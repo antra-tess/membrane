@@ -97,7 +97,8 @@ export class Membrane {
           request,
           prefillResult,
           startTime,
-          attempts
+          attempts,
+          finalRequest
         );
         
         // Call afterResponse hook
@@ -560,7 +561,7 @@ export class Membrane {
     // For now, use prefill transform
     // In full implementation, would check capabilities and choose transform
     const prefillResult = transformToPrefill(request, {
-      assistantName: 'Claude', // TODO: make configurable
+      assistantName: this.config.assistantParticipant ?? 'Claude',
       promptCaching: true, // Enable cache control by default
     });
     
@@ -635,7 +636,8 @@ export class Membrane {
     request: NormalizedRequest,
     prefillResult: PrefillTransformResult,
     startTime: number,
-    attempts: number
+    attempts: number,
+    rawRequest?: unknown
   ): NormalizedResponse {
     // Extract text from response
     const content: ContentBlock[] = [];
@@ -702,7 +704,7 @@ export class Membrane {
         },
       },
       raw: {
-        request: null, // TODO: store raw request
+        request: rawRequest ?? null,
         response: providerResponse.raw,
       },
     };

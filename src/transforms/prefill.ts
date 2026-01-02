@@ -55,7 +55,7 @@ export type ProviderContentBlock = ProviderTextBlock | ProviderImageBlock;
 // ============================================================================
 
 export interface ProviderMessage {
-  role: 'system' | 'user' | 'assistant';
+  role: 'user' | 'assistant';
   content: string | ProviderContentBlock[];
 }
 
@@ -181,11 +181,8 @@ export function transformToPrefill(
       cacheMarkersApplied++;
     }
     systemContent.push(systemBlock);
-    
-    providerMessages.push({
-      role: 'system',
-      content: [systemBlock],
-    });
+    // Note: system content goes in systemContent, not providerMessages
+    // Anthropic's API requires system as a top-level parameter
   }
   
   // Add context prefix as first cached assistant message (for simulacrum seeding)

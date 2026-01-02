@@ -114,22 +114,29 @@ export interface MembraneLogger {
 export interface MembraneConfig {
   /** Model registry for capability lookup */
   registry?: ModelRegistry;
-  
+
   /** Default model to use */
   defaultModel?: string;
-  
+
+  /**
+   * Participant name to recognize as assistant in prefill mode.
+   * Messages with this participant will be formatted as assistant turns.
+   * Default: 'Claude'
+   */
+  assistantParticipant?: string;
+
   /** Retry configuration */
   retry?: Partial<RetryConfig>;
-  
+
   /** Media processing configuration */
   media?: Partial<MediaConfig>;
-  
+
   /** Lifecycle hooks */
   hooks?: MembraneHooks;
-  
+
   /** Logger instance */
   logger?: MembraneLogger;
-  
+
   /** Enable debug logging */
   debug?: boolean;
 }
