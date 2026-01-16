@@ -3,6 +3,7 @@
  */
 
 import type { ContentBlock } from './content.js';
+import type { ToolCall, ToolResult } from './tools.js';
 
 // ============================================================================
 // Stop Reason
@@ -148,18 +149,36 @@ export interface RawAccess {
 // ============================================================================
 
 export interface NormalizedResponse {
-  /** Response content blocks */
+  /** Response content blocks (parsed/structured) */
   content: ContentBlock[];
-  
+
+  /**
+   * Raw assistant output text including all XML.
+   * Use this for building subsequent turn context (verbatim prefill).
+   */
+  rawAssistantText: string;
+
+  /**
+   * Tool calls extracted from the response.
+   * Convenience accessor - these are also in content as tool_use blocks.
+   */
+  toolCalls: ToolCall[];
+
+  /**
+   * Tool results that were executed during this response.
+   * Empty if no tools were called or tool execution was disabled.
+   */
+  toolResults: ToolResult[];
+
   /** Why generation stopped */
   stopReason: StopReason;
-  
+
   /** Basic usage (always available) */
   usage: BasicUsage;
-  
+
   /** Detailed response information */
   details: ResponseDetails;
-  
+
   /** Raw request/response for debugging */
   raw: RawAccess;
 }
@@ -170,15 +189,31 @@ export interface NormalizedResponse {
 
 export interface AbortedResponse {
   aborted: true;
-  
+
   /** Content received before abort */
   partialContent?: ContentBlock[];
-  
+
   /** Tokens consumed before abort */
   partialUsage?: BasicUsage;
-  
+
   /** Why it was aborted */
   reason: 'user' | 'timeout' | 'error';
+
+  /**
+   * Raw assistant text accumulated before abort.
+   * Use for displaying partial output or as prefill to continue.
+   */
+  rawAssistantText?: string;
+
+  /**
+   * Tool calls that were executed before abort.
+   */
+  toolCalls?: ToolCall[];
+
+  /**
+   * Tool results received before abort.
+   */
+  toolResults?: ToolResult[];
 }
 
 export function isAbortedResponse(

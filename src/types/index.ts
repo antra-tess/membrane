@@ -54,6 +54,7 @@ export type {
   ToolDefinition,
   ToolCall,
   ToolResult,
+  ToolResultContentBlock,
   ToolContext,
   ParsedToolCalls,
 } from './tools.js';
@@ -112,6 +113,9 @@ export type {
   OnToolCallsCallback,
   OnPreToolContentCallback,
   OnUsageCallback,
+  OnBlockCallback,
+  BlockEvent,
+  BlockDelta,
 } from './streaming.js';
 
 // Errors

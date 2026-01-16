@@ -100,13 +100,13 @@ export interface PrefillTransformOptions {
   /** Custom stop sequences to add */
   additionalStopSequences?: string[];
   
-  /** 
+  /**
    * Where to inject tool definitions:
-   * - 'system': Inject into system prompt (default)
-   * - 'conversation': Inject as user message ~N from end (chatperx style)
+   * - 'conversation': Inject into assistant content ~N messages from end (default)
+   * - 'system': Inject into system prompt
    * - 'none': No injection (use getToolInstructions() for manual placement)
    */
-  toolInjectionMode?: 'system' | 'conversation' | 'none';
+  toolInjectionMode?: 'conversation' | 'system' | 'none';
   
   /** Position to inject tools when mode is 'conversation' (from end of messages) */
   toolInjectionPosition?: number;
@@ -139,7 +139,7 @@ export function transformToPrefill(
     assistantName = 'Claude',
     maxParticipantsForStop = 10,
     additionalStopSequences = [],
-    toolInjectionMode = 'system',
+    toolInjectionMode = 'conversation',
     toolInjectionPosition = 10,
     promptCaching = true,
     messageDelimiter = '',
@@ -187,12 +187,6 @@ export function transformToPrefill(
   
   // Add context prefix as first cached assistant message (for simulacrum seeding)
   if (contextPrefix) {
-    // Need a user message first (Anthropic requires user->assistant alternation)
-    providerMessages.push({
-      role: 'user',
-      content: '[conversation begins]',
-    });
-    
     const prefixBlock: ProviderTextBlock = { type: 'text', text: contextPrefix };
     if (promptCaching) {
       prefixBlock.cache_control = { type: 'ephemeral' };
@@ -296,43 +290,44 @@ export function transformToPrefill(
     }
   }
   
-  // Flush any remaining conversation, insert tools near end if mode is 'conversation'
+  // Flush any remaining conversation, inject tools if mode is 'conversation'
   if (currentConversation.length > 0) {
-    const shouldInjectInConversation = 
-      toolInjectionMode === 'conversation' && 
-      request.tools && 
-      request.tools.length > 0 && 
-      currentConversation.length > toolInjectionPosition;
-      
-    if (shouldInjectInConversation) {
-      // Insert tools ~N messages from the end
-      const splitPoint = currentConversation.length - toolInjectionPosition;
-      const beforeTools = currentConversation.slice(0, splitPoint);
-      const afterTools = currentConversation.slice(splitPoint);
-      
-      // Add content before tools
-      if (beforeTools.length > 0) {
+    const hasToolsForConversation =
+      toolInjectionMode === 'conversation' &&
+      request.tools &&
+      request.tools.length > 0;
+
+    if (hasToolsForConversation) {
+      // Inject tools into assistant content
+      const toolsText = formatToolsForInjection(request.tools!);
+
+      if (currentConversation.length > toolInjectionPosition) {
+        // Long conversation: insert tools ~N messages from the end
+        const splitPoint = currentConversation.length - toolInjectionPosition;
+        const beforeTools = currentConversation.slice(0, splitPoint);
+        const afterTools = currentConversation.slice(splitPoint);
+
+        const combined = [
+          ...beforeTools,
+          toolsText,
+          ...afterTools,
+        ].join(joiner);
+
         providerMessages.push({
           role: 'assistant',
-          content: beforeTools.join(joiner),
+          content: combined,
         });
-      }
-      
-      // Add tools as user message
-      providerMessages.push({
-        role: 'user',
-        content: formatToolsForInjection(request.tools!),
-      });
-      
-      // Add content after tools
-      if (afterTools.length > 0) {
+      } else {
+        // Short conversation: inject tools at the end (right before completion point)
+        const combined = [...currentConversation, toolsText].join(joiner);
+
         providerMessages.push({
           role: 'assistant',
-          content: afterTools.join(joiner),
+          content: combined,
         });
       }
     } else {
-      // Short conversation - just add everything
+      // No tool injection needed
       providerMessages.push({
         role: 'assistant',
         content: currentConversation.join(joiner),
@@ -453,29 +448,20 @@ const PARAM_OPEN = '<' + 'parameter name="';
 const PARAM_CLOSE = '</' + 'parameter>';
 
 function formatToolsForInjection(tools: ToolDefinition[]): string {
-  // Format each tool as JSON inside <function> tags
-  const formatted = tools.map((tool) => {
-    const toolDef = {
-      description: tool.description,
-      name: tool.name,
-      parameters: tool.inputSchema,
-    };
-    return `${FUNCTION_OPEN}${JSON.stringify(toolDef)}${FUNCTION_CLOSE}`;
-  });
-  
-  // Build instruction with example
-  const instruction = `
-When making function calls using tools that accept array or object parameters ensure those are structured using JSON. For example:
+  // Use the same XML format as system mode for consistency
+  const toolsXml = formatToolsForPrefill(tools);
+
+  return `
+<available_tools>
+${toolsXml}
+</available_tools>
+
+When you want to use a tool, output:
 ${FUNC_CALLS_OPEN}
-${INVOKE_OPEN}example_complex_tool">
-${PARAM_OPEN}parameter">[{"color": "orange", "options": {"key": true}}]${PARAM_CLOSE}
+${INVOKE_OPEN}tool_name">
+${PARAM_OPEN}param_name">value${PARAM_CLOSE}
 ${INVOKE_CLOSE}
 ${FUNC_CALLS_CLOSE}`;
-  
-  return `${FUNCTIONS_OPEN}
-${formatted.join('\n')}
-${FUNCTIONS_CLOSE}
-${instruction}`;
 }
 
 function buildStopSequences(
@@ -499,7 +485,7 @@ function buildStopSequences(
   
   // Build stop sequences
   const sequences: string[] = [];
-  
+
   // Participant-based stops
   for (const participant of participants) {
     sequences.push(`\n${participant}:`);

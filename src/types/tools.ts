@@ -37,9 +37,20 @@ export interface ToolCall {
 
 export interface ToolResult {
   toolUseId: string;
-  content: string;
+  /**
+   * Result content - can be string or structured content blocks (for images).
+   * For XML mode, images are noted in text. For native mode, passed as content blocks.
+   */
+  content: string | ToolResultContentBlock[];
   isError?: boolean;
 }
+
+/**
+ * Content block types allowed in tool results
+ */
+export type ToolResultContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'image'; source: { type: 'base64'; data: string; mediaType: string } };
 
 // ============================================================================
 // Tool Context (passed to execution callback)

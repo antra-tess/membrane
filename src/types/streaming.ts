@@ -6,6 +6,9 @@ import type { ContentBlock } from './content.js';
 import type { ToolCall, ToolResult, ToolContext } from './tools.js';
 import type { BasicUsage } from './response.js';
 
+// Re-export block event types from stream-parser
+export type { BlockEvent, BlockDelta } from '../utils/stream-parser.js';
+
 // ============================================================================
 // Stream State
 // ============================================================================
@@ -64,6 +67,12 @@ export type OnPreToolContentCallback = (content: string) => Promise<void> | void
  */
 export type OnUsageCallback = (usage: BasicUsage) => void;
 
+/**
+ * Callback for structured block events during streaming.
+ * Provides parsed block information as it's detected.
+ */
+export type OnBlockCallback = (event: import('../utils/stream-parser.js').BlockEvent) => void;
+
 // ============================================================================
 // Stream Options
 // ============================================================================
@@ -94,12 +103,15 @@ export interface StreamOptions {
   
   /** Called with usage updates */
   onUsage?: OnUsageCallback;
-  
+
+  /** Called for structured block events (thinking, tool_use, tool_result) */
+  onBlock?: OnBlockCallback;
+
   // ---- Tool Loop Config ----
-  
+
   /** Maximum tool execution depth (default: 10) */
   maxToolDepth?: number;
-  
+
   /** Timeout for each tool execution */
   toolTimeoutMs?: number;
 }

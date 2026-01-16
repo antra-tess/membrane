@@ -2,7 +2,7 @@
  * Context management types
  */
 
-import type { NormalizedMessage, NormalizedResponse, GenerationConfig, ToolDefinition } from '../types/index.js';
+import type { NormalizedMessage, NormalizedResponse, AbortedResponse, GenerationConfig, ToolDefinition } from '../types/index.js';
 
 // ============================================================================
 // Cache Marker
@@ -150,12 +150,12 @@ export interface ContextInfo {
 // ============================================================================
 
 export interface ContextOutput {
-  /** The LLM response */
-  response: NormalizedResponse;
-  
+  /** The LLM response (may be aborted) */
+  response: NormalizedResponse | AbortedResponse;
+
   /** Updated state (save this for next call) */
   state: ContextState;
-  
+
   /** Info about what happened */
   info: ContextInfo;
 }
