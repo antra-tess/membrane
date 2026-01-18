@@ -1,7 +1,15 @@
 /**
- * OpenRouter provider adapter
+ * OpenAI Direct provider adapter
  * 
- * Handles OpenAI-compatible API with tool_calls format
+ * Direct adapter for OpenAI's API with support for modern models:
+ * - GPT-4o, GPT-4 Turbo
+ * - GPT-5, GPT-5-mini (uses max_completion_tokens)
+ * - o1, o3, o4-mini reasoning models
+ * 
+ * Key differences from generic OpenAI-compatible:
+ * - Uses max_completion_tokens for newer models (not max_tokens)
+ * - Handles reasoning models' special requirements
+ * - Direct API integration with proper error handling
  */
 
 import type {
@@ -11,7 +19,6 @@ import type {
   ProviderResponse,
   StreamCallbacks,
   ContentBlock,
-  ToolDefinition,
 } from '../types/index.js';
 import {
   MembraneError,
@@ -27,22 +34,14 @@ import {
 // Types
 // ============================================================================
 
-/** Content block for Anthropic-style caching through OpenRouter */
-interface OpenRouterContentBlock {
-  type: 'text';
-  text: string;
-  cache_control?: { type: 'ephemeral' };
-}
-
-interface OpenRouterMessage {
+interface OpenAIMessage {
   role: 'user' | 'assistant' | 'system' | 'tool';
-  /** Can be string, null, or content blocks array (for Claude cache_control) */
-  content?: string | null | OpenRouterContentBlock[];
-  tool_calls?: OpenRouterToolCall[];
+  content?: string | null;
+  tool_calls?: OpenAIToolCall[];
   tool_call_id?: string;
 }
 
-interface OpenRouterToolCall {
+interface OpenAIToolCall {
   id: string;
   type: 'function';
   function: {
@@ -51,7 +50,7 @@ interface OpenRouterToolCall {
   };
 }
 
-interface OpenRouterTool {
+interface OpenAITool {
   type: 'function';
   function: {
     name: string;
@@ -60,24 +59,26 @@ interface OpenRouterTool {
   };
 }
 
-interface OpenRouterResponse {
+interface OpenAIResponse {
   id: string;
   model: string;
   choices: {
     index: number;
-    message: OpenRouterMessage;
+    message: OpenAIMessage;
     finish_reason: string;
   }[];
-  usage: {
+  usage?: {
     prompt_tokens: number;
     completion_tokens: number;
     total_tokens: number;
-    /** Anthropic prompt caching (when using Claude models with cache_control) */
-    cache_creation_input_tokens?: number;
-    cache_read_input_tokens?: number;
-    /** OpenAI-style prompt caching details */
+    /** OpenAI prompt caching details (automatic for prompts ≥1024 tokens) */
     prompt_tokens_details?: {
       cached_tokens?: number;
+      audio_tokens?: number;
+    };
+    completion_tokens_details?: {
+      reasoning_tokens?: number;
+      audio_tokens?: number;
     };
   };
 }
@@ -86,60 +87,106 @@ interface OpenRouterResponse {
 // Adapter Configuration
 // ============================================================================
 
-export interface OpenRouterAdapterConfig {
-  /** API key (defaults to OPENROUTER_API_KEY env var) */
+export interface OpenAIAdapterConfig {
+  /** API key (defaults to OPENAI_API_KEY env var) */
   apiKey?: string;
   
-  /** Base URL (default: https://openrouter.ai/api/v1) */
+  /** Base URL (default: https://api.openai.com/v1) - useful for Azure OpenAI */
   baseURL?: string;
   
-  /** HTTP Referer header for OpenRouter */
-  httpReferer?: string;
-  
-  /** X-Title header for OpenRouter */
-  xTitle?: string;
+  /** Organization ID (optional) */
+  organization?: string;
   
   /** Default max tokens */
   defaultMaxTokens?: number;
 }
 
 // ============================================================================
-// OpenRouter Adapter
+// Model Detection Helpers
 // ============================================================================
 
-export class OpenRouterAdapter implements ProviderAdapter {
-  readonly name = 'openrouter';
+/**
+ * Models that require max_completion_tokens instead of max_tokens
+ */
+const COMPLETION_TOKENS_MODELS = [
+  'gpt-5',
+  'gpt-5-mini',
+  'o1',
+  'o1-mini',
+  'o1-preview',
+  'o3',
+  'o3-mini',
+  'o4-mini',
+];
+
+/**
+ * Check if a model requires max_completion_tokens parameter
+ */
+function requiresCompletionTokens(model: string): boolean {
+  return COMPLETION_TOKENS_MODELS.some(prefix => model.startsWith(prefix));
+}
+
+/**
+ * Models that don't support custom temperature (only default 1.0)
+ */
+const NO_TEMPERATURE_MODELS = [
+  'gpt-5',       // Base GPT-5 models
+  'gpt-5-mini',
+  'o1',          // Reasoning models
+  'o1-mini',
+  'o1-preview',
+  'o3',
+  'o3-mini',
+  'o4-mini',
+];
+
+/**
+ * Check if a model doesn't support custom temperature
+ */
+function noTemperatureSupport(model: string): boolean {
+  return NO_TEMPERATURE_MODELS.some(prefix => model.startsWith(prefix));
+}
+
+// ============================================================================
+// OpenAI Adapter
+// ============================================================================
+
+export class OpenAIAdapter implements ProviderAdapter {
+  readonly name = 'openai';
   private apiKey: string;
   private baseURL: string;
-  private httpReferer: string;
-  private xTitle: string;
+  private organization?: string;
   private defaultMaxTokens: number;
 
-  constructor(config: OpenRouterAdapterConfig = {}) {
-    this.apiKey = config.apiKey ?? process.env.OPENROUTER_API_KEY ?? '';
-    this.baseURL = config.baseURL ?? 'https://openrouter.ai/api/v1';
-    this.httpReferer = config.httpReferer ?? 'https://membrane.local';
-    this.xTitle = config.xTitle ?? 'Membrane';
+  constructor(config: OpenAIAdapterConfig = {}) {
+    this.apiKey = config.apiKey ?? process.env.OPENAI_API_KEY ?? '';
+    this.baseURL = config.baseURL ?? 'https://api.openai.com/v1';
+    this.organization = config.organization;
     this.defaultMaxTokens = config.defaultMaxTokens ?? 4096;
     
     if (!this.apiKey) {
-      throw new Error('OpenRouter API key not provided');
+      throw new Error('OpenAI API key not provided');
     }
   }
 
   supportsModel(modelId: string): boolean {
-    // OpenRouter supports many models
-    return modelId.includes('/');
+    // OpenAI models typically start with gpt-, o1, o3, o4
+    return (
+      modelId.startsWith('gpt-') ||
+      modelId.startsWith('o1') ||
+      modelId.startsWith('o3') ||
+      modelId.startsWith('o4')
+    );
   }
 
   async complete(
     request: ProviderRequest,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const openRouterRequest = this.buildRequest(request);
+    const openAIRequest = this.buildRequest(request);
     
     try {
-      const response = await this.makeRequest(openRouterRequest, options);
+      const response = await this.makeRequest(openAIRequest, options);
       return this.parseResponse(response, request.model);
     } catch (error) {
       throw this.handleError(error);
@@ -151,22 +198,22 @@ export class OpenRouterAdapter implements ProviderAdapter {
     callbacks: StreamCallbacks,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const openRouterRequest = this.buildRequest(request);
-    openRouterRequest.stream = true;
+    const openAIRequest = this.buildRequest(request);
+    openAIRequest.stream = true;
     // Request usage data in stream for cache metrics
-    openRouterRequest.stream_options = { include_usage: true };
+    openAIRequest.stream_options = { include_usage: true };
     
     try {
       const response = await fetch(`${this.baseURL}/chat/completions`, {
         method: 'POST',
         headers: this.getHeaders(),
-        body: JSON.stringify(openRouterRequest),
+        body: JSON.stringify(openAIRequest),
         signal: options?.signal,
       });
       
       if (!response.ok) {
         const errorText = await response.text();
-        throw new Error(`OpenRouter error: ${response.status} ${errorText}`);
+        throw new Error(`OpenAI API error: ${response.status} ${errorText}`);
       }
       
       const reader = response.body?.getReader();
@@ -177,8 +224,8 @@ export class OpenRouterAdapter implements ProviderAdapter {
       const decoder = new TextDecoder();
       let accumulated = '';
       let finishReason = 'stop';
-      let toolCalls: OpenRouterToolCall[] = [];
-      let streamUsage: OpenRouterResponse['usage'] | undefined;
+      let toolCalls: OpenAIToolCall[] = [];
+      let streamUsage: OpenAIResponse['usage'] | undefined;
       
       while (true) {
         const { done, value } = await reader.read();
@@ -223,18 +270,18 @@ export class OpenRouterAdapter implements ProviderAdapter {
               finishReason = parsed.choices[0].finish_reason;
             }
             
-            // Capture usage data (comes in final chunk when stream_options.include_usage is set)
+            // Capture usage data (comes in final chunk with stream_options.include_usage)
             if (parsed.usage) {
               streamUsage = parsed.usage;
             }
-          } catch (e) {
-            // Ignore parse errors
+          } catch {
+            // Ignore parse errors in stream
           }
         }
       }
       
       // Build response with accumulated data
-      const message: OpenRouterMessage = {
+      const message: OpenAIMessage = {
         role: 'assistant',
         content: accumulated || null,
       };
@@ -251,49 +298,37 @@ export class OpenRouterAdapter implements ProviderAdapter {
   }
 
   private getHeaders(): Record<string, string> {
-    return {
+    const headers: Record<string, string> = {
       'Authorization': `Bearer ${this.apiKey}`,
       'Content-Type': 'application/json',
-      'HTTP-Referer': this.httpReferer,
-      'X-Title': this.xTitle,
     };
+    
+    if (this.organization) {
+      headers['OpenAI-Organization'] = this.organization;
+    }
+    
+    return headers;
   }
 
   private buildRequest(request: ProviderRequest): any {
     const messages = this.convertMessages(request.messages as any[]);
+    const model = request.model;
+    const maxTokens = request.maxTokens || this.defaultMaxTokens;
     
     const params: any = {
-      model: request.model,
+      model,
       messages,
-      max_tokens: request.maxTokens || this.defaultMaxTokens,
     };
     
-    // Handle system prompt (can be string or content blocks with cache_control)
-    if (request.system) {
-      if (typeof request.system === 'string') {
-        // Simple string system prompt - prepend as system message
-        messages.unshift({ role: 'system' as const, content: request.system });
-      } else if (Array.isArray(request.system)) {
-        // Content blocks with potential cache_control - preserve for Claude caching
-        const hasCache = (request.system as any[]).some((block: any) => block.cache_control);
-        if (hasCache) {
-          // Preserve cache_control in content block format for Claude
-          messages.unshift({
-            role: 'system' as const,
-            content: request.system as unknown as OpenRouterContentBlock[],
-          });
-        } else {
-          // No caching, just join text
-          const text = (request.system as any[])
-            .filter((b: any) => b.type === 'text')
-            .map((b: any) => b.text)
-            .join('\n');
-          messages.unshift({ role: 'system' as const, content: text });
-        }
-      }
+    // Use appropriate max tokens parameter based on model
+    if (requiresCompletionTokens(model)) {
+      params.max_completion_tokens = maxTokens;
+    } else {
+      params.max_tokens = maxTokens;
     }
     
-    if (request.temperature !== undefined) {
+    // Some models (gpt-5, o1, o3, o4) don't support custom temperature
+    if (request.temperature !== undefined && !noTemperatureSupport(model)) {
       params.temperature = request.temperature;
     }
     
@@ -302,28 +337,10 @@ export class OpenRouterAdapter implements ProviderAdapter {
     }
     
     if (request.tools && request.tools.length > 0) {
-      // Check if tools are already in OpenRouter format (from buildNativeToolRequest)
-      const firstTool = request.tools[0] as any;
-      if (firstTool.input_schema) {
-        // Already in provider format
-        params.tools = request.tools.map((t: any) => ({
-          type: 'function',
-          function: {
-            name: t.name,
-            description: t.description,
-            parameters: t.input_schema,
-          },
-        }));
-      } else if (firstTool.inputSchema) {
-        // In ToolDefinition format
-        params.tools = this.convertTools(request.tools as ToolDefinition[]);
-      } else {
-        // Unknown format, pass through
-        params.tools = request.tools;
-      }
+      params.tools = this.convertTools(request.tools as any[]);
     }
     
-    // Apply extra params
+    // Apply extra params (can override automatic choices)
     if (request.extra) {
       Object.assign(params, request.extra);
     }
@@ -331,40 +348,23 @@ export class OpenRouterAdapter implements ProviderAdapter {
     return params;
   }
 
-  private convertMessages(messages: any[]): OpenRouterMessage[] {
+  private convertMessages(messages: any[]): OpenAIMessage[] {
     // Use flatMap to handle one-to-many expansion (multiple tool_results → multiple messages)
     return messages.flatMap(msg => {
-      // If it's already in OpenRouter format, pass through
+      // If it's already in OpenAI format, pass through
       if (msg.role && (typeof msg.content === 'string' || msg.content === null || msg.tool_calls)) {
-        return [msg as OpenRouterMessage];
+        return [msg as OpenAIMessage];
       }
       
       // Convert from Anthropic-style format
       if (Array.isArray(msg.content)) {
-        // Check if any block has cache_control - if so, preserve the array format
-        // This is needed for Claude models through OpenRouter to use prompt caching
-        const hasCache = msg.content.some((block: any) => block.cache_control);
-        
-        const toolCalls: OpenRouterToolCall[] = [];
-        const contentBlocks: OpenRouterContentBlock[] = [];
         const textParts: string[] = [];
-        const toolResults: OpenRouterMessage[] = [];
+        const toolCalls: OpenAIToolCall[] = [];
+        const toolResults: OpenAIMessage[] = [];
         
         for (const block of msg.content) {
           if (block.type === 'text') {
-            if (hasCache) {
-              // Preserve cache_control in content block format
-              const contentBlock: OpenRouterContentBlock = {
-                type: 'text',
-                text: block.text,
-              };
-              if (block.cache_control) {
-                contentBlock.cache_control = block.cache_control;
-              }
-              contentBlocks.push(contentBlock);
-            } else {
-              textParts.push(block.text);
-            }
+            textParts.push(block.text);
           } else if (block.type === 'tool_use') {
             toolCalls.push({
               id: block.id,
@@ -390,10 +390,9 @@ export class OpenRouterAdapter implements ProviderAdapter {
         }
         
         // Otherwise build normal message
-        const result: OpenRouterMessage = {
+        const result: OpenAIMessage = {
           role: msg.role,
-          // Use content blocks array if caching is in use, otherwise concatenate text
-          content: hasCache ? contentBlocks : (textParts.join('\n') || null),
+          content: textParts.join('\n') || null,
         };
         
         if (toolCalls.length > 0) {
@@ -410,18 +409,22 @@ export class OpenRouterAdapter implements ProviderAdapter {
     });
   }
 
-  private convertTools(tools: ToolDefinition[]): OpenRouterTool[] {
-    return tools.map(tool => ({
-      type: 'function',
-      function: {
-        name: tool.name,
-        description: tool.description,
-        parameters: tool.inputSchema,
-      },
-    }));
+  private convertTools(tools: any[]): OpenAITool[] {
+    return tools.map(tool => {
+      const inputSchema = tool.inputSchema || tool.input_schema || { type: 'object', properties: {} };
+      
+      return {
+        type: 'function',
+        function: {
+          name: tool.name,
+          description: tool.description,
+          parameters: inputSchema,
+        },
+      };
+    });
   }
 
-  private async makeRequest(request: any, options?: ProviderRequestOptions): Promise<OpenRouterResponse> {
+  private async makeRequest(request: any, options?: ProviderRequestOptions): Promise<OpenAIResponse> {
     const response = await fetch(`${this.baseURL}/chat/completions`, {
       method: 'POST',
       headers: this.getHeaders(),
@@ -431,22 +434,18 @@ export class OpenRouterAdapter implements ProviderAdapter {
     
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`OpenRouter error: ${response.status} ${errorText}`);
+      throw new Error(`OpenAI API error: ${response.status} ${errorText}`);
     }
     
-    return response.json() as Promise<OpenRouterResponse>;
+    return response.json() as Promise<OpenAIResponse>;
   }
 
-  private parseResponse(response: OpenRouterResponse, requestedModel: string): ProviderResponse {
+  private parseResponse(response: OpenAIResponse, requestedModel: string): ProviderResponse {
     const choice = response.choices[0];
     const message = choice?.message;
     
-    // Extract cache tokens - OpenRouter passes through both Anthropic and OpenAI caching
-    // Anthropic: cache_creation_input_tokens, cache_read_input_tokens
-    // OpenAI: prompt_tokens_details.cached_tokens
-    const cacheCreationTokens = response.usage?.cache_creation_input_tokens;
-    const cacheReadTokens = response.usage?.cache_read_input_tokens 
-      ?? response.usage?.prompt_tokens_details?.cached_tokens;
+    // Extract prompt caching details (OpenAI automatic caching for prompts ≥1024 tokens)
+    const cachedTokens = response.usage?.prompt_tokens_details?.cached_tokens ?? 0;
     
     return {
       content: this.messageToContent(message),
@@ -455,8 +454,9 @@ export class OpenRouterAdapter implements ProviderAdapter {
       usage: {
         inputTokens: response.usage?.prompt_tokens ?? 0,
         outputTokens: response.usage?.completion_tokens ?? 0,
-        cacheCreationTokens: cacheCreationTokens ?? undefined,
-        cacheReadTokens: cacheReadTokens ?? undefined,
+        // OpenAI's automatic prompt caching - cached tokens are read from cache
+        // Note: OpenAI doesn't have separate "creation" tokens - it's automatic
+        cacheReadTokens: cachedTokens > 0 ? cachedTokens : undefined,
       },
       model: response.model ?? requestedModel,
       raw: response,
@@ -464,15 +464,13 @@ export class OpenRouterAdapter implements ProviderAdapter {
   }
 
   private parseStreamedResponse(
-    message: OpenRouterMessage,
+    message: OpenAIMessage,
     finishReason: string,
     requestedModel: string,
-    streamUsage?: OpenRouterResponse['usage']
+    streamUsage?: OpenAIResponse['usage']
   ): ProviderResponse {
-    // Extract cache tokens if available from stream usage
-    const cacheCreationTokens = streamUsage?.cache_creation_input_tokens;
-    const cacheReadTokens = streamUsage?.cache_read_input_tokens 
-      ?? streamUsage?.prompt_tokens_details?.cached_tokens;
+    // Extract cached tokens from stream usage if available
+    const cachedTokens = streamUsage?.prompt_tokens_details?.cached_tokens ?? 0;
     
     return {
       content: this.messageToContent(message),
@@ -481,18 +479,17 @@ export class OpenRouterAdapter implements ProviderAdapter {
       usage: {
         inputTokens: streamUsage?.prompt_tokens ?? 0,
         outputTokens: streamUsage?.completion_tokens ?? 0,
-        cacheCreationTokens: cacheCreationTokens ?? undefined,
-        cacheReadTokens: cacheReadTokens ?? undefined,
+        cacheReadTokens: cachedTokens > 0 ? cachedTokens : undefined,
       },
       model: requestedModel,
       raw: { message, finish_reason: finishReason, usage: streamUsage },
     };
   }
 
-  private messageToContent(message: OpenRouterMessage | undefined): any {
+  private messageToContent(message: OpenAIMessage | undefined): ContentBlock[] {
     if (!message) return [];
     
-    const content: any[] = [];
+    const content: ContentBlock[] = [];
     
     if (message.content) {
       content.push({ type: 'text', text: message.content });
@@ -531,19 +528,23 @@ export class OpenRouterAdapter implements ProviderAdapter {
     if (error instanceof Error) {
       const message = error.message;
       
-      if (message.includes('429') || message.includes('rate')) {
-        return rateLimitError(message, undefined, error);
+      // OpenAI specific error patterns
+      if (message.includes('429') || message.includes('rate_limit')) {
+        // Try to extract retry-after
+        const retryMatch = message.match(/retry after (\d+)/i);
+        const retryAfter = retryMatch?.[1] ? parseInt(retryMatch[1], 10) * 1000 : undefined;
+        return rateLimitError(message, retryAfter, error);
       }
       
-      if (message.includes('401') || message.includes('auth')) {
+      if (message.includes('401') || message.includes('invalid_api_key') || message.includes('Incorrect API key')) {
         return authError(message, error);
       }
       
-      if (message.includes('context') || message.includes('too long')) {
+      if (message.includes('context_length') || message.includes('maximum context') || message.includes('too long')) {
         return contextLengthError(message, error);
       }
       
-      if (message.includes('500') || message.includes('502') || message.includes('503')) {
+      if (message.includes('500') || message.includes('502') || message.includes('503') || message.includes('server_error')) {
         return serverError(message, undefined, error);
       }
       
@@ -551,7 +552,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
         return abortError();
       }
       
-      if (message.includes('network') || message.includes('fetch')) {
+      if (message.includes('network') || message.includes('fetch') || message.includes('ECONNREFUSED')) {
         return networkError(message, error);
       }
     }
@@ -570,80 +571,22 @@ export class OpenRouterAdapter implements ProviderAdapter {
 // ============================================================================
 
 /**
- * Convert normalized content blocks to OpenRouter format
+ * Convert normalized content blocks to OpenAI message format
  */
-export function toOpenRouterMessages(
-  messages: { role: string; content: ContentBlock[] }[]
-): OpenRouterMessage[] {
-  const result: OpenRouterMessage[] = [];
-  
-  for (const msg of messages) {
-    const textParts: string[] = [];
-    const toolCalls: OpenRouterToolCall[] = [];
-    const toolResults: { id: string; content: string }[] = [];
-    
-    for (const block of msg.content) {
-      if (block.type === 'text') {
-        textParts.push(block.text);
-      } else if (block.type === 'tool_use') {
-        toolCalls.push({
-          id: block.id,
-          type: 'function',
-          function: {
-            name: block.name,
-            arguments: JSON.stringify(block.input),
-          },
-        });
-      } else if (block.type === 'tool_result') {
-        toolResults.push({
-          id: block.toolUseId,
-          content: typeof block.content === 'string' ? block.content : JSON.stringify(block.content),
-        });
-      }
-    }
-    
-    // Add main message
-    if (textParts.length > 0 || toolCalls.length > 0) {
-      const message: OpenRouterMessage = {
-        role: msg.role as 'user' | 'assistant',
-        content: textParts.join('\n') || null,
-      };
-      if (toolCalls.length > 0) {
-        message.tool_calls = toolCalls;
-      }
-      result.push(message);
-    }
-    
-    // Add tool results as separate messages
-    for (const tr of toolResults) {
-      result.push({
-        role: 'tool',
-        tool_call_id: tr.id,
-        content: tr.content,
-      });
-    }
-  }
-  
-  return result;
+export function toOpenAIContent(blocks: ContentBlock[]): string | null {
+  const textBlocks = blocks.filter(b => b.type === 'text') as Array<{ type: 'text'; text: string }>;
+  if (textBlocks.length === 0) return null;
+  return textBlocks.map(b => b.text).join('\n');
 }
 
 /**
- * Convert OpenRouter response to normalized content blocks
+ * Convert OpenAI response message to normalized content blocks
  */
-export function fromOpenRouterMessage(message: OpenRouterMessage): ContentBlock[] {
+export function fromOpenAIContent(message: OpenAIMessage): ContentBlock[] {
   const result: ContentBlock[] = [];
   
   if (message.content) {
-    if (typeof message.content === 'string') {
-      result.push({ type: 'text', text: message.content });
-    } else if (Array.isArray(message.content)) {
-      // Content blocks array - extract text (cache_control is for requests only)
-      for (const block of message.content) {
-        if (block.type === 'text') {
-          result.push({ type: 'text', text: block.text });
-        }
-      }
-    }
+    result.push({ type: 'text', text: message.content });
   }
   
   if (message.tool_calls) {
