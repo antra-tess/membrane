@@ -147,6 +147,25 @@ function noTemperatureSupport(model: string): boolean {
   return NO_TEMPERATURE_MODELS.some(prefix => model.startsWith(prefix));
 }
 
+/**
+ * Models that don't support stop sequences (reasoning models)
+ */
+const NO_STOP_MODELS = [
+  'o1',          // Reasoning models don't support stop sequences
+  'o1-mini',
+  'o1-preview',
+  'o3',
+  'o3-mini',
+  'o4-mini',
+];
+
+/**
+ * Check if a model doesn't support stop sequences
+ */
+function noStopSupport(model: string): boolean {
+  return NO_STOP_MODELS.some(prefix => model.startsWith(prefix));
+}
+
 // ============================================================================
 // OpenAI Adapter
 // ============================================================================
@@ -332,7 +351,8 @@ export class OpenAIAdapter implements ProviderAdapter {
       params.temperature = request.temperature;
     }
     
-    if (request.stopSequences && request.stopSequences.length > 0) {
+    // Reasoning models (o1, o3, o4) don't support stop sequences
+    if (request.stopSequences && request.stopSequences.length > 0 && !noStopSupport(model)) {
       params.stop = request.stopSequences;
     }
     
