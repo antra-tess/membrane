@@ -119,6 +119,13 @@ export interface NormalizedRequest {
   /** Stop sequence configuration */
   stopSequences?: StopSequenceConfig | string[];
   
+  /**
+   * Maximum participants to include in auto-generated stop sequences (prefill mode).
+   * Set to 0 to disable participant-based stop sequences (allows frags/quotes).
+   * If not specified, uses membrane config default (10).
+   */
+  maxParticipantsForStop?: number;
+  
   /** Provider-specific parameters (pass-through) */
   providerParams?: Record<string, unknown>;
 }

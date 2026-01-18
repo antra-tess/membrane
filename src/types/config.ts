@@ -125,6 +125,16 @@ export interface MembraneConfig {
    */
   assistantParticipant?: string;
 
+  /**
+   * Maximum number of participants to include in auto-generated stop sequences.
+   * In prefill mode, membrane generates stop sequences like "\nUsername:" to prevent
+   * the model from speaking as other participants.
+   * 
+   * Set to 0 to disable participant-based stop sequences (allows frags/quotes).
+   * Default: 10
+   */
+  maxParticipantsForStop?: number;
+
   /** Retry configuration */
   retry?: Partial<RetryConfig>;
 

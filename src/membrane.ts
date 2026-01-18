@@ -751,10 +751,16 @@ export class Membrane {
       ? request.stopSequences
       : request.stopSequences?.sequences ?? [];
     
+    // Request-level maxParticipantsForStop takes precedence over instance config
+    const maxParticipantsForStop = request.maxParticipantsForStop 
+      ?? this.config.maxParticipantsForStop 
+      ?? 10;
+    
     const prefillResult = transformToPrefill(request, {
       assistantName: this.config.assistantParticipant ?? 'Claude',
       promptCaching: true, // Enable cache control by default
       additionalStopSequences,
+      maxParticipantsForStop,
     });
     
     // Use the pre-built messages from prefill transform
