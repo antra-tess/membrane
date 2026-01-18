@@ -745,9 +745,16 @@ export class Membrane {
   } {
     // For now, use prefill transform
     // In full implementation, would check capabilities and choose transform
+    
+    // Extract user-provided stop sequences to pass to prefill transform
+    const additionalStopSequences = Array.isArray(request.stopSequences)
+      ? request.stopSequences
+      : request.stopSequences?.sequences ?? [];
+    
     const prefillResult = transformToPrefill(request, {
       assistantName: this.config.assistantParticipant ?? 'Claude',
       promptCaching: true, // Enable cache control by default
+      additionalStopSequences,
     });
     
     // Use the pre-built messages from prefill transform
