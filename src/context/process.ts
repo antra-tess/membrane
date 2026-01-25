@@ -129,11 +129,22 @@ export async function processContext(
     config: input.config,
   };
   
-  // Stream response
+  // Stream response - pass through all options
   const response = await membrane.stream(request, {
     onChunk: options?.onChunk,
     signal: options?.signal,
+    onToolCalls: options?.onToolCalls,
+    onPreToolContent: options?.onPreToolContent,
+    onUsage: options?.onUsage,
+    maxToolDepth: options?.maxToolDepth,
   });
+  
+  // Determine cachedStartMessageId
+  // - On roll: use first message ID after truncation (anchor for stable fetches)
+  // - No roll: keep existing (maintains fetch window stability)
+  const cachedStartMessageId = didRoll
+    ? (keptMessages.length > 0 ? getMessageId(keptMessages[0]!) : undefined)
+    : currentState.cachedStartMessageId;
   
   // Update state
   const newState: ContextState = {
@@ -143,6 +154,7 @@ export async function processContext(
     tokensSinceRoll: didRoll ? keptTotalTokens : currentState.tokensSinceRoll + keptTotalTokens,
     inGracePeriod: rollDecision.enteredGrace || (currentState.inGracePeriod && !didRoll),
     lastRollTime: didRoll ? new Date().toISOString() : currentState.lastRollTime,
+    cachedStartMessageId,
   };
   
   // Build info
@@ -155,6 +167,7 @@ export async function processContext(
     uncachedTokens,
     totalTokens: keptTotalTokens,
     hardLimitHit,
+    cachedStartMessageId,
   };
   
   return { response, state: newState, info };
@@ -201,7 +214,7 @@ function detectDiscontinuity(
   return overlap.length < state.windowMessageIds.length * 0.5;
 }
 
-function calculateCharacters(messages: NormalizedMessage[]): number {
+export function calculateCharacters(messages: NormalizedMessage[]): number {
   let chars = 0;
   for (const msg of messages) {
     for (const block of msg.content) {
@@ -219,7 +232,7 @@ function calculateCharacters(messages: NormalizedMessage[]): number {
   return chars;
 }
 
-interface RollDecision {
+export interface RollDecision {
   shouldRoll: boolean;
   reason?: 'threshold' | 'grace_exceeded' | 'hard_limit';
   targetTokens?: number;
@@ -227,7 +240,7 @@ interface RollDecision {
   enteredGrace: boolean;
 }
 
-function shouldRoll(
+export function shouldRoll(
   state: ContextState,
   messageCount: number,
   totalTokens: number,
@@ -300,13 +313,13 @@ function shouldRoll(
   };
 }
 
-interface MessageWithTokens {
+export interface MessageWithTokens {
   message: NormalizedMessage;
   tokens: number;
   id: string;
 }
 
-function truncateMessages(
+export function truncateMessages(
   messages: MessageWithTokens[],
   targetTokens?: number,
   targetMessages?: number,
@@ -360,7 +373,7 @@ function truncateMessages(
   return { kept: messages, dropped: 0 };
 }
 
-function placeCacheMarkers(
+export function placeCacheMarkers(
   messages: NormalizedMessage[],
   messageTokens: MessageWithTokens[],
   state: ContextState,
@@ -495,7 +508,7 @@ function findNearestUserMessage(
   return null;
 }
 
-function applyCacheMarkers(
+export function applyCacheMarkers(
   messages: NormalizedMessage[],
   cacheMarkers: CacheMarker[]
 ): NormalizedMessage[] {

@@ -7,6 +7,20 @@
 
 export { processContext } from './process.js';
 
+// Rolling helpers - can be used standalone by callers doing their own transforms
+export {
+  shouldRoll,
+  truncateMessages,
+  placeCacheMarkers,
+  applyCacheMarkers,
+  calculateCharacters,
+} from './process.js';
+
+export type {
+  RollDecision,
+  MessageWithTokens,
+} from './process.js';
+
 export {
   createInitialState,
   defaultTokenEstimator,
@@ -20,5 +34,7 @@ export type {
   ContextConfig,
   ContextInfo,
   ContextStreamOptions,
+  ContextToolCallback,
+  ContextPreToolCallback,
   CacheMarker,
 } from './types.js';
