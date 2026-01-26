@@ -411,6 +411,65 @@ describe('Multi-request logging', () => {
     // Should have captured 3 requests
     expect(capturedRequests.length).toBe(3);
   });
+
+  it('should inject tool results into continuation request context', async () => {
+    const capturedRequests: any[] = [];
+
+    const fnCallsOpen = '<function_calls>';
+    const fnCallsClose = '</function_calls>';
+    const invokeOpen = '<invoke name="test_tool">';
+    const invokeClose = '</invoke>';
+    const paramOpen = '<parameter name="param">';
+    const paramClose = '</parameter>';
+
+    const toolCallXml = [
+      fnCallsOpen, '\n', invokeOpen, '\n',
+      paramOpen, 'test_value', paramClose, '\n',
+      invokeClose, '\n',
+    ].join('');
+
+    const adapter = createMultiCallAdapter([
+      { chunks: [toolCallXml], stopReason: 'stop_sequence', stopSequence: fnCallsClose },
+      { chunks: ['Final response after tool.'], stopReason: 'end_turn' },
+    ]);
+
+    const membrane = new Membrane(adapter);
+
+    await membrane.stream(createMultiTurnRequest(), {
+      onRequest: (req) => { capturedRequests.push(req); },
+      onToolCalls: async (calls) => {
+        return calls.map(call => ({
+          toolUseId: call.id,
+          content: 'TOOL_EXECUTION_RESULT_12345',
+        }));
+      },
+    });
+
+    expect(capturedRequests.length).toBe(2);
+
+    // The second request should contain the tool results in the assistant message
+    const secondRequest = capturedRequests[1];
+    const assistantMessages = secondRequest.messages.filter((m: any) => m.role === 'assistant');
+
+    // Find the assistant message content (could be string or array)
+    let assistantContent = '';
+    for (const msg of assistantMessages) {
+      if (typeof msg.content === 'string') {
+        assistantContent += msg.content;
+      } else if (Array.isArray(msg.content)) {
+        for (const block of msg.content) {
+          if (block.type === 'text') {
+            assistantContent += block.text;
+          }
+        }
+      }
+    }
+
+    // Tool results should be in the continuation request
+    expect(assistantContent).toContain('TOOL_EXECUTION_RESULT_12345');
+    expect(assistantContent).toContain('<function_results>');
+    expect(assistantContent).toContain('</function_results>');
+  });
 });
 
 describe('Edge cases', () => {
