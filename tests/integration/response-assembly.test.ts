@@ -578,6 +578,72 @@ describe('Multi-request logging', () => {
     expect(assistantContent).toContain('</function_results>');
   });
 
+  it('should add <thinking> tag after tool results when thinking is enabled', async () => {
+    const capturedRequests: any[] = [];
+
+    const fnCallsOpen = '<function_calls>';
+    const fnCallsClose = '</function_calls>';
+    const invokeOpen = '<invoke name="test_tool">';
+    const invokeClose = '</invoke>';
+    const paramOpen = '<parameter name="param">';
+    const paramClose = '</parameter>';
+
+    const toolCallXml = [
+      fnCallsOpen, '\n', invokeOpen, '\n',
+      paramOpen, 'test_value', paramClose, '\n',
+      invokeClose, '\n',
+    ].join('');
+
+    const adapter = createMultiCallAdapter([
+      { chunks: [toolCallXml], stopReason: 'stop_sequence', stopSequence: fnCallsClose },
+      { chunks: ['More thinking</thinking>Final response.'], stopReason: 'end_turn' },
+    ]);
+
+    const membrane = new Membrane(adapter);
+
+    // Request with thinking enabled
+    const request: NormalizedRequest = {
+      ...createMultiTurnRequest(),
+      config: {
+        model: 'claude-sonnet-4-20250514',
+        maxTokens: 1000,
+        thinking: { enabled: true },
+      },
+    };
+
+    await membrane.stream(request, {
+      onRequest: (req) => { capturedRequests.push(req); },
+      onToolCalls: async (calls) => {
+        return calls.map(call => ({
+          toolUseId: call.id,
+          content: 'Tool executed successfully',
+        }));
+      },
+    });
+
+    expect(capturedRequests.length).toBe(2);
+
+    // The second request should have <thinking> after </function_results>
+    const secondRequest = capturedRequests[1];
+    const assistantMessages = secondRequest.messages.filter((m: any) => m.role === 'assistant');
+
+    let assistantContent = '';
+    for (const msg of assistantMessages) {
+      if (typeof msg.content === 'string') {
+        assistantContent += msg.content;
+      }
+    }
+
+    // Should have thinking tag after function_results
+    expect(assistantContent).toContain('</function_results>');
+    expect(assistantContent).toContain('<thinking>');
+
+    // The thinking tag should come AFTER function_results
+    const resultsEnd = assistantContent.indexOf('</function_results>');
+    const thinkingStart = assistantContent.lastIndexOf('<thinking>');
+    expect(thinkingStart).toBeGreaterThan(resultsEnd);
+  });
+
   it('should throw clear error when onToolCalls returns undefined', async () => {
     const fnCallsOpen = '<function_calls>';
     const fnCallsClose = '</function_calls>';

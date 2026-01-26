@@ -407,19 +407,25 @@ export class Membrane {
               };
               onChunk?.(splitContent.beforeImageXml, toolResultMeta);
 
+              // If thinking is enabled, add <thinking> tag after tool results
+              let afterImageXml = splitContent.afterImageXml;
+              if (request.config.thinking?.enabled) {
+                afterImageXml += '\n<thinking>';
+              }
+
               // Build continuation with image injection
               providerRequest = this.buildContinuationRequestWithImages(
                 request,
                 prefillResult,
                 parser.getAccumulated(),
                 splitContent.images,
-                splitContent.afterImageXml
+                afterImageXml
               );
 
               // Also add afterImageXml to accumulated for complete rawAssistantText
               // This is prefilled but represents assistant's logical output
-              parser.push(splitContent.afterImageXml);
-              onChunk?.(splitContent.afterImageXml, toolResultMeta);
+              parser.push(afterImageXml);
+              onChunk?.(afterImageXml, toolResultMeta);
               prefillResult.assistantPrefill = parser.getAccumulated();
             } else {
               // Standard path: no images, use simple XML injection
@@ -431,6 +437,12 @@ export class Membrane {
                 blockIndex: 0,
               };
               onChunk?.(resultsXml, toolResultMeta);
+
+              // If thinking is enabled, add <thinking> tag after tool results
+              // to prompt the model to think before responding
+              if (request.config.thinking?.enabled) {
+                parser.push('\n<thinking>');
+              }
 
               // Update prefill and continue
               prefillResult.assistantPrefill = parser.getAccumulated();
