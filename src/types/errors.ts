@@ -26,24 +26,27 @@ export type MembraneErrorType =
 export interface ErrorInfo {
   /** Normalized error type */
   type: MembraneErrorType;
-  
+
   /** Human-readable message */
   message: string;
-  
+
   /** Whether this error is retryable */
   retryable: boolean;
-  
+
   /** Retry after (milliseconds) - for rate limits */
   retryAfterMs?: number;
-  
+
   /** HTTP status code if available */
   httpStatus?: number;
-  
+
   /** Provider-specific error code */
   providerErrorCode?: string;
-  
+
   /** Raw error object */
   rawError: unknown;
+
+  /** Raw request that caused the error (for logging) */
+  rawRequest?: unknown;
 }
 
 // ============================================================================
@@ -57,6 +60,7 @@ export class MembraneError extends Error {
   readonly httpStatus?: number;
   readonly providerErrorCode?: string;
   readonly rawError?: unknown;
+  readonly rawRequest?: unknown;
 
   constructor(info: ErrorInfo) {
     super(info.message);
@@ -67,6 +71,7 @@ export class MembraneError extends Error {
     this.httpStatus = info.httpStatus;
     this.providerErrorCode = info.providerErrorCode;
     this.rawError = info.rawError;
+    this.rawRequest = info.rawRequest;
   }
 
   toErrorInfo(): ErrorInfo {
@@ -78,6 +83,7 @@ export class MembraneError extends Error {
       httpStatus: this.httpStatus,
       providerErrorCode: this.providerErrorCode,
       rawError: this.rawError,
+      rawRequest: this.rawRequest,
     };
   }
 }

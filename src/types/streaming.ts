@@ -172,6 +172,12 @@ export type OnUsageCallback = (usage: BasicUsage) => void;
  */
 export type OnBlockCallback = (event: BlockEvent) => void;
 
+/**
+ * Callback called with the raw provider request before it's sent.
+ * Useful for logging/debugging.
+ */
+export type OnRequestCallback = (rawRequest: unknown) => void;
+
 // ============================================================================
 // Stream Options
 // ============================================================================
@@ -206,6 +212,9 @@ export interface StreamOptions {
   /** Called for structured block events (thinking, tool_use, tool_result) */
   onBlock?: OnBlockCallback;
 
+  /** Called with raw provider request before sending (for logging) */
+  onRequest?: OnRequestCallback;
+
   // ---- Tool Loop Config ----
 
   /** Maximum tool execution depth (default: 10) */
@@ -222,10 +231,13 @@ export interface StreamOptions {
 export interface CompleteOptions {
   /** Abort signal for cancellation */
   signal?: AbortSignal;
-  
+
   /** Request timeout */
   timeoutMs?: number;
-  
+
   /** Request ID for correlation */
   requestId?: string;
+
+  /** Called with raw provider request before sending (for logging) */
+  onRequest?: OnRequestCallback;
 }

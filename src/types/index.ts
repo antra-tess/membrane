@@ -114,6 +114,7 @@ export type {
   OnPreToolContentCallback,
   OnUsageCallback,
   OnBlockCallback,
+  OnRequestCallback,
   BlockEvent,
   BlockDelta,
 } from './streaming.js';

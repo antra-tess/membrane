@@ -81,24 +81,30 @@ export class Membrane {
   ): Promise<NormalizedResponse> {
     const startTime = Date.now();
     let attempts = 0;
-    
+    let rawRequest: unknown;
+
     while (true) {
       attempts++;
-      
+
       try {
         const { providerRequest, prefillResult } = this.transformRequest(request);
-        
+
         // Call beforeRequest hook
         let finalRequest = providerRequest;
         if (this.config.hooks?.beforeRequest) {
           finalRequest = await this.config.hooks.beforeRequest(request, providerRequest) ?? providerRequest;
         }
-        
+
+        rawRequest = finalRequest;
+
+        // Call onRequest callback for logging
+        options.onRequest?.(rawRequest);
+
         const providerResponse = await this.adapter.complete(finalRequest, {
           signal: options.signal,
           timeoutMs: options.timeoutMs,
         });
-        
+
         const response = this.transformResponse(
           providerResponse,
           request,
@@ -107,33 +113,34 @@ export class Membrane {
           attempts,
           finalRequest
         );
-        
+
         // Call afterResponse hook
         if (this.config.hooks?.afterResponse) {
           return await this.config.hooks.afterResponse(response, providerResponse.raw);
         }
-        
+
         return response;
-        
+
       } catch (error) {
         const errorInfo = classifyError(error);
-        
+        errorInfo.rawRequest = rawRequest;
+
         if (errorInfo.retryable && attempts < this.retryConfig.maxRetries) {
           // Check hook for retry decision
           if (this.config.hooks?.onError) {
             const decision = await this.config.hooks.onError(errorInfo, attempts);
             if (decision === 'abort') {
-              throw error instanceof MembraneError ? error : new MembraneError(errorInfo);
+              throw new MembraneError(errorInfo);
             }
           }
-          
+
           // Wait before retry
           const delay = this.calculateRetryDelay(attempts);
           await this.sleep(delay);
           continue;
         }
-        
-        throw error instanceof MembraneError ? error : new MembraneError(errorInfo);
+
+        throw new MembraneError(errorInfo);
       }
     }
   }
@@ -209,6 +216,7 @@ export class Membrane {
       onPreToolContent,
       onUsage,
       onBlock,
+      onRequest,
       maxToolDepth = 10,
       signal,
     } = options;
@@ -239,6 +247,9 @@ export class Membrane {
       // Tool execution loop
       while (toolDepth <= maxToolDepth) {
         rawRequest = providerRequest;
+
+        // Call onRequest callback for logging
+        onRequest?.(rawRequest);
 
         // Track if we manually detected a stop sequence (API doesn't always stop)
         let detectedStopSequence: string | null = null;
@@ -470,8 +481,8 @@ export class Membrane {
           'user'
         );
       }
-      // Re-throw non-abort errors
-      throw error;
+      // Re-throw with rawRequest attached for logging
+      throw this.attachRawRequest(error, rawRequest);
     }
   }
 
@@ -489,6 +500,7 @@ export class Membrane {
       onToolCalls,
       onPreToolContent,
       onUsage,
+      onRequest,
       maxToolDepth = 10,
       signal,
     } = options;
@@ -516,6 +528,9 @@ export class Membrane {
         // Build provider request with native tools
         const providerRequest = this.buildNativeToolRequest(request, messages);
         rawRequest = providerRequest;
+
+        // Call onRequest callback for logging
+        onRequest?.(rawRequest);
 
         // Stream from provider
         let textAccumulated = '';
@@ -674,8 +689,8 @@ export class Membrane {
           'user'
         );
       }
-      // Re-throw non-abort errors
-      throw error;
+      // Re-throw with rawRequest attached for logging
+      throw this.attachRawRequest(error, rawRequest);
     }
   }
 
@@ -1131,6 +1146,12 @@ export class Membrane {
     const { retryDelayMs, backoffMultiplier, maxRetryDelayMs } = this.retryConfig;
     const delay = retryDelayMs * Math.pow(backoffMultiplier, attempt - 1);
     return Math.min(delay, maxRetryDelayMs);
+  }
+
+  private attachRawRequest(error: unknown, rawRequest: unknown): Error {
+    const errorInfo = classifyError(error);
+    errorInfo.rawRequest = rawRequest;
+    return new MembraneError(errorInfo);
   }
 
   private sleep(ms: number): Promise<void> {
