@@ -435,24 +435,28 @@ export class Membrane {
                 block: { type: 'tool_result' },
               });
 
-              // Append the text portion to accumulated (before image)
+              // Push XML to parser for prefill (internal)
               parser.push(splitContent.beforeImageXml);
-              const toolResultMeta: ChunkMeta = {
-                type: 'tool_result',
-                visible: false,
-                blockIndex: toolResultBlockIndex,
-              };
-              onChunk?.(splitContent.beforeImageXml, toolResultMeta);
 
-              // Emit block complete for each tool result
+              // Emit chunk and block complete for each tool result (without XML wrapper)
               for (const result of results) {
+                const resultContent = typeof result.content === 'string'
+                  ? result.content
+                  : JSON.stringify(result.content);
+                const toolResultMeta: ChunkMeta = {
+                  type: 'tool_result',
+                  visible: false,
+                  blockIndex: parser.getBlockIndex(),
+                  toolId: result.toolUseId,
+                };
+                onChunk?.(resultContent, toolResultMeta);
                 onBlock?.({
                   event: 'block_complete',
-                  index: toolResultBlockIndex,
+                  index: parser.getBlockIndex(),
                   block: {
                     type: 'tool_result',
                     toolId: result.toolUseId,
-                    content: typeof result.content === 'string' ? result.content : JSON.stringify(result.content),
+                    content: resultContent,
                     isError: result.isError,
                   },
                 });
@@ -494,23 +498,28 @@ export class Membrane {
                 block: { type: 'tool_result' },
               });
 
+              // Push XML to parser for prefill (internal), but emit clean content via onChunk
               parser.push(resultsXml);
-              const toolResultMeta: ChunkMeta = {
-                type: 'tool_result',
-                visible: false,
-                blockIndex: toolResultBlockIndex,
-              };
-              onChunk?.(resultsXml, toolResultMeta);
 
-              // Emit block complete for each tool result
+              // Emit chunk and block complete for each tool result (without XML wrapper)
               for (const result of results) {
+                const resultContent = typeof result.content === 'string'
+                  ? result.content
+                  : JSON.stringify(result.content);
+                const toolResultMeta: ChunkMeta = {
+                  type: 'tool_result',
+                  visible: false,
+                  blockIndex: parser.getBlockIndex(),
+                  toolId: result.toolUseId,
+                };
+                onChunk?.(resultContent, toolResultMeta);
                 onBlock?.({
                   event: 'block_complete',
-                  index: toolResultBlockIndex,
+                  index: parser.getBlockIndex(),
                   block: {
                     type: 'tool_result',
                     toolId: result.toolUseId,
-                    content: typeof result.content === 'string' ? result.content : JSON.stringify(result.content),
+                    content: resultContent,
                     isError: result.isError,
                   },
                 });
