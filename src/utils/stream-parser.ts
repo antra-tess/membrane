@@ -18,8 +18,20 @@ import type {
 // Result Types
 // ============================================================================
 
+/**
+ * A single emission from processChunk - either content or a block event.
+ * Emissions are in the correct order for interleaved processing.
+ */
+export type StreamEmission =
+  | { kind: 'content'; text: string; meta: ChunkMeta }
+  | { kind: 'blockEvent'; event: BlockEvent };
+
 export interface ProcessChunkResult {
+  /** Ordered emissions for correct interleaving */
+  emissions: StreamEmission[];
+  /** @deprecated Use emissions instead - content may be out of order with blockEvents */
   content: Array<{ text: string; meta: ChunkMeta }>;
+  /** @deprecated Use emissions instead - blockEvents may be out of order with content */
   blockEvents: BlockEvent[];
 }
 
@@ -161,8 +173,21 @@ export class IncrementalXmlParser {
   // ============================================================================
 
   processChunk(chunk: string): ProcessChunkResult {
+    const emissions: StreamEmission[] = [];
     const content: Array<{ text: string; meta: ChunkMeta }> = [];
     const blockEvents: BlockEvent[] = [];
+
+    // Helper to emit content (adds to both emissions and legacy content array)
+    const emitContent = (text: string, meta: ChunkMeta) => {
+      emissions.push({ kind: 'content', text, meta });
+      content.push({ text, meta });
+    };
+
+    // Helper to emit block event (adds to both emissions and legacy blockEvents array)
+    const emitBlockEvent = (event: BlockEvent) => {
+      emissions.push({ kind: 'blockEvent', event });
+      blockEvents.push(event);
+    };
 
     // Sync currentBlockType with depths before processing
     // This handles the case where push() was used for prefill initialization
@@ -186,14 +211,13 @@ export class IncrementalXmlParser {
 
         if (this.isCompleteMembraneTag(this.state.tagBuffer)) {
           const events = this.handleMembraneTag(this.state.tagBuffer);
-          blockEvents.push(...events);
+          for (const event of events) {
+            emitBlockEvent(event);
+          }
           this.state.tagBuffer = '';
         } else if (this.cantBeMembraneTag(this.state.tagBuffer)) {
-          this.ensureBlockStarted(blockEvents);
-          content.push({
-            text: this.state.tagBuffer,
-            meta: this.getCurrentMeta()
-          });
+          this.ensureBlockStartedWithEmit(emitBlockEvent);
+          emitContent(this.state.tagBuffer, this.getCurrentMeta());
           this.state.currentBlockContent += this.state.tagBuffer;
           this.state.tagBuffer = '';
         }
@@ -202,16 +226,16 @@ export class IncrementalXmlParser {
         if (nextLt === -1) {
           const text = chunk.slice(pos);
           if (text) {
-            this.ensureBlockStarted(blockEvents);
-            content.push({ text, meta: this.getCurrentMeta() });
+            this.ensureBlockStartedWithEmit(emitBlockEvent);
+            emitContent(text, this.getCurrentMeta());
             this.state.currentBlockContent += text;
           }
           break;
         } else {
           if (nextLt > pos) {
             const text = chunk.slice(pos, nextLt);
-            this.ensureBlockStarted(blockEvents);
-            content.push({ text, meta: this.getCurrentMeta() });
+            this.ensureBlockStartedWithEmit(emitBlockEvent);
+            emitContent(text, this.getCurrentMeta());
             this.state.currentBlockContent += text;
           }
           this.state.tagBuffer = '<';
@@ -220,25 +244,34 @@ export class IncrementalXmlParser {
       }
     }
 
-    return { content, blockEvents };
+    return { emissions, content, blockEvents };
   }
 
   flush(): ProcessChunkResult {
+    const emissions: StreamEmission[] = [];
     const content: Array<{ text: string; meta: ChunkMeta }> = [];
     const blockEvents: BlockEvent[] = [];
 
     if (this.state.tagBuffer) {
-      this.ensureBlockStarted(blockEvents);
-      content.push({ text: this.state.tagBuffer, meta: this.getCurrentMeta() });
+      if (!this.state.currentBlockStarted) {
+        const event = this.makeBlockStart(this.state.currentBlockType);
+        emissions.push({ kind: 'blockEvent', event });
+        blockEvents.push(event);
+      }
+      const meta = this.getCurrentMeta();
+      emissions.push({ kind: 'content', text: this.state.tagBuffer, meta });
+      content.push({ text: this.state.tagBuffer, meta });
       this.state.currentBlockContent += this.state.tagBuffer;
       this.state.tagBuffer = '';
     }
 
     if (this.state.currentBlockStarted) {
-      blockEvents.push(this.makeBlockComplete());
+      const event = this.makeBlockComplete();
+      emissions.push({ kind: 'blockEvent', event });
+      blockEvents.push(event);
     }
 
-    return { content, blockEvents };
+    return { emissions, content, blockEvents };
   }
 
   getCurrentBlockType(): MembraneBlockType {
@@ -320,6 +353,12 @@ export class IncrementalXmlParser {
   private ensureBlockStarted(events: BlockEvent[]): void {
     if (!this.state.currentBlockStarted) {
       events.push(this.makeBlockStart(this.state.currentBlockType));
+    }
+  }
+
+  private ensureBlockStartedWithEmit(emit: (event: BlockEvent) => void): void {
+    if (!this.state.currentBlockStarted) {
+      emit(this.makeBlockStart(this.state.currentBlockType));
     }
   }
 

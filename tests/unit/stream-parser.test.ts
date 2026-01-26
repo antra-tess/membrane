@@ -158,6 +158,54 @@ describe('IncrementalXmlParser', () => {
     });
   });
 
+  describe('emission interleaving', () => {
+    it('should emit content before block_complete when content precedes closing tag', () => {
+      parser.processChunk('<thinking>');
+
+      const result = parser.processChunk('final thought</thinking>');
+
+      // Emissions should be in order: content, block_complete
+      const contentIdx = result.emissions.findIndex(e => e.kind === 'content' && e.text === 'final thought');
+      const completeIdx = result.emissions.findIndex(e => e.kind === 'blockEvent' && e.event.event === 'block_complete');
+
+      expect(contentIdx).toBeGreaterThanOrEqual(0);
+      expect(completeIdx).toBeGreaterThanOrEqual(0);
+      expect(contentIdx).toBeLessThan(completeIdx);
+    });
+
+    it('should emit block_start before content when content follows closing tag', () => {
+      parser.processChunk('<thinking>thought</thinking>');
+
+      const result = parser.processChunk('after text');
+
+      // Emissions should be in order: block_start, content
+      const startIdx = result.emissions.findIndex(e => e.kind === 'blockEvent' && e.event.event === 'block_start');
+      const contentIdx = result.emissions.findIndex(e => e.kind === 'content' && e.text === 'after text');
+
+      expect(startIdx).toBeGreaterThanOrEqual(0);
+      expect(contentIdx).toBeGreaterThanOrEqual(0);
+      expect(startIdx).toBeLessThan(contentIdx);
+    });
+
+    it('should emit in correct order for content+close+content in single chunk', () => {
+      parser.processChunk('<thinking>');
+
+      const result = parser.processChunk('last thought</thinking>new text');
+
+      // Expected order: content(last thought), block_complete, block_start, content(new text)
+      const emissions = result.emissions;
+
+      const lastThoughtIdx = emissions.findIndex(e => e.kind === 'content' && e.text === 'last thought');
+      const completeIdx = emissions.findIndex(e => e.kind === 'blockEvent' && e.event.event === 'block_complete');
+      const startIdx = emissions.findIndex(e => e.kind === 'blockEvent' && e.event.event === 'block_start');
+      const newTextIdx = emissions.findIndex(e => e.kind === 'content' && e.text === 'new text');
+
+      expect(lastThoughtIdx).toBeLessThan(completeIdx);
+      expect(completeIdx).toBeLessThan(startIdx);
+      expect(startIdx).toBeLessThan(newTextIdx);
+    });
+  });
+
   describe('chunk metadata accuracy', () => {
     it('should emit correct block type for content before closing tag in same chunk', () => {
       // First establish we're in a thinking block

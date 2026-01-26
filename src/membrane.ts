@@ -278,7 +278,7 @@ export class Membrane {
               }
 
               // Process chunk with enriched streaming API
-              const { content, blockEvents } = parser.processChunk(chunk);
+              const { emissions } = parser.processChunk(chunk);
 
               // Check for stop sequences only in NEW content (not already-processed)
               const accumulated = parser.getAccumulated();
@@ -307,16 +307,13 @@ export class Membrane {
                 }
               }
 
-              // Emit block events first
-              if (onBlock) {
-                for (const event of blockEvents) {
-                  onBlock(event);
+              // Emit in correct interleaved order using emissions array
+              for (const emission of emissions) {
+                if (emission.kind === 'blockEvent') {
+                  onBlock?.(emission.event);
+                } else {
+                  onChunk?.(emission.text, emission.meta);
                 }
-              }
-
-              // Emit content chunks with metadata
-              for (const { text, meta } of content) {
-                onChunk?.(text, meta);
               }
             },
             onContentBlock: onContentBlockUpdate
