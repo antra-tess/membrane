@@ -353,6 +353,14 @@ export class Membrane {
         totalUsage.outputTokens += streamResult.usage.outputTokens;
         onUsage?.(totalUsage);
 
+        // Flush the parser to complete any in-progress streaming block
+        const flushResult = parser.flush();
+        for (const emission of flushResult.emissions) {
+          if (emission.kind === 'blockEvent') {
+            onBlock?.(emission.event);
+          }
+        }
+
         // Get accumulated text from parser
         const accumulated = parser.getAccumulated();
 

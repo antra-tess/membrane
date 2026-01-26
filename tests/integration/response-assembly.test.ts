@@ -617,10 +617,14 @@ describe('Multi-request logging', () => {
     expect(toolCallStarts.length).toBeGreaterThanOrEqual(1);
     expect(toolCallCompletes.length).toBeGreaterThanOrEqual(1);
 
-    // Tool call complete should have toolName and input
-    const toolCallComplete = toolCallCompletes[0];
-    expect(toolCallComplete.block.toolName).toBe('test_tool');
-    expect(toolCallComplete.block.input).toBeDefined();
+    // Find the tool call complete with parsed data (has toolName)
+    // Note: there may be multiple tool_call block_complete events:
+    // - One from streaming flush (has content, no toolName)
+    // - One from parsed tool call (has toolName and input)
+    const parsedToolCallComplete = toolCallCompletes.find(e => (e.block as any).toolName);
+    expect(parsedToolCallComplete).toBeDefined();
+    expect(parsedToolCallComplete!.block.toolName).toBe('test_tool');
+    expect(parsedToolCallComplete!.block.input).toBeDefined();
 
     // Should have block events for tool_result
     const toolResultStarts = blockEvents.filter(e => e.event === 'block_start' && e.block.type === 'tool_result');
