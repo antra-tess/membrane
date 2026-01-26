@@ -147,12 +147,17 @@ export class AnthropicAdapter implements ProviderAdapter {
     if (request.tools && request.tools.length > 0) {
       params.tools = request.tools as Anthropic.Tool[];
     }
-    
+
+    // Handle extended thinking
+    if ((request as any).thinking) {
+      (params as any).thinking = (request as any).thinking;
+    }
+
     // Apply extra params
     if (request.extra) {
       Object.assign(params, request.extra);
     }
-    
+
     return params;
   }
 

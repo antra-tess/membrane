@@ -740,6 +740,14 @@ export class Membrane {
       input_schema: tool.inputSchema,
     }));
     
+    // Build thinking config for native extended thinking
+    const thinking = request.config.thinking?.enabled
+      ? {
+          type: 'enabled' as const,
+          budget_tokens: request.config.thinking.budgetTokens ?? 5000,
+        }
+      : undefined;
+
     return {
       model: request.config.model,
       maxTokens: request.config.maxTokens,
@@ -747,6 +755,7 @@ export class Membrane {
       messages: providerMessages,
       system: request.system,
       tools,
+      thinking,
       extra: request.providerParams,
     };
   }
@@ -811,6 +820,7 @@ export class Membrane {
     const prefillResult = transformToPrefill(request, {
       assistantName: this.config.assistantParticipant ?? 'Claude',
       promptCaching: true, // Enable cache control by default
+      prefillThinking: request.config.thinking?.enabled ?? false,
       additionalStopSequences,
       maxParticipantsForStop,
     });
