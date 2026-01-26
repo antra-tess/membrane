@@ -469,6 +469,9 @@ export class Membrane {
               parser.push(afterImageXml);
               onChunk?.(afterImageXml, toolResultMeta);
               prefillResult.assistantPrefill = parser.getAccumulated();
+
+              // Reset parser state for new streaming iteration
+              parser.resetForNewIteration();
             } else {
               // Standard path: no images, use simple XML injection
               const resultsXml = formatToolResults(results);
@@ -518,6 +521,8 @@ export class Membrane {
               );
             }
 
+            // Reset parser state for new streaming iteration
+            parser.resetForNewIteration();
             toolDepth++;
             continue;
           }
@@ -550,6 +555,8 @@ export class Membrane {
             prefillResult,
             parser.getAccumulated()
           );
+          // Reset parser state for new streaming iteration
+          parser.resetForNewIteration();
           continue;
         }
 

@@ -118,6 +118,18 @@ export class IncrementalXmlParser {
     return this.scan();
   }
 
+  /**
+   * Reset streaming state for a new API response iteration.
+   * Keeps accumulated text and depths, but resets block tracking
+   * so processChunk will resync currentBlockType with current depths.
+   */
+  resetForNewIteration(): void {
+    this.state.currentBlockStarted = false;
+    this.state.currentBlockContent = '';
+    this.state.currentBlockType = this.getCurrentBlockType();
+    this.state.tagBuffer = '';
+  }
+
   isInsideBlock(): boolean {
     return (
       this.state.functionCallsDepth > 0 ||
@@ -243,6 +255,9 @@ export class IncrementalXmlParser {
         }
       }
     }
+
+    // Update lastScanPos so scanForDepth won't re-process tags we handled
+    this.state.lastScanPos = this.state.accumulated.length;
 
     return { emissions, content, blockEvents };
   }
