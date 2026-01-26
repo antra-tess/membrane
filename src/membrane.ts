@@ -383,9 +383,12 @@ export class Membrane {
               accumulated: parser.getAccumulated(),
             };
 
-            const rawResults = await onToolCalls(parsed.calls, context);
-            // Normalize results - handle undefined or non-array returns
-            const results = Array.isArray(rawResults) ? rawResults : [];
+            const results = await onToolCalls(parsed.calls, context);
+            if (!Array.isArray(results)) {
+              throw new Error(
+                `onToolCalls must return an array of ToolResult, got ${typeof results}`
+              );
+            }
 
             // Track the tool results
             executedToolResults.push(...results);
@@ -642,9 +645,12 @@ export class Membrane {
             accumulated: allTextAccumulated,
           };
 
-          const rawResults = await onToolCalls(toolCalls, context);
-          // Normalize results - handle undefined or non-array returns
-          const results = Array.isArray(rawResults) ? rawResults : [];
+          const results = await onToolCalls(toolCalls, context);
+          if (!Array.isArray(results)) {
+            throw new Error(
+              `onToolCalls must return an array of ToolResult, got ${typeof results}`
+            );
+          }
 
           // Track tool results
           executedToolResults.push(...results);

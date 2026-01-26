@@ -578,7 +578,7 @@ describe('Multi-request logging', () => {
     expect(assistantContent).toContain('</function_results>');
   });
 
-  it('should handle onToolCalls returning undefined gracefully', async () => {
+  it('should throw clear error when onToolCalls returns undefined', async () => {
     const fnCallsOpen = '<function_calls>';
     const fnCallsClose = '</function_calls>';
     const invokeOpen = '<invoke name="test_tool">';
@@ -599,12 +599,12 @@ describe('Multi-request logging', () => {
 
     const membrane = new Membrane(adapter);
 
-    // This should not throw even if onToolCalls returns undefined
+    // Should throw with clear error message
     await expect(membrane.stream(createMultiTurnRequest(), {
       onToolCalls: async () => {
         return undefined as any;  // Simulate buggy handler
       },
-    })).resolves.toBeDefined();
+    })).rejects.toThrow('onToolCalls must return an array');
   });
 });
 
