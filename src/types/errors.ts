@@ -92,7 +92,7 @@ export class MembraneError extends Error {
 // Error Factory Functions
 // ============================================================================
 
-export function rateLimitError(message: string, retryAfterMs?: number, raw?: unknown): MembraneError {
+export function rateLimitError(message: string, retryAfterMs?: number, raw?: unknown, rawRequest?: unknown): MembraneError {
   return new MembraneError({
     type: 'rate_limit',
     message,
@@ -100,91 +100,101 @@ export function rateLimitError(message: string, retryAfterMs?: number, raw?: unk
     retryAfterMs,
     httpStatus: 429,
     rawError: raw,
+    rawRequest,
   });
 }
 
-export function contextLengthError(message: string, raw?: unknown): MembraneError {
+export function contextLengthError(message: string, raw?: unknown, rawRequest?: unknown): MembraneError {
   return new MembraneError({
     type: 'context_length',
     message,
     retryable: false,
     httpStatus: 400,
     rawError: raw,
+    rawRequest,
   });
 }
 
-export function invalidRequestError(message: string, raw?: unknown): MembraneError {
+export function invalidRequestError(message: string, raw?: unknown, rawRequest?: unknown): MembraneError {
   return new MembraneError({
     type: 'invalid_request',
     message,
     retryable: false,
     httpStatus: 400,
     rawError: raw,
+    rawRequest,
   });
 }
 
-export function authError(message: string, raw?: unknown): MembraneError {
+export function authError(message: string, raw?: unknown, rawRequest?: unknown): MembraneError {
   return new MembraneError({
     type: 'auth',
     message,
     retryable: false,
     httpStatus: 401,
     rawError: raw,
+    rawRequest,
   });
 }
 
-export function serverError(message: string, httpStatus?: number, raw?: unknown): MembraneError {
+export function serverError(message: string, httpStatus?: number, raw?: unknown, rawRequest?: unknown): MembraneError {
   return new MembraneError({
     type: 'server',
     message,
     retryable: true,
     httpStatus: httpStatus ?? 500,
     rawError: raw,
+    rawRequest,
   });
 }
 
-export function networkError(message: string, raw?: unknown): MembraneError {
+export function networkError(message: string, raw?: unknown, rawRequest?: unknown): MembraneError {
   return new MembraneError({
     type: 'network',
     message,
     retryable: true,
     rawError: raw,
+    rawRequest,
   });
 }
 
-export function timeoutError(message: string, raw?: unknown): MembraneError {
+export function timeoutError(message: string, raw?: unknown, rawRequest?: unknown): MembraneError {
   return new MembraneError({
     type: 'timeout',
     message,
     retryable: true,
     rawError: raw,
+    rawRequest,
   });
 }
 
-export function abortError(message: string = 'Request was aborted'): MembraneError {
+export function abortError(message: string = 'Request was aborted', rawRequest?: unknown): MembraneError {
   return new MembraneError({
     type: 'abort',
     message,
     retryable: false,
     rawError: undefined,
+    rawRequest,
   });
 }
 
-export function safetyError(message: string, raw?: unknown): MembraneError {
+export function safetyError(message: string, raw?: unknown, rawRequest?: unknown): MembraneError {
   return new MembraneError({
     type: 'safety',
     message,
     retryable: false,
     rawError: raw,
+    rawRequest,
   });
 }
 
-export function unsupportedError(message: string): MembraneError {
+export function unsupportedError(message: string, rawRequest?: unknown): MembraneError {
   return new MembraneError({
     type: 'unsupported',
     message,
     retryable: false,
     rawError: undefined,
+    rawRequest,
   });
 }
 

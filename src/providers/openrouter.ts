@@ -137,12 +137,12 @@ export class OpenRouterAdapter implements ProviderAdapter {
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
     const openRouterRequest = this.buildRequest(request);
-    
+
     try {
       const response = await this.makeRequest(openRouterRequest, options);
-      return this.parseResponse(response, request.model);
+      return this.parseResponse(response, request.model, openRouterRequest);
     } catch (error) {
-      throw this.handleError(error);
+      throw this.handleError(error, openRouterRequest);
     }
   }
 
@@ -155,7 +155,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
     openRouterRequest.stream = true;
     // Request usage data in stream for cache metrics
     openRouterRequest.stream_options = { include_usage: true };
-    
+
     try {
       const response = await fetch(`${this.baseURL}/chat/completions`, {
         method: 'POST',
@@ -163,43 +163,43 @@ export class OpenRouterAdapter implements ProviderAdapter {
         body: JSON.stringify(openRouterRequest),
         signal: options?.signal,
       });
-      
+
       if (!response.ok) {
         const errorText = await response.text();
         throw new Error(`OpenRouter error: ${response.status} ${errorText}`);
       }
-      
+
       const reader = response.body?.getReader();
       if (!reader) {
         throw new Error('No response body');
       }
-      
+
       const decoder = new TextDecoder();
       let accumulated = '';
       let finishReason = 'stop';
       let toolCalls: OpenRouterToolCall[] = [];
       let streamUsage: OpenRouterResponse['usage'] | undefined;
-      
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        
+
         const chunk = decoder.decode(value, { stream: true });
         const lines = chunk.split('\n').filter(line => line.startsWith('data: '));
-        
+
         for (const line of lines) {
           const data = line.slice(6);
           if (data === '[DONE]') continue;
-          
+
           try {
             const parsed = JSON.parse(data);
             const delta = parsed.choices?.[0]?.delta;
-            
+
             if (delta?.content) {
               accumulated += delta.content;
               callbacks.onChunk(delta.content);
             }
-            
+
             // Handle streaming tool calls
             if (delta?.tool_calls) {
               for (const tc of delta.tool_calls) {
@@ -218,11 +218,11 @@ export class OpenRouterAdapter implements ProviderAdapter {
                 }
               }
             }
-            
+
             if (parsed.choices?.[0]?.finish_reason) {
               finishReason = parsed.choices[0].finish_reason;
             }
-            
+
             // Capture usage data (comes in final chunk when stream_options.include_usage is set)
             if (parsed.usage) {
               streamUsage = parsed.usage;
@@ -232,21 +232,21 @@ export class OpenRouterAdapter implements ProviderAdapter {
           }
         }
       }
-      
+
       // Build response with accumulated data
       const message: OpenRouterMessage = {
         role: 'assistant',
         content: accumulated || null,
       };
-      
+
       if (toolCalls.length > 0) {
         message.tool_calls = toolCalls;
       }
-      
-      return this.parseStreamedResponse(message, finishReason, request.model, streamUsage);
-      
+
+      return this.parseStreamedResponse(message, finishReason, request.model, streamUsage, openRouterRequest);
+
     } catch (error) {
-      throw this.handleError(error);
+      throw this.handleError(error, openRouterRequest);
     }
   }
 
@@ -437,17 +437,17 @@ export class OpenRouterAdapter implements ProviderAdapter {
     return response.json() as Promise<OpenRouterResponse>;
   }
 
-  private parseResponse(response: OpenRouterResponse, requestedModel: string): ProviderResponse {
+  private parseResponse(response: OpenRouterResponse, requestedModel: string, rawRequest: unknown): ProviderResponse {
     const choice = response.choices[0];
     const message = choice?.message;
-    
+
     // Extract cache tokens - OpenRouter passes through both Anthropic and OpenAI caching
     // Anthropic: cache_creation_input_tokens, cache_read_input_tokens
     // OpenAI: prompt_tokens_details.cached_tokens
     const cacheCreationTokens = response.usage?.cache_creation_input_tokens;
-    const cacheReadTokens = response.usage?.cache_read_input_tokens 
+    const cacheReadTokens = response.usage?.cache_read_input_tokens
       ?? response.usage?.prompt_tokens_details?.cached_tokens;
-    
+
     return {
       content: this.messageToContent(message),
       stopReason: this.mapFinishReason(choice?.finish_reason),
@@ -459,6 +459,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
         cacheReadTokens: cacheReadTokens ?? undefined,
       },
       model: response.model ?? requestedModel,
+      rawRequest,
       raw: response,
     };
   }
@@ -467,13 +468,14 @@ export class OpenRouterAdapter implements ProviderAdapter {
     message: OpenRouterMessage,
     finishReason: string,
     requestedModel: string,
-    streamUsage?: OpenRouterResponse['usage']
+    streamUsage?: OpenRouterResponse['usage'],
+    rawRequest?: unknown
   ): ProviderResponse {
     // Extract cache tokens if available from stream usage
     const cacheCreationTokens = streamUsage?.cache_creation_input_tokens;
-    const cacheReadTokens = streamUsage?.cache_read_input_tokens 
+    const cacheReadTokens = streamUsage?.cache_read_input_tokens
       ?? streamUsage?.prompt_tokens_details?.cached_tokens;
-    
+
     return {
       content: this.messageToContent(message),
       stopReason: this.mapFinishReason(finishReason),
@@ -485,6 +487,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
         cacheReadTokens: cacheReadTokens ?? undefined,
       },
       model: requestedModel,
+      rawRequest,
       raw: { message, finish_reason: finishReason, usage: streamUsage },
     };
   }
@@ -527,40 +530,41 @@ export class OpenRouterAdapter implements ProviderAdapter {
     }
   }
 
-  private handleError(error: unknown): MembraneError {
+  private handleError(error: unknown, rawRequest?: unknown): MembraneError {
     if (error instanceof Error) {
       const message = error.message;
-      
+
       if (message.includes('429') || message.includes('rate')) {
-        return rateLimitError(message, undefined, error);
+        return rateLimitError(message, undefined, error, rawRequest);
       }
-      
+
       if (message.includes('401') || message.includes('auth')) {
-        return authError(message, error);
+        return authError(message, error, rawRequest);
       }
-      
+
       if (message.includes('context') || message.includes('too long')) {
-        return contextLengthError(message, error);
+        return contextLengthError(message, error, rawRequest);
       }
-      
+
       if (message.includes('500') || message.includes('502') || message.includes('503')) {
-        return serverError(message, undefined, error);
+        return serverError(message, undefined, error, rawRequest);
       }
-      
+
       if (error.name === 'AbortError') {
-        return abortError();
+        return abortError(undefined, rawRequest);
       }
-      
+
       if (message.includes('network') || message.includes('fetch')) {
-        return networkError(message, error);
+        return networkError(message, error, rawRequest);
       }
     }
-    
+
     return new MembraneError({
       type: 'unknown',
       message: error instanceof Error ? error.message : String(error),
       retryable: false,
       rawError: error,
+      rawRequest,
     });
   }
 }

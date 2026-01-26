@@ -95,15 +95,16 @@ export class Membrane {
           finalRequest = await this.config.hooks.beforeRequest(request, providerRequest) ?? providerRequest;
         }
 
-        rawRequest = finalRequest;
-
-        // Call onRequest callback for logging
-        options.onRequest?.(rawRequest);
-
         const providerResponse = await this.adapter.complete(finalRequest, {
           signal: options.signal,
           timeoutMs: options.timeoutMs,
         });
+
+        // Use the actual raw request from provider (after any adapter transformations)
+        rawRequest = providerResponse.rawRequest;
+
+        // Call onRequest callback with actual request sent to API
+        options.onRequest?.(rawRequest);
 
         const response = this.transformResponse(
           providerResponse,
@@ -111,7 +112,7 @@ export class Membrane {
           prefillResult,
           startTime,
           attempts,
-          finalRequest
+          rawRequest
         );
 
         // Call afterResponse hook
@@ -246,10 +247,6 @@ export class Membrane {
     try {
       // Tool execution loop
       while (toolDepth <= maxToolDepth) {
-        rawRequest = providerRequest;
-
-        // Call onRequest callback for logging
-        onRequest?.(rawRequest);
 
         // Track if we manually detected a stop sequence (API doesn't always stop)
         let detectedStopSequence: string | null = null;
@@ -324,6 +321,12 @@ export class Membrane {
           streamResult.stopReason = 'stop_sequence';
           streamResult.stopSequence = detectedStopSequence;
         }
+
+        // Use the actual raw request from provider (after adapter transformations)
+        rawRequest = streamResult.rawRequest;
+
+        // Call onRequest callback with actual request sent to API
+        onRequest?.(rawRequest);
 
         rawResponse = streamResult.raw;
         lastStopReason = this.mapStopReason(streamResult.stopReason);
@@ -527,10 +530,6 @@ export class Membrane {
       while (toolDepth <= maxToolDepth) {
         // Build provider request with native tools
         const providerRequest = this.buildNativeToolRequest(request, messages);
-        rawRequest = providerRequest;
-
-        // Call onRequest callback for logging
-        onRequest?.(rawRequest);
 
         // Stream from provider
         let textAccumulated = '';
@@ -556,6 +555,12 @@ export class Membrane {
           },
           { signal }
         );
+
+        // Use the actual raw request from provider (after adapter transformations)
+        rawRequest = streamResult.rawRequest;
+
+        // Call onRequest callback with actual request sent to API
+        onRequest?.(rawRequest);
 
         rawResponse = streamResult.raw;
         lastStopReason = this.mapStopReason(streamResult.stopReason);

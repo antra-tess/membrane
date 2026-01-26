@@ -61,18 +61,16 @@ export class AnthropicAdapter implements ProviderAdapter {
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
     const anthropicRequest = this.buildRequest(request);
-    
+    const fullRequest = { ...anthropicRequest, stream: false as const };
+
     try {
-      const response = await this.client.messages.create({
-        ...anthropicRequest,
-        stream: false,
-      }, {
+      const response = await this.client.messages.create(fullRequest, {
         signal: options?.signal,
       });
-      
-      return this.parseResponse(response);
+
+      return this.parseResponse(response, fullRequest);
     } catch (error) {
-      throw this.handleError(error);
+      throw this.handleError(error, fullRequest);
     }
   }
 
@@ -82,16 +80,18 @@ export class AnthropicAdapter implements ProviderAdapter {
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
     const anthropicRequest = this.buildRequest(request);
-    
+    // Note: stream is implicitly true when using .stream()
+    const fullRequest = { ...anthropicRequest, stream: true };
+
     try {
       const stream = await this.client.messages.stream(anthropicRequest, {
         signal: options?.signal,
       });
-      
+
       let accumulated = '';
       const contentBlocks: unknown[] = [];
       let currentBlockIndex = -1;
-      
+
       for await (const event of stream) {
         if (event.type === 'content_block_start') {
           currentBlockIndex = event.index;
@@ -110,12 +110,12 @@ export class AnthropicAdapter implements ProviderAdapter {
           callbacks.onContentBlock?.(currentBlockIndex, contentBlocks[currentBlockIndex]);
         }
       }
-      
+
       const finalMessage = await stream.finalMessage();
-      return this.parseResponse(finalMessage);
-      
+      return this.parseResponse(finalMessage, fullRequest);
+
     } catch (error) {
-      throw this.handleError(error);
+      throw this.handleError(error, fullRequest);
     }
   }
 
@@ -161,7 +161,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     return params;
   }
 
-  private parseResponse(response: Anthropic.Message): ProviderResponse {
+  private parseResponse(response: Anthropic.Message, rawRequest: unknown): ProviderResponse {
     return {
       content: response.content,
       stopReason: response.stop_reason ?? 'end_turn',
@@ -173,43 +173,45 @@ export class AnthropicAdapter implements ProviderAdapter {
         cacheReadTokens: (response.usage as any).cache_read_input_tokens,
       },
       model: response.model,
+      rawRequest,
       raw: response,
     };
   }
 
-  private handleError(error: unknown): MembraneError {
+  private handleError(error: unknown, rawRequest?: unknown): MembraneError {
     if (error instanceof Anthropic.APIError) {
       const status = error.status;
       const message = error.message;
-      
+
       if (status === 429) {
         // Try to parse retry-after
         const retryAfter = this.parseRetryAfter(error);
-        return rateLimitError(message, retryAfter, error);
+        return rateLimitError(message, retryAfter, error, rawRequest);
       }
-      
+
       if (status === 401) {
-        return authError(message, error);
+        return authError(message, error, rawRequest);
       }
-      
+
       if (message.includes('context') || message.includes('too long')) {
-        return contextLengthError(message, error);
+        return contextLengthError(message, error, rawRequest);
       }
-      
+
       if (status >= 500) {
-        return serverError(message, status, error);
+        return serverError(message, status, error, rawRequest);
       }
     }
-    
+
     if (error instanceof Error && error.name === 'AbortError') {
-      return abortError();
+      return abortError(undefined, rawRequest);
     }
-    
+
     return new MembraneError({
       type: 'unknown',
       message: error instanceof Error ? error.message : String(error),
       retryable: false,
       rawError: error,
+      rawRequest,
     });
   }
 

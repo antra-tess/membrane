@@ -238,7 +238,10 @@ export interface ProviderResponse {
   
   /** Model that actually ran */
   model: string;
-  
+
+  /** Raw request that was actually sent to the API */
+  rawRequest: unknown;
+
   /** Raw response for debugging */
   raw: unknown;
 }

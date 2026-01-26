@@ -130,12 +130,12 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
     const openAIRequest = this.buildRequest(request);
-    
+
     try {
       const response = await this.makeRequest(openAIRequest, options);
-      return this.parseResponse(response, request.model);
+      return this.parseResponse(response, request.model, openAIRequest);
     } catch (error) {
-      throw this.handleError(error);
+      throw this.handleError(error, openAIRequest);
     }
   }
 
@@ -146,7 +146,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   ): Promise<ProviderResponse> {
     const openAIRequest = this.buildRequest(request);
     openAIRequest.stream = true;
-    
+
     try {
       const response = await fetch(`${this.baseURL}/chat/completions`, {
         method: 'POST',
@@ -154,42 +154,42 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         body: JSON.stringify(openAIRequest),
         signal: options?.signal,
       });
-      
+
       if (!response.ok) {
         const errorText = await response.text();
         throw new Error(`API error: ${response.status} ${errorText}`);
       }
-      
+
       const reader = response.body?.getReader();
       if (!reader) {
         throw new Error('No response body');
       }
-      
+
       const decoder = new TextDecoder();
       let accumulated = '';
       let finishReason = 'stop';
       let toolCalls: OpenAIToolCall[] = [];
-      
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        
+
         const chunk = decoder.decode(value, { stream: true });
         const lines = chunk.split('\n').filter(line => line.startsWith('data: '));
-        
+
         for (const line of lines) {
           const data = line.slice(6);
           if (data === '[DONE]') continue;
-          
+
           try {
             const parsed = JSON.parse(data);
             const delta = parsed.choices?.[0]?.delta;
-            
+
             if (delta?.content) {
               accumulated += delta.content;
               callbacks.onChunk(delta.content);
             }
-            
+
             // Handle streaming tool calls
             if (delta?.tool_calls) {
               for (const tc of delta.tool_calls) {
@@ -208,7 +208,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
                 }
               }
             }
-            
+
             if (parsed.choices?.[0]?.finish_reason) {
               finishReason = parsed.choices[0].finish_reason;
             }
@@ -217,21 +217,21 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
           }
         }
       }
-      
+
       // Build response with accumulated data
       const message: OpenAIMessage = {
         role: 'assistant',
         content: accumulated || null,
       };
-      
+
       if (toolCalls.length > 0) {
         message.tool_calls = toolCalls;
       }
-      
-      return this.parseStreamedResponse(message, finishReason, request.model);
-      
+
+      return this.parseStreamedResponse(message, finishReason, request.model, openAIRequest);
+
     } catch (error) {
-      throw this.handleError(error);
+      throw this.handleError(error, openAIRequest);
     }
   }
 
@@ -371,10 +371,10 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     return response.json() as Promise<OpenAIResponse>;
   }
 
-  private parseResponse(response: OpenAIResponse, requestedModel: string): ProviderResponse {
+  private parseResponse(response: OpenAIResponse, requestedModel: string, rawRequest: unknown): ProviderResponse {
     const choice = response.choices[0];
     const message = choice?.message;
-    
+
     return {
       content: this.messageToContent(message),
       stopReason: this.mapFinishReason(choice?.finish_reason),
@@ -384,6 +384,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         outputTokens: response.usage?.completion_tokens ?? 0,
       },
       model: response.model ?? requestedModel,
+      rawRequest,
       raw: response,
     };
   }
@@ -391,7 +392,8 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   private parseStreamedResponse(
     message: OpenAIMessage,
     finishReason: string,
-    requestedModel: string
+    requestedModel: string,
+    rawRequest?: unknown
   ): ProviderResponse {
     return {
       content: this.messageToContent(message),
@@ -402,6 +404,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         outputTokens: 0,
       },
       model: requestedModel,
+      rawRequest,
       raw: { message, finish_reason: finishReason },
     };
   }
@@ -444,40 +447,41 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     }
   }
 
-  private handleError(error: unknown): MembraneError {
+  private handleError(error: unknown, rawRequest?: unknown): MembraneError {
     if (error instanceof Error) {
       const message = error.message;
-      
+
       if (message.includes('429') || message.includes('rate')) {
-        return rateLimitError(message, undefined, error);
+        return rateLimitError(message, undefined, error, rawRequest);
       }
-      
+
       if (message.includes('401') || message.includes('auth') || message.includes('Unauthorized')) {
-        return authError(message, error);
+        return authError(message, error, rawRequest);
       }
-      
+
       if (message.includes('context') || message.includes('too long') || message.includes('maximum context')) {
-        return contextLengthError(message, error);
+        return contextLengthError(message, error, rawRequest);
       }
-      
+
       if (message.includes('500') || message.includes('502') || message.includes('503')) {
-        return serverError(message, undefined, error);
+        return serverError(message, undefined, error, rawRequest);
       }
-      
+
       if (error.name === 'AbortError') {
-        return abortError();
+        return abortError(undefined, rawRequest);
       }
-      
+
       if (message.includes('network') || message.includes('fetch') || message.includes('ECONNREFUSED')) {
-        return networkError(message, error);
+        return networkError(message, error, rawRequest);
       }
     }
-    
+
     return new MembraneError({
       type: 'unknown',
       message: error instanceof Error ? error.message : String(error),
       retryable: false,
       rawError: error,
+      rawRequest,
     });
   }
 }

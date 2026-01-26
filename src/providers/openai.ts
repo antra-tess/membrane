@@ -203,12 +203,12 @@ export class OpenAIAdapter implements ProviderAdapter {
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
     const openAIRequest = this.buildRequest(request);
-    
+
     try {
       const response = await this.makeRequest(openAIRequest, options);
-      return this.parseResponse(response, request.model);
+      return this.parseResponse(response, request.model, openAIRequest);
     } catch (error) {
-      throw this.handleError(error);
+      throw this.handleError(error, openAIRequest);
     }
   }
 
@@ -221,7 +221,7 @@ export class OpenAIAdapter implements ProviderAdapter {
     openAIRequest.stream = true;
     // Request usage data in stream for cache metrics
     openAIRequest.stream_options = { include_usage: true };
-    
+
     try {
       const response = await fetch(`${this.baseURL}/chat/completions`, {
         method: 'POST',
@@ -229,43 +229,43 @@ export class OpenAIAdapter implements ProviderAdapter {
         body: JSON.stringify(openAIRequest),
         signal: options?.signal,
       });
-      
+
       if (!response.ok) {
         const errorText = await response.text();
         throw new Error(`OpenAI API error: ${response.status} ${errorText}`);
       }
-      
+
       const reader = response.body?.getReader();
       if (!reader) {
         throw new Error('No response body');
       }
-      
+
       const decoder = new TextDecoder();
       let accumulated = '';
       let finishReason = 'stop';
       let toolCalls: OpenAIToolCall[] = [];
       let streamUsage: OpenAIResponse['usage'] | undefined;
-      
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        
+
         const chunk = decoder.decode(value, { stream: true });
         const lines = chunk.split('\n').filter(line => line.startsWith('data: '));
-        
+
         for (const line of lines) {
           const data = line.slice(6);
           if (data === '[DONE]') continue;
-          
+
           try {
             const parsed = JSON.parse(data);
             const delta = parsed.choices?.[0]?.delta;
-            
+
             if (delta?.content) {
               accumulated += delta.content;
               callbacks.onChunk(delta.content);
             }
-            
+
             // Handle streaming tool calls
             if (delta?.tool_calls) {
               for (const tc of delta.tool_calls) {
@@ -284,11 +284,11 @@ export class OpenAIAdapter implements ProviderAdapter {
                 }
               }
             }
-            
+
             if (parsed.choices?.[0]?.finish_reason) {
               finishReason = parsed.choices[0].finish_reason;
             }
-            
+
             // Capture usage data (comes in final chunk with stream_options.include_usage)
             if (parsed.usage) {
               streamUsage = parsed.usage;
@@ -298,21 +298,21 @@ export class OpenAIAdapter implements ProviderAdapter {
           }
         }
       }
-      
+
       // Build response with accumulated data
       const message: OpenAIMessage = {
         role: 'assistant',
         content: accumulated || null,
       };
-      
+
       if (toolCalls.length > 0) {
         message.tool_calls = toolCalls;
       }
-      
-      return this.parseStreamedResponse(message, finishReason, request.model, streamUsage);
-      
+
+      return this.parseStreamedResponse(message, finishReason, request.model, streamUsage, openAIRequest);
+
     } catch (error) {
-      throw this.handleError(error);
+      throw this.handleError(error, openAIRequest);
     }
   }
 
@@ -460,13 +460,13 @@ export class OpenAIAdapter implements ProviderAdapter {
     return response.json() as Promise<OpenAIResponse>;
   }
 
-  private parseResponse(response: OpenAIResponse, requestedModel: string): ProviderResponse {
+  private parseResponse(response: OpenAIResponse, requestedModel: string, rawRequest: unknown): ProviderResponse {
     const choice = response.choices[0];
     const message = choice?.message;
-    
+
     // Extract prompt caching details (OpenAI automatic caching for prompts ≥1024 tokens)
     const cachedTokens = response.usage?.prompt_tokens_details?.cached_tokens ?? 0;
-    
+
     return {
       content: this.messageToContent(message),
       stopReason: this.mapFinishReason(choice?.finish_reason),
@@ -479,6 +479,7 @@ export class OpenAIAdapter implements ProviderAdapter {
         cacheReadTokens: cachedTokens > 0 ? cachedTokens : undefined,
       },
       model: response.model ?? requestedModel,
+      rawRequest,
       raw: response,
     };
   }
@@ -487,11 +488,12 @@ export class OpenAIAdapter implements ProviderAdapter {
     message: OpenAIMessage,
     finishReason: string,
     requestedModel: string,
-    streamUsage?: OpenAIResponse['usage']
+    streamUsage?: OpenAIResponse['usage'],
+    rawRequest?: unknown
   ): ProviderResponse {
     // Extract cached tokens from stream usage if available
     const cachedTokens = streamUsage?.prompt_tokens_details?.cached_tokens ?? 0;
-    
+
     return {
       content: this.messageToContent(message),
       stopReason: this.mapFinishReason(finishReason),
@@ -502,6 +504,7 @@ export class OpenAIAdapter implements ProviderAdapter {
         cacheReadTokens: cachedTokens > 0 ? cachedTokens : undefined,
       },
       model: requestedModel,
+      rawRequest,
       raw: { message, finish_reason: finishReason, usage: streamUsage },
     };
   }
@@ -544,44 +547,45 @@ export class OpenAIAdapter implements ProviderAdapter {
     }
   }
 
-  private handleError(error: unknown): MembraneError {
+  private handleError(error: unknown, rawRequest?: unknown): MembraneError {
     if (error instanceof Error) {
       const message = error.message;
-      
+
       // OpenAI specific error patterns
       if (message.includes('429') || message.includes('rate_limit')) {
         // Try to extract retry-after
         const retryMatch = message.match(/retry after (\d+)/i);
         const retryAfter = retryMatch?.[1] ? parseInt(retryMatch[1], 10) * 1000 : undefined;
-        return rateLimitError(message, retryAfter, error);
+        return rateLimitError(message, retryAfter, error, rawRequest);
       }
-      
+
       if (message.includes('401') || message.includes('invalid_api_key') || message.includes('Incorrect API key')) {
-        return authError(message, error);
+        return authError(message, error, rawRequest);
       }
-      
+
       if (message.includes('context_length') || message.includes('maximum context') || message.includes('too long')) {
-        return contextLengthError(message, error);
+        return contextLengthError(message, error, rawRequest);
       }
-      
+
       if (message.includes('500') || message.includes('502') || message.includes('503') || message.includes('server_error')) {
-        return serverError(message, undefined, error);
+        return serverError(message, undefined, error, rawRequest);
       }
-      
+
       if (error.name === 'AbortError') {
-        return abortError();
+        return abortError(undefined, rawRequest);
       }
-      
+
       if (message.includes('network') || message.includes('fetch') || message.includes('ECONNREFUSED')) {
-        return networkError(message, error);
+        return networkError(message, error, rawRequest);
       }
     }
-    
+
     return new MembraneError({
       type: 'unknown',
       message: error instanceof Error ? error.message : String(error),
       retryable: false,
       rawError: error,
+      rawRequest,
     });
   }
 }
