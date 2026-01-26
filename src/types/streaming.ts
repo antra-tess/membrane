@@ -250,4 +250,7 @@ export interface CompleteOptions {
 
   /** Called with raw provider request before sending (for logging) */
   onRequest?: OnRequestCallback;
+
+  /** Called with raw provider response after API call (for logging) */
+  onResponse?: OnResponseCallback;
 }

@@ -115,6 +115,7 @@ export type {
   OnUsageCallback,
   OnBlockCallback,
   OnRequestCallback,
+  OnResponseCallback,
   BlockEvent,
   BlockDelta,
 } from './streaming.js';

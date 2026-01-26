@@ -106,6 +106,9 @@ export class Membrane {
         // Call onRequest callback with actual request sent to API
         options.onRequest?.(rawRequest);
 
+        // Call onResponse callback with raw response from API
+        options.onResponse?.(providerResponse.raw);
+
         const response = this.transformResponse(
           providerResponse,
           request,
