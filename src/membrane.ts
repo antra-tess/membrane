@@ -240,8 +240,11 @@ export class Membrane {
 
     // Initialize parser with prefill content so it knows about any open tags
     // (e.g., <thinking> in the prefill means API response continues inside thinking)
+    // Track the initial prefill length so we can extract only NEW content for response
+    let initialPrefillLength = 0;
     if (prefillResult.assistantPrefill) {
       parser.push(prefillResult.assistantPrefill);
+      initialPrefillLength = prefillResult.assistantPrefill.length;
     }
 
     try {
@@ -458,9 +461,13 @@ export class Membrane {
         break;
       }
 
-      // Build final response
+      // Build final response - only use NEW content (after initial prefill) for content parsing
+      // The full accumulated text is still available in raw.response
+      const fullAccumulated = parser.getAccumulated();
+      const newContent = fullAccumulated.slice(initialPrefillLength);
+
       return this.buildFinalResponse(
-        parser.getAccumulated(),
+        newContent,
         contentBlocks,
         lastStopReason,
         totalUsage,
@@ -476,8 +483,12 @@ export class Membrane {
     } catch (error) {
       // Check if this is an abort error
       if (this.isAbortError(error)) {
+        // Only use NEW content (after initial prefill) for partial content
+        const fullAccumulated = parser.getAccumulated();
+        const newContent = fullAccumulated.slice(initialPrefillLength);
+
         return this.buildAbortedResponse(
-          parser.getAccumulated(),
+          newContent,
           totalUsage,
           executedToolCalls,
           executedToolResults,
