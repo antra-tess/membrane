@@ -479,9 +479,8 @@ export class Membrane {
               );
 
               // Also add afterImageXml to accumulated for complete rawAssistantText
-              // This is prefilled but represents assistant's logical output
+              // Note: afterImageXml is internal prefill (closing tags), not emitted via onChunk
               parser.push(afterImageXml);
-              onChunk?.(afterImageXml, toolResultMeta);
               prefillResult.assistantPrefill = parser.getAccumulated();
 
               // Reset parser state for new streaming iteration
