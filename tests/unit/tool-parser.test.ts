@@ -246,6 +246,72 @@ Text3`;
       expect(blocks.length).toBe(5);
     });
   });
+
+  describe('startInsideBlock option (prefill continuation)', () => {
+    it('should parse thinking when opening tag is in prefill', () => {
+      // Simulates: prefill had "<thinking>Started thinking..." and API continues with:
+      const newContent = 'more thoughts</thinking>Here is my answer.';
+      const { blocks } = parseAccumulatedIntoBlocks(newContent, { startInsideBlock: 'thinking' });
+
+      // Should have: thinking block, then text block
+      expect(blocks).toHaveLength(2);
+      expect(blocks[0].type).toBe('thinking');
+      expect((blocks[0] as any).thinking).toBe('more thoughts');
+      expect(blocks[1].type).toBe('text');
+      expect((blocks[1] as any).text).toBe('Here is my answer.');
+    });
+
+    it('should parse thinking with only closing tag in content', () => {
+      // Edge case: prefill ends right before </thinking>
+      const newContent = '</thinking>Response text';
+      const { blocks } = parseAccumulatedIntoBlocks(newContent, { startInsideBlock: 'thinking' });
+
+      expect(blocks).toHaveLength(2);
+      expect(blocks[0].type).toBe('thinking');
+      expect((blocks[0] as any).thinking).toBe(''); // Empty thinking content
+      expect(blocks[1].type).toBe('text');
+      expect((blocks[1] as any).text).toBe('Response text');
+    });
+
+    it('should handle no closing tag (still inside block)', () => {
+      // API response is entirely within thinking block
+      const newContent = 'continued thinking without closing tag';
+      const { blocks } = parseAccumulatedIntoBlocks(newContent, { startInsideBlock: 'thinking' });
+
+      // Without closing tag, content is not a complete thinking block
+      // The synthetic opening + content doesn't form a closed tag
+      expect(blocks).toHaveLength(1);
+      expect(blocks[0].type).toBe('text');
+    });
+
+    it('should work without startInsideBlock for normal content', () => {
+      const text = '<thinking>Full thinking</thinking>Response';
+      const { blocks: blocksWithOption } = parseAccumulatedIntoBlocks(text, { startInsideBlock: undefined });
+      const { blocks: blocksWithoutOption } = parseAccumulatedIntoBlocks(text);
+
+      expect(blocksWithOption).toEqual(blocksWithoutOption);
+    });
+
+    it('should handle tool_call block continuation', () => {
+      const newContent = `<invoke name="get_weather">
+<parameter name="city">London</parameter>
+</invoke>
+</function_calls>
+Result of the call.`;
+
+      const { blocks, toolCalls } = parseAccumulatedIntoBlocks(newContent, { startInsideBlock: 'tool_call' });
+
+      expect(toolCalls).toHaveLength(1);
+      expect(toolCalls[0].name).toBe('get_weather');
+      expect(toolCalls[0].input).toEqual({ city: 'London' });
+
+      // Should have tool_use block and text block
+      const toolUseBlocks = blocks.filter(b => b.type === 'tool_use');
+      const textBlocks = blocks.filter(b => b.type === 'text');
+      expect(toolUseBlocks).toHaveLength(1);
+      expect(textBlocks).toHaveLength(1);
+    });
+  });
 });
 
 describe('parseToolCalls', () => {

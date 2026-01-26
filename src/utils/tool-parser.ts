@@ -272,13 +272,28 @@ const ERROR_REGEX = /<error\s+tool_use_id="([^"]+)">([\s\S]*?)<\/error>/g;
  * Extracts thinking blocks, tool calls, tool results, and plain text.
  *
  * @param text - The accumulated assistant output text
+ * @param options - Optional parsing context
+ * @param options.startInsideBlock - Block type we're starting inside (from prefill context)
  * @returns Array of ContentBlock in order of appearance
  */
-export function parseAccumulatedIntoBlocks(text: string): {
+export function parseAccumulatedIntoBlocks(
+  text: string,
+  options?: { startInsideBlock?: 'thinking' | 'tool_call' | 'tool_result' }
+): {
   blocks: ContentBlock[];
   toolCalls: ToolCall[];
   toolResults: ToolResult[];
 } {
+  // If we're starting inside a block from prefill, prepend a synthetic opening tag
+  // so the regex can match the closing tag properly
+  let processedText = text;
+  if (options?.startInsideBlock === 'thinking') {
+    processedText = '<thinking>' + text;
+  } else if (options?.startInsideBlock === 'tool_call') {
+    processedText = '<function_calls>' + text;
+  } else if (options?.startInsideBlock === 'tool_result') {
+    processedText = '<function_results>' + text;
+  }
   const blocks: ContentBlock[] = [];
   const toolCalls: ToolCall[] = [];
   const toolResults: ToolResult[] = [];
@@ -294,7 +309,7 @@ export function parseAccumulatedIntoBlocks(text: string): {
   // Find all thinking blocks
   THINKING_BLOCK_REGEX.lastIndex = 0;
   let thinkingMatch: RegExpExecArray | null;
-  while ((thinkingMatch = THINKING_BLOCK_REGEX.exec(text)) !== null) {
+  while ((thinkingMatch = THINKING_BLOCK_REGEX.exec(processedText)) !== null) {
     positions.push({
       start: thinkingMatch.index,
       end: thinkingMatch.index + thinkingMatch[0].length,
@@ -308,7 +323,7 @@ export function parseAccumulatedIntoBlocks(text: string): {
   // Find all function_calls blocks and parse their tool calls
   FUNCTION_BLOCK_WITH_CONTENT_REGEX.lastIndex = 0;
   let funcMatch: RegExpExecArray | null;
-  while ((funcMatch = FUNCTION_BLOCK_WITH_CONTENT_REGEX.exec(text)) !== null) {
+  while ((funcMatch = FUNCTION_BLOCK_WITH_CONTENT_REGEX.exec(processedText)) !== null) {
     const innerContent = funcMatch[2] ?? '';
     const blockToolCalls: ContentBlock[] = [];
 
@@ -372,7 +387,7 @@ export function parseAccumulatedIntoBlocks(text: string): {
   // Find all function_results blocks and parse their results
   FUNCTION_RESULTS_BLOCK_REGEX.lastIndex = 0;
   let resultsMatch: RegExpExecArray | null;
-  while ((resultsMatch = FUNCTION_RESULTS_BLOCK_REGEX.exec(text)) !== null) {
+  while ((resultsMatch = FUNCTION_RESULTS_BLOCK_REGEX.exec(processedText)) !== null) {
     const innerContent = resultsMatch[2] ?? '';
     const blockResults: ContentBlock[] = [];
 
@@ -421,11 +436,12 @@ export function parseAccumulatedIntoBlocks(text: string): {
   positions.sort((a, b) => a.start - b.start);
 
   // Build final blocks array, inserting text blocks between special blocks
+  // Use processedText for slicing since positions are relative to it
   let lastEnd = 0;
   for (const pos of positions) {
     // Add text block for content before this special block
     if (pos.start > lastEnd) {
-      const textContent = text.slice(lastEnd, pos.start).trim();
+      const textContent = processedText.slice(lastEnd, pos.start).trim();
       if (textContent) {
         blocks.push({ type: 'text', text: textContent });
       }
@@ -444,8 +460,8 @@ export function parseAccumulatedIntoBlocks(text: string): {
   // Add any remaining text after the last special block
   // This also handles the case where there are no special blocks at all
   // (lastEnd stays 0, so we slice from 0 to get all text)
-  if (lastEnd < text.length) {
-    const textContent = text.slice(lastEnd).trim();
+  if (lastEnd < processedText.length) {
+    const textContent = processedText.slice(lastEnd).trim();
     if (textContent) {
       blocks.push({ type: 'text', text: textContent });
     }

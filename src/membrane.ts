@@ -241,10 +241,19 @@ export class Membrane {
     // Initialize parser with prefill content so it knows about any open tags
     // (e.g., <thinking> in the prefill means API response continues inside thinking)
     // Track the initial prefill length so we can extract only NEW content for response
+    // Also track what block type we're inside at the end of prefill
     let initialPrefillLength = 0;
+    let initialBlockType: 'thinking' | 'tool_call' | 'tool_result' | null = null;
     if (prefillResult.assistantPrefill) {
       parser.push(prefillResult.assistantPrefill);
       initialPrefillLength = prefillResult.assistantPrefill.length;
+      // Capture what block type we're inside after prefill (if any)
+      if (parser.isInsideBlock()) {
+        const blockType = parser.getCurrentBlockType();
+        if (blockType === 'thinking' || blockType === 'tool_call' || blockType === 'tool_result') {
+          initialBlockType = blockType;
+        }
+      }
     }
 
     try {
@@ -478,7 +487,8 @@ export class Membrane {
         rawRequest,
         rawResponse,
         executedToolCalls,
-        executedToolResults
+        executedToolResults,
+        initialBlockType
       );
     } catch (error) {
       // Check if this is an abort error
@@ -492,7 +502,8 @@ export class Membrane {
           totalUsage,
           executedToolCalls,
           executedToolResults,
-          'user'
+          'user',
+          initialBlockType
         );
       }
       // Re-throw with rawRequest attached for logging
@@ -1085,7 +1096,8 @@ export class Membrane {
     rawRequest: unknown,
     rawResponse: unknown,
     executedToolCalls: ToolCall[] = [],
-    executedToolResults: ToolResult[] = []
+    executedToolResults: ToolResult[] = [],
+    startInsideBlock: 'thinking' | 'tool_call' | 'tool_result' | null = null
   ): NormalizedResponse {
     // Parse accumulated text into structured content blocks
     // This extracts thinking, tool_use, tool_result, and text blocks
@@ -1100,7 +1112,10 @@ export class Membrane {
       toolResults = executedToolResults;
     } else {
       // XML mode - parse accumulated text into blocks
-      const parsed = parseAccumulatedIntoBlocks(accumulated);
+      // If we started inside a block (from prefill), pass that context so the parser
+      // can correctly handle closing tags without corresponding opening tags
+      const parseOptions = startInsideBlock ? { startInsideBlock } : undefined;
+      const parsed = parseAccumulatedIntoBlocks(accumulated, parseOptions);
       finalContent = parsed.blocks;
       toolCalls = parsed.toolCalls.length > 0 ? parsed.toolCalls : executedToolCalls;
       toolResults = parsed.toolResults.length > 0 ? parsed.toolResults : executedToolResults;
@@ -1209,10 +1224,13 @@ export class Membrane {
     usage: BasicUsage,
     toolCalls: ToolCall[],
     toolResults: ToolResult[],
-    reason: 'user' | 'timeout' | 'error'
+    reason: 'user' | 'timeout' | 'error',
+    startInsideBlock: 'thinking' | 'tool_call' | 'tool_result' | null = null
   ): AbortedResponse {
     // Parse accumulated text into content blocks for partial content
-    const { blocks } = parseAccumulatedIntoBlocks(accumulated);
+    // If we started inside a block (from prefill), pass that context
+    const parseOptions = startInsideBlock ? { startInsideBlock } : undefined;
+    const { blocks } = parseAccumulatedIntoBlocks(accumulated, parseOptions);
 
     return {
       aborted: true,
