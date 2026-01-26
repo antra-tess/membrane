@@ -164,9 +164,18 @@ export class IncrementalXmlParser {
     const content: Array<{ text: string; meta: ChunkMeta }> = [];
     const blockEvents: BlockEvent[] = [];
 
-    // Also update accumulated and scan for depth tracking
+    // Sync currentBlockType with depths before processing
+    // This handles the case where push() was used for prefill initialization
+    // and now we're streaming with processChunk()
+    if (!this.state.currentBlockStarted) {
+      this.state.currentBlockType = this.getCurrentBlockType();
+    }
+
+    // Note: We intentionally do NOT call scanForDepth() here anymore.
+    // The character-by-character handling via handleMembraneTag() tracks depths.
+    // Calling scanForDepth() would pre-update depths before content is emitted,
+    // causing the last tokens before a closing tag to have wrong type.
     this.state.accumulated += chunk;
-    this.scanForDepth();
 
     let pos = 0;
     while (pos < chunk.length) {
@@ -345,7 +354,9 @@ export class IncrementalXmlParser {
   }
 
   private getCurrentMeta(): ChunkMeta {
-    const type = this.getCurrentBlockType();
+    // Use currentBlockType (updated only after tag is fully handled)
+    // not getCurrentBlockType() (which checks depths that may be pre-updated by scanForDepth)
+    const type = this.state.currentBlockType;
     return {
       type,
       visible: type === 'text',

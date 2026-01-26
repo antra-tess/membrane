@@ -157,4 +157,46 @@ describe('IncrementalXmlParser', () => {
       expect(parser.isInsideBlock()).toBe(false);
     });
   });
+
+  describe('chunk metadata accuracy', () => {
+    it('should emit correct block type for content before closing tag in same chunk', () => {
+      // First establish we're in a thinking block
+      parser.processChunk('<thinking>');
+
+      // Now process a chunk that contains content AND the closing tag
+      const result = parser.processChunk('last thought</thinking>');
+
+      // The "last thought" part should have type 'thinking', not 'text'
+      const thinkingContent = result.content.filter(c => c.text.trim() && !c.text.includes('<'));
+      expect(thinkingContent.length).toBeGreaterThan(0);
+      expect(thinkingContent[0].meta.type).toBe('thinking');
+    });
+
+    it('should emit correct block type for content after closing tag in same chunk', () => {
+      parser.processChunk('<thinking>thoughts');
+
+      const result = parser.processChunk('</thinking>after text');
+
+      // Content after closing tag should be 'text' type
+      const textContent = result.content.filter(c => c.text === 'after text');
+      expect(textContent.length).toBe(1);
+      expect(textContent[0].meta.type).toBe('text');
+    });
+
+    it('should handle content+close+content in one chunk', () => {
+      parser.processChunk('<thinking>');
+
+      const result = parser.processChunk('thinking content</thinking>plain text');
+
+      // Find thinking content
+      const beforeClose = result.content.filter(c => c.text.includes('thinking content'));
+      expect(beforeClose.length).toBe(1);
+      expect(beforeClose[0].meta.type).toBe('thinking');
+
+      // Find plain text content
+      const afterClose = result.content.filter(c => c.text.includes('plain text'));
+      expect(afterClose.length).toBe(1);
+      expect(afterClose[0].meta.type).toBe('text');
+    });
+  });
 });
