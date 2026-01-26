@@ -229,6 +229,12 @@ export class Membrane {
     // Transform initial request (XML tools are injected into system prompt)
     let { providerRequest, prefillResult } = this.transformRequest(request);
 
+    // Initialize parser with prefill content so it knows about any open tags
+    // (e.g., <thinking> in the prefill means API response continues inside thinking)
+    if (prefillResult.assistantPrefill) {
+      parser.push(prefillResult.assistantPrefill);
+    }
+
     try {
       // Tool execution loop
       while (toolDepth <= maxToolDepth) {
