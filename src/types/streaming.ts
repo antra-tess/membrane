@@ -178,6 +178,13 @@ export type OnBlockCallback = (event: BlockEvent) => void;
  */
 export type OnRequestCallback = (rawRequest: unknown) => void;
 
+/**
+ * Callback called with the raw provider response after each API call.
+ * Called for each API request during multi-turn tool execution.
+ * Useful for logging/debugging.
+ */
+export type OnResponseCallback = (rawResponse: unknown) => void;
+
 // ============================================================================
 // Stream Options
 // ============================================================================
@@ -214,6 +221,9 @@ export interface StreamOptions {
 
   /** Called with raw provider request before sending (for logging) */
   onRequest?: OnRequestCallback;
+
+  /** Called with raw provider response after each API call (for logging) */
+  onResponse?: OnResponseCallback;
 
   // ---- Tool Loop Config ----
 

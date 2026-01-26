@@ -340,6 +340,43 @@ describe('Multi-request logging', () => {
     expect(capturedRequests[0]).not.toEqual(capturedRequests[1]);
   });
 
+  it('should call onResponse for each API response during tool execution', async () => {
+    const capturedResponses: unknown[] = [];
+
+    const fnCallsOpen = '<function_calls>';
+    const fnCallsClose = '</function_calls>';
+    const invokeOpen = '<invoke name="test_tool">';
+    const invokeClose = '</invoke>';
+    const paramOpen = '<parameter name="param">';
+    const paramClose = '</parameter>';
+
+    const toolCallXml = [
+      fnCallsOpen, '\n', invokeOpen, '\n',
+      paramOpen, 'value', paramClose, '\n',
+      invokeClose, '\n',
+    ].join('');
+
+    const adapter = createMultiCallAdapter([
+      { chunks: [toolCallXml], stopReason: 'stop_sequence', stopSequence: fnCallsClose },
+      { chunks: ['Done.'], stopReason: 'end_turn' },
+    ]);
+
+    const membrane = new Membrane(adapter);
+
+    await membrane.stream(createMultiTurnRequest(), {
+      onResponse: (res) => { capturedResponses.push(res); },
+      onToolCalls: async (calls) => {
+        return calls.map(call => ({
+          toolUseId: call.id,
+          content: 'Tool result',
+        }));
+      },
+    });
+
+    // Should have captured 2 responses
+    expect(capturedResponses.length).toBe(2);
+  });
+
   it('should call onRequest multiple times for multi-tool execution', async () => {
     const capturedRequests: unknown[] = [];
 

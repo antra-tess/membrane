@@ -218,6 +218,7 @@ export class Membrane {
       onUsage,
       onBlock,
       onRequest,
+      onResponse,
       maxToolDepth = 10,
       signal,
     } = options;
@@ -338,6 +339,10 @@ export class Membrane {
         onRequest?.(rawRequest);
 
         rawResponse = streamResult.raw;
+
+        // Call onResponse callback with raw response from API
+        onResponse?.(rawResponse);
+
         lastStopReason = this.mapStopReason(streamResult.stopReason);
 
         // Accumulate usage
@@ -523,6 +528,7 @@ export class Membrane {
       onPreToolContent,
       onUsage,
       onRequest,
+      onResponse,
       maxToolDepth = 10,
       signal,
     } = options;
@@ -582,6 +588,10 @@ export class Membrane {
         onRequest?.(rawRequest);
 
         rawResponse = streamResult.raw;
+
+        // Call onResponse callback with raw response from API
+        onResponse?.(rawResponse);
+
         lastStopReason = this.mapStopReason(streamResult.stopReason);
 
         // Accumulate usage
