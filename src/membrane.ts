@@ -381,7 +381,7 @@ export class Membrane {
 
             // Emit block events for each tool call
             for (const call of parsed.calls) {
-              const toolCallBlockIndex = contentBlocks.length;
+              const toolCallBlockIndex = parser.getBlockIndex();
               onBlock?.({
                 event: 'block_start',
                 index: toolCallBlockIndex,
@@ -397,6 +397,7 @@ export class Membrane {
                   input: call.input,
                 },
               });
+              parser.incrementBlockIndex();
             }
 
             // Track the tool calls
@@ -427,7 +428,7 @@ export class Membrane {
               const splitContent = formatToolResultsForSplitTurn(results);
 
               // Emit block events for tool results (image path)
-              const toolResultBlockIndex = contentBlocks.length;
+              const toolResultBlockIndex = parser.getBlockIndex();
               onBlock?.({
                 event: 'block_start',
                 index: toolResultBlockIndex,
@@ -455,6 +456,7 @@ export class Membrane {
                     isError: result.isError,
                   },
                 });
+                parser.incrementBlockIndex();
               }
 
               // If thinking is enabled, add <thinking> tag after tool results
@@ -485,7 +487,7 @@ export class Membrane {
               const resultsXml = formatToolResults(results);
 
               // Emit block events for tool results
-              const toolResultBlockIndex = contentBlocks.length;
+              const toolResultBlockIndex = parser.getBlockIndex();
               onBlock?.({
                 event: 'block_start',
                 index: toolResultBlockIndex,
@@ -512,6 +514,7 @@ export class Membrane {
                     isError: result.isError,
                   },
                 });
+                parser.incrementBlockIndex();
               }
 
               // If thinking is enabled, add <thinking> tag after tool results

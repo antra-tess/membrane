@@ -172,6 +172,20 @@ export class IncrementalXmlParser {
     };
   }
 
+  /**
+   * Get the current block index (for external block event emission).
+   */
+  getBlockIndex(): number {
+    return this.state.blockIndex;
+  }
+
+  /**
+   * Increment the block index (call after emitting external block events).
+   */
+  incrementBlockIndex(): void {
+    this.state.blockIndex++;
+  }
+
   reset(): void {
     this.state = createInitialState();
   }
