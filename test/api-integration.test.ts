@@ -442,9 +442,9 @@ await runTest('Test 7: Thinking and tools combined', async () => {
     const thinkingBlocks = response.content.filter(b => b.type === 'thinking');
     assert(thinkingBlocks.length > 0, `Should have thinking block(s) (got ${thinkingBlocks.length})`);
 
-    // Should have answer (9999)
+    // Should have answer (9999 or 9,999)
     assert(
-      response.rawAssistantText.includes('9999'),
+      response.rawAssistantText.includes('9999') || response.rawAssistantText.includes('9,999'),
       'Response should contain the answer 9999'
     );
 
