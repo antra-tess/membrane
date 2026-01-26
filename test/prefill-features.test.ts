@@ -126,13 +126,13 @@ const result2 = transformToPrefill(request2, {
 // System should NOT contain tool definitions
 assert(!result2.system.includes('<available_tools>'), 'System should not have tools in conversation mode');
 
-// Conversation should have tools as user message
-const userToolMsg2 = result2.messages.filter(m => 
-  m.role === 'user' && 
-  typeof m.content === 'string' && 
-  m.content.includes('<functions>')
+// Tools should be injected into the assistant content (not as separate user message)
+const assistantWithTools = result2.messages.filter(m =>
+  m.role === 'assistant' &&
+  typeof m.content === 'string' &&
+  m.content.includes('<available_tools>')
 );
-assert(userToolMsg2.length === 1, 'Conversation should have exactly one tool user message');
+assert(assistantWithTools.length >= 1, 'Assistant content should include tools in conversation mode');
 
 // ============================================================================
 // Test 3: Tool Injection Mode - None
@@ -254,11 +254,11 @@ const resultPrefix = transformToPrefill(requestPrefix, {
   promptCaching: true,
 });
 
-// Should have user message before the prefix
+// Context prefix creates assistant messages (API now allows consecutive assistant messages)
 const userMsgs = resultPrefix.messages.filter(m => m.role === 'user');
 const assistantMsgs = resultPrefix.messages.filter(m => m.role === 'assistant');
 
-assert(userMsgs.length >= 1, 'Should have user message for prefix');
+assert(assistantMsgs.length >= 1, 'Should have assistant messages');
 
 // First assistant message should be the context prefix with cache_control
 const firstAssistant = assistantMsgs[0];

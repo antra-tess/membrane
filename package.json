@@ -1,5 +1,5 @@
 {
-  "name": "membrane",
+  "name": "@antra_tessera/membrane",
   "version": "0.1.0",
   "description": "LLM middleware - a selective boundary that transforms what passes through",
   "type": "module",

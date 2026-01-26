@@ -133,9 +133,8 @@ const request4: NormalizedRequest = {
 
 const result4 = transformToPrefill(request4, { promptCaching: true });
 
-// Should have system message
-const systemMsg = result4.messages.find(m => m.role === 'system');
-assert(systemMsg !== undefined, 'Should have system message');
+// Should have system content (separate from messages, as Anthropic API requires)
+assert(result4.systemContent.length > 0, 'Should have system content');
 
 // Should have assistant messages with conversation
 const assistantMsgs = result4.messages.filter(m => m.role === 'assistant');

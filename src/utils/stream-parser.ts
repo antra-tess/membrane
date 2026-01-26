@@ -4,42 +4,49 @@
  * Tracks nesting depth of XML blocks as tokens arrive, enabling:
  * - False-positive stop sequence detection
  * - Structured block events for UI
+ * - Enriched chunk metadata for TTS/display filtering
  */
 
-import type { ContentBlock } from '../types/content.js';
+import type {
+  BlockEvent,
+  ChunkMeta,
+  MembraneBlock,
+  MembraneBlockType,
+} from '../types/streaming.js';
 
 // ============================================================================
-// Block Events
+// Result Types
 // ============================================================================
 
-export type BlockDelta =
-  | { type: 'text'; text: string }
-  | { type: 'thinking'; thinking: string }
-  | { type: 'tool_input'; partialJson: string };
-
-export type BlockEvent =
-  | { event: 'block_start'; index: number; block: Partial<ContentBlock> }
-  | { event: 'block_delta'; index: number; delta: BlockDelta }
-  | { event: 'block_complete'; index: number; block: ContentBlock };
+export interface ProcessChunkResult {
+  content: Array<{ text: string; meta: ChunkMeta }>;
+  blockEvents: BlockEvent[];
+}
 
 // ============================================================================
 // Parser State
 // ============================================================================
 
 interface ParserState {
-  // Nesting depth for tracked XML blocks
   functionCallsDepth: number;
   functionResultsDepth: number;
   thinkingDepth: number;
-
-  // Accumulated text (full stream so far)
   accumulated: string;
-
-  // Position of last scan (for incremental scanning)
   lastScanPos: number;
-
-  // Current block index for events
   blockIndex: number;
+  currentBlockStarted: boolean;
+  currentBlockContent: string;
+  currentBlockType: MembraneBlockType;
+  tagBuffer: string;
+  toolCallState: {
+    inInvoke: boolean;
+    currentToolName: string;
+    currentToolId: string;
+    inParameter: boolean;
+    currentParamName: string;
+    paramContent: string;
+    allParams: Record<string, string>;
+  };
 }
 
 function createInitialState(): ParserState {
@@ -50,23 +57,38 @@ function createInitialState(): ParserState {
     accumulated: '',
     lastScanPos: 0,
     blockIndex: 0,
+    currentBlockStarted: false,
+    currentBlockContent: '',
+    currentBlockType: 'text',
+    tagBuffer: '',
+    toolCallState: {
+      inInvoke: false,
+      currentToolName: '',
+      currentToolId: '',
+      inParameter: false,
+      currentParamName: '',
+      paramContent: '',
+      allParams: {},
+    },
   };
 }
 
-// ============================================================================
-// Tag Patterns
-// ============================================================================
-
-// Opening tags (with optional antml: prefix)
-const FUNCTION_CALLS_OPEN = /<(antml:)?function_calls>/g;
-const FUNCTION_CALLS_CLOSE = /<\/(antml:)?function_calls>/g;
-const FUNCTION_RESULTS_OPEN = /<(antml:)?function_results>/g;
-const FUNCTION_RESULTS_CLOSE = /<\/(antml:)?function_results>/g;
-const THINKING_OPEN = /<thinking>/g;
-const THINKING_CLOSE = /<\/thinking>/g;
-
-// For finding all tags in one pass
+// For finding all membrane tags in one pass
 const ALL_TAGS = /<\/?(?:antml:)?(?:function_calls|function_results|thinking)>/g;
+
+// For matching complete membrane tags  
+const COMPLETE_MEMBRANE_TAG = /^<\/?(?:antml:)?(?:function_calls|function_results|thinking|invoke|parameter)(?:\s[^>]*)?>$/;
+
+// Known membrane tag prefixes
+const MEMBRANE_TAG_PREFIXES = [
+  '<thinking', '<\/thinking>',
+  '<function_calls', '<\/function_calls>',
+  '<function_results', '<\/function_results>',
+  '<invoke', '<\/invoke>',
+  '<parameter', '<\/parameter>',
+  '<function_calls', '<\/antml:function_calls>',
+  '<invoke', '<\/antml:invoke>',
+];
 
 // ============================================================================
 // Incremental XML Parser
@@ -79,19 +101,11 @@ export class IncrementalXmlParser {
     this.state = createInitialState();
   }
 
-  /**
-   * Feed a chunk of text to the parser.
-   * Returns any block events detected.
-   */
   push(chunk: string): BlockEvent[] {
     this.state.accumulated += chunk;
     return this.scan();
   }
 
-  /**
-   * Check if we're currently inside an unclosed XML block.
-   * Used for false-positive stop sequence detection.
-   */
   isInsideBlock(): boolean {
     return (
       this.state.functionCallsDepth > 0 ||
@@ -100,48 +114,32 @@ export class IncrementalXmlParser {
     );
   }
 
-  /**
-   * Check if we're specifically inside a function_results block.
-   * This is where false positive stops are most likely.
-   */
   isInsideFunctionResults(): boolean {
     return this.state.functionResultsDepth > 0;
   }
 
-  /**
-   * Check if we're inside a function_calls block.
-   */
   isInsideFunctionCalls(): boolean {
     return this.state.functionCallsDepth > 0;
   }
 
-  /**
-   * Get current nesting context as a string (for debugging).
-   */
   getContext(): string {
     const parts: string[] = [];
     if (this.state.functionCallsDepth > 0) {
-      parts.push(`function_calls(${this.state.functionCallsDepth})`);
+      parts.push('function_calls(' + this.state.functionCallsDepth + ')');
     }
     if (this.state.functionResultsDepth > 0) {
-      parts.push(`function_results(${this.state.functionResultsDepth})`);
+      parts.push('function_results(' + this.state.functionResultsDepth + ')');
     }
     if (this.state.thinkingDepth > 0) {
-      parts.push(`thinking(${this.state.thinkingDepth})`);
+      parts.push('thinking(' + this.state.thinkingDepth + ')');
     }
     return parts.length > 0 ? parts.join(' > ') : 'none';
   }
 
-  /**
-   * Get the full accumulated text.
-   */
   getAccumulated(): string {
     return this.state.accumulated;
   }
 
-  /**
-   * Get current depth counters (for debugging/testing).
-   */
   getDepths(): { functionCalls: number; functionResults: number; thinking: number } {
     return {
       functionCalls: this.state.functionCallsDepth,
@@ -150,50 +148,231 @@ export class IncrementalXmlParser {
     };
   }
 
-  /**
-   * Reset the parser state.
-   */
   reset(): void {
     this.state = createInitialState();
   }
 
-  /**
-   * Finalize parsing and return any pending block events.
-   */
   finish(): BlockEvent[] {
-    // For now, just return empty - full block event support will be added later
-    return [];
+    return this.flush().blockEvents;
   }
 
-  /**
-   * Scan the new portion of accumulated text for tags and update depth counters.
-   */
-  private scan(): BlockEvent[] {
-    const events: BlockEvent[] = [];
-    const text = this.state.accumulated;
+  // ============================================================================
+  // Enriched Streaming API
+  // ============================================================================
 
-    // Only scan text we haven't processed yet
-    // But look back a bit in case a tag was split across chunks
+  processChunk(chunk: string): ProcessChunkResult {
+    const content: Array<{ text: string; meta: ChunkMeta }> = [];
+    const blockEvents: BlockEvent[] = [];
+
+    // Also update accumulated and scan for depth tracking
+    this.state.accumulated += chunk;
+    this.scanForDepth();
+
+    let pos = 0;
+    while (pos < chunk.length) {
+      if (this.state.tagBuffer) {
+        const char = chunk[pos];
+        this.state.tagBuffer += char;
+        pos++;
+
+        if (this.isCompleteMembraneTag(this.state.tagBuffer)) {
+          const events = this.handleMembraneTag(this.state.tagBuffer);
+          blockEvents.push(...events);
+          this.state.tagBuffer = '';
+        } else if (this.cantBeMembraneTag(this.state.tagBuffer)) {
+          this.ensureBlockStarted(blockEvents);
+          content.push({
+            text: this.state.tagBuffer,
+            meta: this.getCurrentMeta()
+          });
+          this.state.currentBlockContent += this.state.tagBuffer;
+          this.state.tagBuffer = '';
+        }
+      } else {
+        const nextLt = chunk.indexOf('<', pos);
+        if (nextLt === -1) {
+          const text = chunk.slice(pos);
+          if (text) {
+            this.ensureBlockStarted(blockEvents);
+            content.push({ text, meta: this.getCurrentMeta() });
+            this.state.currentBlockContent += text;
+          }
+          break;
+        } else {
+          if (nextLt > pos) {
+            const text = chunk.slice(pos, nextLt);
+            this.ensureBlockStarted(blockEvents);
+            content.push({ text, meta: this.getCurrentMeta() });
+            this.state.currentBlockContent += text;
+          }
+          this.state.tagBuffer = '<';
+          pos = nextLt + 1;
+        }
+      }
+    }
+
+    return { content, blockEvents };
+  }
+
+  flush(): ProcessChunkResult {
+    const content: Array<{ text: string; meta: ChunkMeta }> = [];
+    const blockEvents: BlockEvent[] = [];
+
+    if (this.state.tagBuffer) {
+      this.ensureBlockStarted(blockEvents);
+      content.push({ text: this.state.tagBuffer, meta: this.getCurrentMeta() });
+      this.state.currentBlockContent += this.state.tagBuffer;
+      this.state.tagBuffer = '';
+    }
+
+    if (this.state.currentBlockStarted) {
+      blockEvents.push(this.makeBlockComplete());
+    }
+
+    return { content, blockEvents };
+  }
+
+  getCurrentBlockType(): MembraneBlockType {
+    if (this.state.thinkingDepth > 0) return 'thinking';
+    if (this.state.functionCallsDepth > 0) return 'tool_call';
+    if (this.state.functionResultsDepth > 0) return 'tool_result';
+    return 'text';
+  }
+
+  // ============================================================================
+  // Private Methods
+  // ============================================================================
+
+  private isCompleteMembraneTag(buffer: string): boolean {
+    if (!buffer.endsWith('>')) return false;
+    return COMPLETE_MEMBRANE_TAG.test(buffer);
+  }
+
+  private cantBeMembraneTag(buffer: string): boolean {
+    if (buffer.endsWith('>')) {
+      return !this.isCompleteMembraneTag(buffer);
+    }
+    for (const prefix of MEMBRANE_TAG_PREFIXES) {
+      if (prefix.startsWith(buffer) || buffer.startsWith(prefix.slice(0, buffer.length))) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private handleMembraneTag(tag: string): BlockEvent[] {
+    const events: BlockEvent[] = [];
+    const isClosing = tag.startsWith('</');
+
+    if (tag.includes('thinking')) {
+      if (!isClosing) {
+        if (this.state.currentBlockStarted) {
+          events.push(this.makeBlockComplete());
+        }
+        this.state.thinkingDepth++;
+        this.state.currentBlockType = 'thinking';
+        events.push(this.makeBlockStart('thinking'));
+      } else {
+        events.push(this.makeBlockComplete());
+        this.state.thinkingDepth--;
+        this.state.currentBlockType = this.getCurrentBlockType();
+      }
+    } else if (tag.includes('function_calls')) {
+      if (!isClosing) {
+        if (this.state.currentBlockStarted) {
+          events.push(this.makeBlockComplete());
+        }
+        this.state.functionCallsDepth++;
+        this.state.currentBlockType = 'tool_call';
+        events.push(this.makeBlockStart('tool_call'));
+      } else {
+        events.push(this.makeBlockComplete());
+        this.state.functionCallsDepth--;
+        this.state.currentBlockType = this.getCurrentBlockType();
+      }
+    } else if (tag.includes('function_results')) {
+      if (!isClosing) {
+        if (this.state.currentBlockStarted) {
+          events.push(this.makeBlockComplete());
+        }
+        this.state.functionResultsDepth++;
+        this.state.currentBlockType = 'tool_result';
+        events.push(this.makeBlockStart('tool_result'));
+      } else {
+        events.push(this.makeBlockComplete());
+        this.state.functionResultsDepth--;
+        this.state.currentBlockType = this.getCurrentBlockType();
+      }
+    }
+
+    return events;
+  }
+
+  private ensureBlockStarted(events: BlockEvent[]): void {
+    if (!this.state.currentBlockStarted) {
+      events.push(this.makeBlockStart(this.state.currentBlockType));
+    }
+  }
+
+  private makeBlockStart(type: MembraneBlockType): BlockEvent {
+    this.state.currentBlockStarted = true;
+    this.state.currentBlockContent = '';
+    this.state.currentBlockType = type;
+    return {
+      event: 'block_start',
+      index: this.state.blockIndex,
+      block: { type }
+    };
+  }
+
+  private makeBlockComplete(): BlockEvent {
+    const block: MembraneBlock = {
+      type: this.state.currentBlockType,
+      content: this.state.currentBlockContent,
+    };
+
+    const event: BlockEvent = {
+      event: 'block_complete',
+      index: this.state.blockIndex,
+      block
+    };
+
+    this.state.blockIndex++;
+    this.state.currentBlockStarted = false;
+    this.state.currentBlockContent = '';
+
+    return event;
+  }
+
+  private getCurrentMeta(): ChunkMeta {
+    const type = this.getCurrentBlockType();
+    return {
+      type,
+      visible: type === 'text',
+      blockIndex: this.state.blockIndex,
+      depth: Math.max(
+        this.state.functionCallsDepth,
+        this.state.functionResultsDepth
+      ),
+    };
+  }
+
+  private scanForDepth(): void {
+    const text = this.state.accumulated;
     const lookbackChars = 30;
     const scanStart = Math.max(0, this.state.lastScanPos - lookbackChars);
     const textToScan = text.slice(scanStart);
 
-    // Reset regex state and find all tags
     ALL_TAGS.lastIndex = 0;
     let match: RegExpExecArray | null;
 
     while ((match = ALL_TAGS.exec(textToScan)) !== null) {
       const absolutePos = scanStart + match.index;
-
-      // Skip tags we've already processed (they're in the lookback zone)
-      if (absolutePos < this.state.lastScanPos) {
-        continue;
-      }
+      if (absolutePos < this.state.lastScanPos) continue;
 
       const tag = match[0];
       const isClosing = tag.startsWith('</');
 
-      // Update depth for the appropriate block type
       if (tag.includes('function_calls')) {
         if (isClosing) {
           this.state.functionCallsDepth = Math.max(0, this.state.functionCallsDepth - 1);
@@ -215,34 +394,21 @@ export class IncrementalXmlParser {
       }
     }
 
-    // Update scan position, but leave buffer for potential partial tags at end
     const partialTagLen = this.findPartialTagAtEnd(text);
     this.state.lastScanPos = text.length - partialTagLen;
-
-    return events;
   }
 
-  /**
-   * Check if text ends with a partial (incomplete) tag.
-   * Returns the length of the partial tag, or 0 if none.
-   */
+  private scan(): BlockEvent[] {
+    this.scanForDepth();
+    return [];
+  }
+
   private findPartialTagAtEnd(text: string): number {
-    // Look at the last 30 chars for potential partial tags
     const tail = text.slice(-30);
     const lastLt = tail.lastIndexOf('<');
-
-    if (lastLt === -1) {
-      return 0;
-    }
-
+    if (lastLt === -1) return 0;
     const afterLt = tail.slice(lastLt);
-
-    // If there's a complete tag (has closing >), no partial
-    if (afterLt.includes('>')) {
-      return 0;
-    }
-
-    // We have a partial tag - return its length
+    if (afterLt.includes('>')) return 0;
     return afterLt.length;
   }
 }
@@ -251,31 +417,21 @@ export class IncrementalXmlParser {
 // Utility Functions
 // ============================================================================
 
-/**
- * Quick check if text has unclosed blocks without full parsing.
- * More efficient for simple checks.
- */
 export function hasUnclosedXmlBlock(text: string): boolean {
   const parser = new IncrementalXmlParser();
   parser.push(text);
   return parser.isInsideBlock();
 }
 
-/**
- * Count opening and closing tags for a specific block type.
- */
 export function countTags(
   text: string,
   openPattern: RegExp,
   closePattern: RegExp
 ): { open: number; close: number; depth: number } {
-  // Reset lastIndex for global regexes
   openPattern.lastIndex = 0;
   closePattern.lastIndex = 0;
-
   const openMatches = text.match(openPattern) || [];
   const closeMatches = text.match(closePattern) || [];
-
   return {
     open: openMatches.length,
     close: closeMatches.length,

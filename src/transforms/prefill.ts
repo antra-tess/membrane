@@ -289,7 +289,17 @@ export function transformToPrefill(
       }
     }
   }
-  
+
+  // If conversation doesn't end with assistant turn, append one
+  // This ensures the model knows to respond as the assistant
+  if (lastNonEmptyParticipant !== assistantName) {
+    if (prefillThinking) {
+      currentConversation.push(`${assistantName}: <thinking>`);
+    } else {
+      currentConversation.push(`${assistantName}:`);
+    }
+  }
+
   // Flush any remaining conversation, inject tools if mode is 'conversation'
   if (currentConversation.length > 0) {
     const hasToolsForConversation =

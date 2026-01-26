@@ -45,7 +45,8 @@ import {
   formatToolResultsForSplitTurn,
   type ProviderImageBlock,
 } from './utils/tool-parser.js';
-import { IncrementalXmlParser } from './utils/stream-parser.js';
+import { IncrementalXmlParser, type ProcessChunkResult } from './utils/stream-parser.js';
+import type { ChunkMeta, BlockEvent } from './types/streaming.js';
 
 // ============================================================================
 // Membrane Class
@@ -250,8 +251,8 @@ export class Membrane {
                 return;
               }
 
-              // Feed to incremental parser (updates nesting depth)
-              const blockEvents = parser.push(chunk);
+              // Process chunk with enriched streaming API
+              const { content, blockEvents } = parser.processChunk(chunk);
 
               // Check for stop sequences only in NEW content (not already-processed)
               const accumulated = parser.getAccumulated();
@@ -265,24 +266,31 @@ export class Membrane {
                   detectedStopSequence = stopSeq;
                   truncatedAccumulated = accumulated.slice(0, absoluteIdx);
 
-                  // Emit only the portion up to stop sequence
+                  // Emit only the portion up to stop sequence with metadata
                   const alreadyEmitted = accumulated.length - chunk.length;
                   if (absoluteIdx > alreadyEmitted) {
                     const truncatedChunk = accumulated.slice(alreadyEmitted, absoluteIdx);
-                    onChunk?.(truncatedChunk);
+                    const meta: ChunkMeta = {
+                      type: parser.getCurrentBlockType(),
+                      visible: parser.getCurrentBlockType() === 'text',
+                      blockIndex: 0, // Approximate
+                    };
+                    onChunk?.(truncatedChunk, meta);
                   }
                   return;
                 }
               }
 
-              // Emit raw chunk
-              onChunk?.(chunk);
-
-              // Emit block events if callback provided
+              // Emit block events first
               if (onBlock) {
                 for (const event of blockEvents) {
                   onBlock(event);
                 }
+              }
+
+              // Emit content chunks with metadata
+              for (const { text, meta } of content) {
+                onChunk?.(text, meta);
               }
             },
             onContentBlock: onContentBlockUpdate
@@ -316,7 +324,7 @@ export class Membrane {
           // Append the closing tag (we truncated before it, or API stopped before it)
           const closeTag = '</function_calls>';
           parser.push(closeTag);
-          onChunk?.(closeTag);
+          // Note: closing tag is structural XML, not emitted via onChunk (invisible)
 
           const parsed = parseToolCalls(parser.getAccumulated());
 
@@ -350,7 +358,12 @@ export class Membrane {
 
               // Append the text portion to accumulated (before image)
               parser.push(splitContent.beforeImageXml);
-              onChunk?.(splitContent.beforeImageXml);
+              const toolResultMeta: ChunkMeta = {
+                type: 'tool_result',
+                visible: false,
+                blockIndex: 0,
+              };
+              onChunk?.(splitContent.beforeImageXml, toolResultMeta);
 
               // Build continuation with image injection
               providerRequest = this.buildContinuationRequestWithImages(
@@ -364,13 +377,18 @@ export class Membrane {
               // Also add afterImageXml to accumulated for complete rawAssistantText
               // This is prefilled but represents assistant's logical output
               parser.push(splitContent.afterImageXml);
-              onChunk?.(splitContent.afterImageXml);
+              onChunk?.(splitContent.afterImageXml, toolResultMeta);
               prefillResult.assistantPrefill = parser.getAccumulated();
             } else {
               // Standard path: no images, use simple XML injection
               const resultsXml = formatToolResults(results);
               parser.push(resultsXml);
-              onChunk?.(resultsXml);
+              const toolResultMeta: ChunkMeta = {
+                type: 'tool_result',
+                visible: false,
+                blockIndex: 0,
+              };
+              onChunk?.(resultsXml, toolResultMeta);
 
               // Update prefill and continue
               prefillResult.assistantPrefill = parser.getAccumulated();
@@ -394,7 +412,12 @@ export class Membrane {
           // Re-add the consumed stop sequence and resume streaming
           if (streamResult.stopSequence) {
             parser.push(streamResult.stopSequence);
-            onChunk?.(streamResult.stopSequence);
+            const meta: ChunkMeta = {
+              type: parser.getCurrentBlockType(),
+              visible: parser.getCurrentBlockType() === 'text',
+              blockIndex: 0,
+            };
+            onChunk?.(streamResult.stopSequence, meta);
           }
 
           // Resume streaming - but limit resumptions to prevent infinite loops
@@ -490,13 +513,21 @@ export class Membrane {
 
         // Stream from provider
         let textAccumulated = '';
+        let blockIndex = 0;
         const streamResult = await this.streamOnce(
           providerRequest,
           {
             onChunk: (chunk) => {
               textAccumulated += chunk;
               allTextAccumulated += chunk;
-              onChunk?.(chunk);
+              // For native mode, emit text chunks with basic metadata
+              // TODO: Use native API content_block events for richer metadata
+              const meta: ChunkMeta = {
+                type: 'text',
+                visible: true,
+                blockIndex,
+              };
+              onChunk?.(chunk, meta);
             },
             onContentBlock: onContentBlockUpdate
               ? (index: number, block: unknown) => onContentBlockUpdate(index, block as ContentBlock)

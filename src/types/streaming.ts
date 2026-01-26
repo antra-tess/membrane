@@ -6,8 +6,103 @@ import type { ContentBlock } from './content.js';
 import type { ToolCall, ToolResult, ToolContext } from './tools.js';
 import type { BasicUsage } from './response.js';
 
-// Re-export block event types from stream-parser
-export type { BlockEvent, BlockDelta } from '../utils/stream-parser.js';
+// ============================================================================
+// Membrane Block Types (logical content regions, not API types)
+// ============================================================================
+
+/**
+ * Membrane block types - logical content regions at the context level.
+ * These are abstract structures, not tied to any wire format.
+ */
+export type MembraneBlockType = 'text' | 'thinking' | 'tool_call' | 'tool_result';
+
+/**
+ * Membrane block - a logical content region with full content.
+ * Used in block_complete events.
+ */
+export interface MembraneBlock {
+  type: MembraneBlockType;
+  content?: string;           // Full content (for text, thinking, tool_result)
+  toolId?: string;            // For tool_call / tool_result
+  toolName?: string;          // For tool_call
+  input?: Record<string, unknown>;  // For tool_call (parsed parameters)
+  isError?: boolean;          // For tool_result
+}
+
+// ============================================================================
+// Chunk Metadata
+// ============================================================================
+
+/**
+ * Chunk type - alias for MembraneBlockType for clarity in chunk contexts
+ */
+export type ChunkType = MembraneBlockType;
+
+/**
+ * Metadata about a streaming chunk.
+ * Provides context about which block the chunk belongs to and its visibility.
+ */
+export interface ChunkMeta {
+  /** Which membrane block type this chunk belongs to */
+  type: ChunkType;
+
+  /** Convenience flag for TTS/display filtering - false for thinking/tool content */
+  visible: boolean;
+
+  /** Which content block this belongs to (0-indexed) */
+  blockIndex: number;
+
+  /** Tool nesting depth (for nested tool calls) */
+  depth?: number;
+
+  /** For tool_call chunks - which part of the tool call is streaming */
+  toolCallPart?: 'name' | 'id' | 'input';
+
+  /** Tool use ID (for tool_call / tool_result chunks) */
+  toolId?: string;
+
+  /** Tool name (for tool_call chunks, once known) */
+  toolName?: string;
+}
+
+// ============================================================================
+// Block Events
+// ============================================================================
+
+/**
+ * Block start event - signals a new block is starting.
+ * Fired before any onChunk calls for that block.
+ */
+export interface BlockStartEvent {
+  event: 'block_start';
+  index: number;
+  block: { type: MembraneBlockType };
+}
+
+/**
+ * Block complete event - signals a block is done.
+ * Includes full accumulated content. Fired after all onChunk calls for that block.
+ */
+export interface BlockCompleteEvent {
+  event: 'block_complete';
+  index: number;
+  block: MembraneBlock;
+}
+
+/**
+ * Block event - either start or complete.
+ * Note: No block_delta - streaming content is provided via onChunk with metadata.
+ */
+export type BlockEvent = BlockStartEvent | BlockCompleteEvent;
+
+/**
+ * @deprecated Use BlockEvent instead. BlockDelta is no longer used;
+ * streaming content is provided via onChunk with ChunkMeta.
+ */
+export type BlockDelta =
+  | { type: 'text'; text: string }
+  | { type: 'thinking'; thinking: string }
+  | { type: 'tool_input'; partialJson: string };
 
 // ============================================================================
 // Stream State
@@ -38,12 +133,16 @@ export interface StreamState {
 // ============================================================================
 
 /**
- * Callback for text chunks - called immediately as tokens arrive
+ * Callback for text chunks - called immediately as tokens arrive.
+ * Includes metadata about block type, visibility, and position.
  */
-export type OnChunkCallback = (chunk: string) => void;
+export type OnChunkCallback = (chunk: string, meta: ChunkMeta) => void;
 
 /**
- * Callback for content block updates (thinking, images)
+ * @deprecated Use onBlock + onChunk with ChunkMeta instead.
+ * This callback is superseded by:
+ * - onBlock for structured block_start/block_complete events
+ * - onChunk with ChunkMeta for streaming content with block context
  */
 export type OnContentBlockCallback = (index: number, block: ContentBlock) => void;
 
@@ -71,7 +170,7 @@ export type OnUsageCallback = (usage: BasicUsage) => void;
  * Callback for structured block events during streaming.
  * Provides parsed block information as it's detected.
  */
-export type OnBlockCallback = (event: import('../utils/stream-parser.js').BlockEvent) => void;
+export type OnBlockCallback = (event: BlockEvent) => void;
 
 // ============================================================================
 // Stream Options

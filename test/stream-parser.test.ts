@@ -362,6 +362,228 @@ console.log('\n--- Test 14: Complex realistic scenario ---');
 }
 
 // ============================================================================
+// Test 15: processChunk - Basic text streaming
+// ============================================================================
+
+console.log('\n--- Test 15: processChunk - Basic text streaming ---');
+
+{
+  const parser = new IncrementalXmlParser();
+
+  const result = parser.processChunk('Hello world');
+
+  assert(result.content.length > 0, 'Should have content');
+  assert(result.blockEvents.length === 1, 'Should have block_start event');
+  assert(result.blockEvents[0].event === 'block_start', 'First event should be block_start');
+
+  // Check metadata
+  const firstContent = result.content[0];
+  assert(firstContent.meta.type === 'text', 'Should be text type');
+  assert(firstContent.meta.visible === true, 'Text should be visible');
+  assert(firstContent.meta.blockIndex === 0, 'Should be block index 0');
+}
+
+// ============================================================================
+// Test 16: processChunk - Thinking block
+// ============================================================================
+
+console.log('\n--- Test 16: processChunk - Thinking block ---');
+
+{
+  const parser = new IncrementalXmlParser();
+
+  // First some text
+  let result = parser.processChunk('Hello ');
+  assert(result.content.some(c => c.text === 'Hello '), 'Should emit Hello');
+
+  // Opening thinking tag - should NOT be emitted as content
+  result = parser.processChunk('<thinking>');
+  const hasThinkingTag = result.content.some(c => c.text.includes('<thinking>'));
+  assert(!hasThinkingTag, 'Opening tag should NOT be emitted as content');
+  assert(result.blockEvents.some(e => e.event === 'block_complete'), 'Should complete text block');
+  assert(result.blockEvents.some(e => e.event === 'block_start' && e.block.type === 'thinking'), 'Should start thinking block');
+
+  // Thinking content
+  result = parser.processChunk('Let me think...');
+  assert(result.content.some(c => c.meta.type === 'thinking'), 'Content should be thinking type');
+  assert(result.content.some(c => c.meta.visible === false), 'Thinking should not be visible');
+
+  // Closing thinking tag
+  result = parser.processChunk('</thinking>');
+  const hasClosingTag = result.content.some(c => c.text.includes('</thinking>'));
+  assert(!hasClosingTag, 'Closing tag should NOT be emitted as content');
+  assert(result.blockEvents.some(e => e.event === 'block_complete'), 'Should complete thinking block');
+}
+
+// ============================================================================
+// Test 17: processChunk - Tool call block
+// ============================================================================
+
+console.log('\n--- Test 17: processChunk - Tool call block ---');
+
+{
+  const parser = new IncrementalXmlParser();
+
+  // Opening function_calls tag
+  let result = parser.processChunk('<function_calls>');
+  const hasFunctionCallsTag = result.content.some(c => c.text.includes('<function_calls>'));
+  assert(!hasFunctionCallsTag, 'function_calls tag should NOT be emitted');
+  assert(result.blockEvents.some(e => e.event === 'block_start' && e.block.type === 'tool_call'), 'Should start tool_call block');
+
+  // Content inside (invoke tags etc)
+  result = parser.processChunk('<invoke name="search">');
+  // invoke tags are structural but inside function_calls
+
+  result = parser.processChunk('</invoke>');
+  result = parser.processChunk('</function_calls>');
+  assert(result.blockEvents.some(e => e.event === 'block_complete'), 'Should complete tool_call block');
+}
+
+// ============================================================================
+// Test 18: processChunk - Partial tag buffering
+// ============================================================================
+
+console.log('\n--- Test 18: processChunk - Partial tag buffering ---');
+
+{
+  const parser = new IncrementalXmlParser();
+
+  // Send partial tag
+  let result = parser.processChunk('Hello <th');
+  // Should emit Hello, but buffer <th
+  assert(result.content.some(c => c.text === 'Hello '), 'Should emit text before partial tag');
+  assert(!result.content.some(c => c.text.includes('<th')), 'Should buffer partial tag');
+
+  // Complete the tag
+  result = parser.processChunk('inking>');
+  // Should NOT emit the tag itself
+  assert(!result.content.some(c => c.text.includes('<thinking>')), 'Complete tag should not be emitted');
+  assert(result.blockEvents.some(e => e.block.type === 'thinking'), 'Should trigger thinking block');
+}
+
+// ============================================================================
+// Test 19: processChunk - Non-membrane tag passthrough
+// ============================================================================
+
+console.log('\n--- Test 19: processChunk - Non-membrane tag passthrough ---');
+
+{
+  const parser = new IncrementalXmlParser();
+
+  // HTML tags should pass through as content
+  const result = parser.processChunk('Hello <b>bold</b> world');
+
+  // All text including <b> tags should be emitted
+  const fullText = result.content.map(c => c.text).join('');
+  assert(fullText.includes('<b>'), 'HTML tag should be emitted');
+  assert(fullText.includes('</b>'), 'HTML closing tag should be emitted');
+  assert(fullText.includes('bold'), 'Content should be emitted');
+}
+
+// ============================================================================
+// Test 20: processChunk - flush at end
+// ============================================================================
+
+console.log('\n--- Test 20: processChunk - flush at end ---');
+
+{
+  const parser = new IncrementalXmlParser();
+
+  // Start some content
+  parser.processChunk('Hello world');
+
+  // Flush should complete the block
+  const result = parser.flush();
+  assert(result.blockEvents.some(e => e.event === 'block_complete'), 'Flush should complete current block');
+
+  // Check the block has content
+  const completeEvent = result.blockEvents.find(e => e.event === 'block_complete');
+  if (completeEvent && completeEvent.event === 'block_complete') {
+    assert(completeEvent.block.content?.includes('Hello'), 'Complete block should have content');
+  }
+}
+
+// ============================================================================
+// Test 21: processChunk - Block indices increment
+// ============================================================================
+
+console.log('\n--- Test 21: processChunk - Block indices increment ---');
+
+{
+  const parser = new IncrementalXmlParser();
+
+  // Text block
+  parser.processChunk('Hello');
+
+  // Thinking block
+  parser.processChunk('<thinking>thoughts</thinking>');
+
+  // More text
+  const result = parser.processChunk('World');
+
+  // Check blockIndex increments
+  assert(result.content.some(c => c.meta.blockIndex >= 2), 'Block index should have incremented');
+}
+
+// ============================================================================
+// Test 22: getCurrentBlockType
+// ============================================================================
+
+console.log('\n--- Test 22: getCurrentBlockType ---');
+
+{
+  const parser = new IncrementalXmlParser();
+
+  assert(parser.getCurrentBlockType() === 'text', 'Initial type should be text');
+
+  parser.processChunk('<thinking>');
+  assert(parser.getCurrentBlockType() === 'thinking', 'Should be thinking inside thinking tag');
+
+  parser.processChunk('</thinking>');
+  assert(parser.getCurrentBlockType() === 'text', 'Should be text after thinking closes');
+
+  parser.processChunk('<function_calls>');
+  assert(parser.getCurrentBlockType() === 'tool_call', 'Should be tool_call inside function_calls');
+
+  parser.processChunk('</function_calls>');
+  assert(parser.getCurrentBlockType() === 'text', 'Should be text after function_calls closes');
+
+  parser.processChunk('<function_results>');
+  assert(parser.getCurrentBlockType() === 'tool_result', 'Should be tool_result inside function_results');
+}
+
+// ============================================================================
+// Test 23: processChunk - Visibility metadata
+// ============================================================================
+
+console.log('\n--- Test 23: processChunk - Visibility metadata ---');
+
+{
+  const parser = new IncrementalXmlParser();
+
+  // Text is visible
+  let result = parser.processChunk('Visible text');
+  assert(result.content.every(c => c.meta.visible === true), 'Text should be visible');
+
+  // Thinking is not visible
+  parser.processChunk('<thinking>');
+  result = parser.processChunk('Hidden thinking');
+  assert(result.content.every(c => c.meta.visible === false), 'Thinking should not be visible');
+  parser.processChunk('</thinking>');
+
+  // Tool calls not visible
+  parser.processChunk('<function_calls>');
+  result = parser.processChunk('Tool content');
+  assert(result.content.every(c => c.meta.visible === false), 'Tool call should not be visible');
+  parser.processChunk('</function_calls>');
+
+  // Tool results not visible
+  parser.processChunk('<function_results>');
+  result = parser.processChunk('Result content');
+  assert(result.content.every(c => c.meta.visible === false), 'Tool result should not be visible');
+}
+
+// ============================================================================
 // Summary
 // ============================================================================
 
