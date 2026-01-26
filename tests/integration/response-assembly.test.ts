@@ -470,6 +470,142 @@ describe('Multi-request logging', () => {
     expect(assistantContent).toContain('<function_results>');
     expect(assistantContent).toContain('</function_results>');
   });
+
+  it('should inject empty tool results into continuation request', async () => {
+    const capturedRequests: any[] = [];
+
+    const fnCallsOpen = '<function_calls>';
+    const fnCallsClose = '</function_calls>';
+    const invokeOpen = '<invoke name="test_tool">';
+    const invokeClose = '</invoke>';
+    const paramOpen = '<parameter name="param">';
+    const paramClose = '</parameter>';
+
+    const toolCallXml = [
+      fnCallsOpen, '\n', invokeOpen, '\n',
+      paramOpen, 'test_value', paramClose, '\n',
+      invokeClose, '\n',
+    ].join('');
+
+    const adapter = createMultiCallAdapter([
+      { chunks: [toolCallXml], stopReason: 'stop_sequence', stopSequence: fnCallsClose },
+      { chunks: ['Final response.'], stopReason: 'end_turn' },
+    ]);
+
+    const membrane = new Membrane(adapter);
+
+    await membrane.stream(createMultiTurnRequest(), {
+      onRequest: (req) => { capturedRequests.push(req); },
+      onToolCalls: async (calls) => {
+        // Return empty string content for tool result
+        return calls.map(call => ({
+          toolUseId: call.id,
+          content: '',  // Empty result
+        }));
+      },
+    });
+
+    expect(capturedRequests.length).toBe(2);
+
+    // The second request should still contain function_results wrapper
+    const secondRequest = capturedRequests[1];
+    const assistantMessages = secondRequest.messages.filter((m: any) => m.role === 'assistant');
+
+    let assistantContent = '';
+    for (const msg of assistantMessages) {
+      if (typeof msg.content === 'string') {
+        assistantContent += msg.content;
+      } else if (Array.isArray(msg.content)) {
+        for (const block of msg.content) {
+          if (block.type === 'text') {
+            assistantContent += block.text;
+          }
+        }
+      }
+    }
+
+    // Even empty results should be wrapped in function_results
+    expect(assistantContent).toContain('<function_results>');
+    expect(assistantContent).toContain('</function_results>');
+    expect(assistantContent).toContain('<result tool_use_id=');
+  });
+
+  it('should handle onToolCalls returning empty array', async () => {
+    const capturedRequests: any[] = [];
+
+    const fnCallsOpen = '<function_calls>';
+    const fnCallsClose = '</function_calls>';
+    const invokeOpen = '<invoke name="test_tool">';
+    const invokeClose = '</invoke>';
+    const paramOpen = '<parameter name="param">';
+    const paramClose = '</parameter>';
+
+    const toolCallXml = [
+      fnCallsOpen, '\n', invokeOpen, '\n',
+      paramOpen, 'test_value', paramClose, '\n',
+      invokeClose, '\n',
+    ].join('');
+
+    const adapter = createMultiCallAdapter([
+      { chunks: [toolCallXml], stopReason: 'stop_sequence', stopSequence: fnCallsClose },
+      { chunks: ['Final response.'], stopReason: 'end_turn' },
+    ]);
+
+    const membrane = new Membrane(adapter);
+
+    await membrane.stream(createMultiTurnRequest(), {
+      onRequest: (req) => { capturedRequests.push(req); },
+      onToolCalls: async () => {
+        // Return empty array - no results at all
+        return [];
+      },
+    });
+
+    expect(capturedRequests.length).toBe(2);
+
+    // Should still inject empty function_results
+    const secondRequest = capturedRequests[1];
+    const assistantMessages = secondRequest.messages.filter((m: any) => m.role === 'assistant');
+
+    let assistantContent = '';
+    for (const msg of assistantMessages) {
+      if (typeof msg.content === 'string') {
+        assistantContent += msg.content;
+      }
+    }
+
+    expect(assistantContent).toContain('<function_results>');
+    expect(assistantContent).toContain('</function_results>');
+  });
+
+  it('should handle onToolCalls returning undefined gracefully', async () => {
+    const fnCallsOpen = '<function_calls>';
+    const fnCallsClose = '</function_calls>';
+    const invokeOpen = '<invoke name="test_tool">';
+    const invokeClose = '</invoke>';
+    const paramOpen = '<parameter name="param">';
+    const paramClose = '</parameter>';
+
+    const toolCallXml = [
+      fnCallsOpen, '\n', invokeOpen, '\n',
+      paramOpen, 'test_value', paramClose, '\n',
+      invokeClose, '\n',
+    ].join('');
+
+    const adapter = createMultiCallAdapter([
+      { chunks: [toolCallXml], stopReason: 'stop_sequence', stopSequence: fnCallsClose },
+      { chunks: ['Final response.'], stopReason: 'end_turn' },
+    ]);
+
+    const membrane = new Membrane(adapter);
+
+    // This should not throw even if onToolCalls returns undefined
+    await expect(membrane.stream(createMultiTurnRequest(), {
+      onToolCalls: async () => {
+        return undefined as any;  // Simulate buggy handler
+      },
+    })).resolves.toBeDefined();
+  });
 });
 
 describe('Edge cases', () => {
