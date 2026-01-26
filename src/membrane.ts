@@ -371,6 +371,26 @@ export class Membrane {
               await onPreToolContent(parsed.beforeText);
             }
 
+            // Emit block events for each tool call
+            for (const call of parsed.calls) {
+              const toolCallBlockIndex = contentBlocks.length;
+              onBlock?.({
+                event: 'block_start',
+                index: toolCallBlockIndex,
+                block: { type: 'tool_call' },
+              });
+              onBlock?.({
+                event: 'block_complete',
+                index: toolCallBlockIndex,
+                block: {
+                  type: 'tool_call',
+                  toolId: call.id,
+                  toolName: call.name,
+                  input: call.input,
+                },
+              });
+            }
+
             // Track the tool calls
             executedToolCalls.push(...parsed.calls);
 
@@ -398,14 +418,36 @@ export class Membrane {
               // Use split-turn injection for images
               const splitContent = formatToolResultsForSplitTurn(results);
 
+              // Emit block events for tool results (image path)
+              const toolResultBlockIndex = contentBlocks.length;
+              onBlock?.({
+                event: 'block_start',
+                index: toolResultBlockIndex,
+                block: { type: 'tool_result' },
+              });
+
               // Append the text portion to accumulated (before image)
               parser.push(splitContent.beforeImageXml);
               const toolResultMeta: ChunkMeta = {
                 type: 'tool_result',
                 visible: false,
-                blockIndex: 0,
+                blockIndex: toolResultBlockIndex,
               };
               onChunk?.(splitContent.beforeImageXml, toolResultMeta);
+
+              // Emit block complete for each tool result
+              for (const result of results) {
+                onBlock?.({
+                  event: 'block_complete',
+                  index: toolResultBlockIndex,
+                  block: {
+                    type: 'tool_result',
+                    toolId: result.toolUseId,
+                    content: typeof result.content === 'string' ? result.content : JSON.stringify(result.content),
+                    isError: result.isError,
+                  },
+                });
+              }
 
               // If thinking is enabled, add <thinking> tag after tool results
               let afterImageXml = splitContent.afterImageXml;
@@ -430,13 +472,36 @@ export class Membrane {
             } else {
               // Standard path: no images, use simple XML injection
               const resultsXml = formatToolResults(results);
+
+              // Emit block events for tool results
+              const toolResultBlockIndex = contentBlocks.length;
+              onBlock?.({
+                event: 'block_start',
+                index: toolResultBlockIndex,
+                block: { type: 'tool_result' },
+              });
+
               parser.push(resultsXml);
               const toolResultMeta: ChunkMeta = {
                 type: 'tool_result',
                 visible: false,
-                blockIndex: 0,
+                blockIndex: toolResultBlockIndex,
               };
               onChunk?.(resultsXml, toolResultMeta);
+
+              // Emit block complete for each tool result
+              for (const result of results) {
+                onBlock?.({
+                  event: 'block_complete',
+                  index: toolResultBlockIndex,
+                  block: {
+                    type: 'tool_result',
+                    toolId: result.toolUseId,
+                    content: typeof result.content === 'string' ? result.content : JSON.stringify(result.content),
+                    isError: result.isError,
+                  },
+                });
+              }
 
               // If thinking is enabled, add <thinking> tag after tool results
               // to prompt the model to think before responding

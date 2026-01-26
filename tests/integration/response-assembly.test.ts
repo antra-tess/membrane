@@ -578,6 +578,61 @@ describe('Multi-request logging', () => {
     expect(assistantContent).toContain('</function_results>');
   });
 
+  it('should emit onBlock events for tool calls and results', async () => {
+    const blockEvents: any[] = [];
+
+    const fnCallsOpen = '<function_calls>';
+    const fnCallsClose = '</function_calls>';
+    const invokeOpen = '<invoke name="test_tool">';
+    const invokeClose = '</invoke>';
+    const paramOpen = '<parameter name="param">';
+    const paramClose = '</parameter>';
+
+    const toolCallXml = [
+      fnCallsOpen, '\n', invokeOpen, '\n',
+      paramOpen, 'test_value', paramClose, '\n',
+      invokeClose, '\n',
+    ].join('');
+
+    const adapter = createMultiCallAdapter([
+      { chunks: [toolCallXml], stopReason: 'stop_sequence', stopSequence: fnCallsClose },
+      { chunks: ['Final response.'], stopReason: 'end_turn' },
+    ]);
+
+    const membrane = new Membrane(adapter);
+
+    await membrane.stream(createMultiTurnRequest(), {
+      onBlock: (event) => { blockEvents.push(event); },
+      onToolCalls: async (calls) => {
+        return calls.map(call => ({
+          toolUseId: call.id,
+          content: 'Tool executed',
+        }));
+      },
+    });
+
+    // Should have block events for tool_call
+    const toolCallStarts = blockEvents.filter(e => e.event === 'block_start' && e.block.type === 'tool_call');
+    const toolCallCompletes = blockEvents.filter(e => e.event === 'block_complete' && e.block.type === 'tool_call');
+    expect(toolCallStarts.length).toBeGreaterThanOrEqual(1);
+    expect(toolCallCompletes.length).toBeGreaterThanOrEqual(1);
+
+    // Tool call complete should have toolName and input
+    const toolCallComplete = toolCallCompletes[0];
+    expect(toolCallComplete.block.toolName).toBe('test_tool');
+    expect(toolCallComplete.block.input).toBeDefined();
+
+    // Should have block events for tool_result
+    const toolResultStarts = blockEvents.filter(e => e.event === 'block_start' && e.block.type === 'tool_result');
+    const toolResultCompletes = blockEvents.filter(e => e.event === 'block_complete' && e.block.type === 'tool_result');
+    expect(toolResultStarts.length).toBeGreaterThanOrEqual(1);
+    expect(toolResultCompletes.length).toBeGreaterThanOrEqual(1);
+
+    // Tool result complete should have content
+    const toolResultComplete = toolResultCompletes[0];
+    expect(toolResultComplete.block.content).toBe('Tool executed');
+  });
+
   it('should add <thinking> tag after tool results when thinking is enabled', async () => {
     const capturedRequests: any[] = [];
 
