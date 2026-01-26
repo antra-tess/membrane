@@ -442,16 +442,13 @@ export function parseAccumulatedIntoBlocks(text: string): {
   }
 
   // Add any remaining text after the last special block
+  // This also handles the case where there are no special blocks at all
+  // (lastEnd stays 0, so we slice from 0 to get all text)
   if (lastEnd < text.length) {
     const textContent = text.slice(lastEnd).trim();
     if (textContent) {
       blocks.push({ type: 'text', text: textContent });
     }
-  }
-
-  // Handle case where there are no special blocks at all
-  if (positions.length === 0 && text.trim()) {
-    blocks.push({ type: 'text', text: text.trim() });
   }
 
   return { blocks, toolCalls, toolResults };
