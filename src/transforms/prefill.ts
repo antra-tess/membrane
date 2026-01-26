@@ -162,6 +162,17 @@ export function transformToPrefill(
   // Track conversation lines for current section
   let currentConversation: string[] = [];
   let lastNonEmptyParticipant: string | null = null;
+
+  // Calculate tool injection point based on total message count (not current segment)
+  // Tools should be injected N messages from the end of the entire conversation
+  const totalMessages = messages.length;
+  const toolInjectionIndex = Math.max(0, totalMessages - toolInjectionPosition);
+  let toolsInjected = false;
+  const hasToolsForConversation =
+    toolInjectionMode === 'conversation' &&
+    request.tools &&
+    request.tools.length > 0;
+  const toolsText = hasToolsForConversation ? formatToolsForInjection(request.tools!) : '';
   
   // Build system prompt
   let systemText = request.system ?? '';
@@ -267,20 +278,24 @@ export function transformToPrefill(
       passedCacheMarker = true;
     }
     
+    // Inject tools BEFORE this message if we've reached the injection point
+    // For short conversations (toolInjectionIndex <= 0), inject at the very beginning (i === 0)
+    const shouldInjectHere = toolInjectionIndex > 0 ? i >= toolInjectionIndex : i === 0;
+    if (hasToolsForConversation && !toolsInjected && shouldInjectHere) {
+      currentConversation.push(toolsText);
+      toolsInjected = true;
+    }
+
     // Check bot continuation logic
     const isBotMessage = message.participant === assistantName;
     const isContinuation = isBotMessage && lastNonEmptyParticipant === assistantName && !hasToolResult;
-    
+
     if (isContinuation && isLastMessage) {
       // Bot continuation - don't add prefix, just complete from where we are
       continue;
     } else if (isLastMessage && isEmpty) {
-      // Completion target - optionally start with thinking tag
-      if (prefillThinking) {
-        currentConversation.push(`${message.participant}: <thinking>`);
-      } else {
-        currentConversation.push(`${message.participant}:`);
-      }
+      // Completion target - turn prefix will be added AFTER tool injection
+      // (handled below, not here)
     } else if (text) {
       // Regular message - append delimiter if configured
       currentConversation.push(`${message.participant}: ${text}${messageDelimiter}`);
@@ -290,59 +305,33 @@ export function transformToPrefill(
     }
   }
 
-  // If conversation doesn't end with assistant turn, append one
-  // This ensures the model knows to respond as the assistant
-  if (lastNonEmptyParticipant !== assistantName) {
-    if (prefillThinking) {
-      currentConversation.push(`${assistantName}: <thinking>`);
-    } else {
-      currentConversation.push(`${assistantName}:`);
-    }
+  // Determine the turn prefix to use (added AFTER tool injection)
+  let turnPrefix: string;
+  if (prefillThinking) {
+    turnPrefix = `${assistantName}: <thinking>`;
+  } else {
+    turnPrefix = `${assistantName}:`;
   }
 
-  // Flush any remaining conversation, inject tools if mode is 'conversation'
+  // Flush any remaining conversation
+  // If tools haven't been injected yet (short conversation), add them now
+  if (hasToolsForConversation && !toolsInjected) {
+    currentConversation.push(toolsText);
+    toolsInjected = true;
+  }
+
+  // Add turn prefix at the very end (after tools and all messages)
   if (currentConversation.length > 0) {
-    const hasToolsForConversation =
-      toolInjectionMode === 'conversation' &&
-      request.tools &&
-      request.tools.length > 0;
-
-    if (hasToolsForConversation) {
-      // Inject tools into assistant content
-      const toolsText = formatToolsForInjection(request.tools!);
-
-      if (currentConversation.length > toolInjectionPosition) {
-        // Long conversation: insert tools ~N messages from the end
-        const splitPoint = currentConversation.length - toolInjectionPosition;
-        const beforeTools = currentConversation.slice(0, splitPoint);
-        const afterTools = currentConversation.slice(splitPoint);
-
-        const combined = [
-          ...beforeTools,
-          toolsText,
-          ...afterTools,
-        ].join(joiner);
-
-        providerMessages.push({
-          role: 'assistant',
-          content: combined,
-        });
-      } else {
-        // Short conversation: inject tools at the end (right before completion point)
-        const combined = [...currentConversation, toolsText].join(joiner);
-
-        providerMessages.push({
-          role: 'assistant',
-          content: combined,
-        });
-      }
-    } else {
-      // No tool injection needed
-      providerMessages.push({
-        role: 'assistant',
-        content: currentConversation.join(joiner),
-      });
-    }
+    providerMessages.push({
+      role: 'assistant',
+      content: [...currentConversation, turnPrefix].join(joiner),
+    });
+  } else {
+    // Empty conversation, just turn prefix
+    providerMessages.push({
+      role: 'assistant',
+      content: turnPrefix,
+    });
   }
   
   // Build stop sequences from participants

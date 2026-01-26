@@ -61,6 +61,52 @@ function createMockAdapter(options: {
 }
 
 /**
+ * Create a multi-call mock adapter for tool execution tests
+ */
+function createMultiCallAdapter(responses: Array<{
+  chunks: string[];
+  stopReason: string;
+  stopSequence?: string;
+}>): ProviderAdapter {
+  let callIndex = 0;
+
+  return {
+    name: 'mock',
+    supportsModel: () => true,
+    async complete(request: ProviderRequest): Promise<ProviderResponse> {
+      return {
+        content: [{ type: 'text', text: 'Mock' }],
+        stopReason: 'end_turn',
+        usage: { inputTokens: 10, outputTokens: 5 },
+        model: 'mock-model',
+        rawRequest: request,
+        raw: {},
+      } as ProviderResponse;
+    },
+    async stream(request: ProviderRequest, callbacks: StreamCallbacks): Promise<ProviderResponse> {
+      const response = responses[callIndex] ?? responses[responses.length - 1];
+      callIndex++;
+
+      let accumulated = '';
+      for (const chunk of response.chunks) {
+        accumulated += chunk;
+        callbacks.onChunk(chunk);
+      }
+
+      return {
+        content: [{ type: 'text', text: accumulated }],
+        stopReason: response.stopReason,
+        stopSequence: response.stopSequence,
+        usage: { inputTokens: 10, outputTokens: response.chunks.length },
+        model: 'mock-model',
+        rawRequest: request,
+        raw: { content: [{ type: 'text', text: accumulated }] },
+      } as ProviderResponse;
+    },
+  };
+}
+
+/**
  * Create a standard multi-turn request for testing
  */
 function createMultiTurnRequest(): NormalizedRequest {
@@ -239,6 +285,94 @@ describe('Response with thinking blocks', () => {
 
     const thinkingBlocks = result.content.filter(b => b.type === 'thinking');
     expect(thinkingBlocks.length).toBe(1);
+  });
+});
+
+describe('Multi-request logging', () => {
+  it('should call onRequest for each API request during tool execution', async () => {
+    const capturedRequests: unknown[] = [];
+
+    // Build XML strings by parts to avoid escaping issues
+    const fnCallsOpen = '<function_calls>';
+    const fnCallsClose = '</function_calls>';
+    const invokeOpen = '<invoke name="test_tool">';
+    const invokeClose = '</invoke>';
+    const paramOpen = '<parameter name="param">';
+    const paramClose = '</parameter>';
+
+    const toolCallXml = [
+      fnCallsOpen,
+      '\n',
+      invokeOpen,
+      '\n',
+      paramOpen, 'value', paramClose,
+      '\n',
+      invokeClose,
+      '\n',
+    ].join('');
+
+    // Create adapter that simulates tool execution (2 API calls)
+    const adapter = createMultiCallAdapter([
+      // First call: return tool call that stops at </function_calls>
+      { chunks: [toolCallXml], stopReason: 'stop_sequence', stopSequence: fnCallsClose },
+      // Second call: return final response
+      { chunks: ['Done with the tool.'], stopReason: 'end_turn' },
+    ]);
+
+    const membrane = new Membrane(adapter);
+    const request = createMultiTurnRequest();
+
+    await membrane.stream(request, {
+      onRequest: (req) => { capturedRequests.push(req); },
+      onToolCalls: async (calls) => {
+        // Return mock tool results
+        return calls.map(call => ({
+          toolUseId: call.id,
+          content: 'Tool result',
+        }));
+      },
+    });
+
+    // Should have captured 2 requests (initial + continuation after tool)
+    expect(capturedRequests.length).toBe(2);
+
+    // Both should have different messages (second has accumulated content)
+    expect(capturedRequests[0]).not.toEqual(capturedRequests[1]);
+  });
+
+  it('should call onRequest multiple times for multi-tool execution', async () => {
+    const capturedRequests: unknown[] = [];
+
+    const fnCallsOpen = '<function_calls>';
+    const fnCallsClose = '</function_calls>';
+    const invokeOpen = '<invoke name="test_tool">';
+    const invokeClose = '</invoke>';
+    const paramOpen = '<parameter name="p">';
+    const paramClose = '</parameter>';
+
+    const toolCallXml = [fnCallsOpen, invokeOpen, paramOpen, 'v', paramClose, invokeClose].join('');
+
+    // Create adapter that simulates 3 API calls (2 tool calls + final)
+    const adapter = createMultiCallAdapter([
+      { chunks: [toolCallXml], stopReason: 'stop_sequence', stopSequence: fnCallsClose },
+      { chunks: [toolCallXml], stopReason: 'stop_sequence', stopSequence: fnCallsClose },
+      { chunks: ['Final response.'], stopReason: 'end_turn' },
+    ]);
+
+    const membrane = new Membrane(adapter);
+
+    await membrane.stream(createMultiTurnRequest(), {
+      onRequest: (req) => { capturedRequests.push(req); },
+      onToolCalls: async (calls) => {
+        return calls.map(call => ({
+          toolUseId: call.id,
+          content: 'Tool result',
+        }));
+      },
+    });
+
+    // Should have captured 3 requests
+    expect(capturedRequests.length).toBe(3);
   });
 });
 
