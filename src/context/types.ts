@@ -92,6 +92,18 @@ export interface ContextState {
   
   /** Last roll timestamp (ISO string) */
   lastRollTime?: string;
+  
+  /**
+   * First message ID of the cached window.
+   * 
+   * Use this to anchor your message fetch window - fetch from this message ID
+   * onwards to ensure cache stability. Only changes when a roll occurs.
+   * 
+   * This helps callers maintain stable fetch windows:
+   * - Discord bots can use this as the `after` parameter when fetching messages
+   * - Other message sources can use it as a pagination cursor
+   */
+  cachedStartMessageId?: string;
 }
 
 // ============================================================================
@@ -143,6 +155,12 @@ export interface ContextInfo {
   
   /** Whether hard limit was hit */
   hardLimitHit: boolean;
+  
+  /**
+   * First message ID of the cached window.
+   * Useful for callers to anchor their message fetch window.
+   */
+  cachedStartMessageId?: string;
 }
 
 // ============================================================================
@@ -164,12 +182,54 @@ export interface ContextOutput {
 // Stream Options
 // ============================================================================
 
+import type { ToolCall, ToolResult, ToolContext } from '../types/tools.js';
+import type { BasicUsage } from '../types/response.js';
+
+/**
+ * Callback for tool execution within processContext.
+ * Return tool results to continue the stream; throw to abort.
+ */
+export type ContextToolCallback = (
+  calls: ToolCall[],
+  context: ToolContext
+) => Promise<ToolResult[]>;
+
+/**
+ * Callback for pre-tool content notification.
+ * Called with content that appeared before tool calls (useful for UI preview).
+ */
+export type ContextPreToolCallback = (content: string) => Promise<void> | void;
+
 export interface ContextStreamOptions {
   /** Callback for streaming chunks */
   onChunk?: (chunk: string) => void;
   
   /** Abort signal */
   signal?: AbortSignal;
+  
+  // ---- Tool Support ----
+  
+  /** 
+   * Called when tool calls are detected; return results to continue.
+   * If not provided, tool calls are not executed (stream stops at tool_use).
+   */
+  onToolCalls?: ContextToolCallback;
+  
+  /**
+   * Called with content before tool calls (for UI preview / progressive display).
+   */
+  onPreToolContent?: ContextPreToolCallback;
+  
+  /**
+   * Called with usage updates during streaming.
+   */
+  onUsage?: (usage: BasicUsage) => void;
+  
+  /**
+   * Maximum tool execution depth (default: 10).
+   * Prevents infinite tool loops.
+   */
+  maxToolDepth?: number;
 }
 
 // ============================================================================
@@ -186,6 +246,7 @@ export function createInitialState(): ContextState {
     messagesSinceRoll: 0,
     tokensSinceRoll: 0,
     inGracePeriod: false,
+    cachedStartMessageId: undefined,
   };
 }
 
