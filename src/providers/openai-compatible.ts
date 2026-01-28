@@ -130,6 +130,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
     const openAIRequest = this.buildRequest(request);
+    options?.onRequest?.(openAIRequest);
 
     try {
       const response = await this.makeRequest(openAIRequest, options);
@@ -146,6 +147,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   ): Promise<ProviderResponse> {
     const openAIRequest = this.buildRequest(request);
     openAIRequest.stream = true;
+    options?.onRequest?.(openAIRequest);
 
     try {
       const response = await fetch(`${this.baseURL}/chat/completions`, {

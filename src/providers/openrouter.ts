@@ -137,6 +137,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
     const openRouterRequest = this.buildRequest(request);
+    options?.onRequest?.(openRouterRequest);
 
     try {
       const response = await this.makeRequest(openRouterRequest, options);
@@ -155,6 +156,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
     openRouterRequest.stream = true;
     // Request usage data in stream for cache metrics
     openRouterRequest.stream_options = { include_usage: true };
+    options?.onRequest?.(openRouterRequest);
 
     try {
       const response = await fetch(`${this.baseURL}/chat/completions`, {

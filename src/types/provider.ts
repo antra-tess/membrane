@@ -216,6 +216,8 @@ export interface ProviderRequest {
 export interface ProviderRequestOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
+  /** Called with the raw API request body right before fetch */
+  onRequest?: (rawRequest: unknown) => void;
 }
 
 export interface ProviderResponse {

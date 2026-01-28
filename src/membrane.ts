@@ -98,13 +98,11 @@ export class Membrane {
         const providerResponse = await this.adapter.complete(finalRequest, {
           signal: options.signal,
           timeoutMs: options.timeoutMs,
+          onRequest: (req) => {
+            rawRequest = req;
+            options.onRequest?.(req);
+          },
         });
-
-        // Use the actual raw request from provider (after any adapter transformations)
-        rawRequest = providerResponse.rawRequest;
-
-        // Call onRequest callback with actual request sent to API
-        options.onRequest?.(rawRequest);
 
         // Call onResponse callback with raw response from API
         options.onResponse?.(providerResponse.raw);
@@ -324,7 +322,13 @@ export class Membrane {
               ? (index: number, block: unknown) => onContentBlockUpdate(index, block as ContentBlock)
               : undefined,
           },
-          { signal }
+          {
+            signal,
+            onRequest: (req) => {
+              rawRequest = req;
+              onRequest?.(req);
+            },
+          }
         );
 
         // If we detected stop sequence manually, fix up the parser and result
@@ -334,12 +338,6 @@ export class Membrane {
           streamResult.stopReason = 'stop_sequence';
           streamResult.stopSequence = detectedStopSequence;
         }
-
-        // Use the actual raw request from provider (after adapter transformations)
-        rawRequest = streamResult.rawRequest;
-
-        // Call onRequest callback with actual request sent to API
-        onRequest?.(rawRequest);
 
         rawResponse = streamResult.raw;
 
@@ -689,14 +687,14 @@ export class Membrane {
               ? (index: number, block: unknown) => onContentBlockUpdate(index, block as ContentBlock)
               : undefined,
           },
-          { signal }
+          {
+            signal,
+            onRequest: (req) => {
+              rawRequest = req;
+              onRequest?.(req);
+            },
+          }
         );
-
-        // Use the actual raw request from provider (after adapter transformations)
-        rawRequest = streamResult.rawRequest;
-
-        // Call onRequest callback with actual request sent to API
-        onRequest?.(rawRequest);
 
         rawResponse = streamResult.raw;
 
@@ -1002,7 +1000,7 @@ export class Membrane {
   private async streamOnce(
     request: any,
     callbacks: { onChunk: (chunk: string) => void; onContentBlock?: (index: number, block: unknown) => void },
-    options: { signal?: AbortSignal }
+    options: { signal?: AbortSignal; onRequest?: (rawRequest: unknown) => void }
   ) {
     return await this.adapter.stream(request, callbacks, options);
   }

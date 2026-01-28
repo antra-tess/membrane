@@ -62,6 +62,7 @@ export class AnthropicAdapter implements ProviderAdapter {
   ): Promise<ProviderResponse> {
     const anthropicRequest = this.buildRequest(request);
     const fullRequest = { ...anthropicRequest, stream: false as const };
+    options?.onRequest?.(fullRequest);
 
     try {
       const response = await this.client.messages.create(fullRequest, {
@@ -82,6 +83,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     const anthropicRequest = this.buildRequest(request);
     // Note: stream is implicitly true when using .stream()
     const fullRequest = { ...anthropicRequest, stream: true };
+    options?.onRequest?.(fullRequest);
 
     try {
       const stream = await this.client.messages.stream(anthropicRequest, {

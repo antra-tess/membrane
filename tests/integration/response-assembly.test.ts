@@ -21,7 +21,8 @@ function createMockAdapter(options: {
     name: 'mock',
     supportsModel: () => true,
 
-    async complete(request: ProviderRequest): Promise<ProviderResponse> {
+    async complete(request: ProviderRequest, reqOptions?: { onRequest?: (req: unknown) => void }): Promise<ProviderResponse> {
+      reqOptions?.onRequest?.(request);
       const response = options.completeResponse ?? {
         content: [{ type: 'text', text: 'Mock response' }],
         stopReason: 'end_turn',
@@ -39,7 +40,8 @@ function createMockAdapter(options: {
       } as ProviderResponse;
     },
 
-    async stream(request: ProviderRequest, callbacks: StreamCallbacks): Promise<ProviderResponse> {
+    async stream(request: ProviderRequest, callbacks: StreamCallbacks, reqOptions?: { onRequest?: (req: unknown) => void }): Promise<ProviderResponse> {
+      reqOptions?.onRequest?.(request);
       const chunks = options.streamChunks ?? ['Hello ', 'world'];
       let accumulated = '';
 
@@ -73,7 +75,8 @@ function createMultiCallAdapter(responses: Array<{
   return {
     name: 'mock',
     supportsModel: () => true,
-    async complete(request: ProviderRequest): Promise<ProviderResponse> {
+    async complete(request: ProviderRequest, reqOptions?: { onRequest?: (req: unknown) => void }): Promise<ProviderResponse> {
+      reqOptions?.onRequest?.(request);
       return {
         content: [{ type: 'text', text: 'Mock' }],
         stopReason: 'end_turn',
@@ -83,7 +86,8 @@ function createMultiCallAdapter(responses: Array<{
         raw: {},
       } as ProviderResponse;
     },
-    async stream(request: ProviderRequest, callbacks: StreamCallbacks): Promise<ProviderResponse> {
+    async stream(request: ProviderRequest, callbacks: StreamCallbacks, reqOptions?: { onRequest?: (req: unknown) => void }): Promise<ProviderResponse> {
+      reqOptions?.onRequest?.(request);
       const response = responses[callIndex] ?? responses[responses.length - 1];
       callIndex++;
 

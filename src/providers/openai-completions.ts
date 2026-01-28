@@ -147,6 +147,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
     const completionsRequest = this.buildRequest(request);
+    options?.onRequest?.(completionsRequest);
 
     try {
       const response = await this.makeRequest(completionsRequest, options);
@@ -163,6 +164,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
   ): Promise<ProviderResponse> {
     const completionsRequest = this.buildRequest(request);
     completionsRequest.stream = true;
+    options?.onRequest?.(completionsRequest);
 
     try {
       const response = await fetch(`${this.baseURL}/completions`, {
