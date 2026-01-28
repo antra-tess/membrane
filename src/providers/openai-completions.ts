@@ -328,7 +328,9 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
   }
 
   private buildRequest(request: ProviderRequest): CompletionsRequest {
-    const { prompt, participants } = this.serializeToPrompt(request.messages as any[]);
+    // Prefer normalizedMessages (has participant names) over messages (has role)
+    const messages = (request.extra?.normalizedMessages as any[]) || (request.messages as any[]);
+    const { prompt, participants } = this.serializeToPrompt(messages);
 
     const params: CompletionsRequest = {
       model: request.model,

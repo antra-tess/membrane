@@ -984,11 +984,16 @@ export class Membrane {
       messages: prefillResult.messages,
       // System is now part of messages with cache_control
       // But we still pass it for providers that need it separately
-      system: prefillResult.systemContent.length > 0 
-        ? prefillResult.systemContent 
+      system: prefillResult.systemContent.length > 0
+        ? prefillResult.systemContent
         : undefined,
       stopSequences: prefillResult.stopSequences,
-      extra: request.providerParams,
+      extra: {
+        ...request.providerParams,
+        // Pass original messages with participant names for adapters that need them
+        // (e.g., OpenAICompletionsAdapter for base models)
+        normalizedMessages: request.messages,
+      },
     };
     
     return { providerRequest, prefillResult };
