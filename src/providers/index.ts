@@ -29,3 +29,8 @@ export {
   fromOpenAIMessage,
   type OpenAICompatibleAdapterConfig,
 } from './openai-compatible.js';
+
+export {
+  OpenAICompletionsAdapter,
+  type OpenAICompletionsAdapterConfig,
+} from './openai-completions.js';
