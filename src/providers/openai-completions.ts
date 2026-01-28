@@ -353,9 +353,9 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
       params.stop = stopSequences;
     }
 
-    // Apply extra params (but not messages/tools which don't apply)
+    // Apply extra params (but not messages/tools/normalizedMessages/prompt which don't apply)
     if (request.extra) {
-      const { messages, tools, ...rest } = request.extra as any;
+      const { messages, tools, normalizedMessages, prompt, ...rest } = request.extra as any;
       Object.assign(params, rest);
     }
 
