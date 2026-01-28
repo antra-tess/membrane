@@ -8,19 +8,36 @@ describe('OpenAICompletionsAdapter', () => {
   });
 
   describe('serializeToPrompt', () => {
-    it('should serialize simple conversation to Human:/Assistant: format', () => {
+    it('should serialize conversation using actual participant names', () => {
+      const messages = [
+        { participant: 'Alice', content: 'Hello' },
+        { participant: 'Claude', content: 'Hi there!' },
+        { participant: 'Alice', content: 'How are you?' },
+      ];
+
+      const { prompt, participants } = adapter.serializeToPrompt(messages);
+
+      expect(prompt).toBe(
+        'Alice: Hello\n\n' +
+        'Claude: Hi there!\n\n' +
+        'Alice: How are you?\n\n' +
+        'Assistant:'
+      );
+      expect(participants).toContain('Alice');
+      expect(participants).toContain('Claude');
+    });
+
+    it('should fall back to role field if participant not present', () => {
       const messages = [
         { role: 'user', content: 'Hello' },
         { role: 'assistant', content: 'Hi there!' },
-        { role: 'user', content: 'How are you?' },
       ];
 
-      const prompt = adapter.serializeToPrompt(messages);
+      const { prompt } = adapter.serializeToPrompt(messages);
 
       expect(prompt).toBe(
-        'Human: Hello\n\n' +
-        'Assistant: Hi there!\n\n' +
-        'Human: How are you?\n\n' +
+        'user: Hello\n\n' +
+        'assistant: Hi there!\n\n' +
         'Assistant:'
       );
     });
@@ -28,7 +45,7 @@ describe('OpenAICompletionsAdapter', () => {
     it('should handle array content blocks', () => {
       const messages = [
         {
-          role: 'user',
+          participant: 'Bob',
           content: [
             { type: 'text', text: 'First part' },
             { type: 'text', text: 'Second part' },
@@ -36,10 +53,10 @@ describe('OpenAICompletionsAdapter', () => {
         },
       ];
 
-      const prompt = adapter.serializeToPrompt(messages);
+      const { prompt } = adapter.serializeToPrompt(messages);
 
       expect(prompt).toBe(
-        'Human: First part\nSecond part\n\n' +
+        'Bob: First part\nSecond part\n\n' +
         'Assistant:'
       );
     });
@@ -47,7 +64,7 @@ describe('OpenAICompletionsAdapter', () => {
     it('should strip images from content', () => {
       const messages = [
         {
-          role: 'user',
+          participant: 'Alice',
           content: [
             { type: 'text', text: 'Look at this:' },
             { type: 'image', source: { type: 'base64', data: 'abc123' } },
@@ -55,65 +72,82 @@ describe('OpenAICompletionsAdapter', () => {
         },
       ];
 
-      const prompt = adapter.serializeToPrompt(messages);
+      const { prompt } = adapter.serializeToPrompt(messages);
 
       expect(prompt).toBe(
-        'Human: Look at this:\n\n' +
+        'Alice: Look at this:\n\n' +
         'Assistant:'
       );
-      // Image should be silently stripped (warning disabled in test config)
     });
 
     it('should skip tool_use and tool_result blocks', () => {
       const messages = [
         {
-          role: 'assistant',
+          participant: 'Claude',
           content: [
             { type: 'text', text: 'Let me check that.' },
             { type: 'tool_use', id: 'tool_1', name: 'search', input: {} },
           ],
         },
         {
-          role: 'user',
+          participant: 'System',
           content: [
             { type: 'tool_result', tool_use_id: 'tool_1', content: 'Result here' },
           ],
         },
         {
-          role: 'user',
+          participant: 'Alice',
           content: 'Thanks!',
         },
       ];
 
-      const prompt = adapter.serializeToPrompt(messages);
+      const { prompt } = adapter.serializeToPrompt(messages);
 
-      // Tool blocks are skipped, empty messages are still included with prefix
-      expect(prompt).toContain('Human: Thanks!');
+      expect(prompt).toContain('Alice: Thanks!');
       expect(prompt).toContain('Assistant:');
       expect(prompt).not.toContain('tool');
       expect(prompt).not.toContain('search');
     });
 
     it('should handle empty conversation', () => {
-      const prompt = adapter.serializeToPrompt([]);
+      const { prompt } = adapter.serializeToPrompt([]);
 
       expect(prompt).toBe('Assistant:');
     });
 
-    it('should normalize role names', () => {
+    it('should use custom assistant name', () => {
+      const customAdapter = new OpenAICompletionsAdapter({
+        baseURL: 'http://localhost:8000/v1',
+        assistantName: 'Claude',
+        warnOnImageStrip: false,
+      });
+
       const messages = [
-        { role: 'human', content: 'Test 1' },
-        { role: 'Human', content: 'Test 2' },
-        { role: 'user', content: 'Test 3' },
+        { participant: 'Alice', content: 'Hello' },
       ];
 
-      const prompt = adapter.serializeToPrompt(messages);
+      const { prompt } = customAdapter.serializeToPrompt(messages);
 
-      expect(prompt).toContain('Human: Test 1');
-      expect(prompt).toContain('Human: Test 2');
-      expect(prompt).toContain('Human: Test 3');
-      expect(prompt).not.toContain('human:');
-      expect(prompt).not.toContain('user:');
+      expect(prompt).toBe(
+        'Alice: Hello\n\n' +
+        'Claude:'
+      );
+    });
+
+    it('should collect all participant names', () => {
+      const messages = [
+        { participant: 'Alice', content: 'Hi' },
+        { participant: 'Bob', content: 'Hello' },
+        { participant: 'Claude', content: 'Hey' },
+        { participant: 'Alice', content: 'Bye' },
+      ];
+
+      const { participants } = adapter.serializeToPrompt(messages);
+
+      expect(participants.size).toBe(3);
+      expect(participants).toContain('Alice');
+      expect(participants).toContain('Bob');
+      expect(participants).toContain('Claude');
     });
   });
 

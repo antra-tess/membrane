@@ -77,10 +77,18 @@ export interface OpenAICompletionsAdapterConfig {
   extraHeaders?: Record<string, string>;
 
   /**
-   * Stop sequences to use (default: ['\n\nHuman:', '\nHuman:'])
-   * These prevent the model from generating user turns.
+   * Name of the assistant participant (default: 'Assistant')
+   * Used to identify which messages are from the assistant and to
+   * add the final prompt prefix for completion.
    */
-  defaultStopSequences?: string[];
+  assistantName?: string;
+
+  /**
+   * Additional stop sequences beyond auto-generated participant-based ones.
+   * By default, stop sequences are generated from participant names in the
+   * conversation (e.g., "\n\nAlice:", "\nBob:").
+   */
+  extraStopSequences?: string[];
 
   /**
    * Whether to warn when images are stripped from context (default: true)
@@ -98,7 +106,8 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
   private apiKey: string;
   private defaultMaxTokens: number;
   private extraHeaders: Record<string, string>;
-  private defaultStopSequences: string[];
+  private assistantName: string;
+  private extraStopSequences: string[];
   private warnOnImageStrip: boolean;
 
   constructor(config: OpenAICompletionsAdapterConfig) {
@@ -111,7 +120,8 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
     this.apiKey = config.apiKey ?? '';
     this.defaultMaxTokens = config.defaultMaxTokens ?? 4096;
     this.extraHeaders = config.extraHeaders ?? {};
-    this.defaultStopSequences = config.defaultStopSequences ?? ['\n\nHuman:', '\nHuman:'];
+    this.assistantName = config.assistantName ?? 'Assistant';
+    this.extraStopSequences = config.extraStopSequences ?? [];
     this.warnOnImageStrip = config.warnOnImageStrip ?? true;
   }
 
@@ -204,16 +214,19 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
   // ============================================================================
 
   /**
-   * Serialize messages to Human:/Assistant: format for base models.
+   * Serialize messages to "Participant: content" format for base models.
+   * Uses actual participant names from messages.
    * Images are stripped from content.
    */
-  serializeToPrompt(messages: any[]): string {
+  serializeToPrompt(messages: any[]): { prompt: string; participants: Set<string> } {
     const parts: string[] = [];
+    const participants = new Set<string>();
     let hasStrippedImages = false;
 
     for (const msg of messages) {
-      const role = this.normalizeRole(msg.role);
-      const prefix = role === 'user' ? 'Human:' : 'Assistant:';
+      // Get participant name (supports both 'participant' and 'role' fields)
+      const participant = msg.participant || msg.role || 'Unknown';
+      participants.add(participant);
 
       // Extract text content, strip images
       const textContent = this.extractTextContent(msg.content);
@@ -222,7 +235,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
       }
 
       if (textContent.text) {
-        parts.push(`${prefix} ${textContent.text}`);
+        parts.push(`${participant}: ${textContent.text}`);
       }
     }
 
@@ -230,17 +243,32 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
       console.warn('[OpenAICompletionsAdapter] Images were stripped from context (not supported in completions mode)');
     }
 
-    // Add final Assistant: prefix to prompt completion
-    parts.push('Assistant:');
+    // Add final assistant prefix to prompt completion
+    parts.push(`${this.assistantName}:`);
 
-    return parts.join('\n\n');
+    return {
+      prompt: parts.join('\n\n'),
+      participants,
+    };
   }
 
-  private normalizeRole(role: string): 'user' | 'assistant' {
-    if (role === 'user' || role === 'human' || role === 'Human') {
-      return 'user';
+  /**
+   * Generate stop sequences from participant names.
+   * Prevents the model from generating turns for other participants.
+   */
+  private generateStopSequences(participants: Set<string>): string[] {
+    const stops: string[] = [];
+
+    for (const participant of participants) {
+      // Skip the assistant - we don't want to stop on its own name
+      if (participant === this.assistantName) continue;
+
+      // Add both "\n\nName:" and "\nName:" variants
+      stops.push(`\n\n${participant}:`);
+      stops.push(`\n${participant}:`);
     }
-    return 'assistant';
+
+    return stops;
   }
 
   private extractTextContent(content: any): { text: string; hadImages: boolean } {
@@ -285,7 +313,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
   }
 
   private buildRequest(request: ProviderRequest): CompletionsRequest {
-    const prompt = this.serializeToPrompt(request.messages as any[]);
+    const { prompt, participants } = this.serializeToPrompt(request.messages as any[]);
 
     const params: CompletionsRequest = {
       model: request.model,
@@ -297,9 +325,10 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
       params.temperature = request.temperature;
     }
 
-    // Combine default stop sequences with any provided ones
+    // Generate stop sequences from participant names + any extras
     const stopSequences = [
-      ...this.defaultStopSequences,
+      ...this.generateStopSequences(participants),
+      ...this.extraStopSequences,
       ...(request.stopSequences || []),
     ];
     if (stopSequences.length > 0) {
