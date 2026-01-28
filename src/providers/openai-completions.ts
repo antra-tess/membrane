@@ -84,6 +84,17 @@ export interface OpenAICompletionsAdapterConfig {
   assistantName?: string;
 
   /**
+   * End-of-turn token to append after each message (default: '<|eot|>')
+   * Set to empty string or null to disable.
+   *
+   * Example output with default:
+   *   Alice: Hello<|eot|>
+   *
+   *   Claude: Hi there!<|eot|>
+   */
+  eotToken?: string | null;
+
+  /**
    * Additional stop sequences beyond auto-generated participant-based ones.
    * By default, stop sequences are generated from participant names in the
    * conversation (e.g., "\n\nAlice:", "\nBob:").
@@ -107,6 +118,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
   private defaultMaxTokens: number;
   private extraHeaders: Record<string, string>;
   private assistantName: string;
+  private eotToken: string;
   private extraStopSequences: string[];
   private warnOnImageStrip: boolean;
 
@@ -121,6 +133,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
     this.defaultMaxTokens = config.defaultMaxTokens ?? 4096;
     this.extraHeaders = config.extraHeaders ?? {};
     this.assistantName = config.assistantName ?? 'Assistant';
+    this.eotToken = config.eotToken === null ? '' : (config.eotToken ?? '<|eot|>');
     this.extraStopSequences = config.extraStopSequences ?? [];
     this.warnOnImageStrip = config.warnOnImageStrip ?? true;
   }
@@ -214,7 +227,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
   // ============================================================================
 
   /**
-   * Serialize messages to "Participant: content" format for base models.
+   * Serialize messages to "Participant: content<eot>" format for base models.
    * Uses actual participant names from messages.
    * Images are stripped from content.
    */
@@ -235,7 +248,9 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
       }
 
       if (textContent.text) {
-        parts.push(`${participant}: ${textContent.text}`);
+        // Append EOT token after content (on same line)
+        const eot = this.eotToken;
+        parts.push(`${participant}: ${textContent.text}${eot}`);
       }
     }
 
@@ -243,7 +258,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
       console.warn('[OpenAICompletionsAdapter] Images were stripped from context (not supported in completions mode)');
     }
 
-    // Add final assistant prefix to prompt completion
+    // Add final assistant prefix to prompt completion (no EOT - model generates this)
     parts.push(`${this.assistantName}:`);
 
     return {
@@ -325,9 +340,10 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
       params.temperature = request.temperature;
     }
 
-    // Generate stop sequences from participant names + any extras
+    // Generate stop sequences from participant names + EOT token + any extras
     const stopSequences = [
       ...this.generateStopSequences(participants),
+      ...(this.eotToken ? [this.eotToken] : []),
       ...this.extraStopSequences,
       ...(request.stopSequences || []),
     ];

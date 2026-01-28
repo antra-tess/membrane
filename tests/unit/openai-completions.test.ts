@@ -18,9 +18,9 @@ describe('OpenAICompletionsAdapter', () => {
       const { prompt, participants } = adapter.serializeToPrompt(messages);
 
       expect(prompt).toBe(
-        'Alice: Hello\n\n' +
-        'Claude: Hi there!\n\n' +
-        'Alice: How are you?\n\n' +
+        'Alice: Hello<|eot|>\n\n' +
+        'Claude: Hi there!<|eot|>\n\n' +
+        'Alice: How are you?<|eot|>\n\n' +
         'Assistant:'
       );
       expect(participants).toContain('Alice');
@@ -36,8 +36,8 @@ describe('OpenAICompletionsAdapter', () => {
       const { prompt } = adapter.serializeToPrompt(messages);
 
       expect(prompt).toBe(
-        'user: Hello\n\n' +
-        'assistant: Hi there!\n\n' +
+        'user: Hello<|eot|>\n\n' +
+        'assistant: Hi there!<|eot|>\n\n' +
         'Assistant:'
       );
     });
@@ -56,7 +56,7 @@ describe('OpenAICompletionsAdapter', () => {
       const { prompt } = adapter.serializeToPrompt(messages);
 
       expect(prompt).toBe(
-        'Bob: First part\nSecond part\n\n' +
+        'Bob: First part\nSecond part<|eot|>\n\n' +
         'Assistant:'
       );
     });
@@ -75,7 +75,7 @@ describe('OpenAICompletionsAdapter', () => {
       const { prompt } = adapter.serializeToPrompt(messages);
 
       expect(prompt).toBe(
-        'Alice: Look at this:\n\n' +
+        'Alice: Look at this:<|eot|>\n\n' +
         'Assistant:'
       );
     });
@@ -129,7 +129,7 @@ describe('OpenAICompletionsAdapter', () => {
       const { prompt } = customAdapter.serializeToPrompt(messages);
 
       expect(prompt).toBe(
-        'Alice: Hello\n\n' +
+        'Alice: Hello<|eot|>\n\n' +
         'Claude:'
       );
     });
@@ -148,6 +148,78 @@ describe('OpenAICompletionsAdapter', () => {
       expect(participants).toContain('Alice');
       expect(participants).toContain('Bob');
       expect(participants).toContain('Claude');
+    });
+
+    it('should append default EOT token after each message', () => {
+      const messages = [
+        { participant: 'Alice', content: 'Hello' },
+        { participant: 'Claude', content: 'Hi there!' },
+      ];
+
+      const { prompt } = adapter.serializeToPrompt(messages);
+
+      expect(prompt).toBe(
+        'Alice: Hello<|eot|>\n\n' +
+        'Claude: Hi there!<|eot|>\n\n' +
+        'Assistant:'
+      );
+    });
+
+    it('should use custom EOT token', () => {
+      const customAdapter = new OpenAICompletionsAdapter({
+        baseURL: 'http://localhost:8000/v1',
+        eotToken: '</s>',
+        warnOnImageStrip: false,
+      });
+
+      const messages = [
+        { participant: 'Alice', content: 'Hello' },
+      ];
+
+      const { prompt } = customAdapter.serializeToPrompt(messages);
+
+      expect(prompt).toBe(
+        'Alice: Hello</s>\n\n' +
+        'Assistant:'
+      );
+    });
+
+    it('should allow disabling EOT token with null', () => {
+      const noEotAdapter = new OpenAICompletionsAdapter({
+        baseURL: 'http://localhost:8000/v1',
+        eotToken: null,
+        warnOnImageStrip: false,
+      });
+
+      const messages = [
+        { participant: 'Alice', content: 'Hello' },
+      ];
+
+      const { prompt } = noEotAdapter.serializeToPrompt(messages);
+
+      expect(prompt).toBe(
+        'Alice: Hello\n\n' +
+        'Assistant:'
+      );
+    });
+
+    it('should allow disabling EOT token with empty string', () => {
+      const noEotAdapter = new OpenAICompletionsAdapter({
+        baseURL: 'http://localhost:8000/v1',
+        eotToken: '',
+        warnOnImageStrip: false,
+      });
+
+      const messages = [
+        { participant: 'Alice', content: 'Hello' },
+      ];
+
+      const { prompt } = noEotAdapter.serializeToPrompt(messages);
+
+      expect(prompt).toBe(
+        'Alice: Hello\n\n' +
+        'Assistant:'
+      );
     });
   });
 
