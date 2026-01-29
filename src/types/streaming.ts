@@ -5,6 +5,7 @@
 import type { ContentBlock } from './content.js';
 import type { ToolCall, ToolResult, ToolContext } from './tools.js';
 import type { BasicUsage } from './response.js';
+import type { PrefillFormatter } from '../formatters/types.js';
 
 // ============================================================================
 // Membrane Block Types (logical content regions, not API types)
@@ -232,6 +233,14 @@ export interface StreamOptions {
 
   /** Timeout for each tool execution */
   toolTimeoutMs?: number;
+
+  // ---- Formatter Config ----
+
+  /**
+   * Override the default formatter for this request.
+   * Useful for switching between prefill and native modes per-request.
+   */
+  formatter?: PrefillFormatter;
 }
 
 // ============================================================================

@@ -155,9 +155,10 @@ export class AnthropicAdapter implements ProviderAdapter {
       (params as any).thinking = (request as any).thinking;
     }
 
-    // Apply extra params
+    // Apply extra params, excluding internal membrane fields
     if (request.extra) {
-      Object.assign(params, request.extra);
+      const { normalizedMessages, prompt, ...rest } = request.extra as Record<string, unknown>;
+      Object.assign(params, rest);
     }
 
     return params;

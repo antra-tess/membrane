@@ -2,16 +2,8 @@
  * Transform exports
  */
 
-export {
-  transformToPrefill,
-  buildContinuationPrefill,
-  type PrefillTransformResult,
-  type PrefillTransformOptions,
-  type ProviderTextBlock,
-  type ProviderImageBlock,
-  type ProviderContentBlock,
-  type ProviderMessage,
-} from './prefill.js';
+// Note: transformToPrefill was removed in v0.4.0
+// Use formatter.buildMessages() instead (see PrefillFormatter interface)
 
 export {
   transformToChat,

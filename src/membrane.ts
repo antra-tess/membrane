@@ -33,10 +33,7 @@ import {
   isTextContent,
   isAbortedResponse,
 } from './types/index.js';
-import {
-  transformToPrefill,
-  type PrefillTransformResult,
-} from './transforms/index.js';
+import type { BuildResult } from './formatters/types.js';
 import {
   parseToolCalls,
   formatToolResults,
@@ -47,6 +44,8 @@ import {
 } from './utils/tool-parser.js';
 import { IncrementalXmlParser, type ProcessChunkResult } from './utils/stream-parser.js';
 import type { ChunkMeta, BlockEvent } from './types/streaming.js';
+import type { PrefillFormatter, StreamParser } from './formatters/types.js';
+import { AnthropicXmlFormatter } from './formatters/anthropic-xml.js';
 
 // ============================================================================
 // Membrane Class
@@ -57,6 +56,7 @@ export class Membrane {
   private registry?: ModelRegistry;
   private retryConfig: RetryConfig;
   private config: MembraneConfig;
+  private formatter: PrefillFormatter;
 
   constructor(
     adapter: ProviderAdapter,
@@ -66,6 +66,8 @@ export class Membrane {
     this.registry = config.registry;
     this.retryConfig = { ...DEFAULT_RETRY_CONFIG, ...config.retry };
     this.config = config;
+    // Use provided formatter or default to AnthropicXmlFormatter
+    this.formatter = config.formatter ?? new AnthropicXmlFormatter();
   }
 
   // ==========================================================================
@@ -222,10 +224,14 @@ export class Membrane {
       onResponse,
       maxToolDepth = 10,
       signal,
+      formatter: requestFormatter,
     } = options;
 
-    // Initialize incremental parser for XML tracking
-    const parser = new IncrementalXmlParser();
+    // Use per-request formatter if provided, otherwise use instance formatter
+    const formatter = requestFormatter ?? this.formatter;
+
+    // Initialize parser from formatter for format-specific tracking
+    const parser = formatter.createStreamParser();
     let toolDepth = 0;
     let totalUsage: BasicUsage = { inputTokens: 0, outputTokens: 0 };
     const contentBlocks: ContentBlock[] = [];
@@ -237,8 +243,8 @@ export class Membrane {
     const executedToolCalls: ToolCall[] = [];
     const executedToolResults: ToolResult[] = [];
 
-    // Transform initial request (XML tools are injected into system prompt)
-    let { providerRequest, prefillResult } = this.transformRequest(request);
+    // Transform initial request using the formatter
+    let { providerRequest, prefillResult } = this.transformRequest(request, formatter);
 
     // Initialize parser with prefill content so it knows about any open tags
     // (e.g., <thinking> in the prefill means API response continues inside thinking)
@@ -948,53 +954,53 @@ export class Membrane {
   // Internal Methods
   // ==========================================================================
 
-  private transformRequest(request: NormalizedRequest): {
+  /**
+   * Transform a normalized request into provider format using the formatter
+   */
+  private transformRequest(request: NormalizedRequest, formatter?: PrefillFormatter): {
     providerRequest: any;
-    prefillResult: PrefillTransformResult;
+    prefillResult: BuildResult;
   } {
-    // For now, use prefill transform
-    // In full implementation, would check capabilities and choose transform
-    
-    // Extract user-provided stop sequences to pass to prefill transform
+    // Use provided formatter or instance formatter
+    const activeFormatter = formatter ?? this.formatter;
+
+    // Extract user-provided stop sequences
     const additionalStopSequences = Array.isArray(request.stopSequences)
       ? request.stopSequences
       : request.stopSequences?.sequences ?? [];
-    
+
     // Request-level maxParticipantsForStop takes precedence over instance config
-    const maxParticipantsForStop = request.maxParticipantsForStop 
-      ?? this.config.maxParticipantsForStop 
+    const maxParticipantsForStop = request.maxParticipantsForStop
+      ?? this.config.maxParticipantsForStop
       ?? 10;
-    
-    const prefillResult = transformToPrefill(request, {
-      assistantName: this.config.assistantParticipant ?? 'Claude',
-      promptCaching: true, // Enable cache control by default
-      prefillThinking: request.config.thinking?.enabled ?? false,
+
+    // Use formatter's buildMessages for all request building
+    const buildResult = activeFormatter.buildMessages(request.messages, {
+      participantMode: 'multiuser',
+      assistantParticipant: this.config.assistantParticipant ?? 'Claude',
+      tools: request.tools,
+      thinking: request.config.thinking,
+      systemPrompt: request.system,
+      promptCaching: true,
       additionalStopSequences,
       maxParticipantsForStop,
     });
-    
-    // Use the pre-built messages from prefill transform
-    // These include cache_control markers on appropriate content blocks
+
     const providerRequest = {
       model: request.config.model,
       maxTokens: request.config.maxTokens,
       temperature: request.config.temperature,
-      messages: prefillResult.messages,
-      // System is now part of messages with cache_control
-      // But we still pass it for providers that need it separately
-      system: prefillResult.systemContent.length > 0
-        ? prefillResult.systemContent
-        : undefined,
-      stopSequences: prefillResult.stopSequences,
+      messages: buildResult.messages,
+      system: buildResult.systemContent,
+      stopSequences: buildResult.stopSequences,
+      tools: buildResult.nativeTools,
       extra: {
         ...request.providerParams,
-        // Pass original messages with participant names for adapters that need them
-        // (e.g., OpenAICompletionsAdapter for base models)
         normalizedMessages: request.messages,
       },
     };
-    
-    return { providerRequest, prefillResult };
+
+    return { providerRequest, prefillResult: buildResult };
   }
 
   private async streamOnce(
@@ -1007,7 +1013,7 @@ export class Membrane {
 
   private buildContinuationRequest(
     originalRequest: NormalizedRequest,
-    prefillResult: PrefillTransformResult,
+    prefillResult: BuildResult,
     accumulated: string
   ): any {
     // Anthropic quirk: assistant content cannot end with trailing whitespace
@@ -1036,8 +1042,10 @@ export class Membrane {
       maxTokens: originalRequest.config.maxTokens,
       temperature: originalRequest.config.temperature,
       messages,
-      system: prefillResult.systemContent.length > 0
-        ? prefillResult.systemContent
+      system: prefillResult.systemContent
+        ? (Array.isArray(prefillResult.systemContent) && prefillResult.systemContent.length > 0
+          ? prefillResult.systemContent
+          : prefillResult.systemContent)
         : undefined,
       stopSequences: prefillResult.stopSequences,
       extra: originalRequest.providerParams,
@@ -1063,7 +1071,7 @@ export class Membrane {
    */
   private buildContinuationRequestWithImages(
     originalRequest: NormalizedRequest,
-    prefillResult: PrefillTransformResult,
+    prefillResult: BuildResult,
     accumulated: string,
     images: ProviderImageBlock[],
     afterImageXml: string
@@ -1108,8 +1116,10 @@ export class Membrane {
       maxTokens: originalRequest.config.maxTokens,
       temperature: originalRequest.config.temperature,
       messages,
-      system: prefillResult.systemContent.length > 0
-        ? prefillResult.systemContent
+      system: prefillResult.systemContent
+        ? (Array.isArray(prefillResult.systemContent) && prefillResult.systemContent.length > 0
+          ? prefillResult.systemContent
+          : prefillResult.systemContent)
         : undefined,
       stopSequences: prefillResult.stopSequences,
       extra: originalRequest.providerParams,
@@ -1119,7 +1129,9 @@ export class Membrane {
   private transformResponse(
     providerResponse: any,
     request: NormalizedRequest,
-    prefillResult: PrefillTransformResult,
+    prefillResult: {
+      cacheMarkersApplied?: number;
+    },
     startTime: number,
     attempts: number,
     rawRequest?: unknown
@@ -1197,7 +1209,7 @@ export class Membrane {
           provider: this.adapter.name,
         },
         cache: {
-          markersInRequest: prefillResult.cacheMarkersApplied,
+          markersInRequest: prefillResult.cacheMarkersApplied ?? 0,
           tokensCreated: providerResponse.usage.cacheCreationTokens ?? 0,
           tokensRead: providerResponse.usage.cacheReadTokens ?? 0,
           hitRatio: this.calculateCacheHitRatio(providerResponse.usage),
@@ -1216,7 +1228,9 @@ export class Membrane {
     stopReason: StopReason,
     usage: BasicUsage,
     request: NormalizedRequest,
-    prefillResult: PrefillTransformResult,
+    prefillResult: {
+      cacheMarkersApplied?: number;
+    },
     startTime: number,
     attempts: number,
     rawRequest: unknown,

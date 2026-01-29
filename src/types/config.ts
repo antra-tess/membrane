@@ -6,6 +6,7 @@ import type { ModelRegistry } from './provider.js';
 import type { ErrorInfo } from './errors.js';
 import type { NormalizedRequest } from './request.js';
 import type { NormalizedResponse } from './response.js';
+import type { PrefillFormatter } from '../formatters/types.js';
 
 // ============================================================================
 // Retry Config
@@ -129,11 +130,18 @@ export interface MembraneConfig {
    * Maximum number of participants to include in auto-generated stop sequences.
    * In prefill mode, membrane generates stop sequences like "\nUsername:" to prevent
    * the model from speaking as other participants.
-   * 
+   *
    * Set to 0 to disable participant-based stop sequences (allows frags/quotes).
    * Default: 10
    */
   maxParticipantsForStop?: number;
+
+  /**
+   * Prefill formatter for message serialization and response parsing.
+   * Controls how messages are formatted for the API and how responses are parsed.
+   * Default: AnthropicXmlFormatter
+   */
+  formatter?: PrefillFormatter;
 
   /** Retry configuration */
   retry?: Partial<RetryConfig>;
