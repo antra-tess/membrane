@@ -1158,6 +1158,31 @@ export class Membrane {
       rawAssistantText = providerResponse.content;
     }
 
+    // If we stopped on a closing XML tag, append it to the text so parsers can complete
+    // the block. The API stops BEFORE the stop sequence, but we need the closing tag.
+    const stoppedOnClosingTag = providerResponse.stopReason === 'stop_sequence' &&
+      providerResponse.stopSequence?.startsWith('</');
+    if (stoppedOnClosingTag && providerResponse.stopSequence) {
+      rawAssistantText += providerResponse.stopSequence;
+      // Update the last text content block if it exists
+      for (let i = content.length - 1; i >= 0; i--) {
+        const block = content[i]!;
+        if (block.type === 'text') {
+          (block as { type: 'text'; text: string }).text += providerResponse.stopSequence;
+          break;
+        }
+      }
+    }
+
+    // Parse XML tool calls from text if no native tool_use blocks were found
+    // This handles prefill mode where tools are XML in the text
+    if (toolCalls.length === 0 && rawAssistantText.includes('<function_calls>')) {
+      const parsed = parseAccumulatedIntoBlocks(rawAssistantText);
+      for (const tc of parsed.toolCalls) {
+        toolCalls.push(tc);
+      }
+    }
+
     const stopReason = this.mapStopReason(providerResponse.stopReason);
     const durationMs = Date.now() - startTime;
     const usage = {

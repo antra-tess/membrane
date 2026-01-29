@@ -13,6 +13,34 @@
 import type { ToolCall, ToolResult, ParsedToolCalls, ContentBlock, ToolResultContentBlock } from '../types/index.js';
 
 // ============================================================================
+// Helper Functions
+// ============================================================================
+
+/**
+ * Parse a parameter value, handling JSON and large integers safely.
+ * Discord snowflake IDs and similar large integers lose precision when
+ * parsed as JavaScript numbers, so we keep them as strings.
+ */
+function parseParamValue(value: string): unknown {
+  const trimmed = value.trim();
+  
+  // Check if it looks like a large integer (all digits, no decimal)
+  // JavaScript can only safely represent integers up to 2^53 - 1
+  const looksLikeLargeInt = /^\d{16,}$/.test(trimmed);
+  if (looksLikeLargeInt) {
+    // Keep as string to preserve precision
+    return trimmed;
+  }
+  
+  // Try to parse as JSON
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return trimmed;
+  }
+}
+
+// ============================================================================
 // Tool Call Parsing
 // ============================================================================
 
@@ -93,11 +121,8 @@ export function parseToolCalls(text: string): ParsedToolCalls | null {
       const paramValue = paramMatch[3] ?? ''; // Group 3 is the value
 
       // Try to parse as JSON, fall back to string
-      try {
-        input[paramName] = JSON.parse(paramValue);
-      } catch {
-        input[paramName] = paramValue.trim();
-      }
+      // Special handling for large integers (like Discord snowflake IDs)
+      input[paramName] = parseParamValue(paramValue);
     }
 
     calls.push({
@@ -341,11 +366,8 @@ export function parseAccumulatedIntoBlocks(
       while ((paramMatch = PARAMETER_REGEX.exec(invokeContent)) !== null) {
         const paramName = paramMatch[2] ?? '';
         const paramValue = paramMatch[3] ?? '';
-        try {
-          input[paramName] = JSON.parse(paramValue);
-        } catch {
-          input[paramName] = paramValue.trim();
-        }
+        // Special handling for large integers (like Discord snowflake IDs)
+        input[paramName] = parseParamValue(paramValue);
       }
 
       const id = generateToolId();
