@@ -381,3 +381,74 @@ describe('formatToolResults', () => {
     expect(xml).toContain('tool_use_id="b"');
   });
 });
+
+describe('parseToolCalls large integer handling', () => {
+  it('should preserve large integers as strings (Discord snowflake IDs)', () => {
+    const xml = `<function_calls>
+<invoke name="send_message">
+<parameter name="channel_id">1234567890123456789</parameter>
+<parameter name="user_id">9876543210987654321</parameter>
+</invoke>
+</function_calls>`;
+
+    const result = parseToolCalls(xml);
+    expect(result).not.toBeNull();
+    expect(result?.calls.length).toBe(1);
+
+    const input = result?.calls[0]?.input as Record<string, unknown>;
+    // Large integers should be preserved as strings
+    expect(input.channel_id).toBe('1234567890123456789');
+    expect(input.user_id).toBe('9876543210987654321');
+    expect(typeof input.channel_id).toBe('string');
+    expect(typeof input.user_id).toBe('string');
+  });
+
+  it('should parse regular numbers as numbers', () => {
+    const xml = `<function_calls>
+<invoke name="calc">
+<parameter name="count">42</parameter>
+<parameter name="price">3.14</parameter>
+</invoke>
+</function_calls>`;
+
+    const result = parseToolCalls(xml);
+    const input = result?.calls[0]?.input as Record<string, unknown>;
+
+    expect(input.count).toBe(42);
+    expect(input.price).toBe(3.14);
+    expect(typeof input.count).toBe('number');
+    expect(typeof input.price).toBe('number');
+  });
+
+  it('should parse booleans and JSON strings correctly', () => {
+    const xml = `<function_calls>
+<invoke name="test">
+<parameter name="enabled">true</parameter>
+<parameter name="disabled">false</parameter>
+<parameter name="name">"hello"</parameter>
+</invoke>
+</function_calls>`;
+
+    const result = parseToolCalls(xml);
+    const input = result?.calls[0]?.input as Record<string, unknown>;
+
+    expect(input.enabled).toBe(true);
+    expect(input.disabled).toBe(false);
+    expect(input.name).toBe('hello');
+  });
+
+  it('should handle 15-digit numbers as numbers (safe range)', () => {
+    const xml = `<function_calls>
+<invoke name="test">
+<parameter name="safe_id">123456789012345</parameter>
+</invoke>
+</function_calls>`;
+
+    const result = parseToolCalls(xml);
+    const input = result?.calls[0]?.input as Record<string, unknown>;
+
+    // 15 digits is safe for JavaScript numbers
+    expect(input.safe_id).toBe(123456789012345);
+    expect(typeof input.safe_id).toBe('number');
+  });
+});
