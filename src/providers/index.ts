@@ -10,16 +10,6 @@ export {
 } from './anthropic.js';
 
 export {
-  AnthropicChatAdapter,
-  type AnthropicChatAdapterConfig,
-} from './anthropic-chat.js';
-
-export {
-  AnthropicMultiuserAdapter,
-  type AnthropicMultiuserAdapterConfig,
-} from './anthropic-multiuser.js';
-
-export {
   OpenRouterAdapter,
   toOpenRouterMessages,
   fromOpenRouterMessage,
