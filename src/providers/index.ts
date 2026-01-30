@@ -34,3 +34,10 @@ export {
   OpenAICompletionsAdapter,
   type OpenAICompletionsAdapterConfig,
 } from './openai-completions.js';
+
+export {
+  MockAdapter,
+  createEchoAdapter,
+  createCannedAdapter,
+  type MockAdapterConfig,
+} from './mock.js';
