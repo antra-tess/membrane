@@ -39,12 +39,19 @@ export interface MessageMetadata {
 export interface NormalizedMessage {
   /** Participant name: "Alice", "Bob", "Claude", etc. */
   participant: string;
-  
+
   /** Content blocks */
   content: ContentBlock[];
-  
+
   /** Message metadata */
   metadata?: MessageMetadata;
+
+  /**
+   * Cache breakpoint for Anthropic prompt caching.
+   * When true, content up to and including this message will have cache_control applied.
+   * Multiple messages can have cacheBreakpoint for multiple cache points.
+   */
+  cacheBreakpoint?: boolean;
 }
 
 // ============================================================================

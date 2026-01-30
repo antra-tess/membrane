@@ -28,8 +28,53 @@ const formatter = new AnthropicXmlFormatter({
 - Participant-based message format (Name: content)
 - XML tool syntax (<function_calls>, <function_results>)
 - <thinking> block support for extended thinking
-- Prompt caching with cache_control markers
+- Prompt caching with cache_control markers (see below)
 - Context prefix for simulacrum seeding
+
+## Prompt Caching
+
+Anthropic supports prompt caching to reduce costs for repeated prefixes. Membrane provides two ways to control cache breakpoints:
+
+### 1. Explicit cache breakpoints (recommended)
+
+Set `cacheBreakpoint: true` on messages that should be cached:
+
+```typescript
+const messages: NormalizedMessage[] = [
+  { participant: 'User', content: [...] },
+  { participant: 'Claude', content: [...], cacheBreakpoint: true }, // Cache up to here
+  { participant: 'User', content: [...] },
+  { participant: 'Claude', content: [...], cacheBreakpoint: true }, // Second cache point
+  { participant: 'User', content: [...] },
+  { participant: 'Claude', content: [...] }, // Current turn
+];
+```
+
+This gives you full control over where cache boundaries are placed. Anthropic supports up to 4 cache breakpoints.
+
+### 2. Callback-based (for automatic rolling cache)
+
+Use `hasCacheMarker` callback for dynamic cache boundaries:
+
+```typescript
+const result = formatter.buildMessages(messages, {
+  promptCaching: true,
+  hasCacheMarker: (message, index) => {
+    // Your logic to determine cache boundaries
+    return index === someDynamicIndex;
+  },
+});
+```
+
+### Cache marker behavior
+
+When `promptCaching: true`:
+- System prompt automatically gets `cache_control`
+- Context prefix (if provided) gets `cache_control`
+- Messages with `cacheBreakpoint: true` flush with `cache_control`
+- `hasCacheMarker` callback flushes content BEFORE the marked message
+
+The `cacheMarkersApplied` count in `BuildResult` tells you how many markers were applied.
 
 ### NativeFormatter
 

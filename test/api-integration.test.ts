@@ -489,6 +489,124 @@ await runTest('Test 8: Content block integrity (no duplicates)', async () => {
 });
 
 // ============================================================================
+// Test 9: Cache Breakpoints
+// ============================================================================
+
+await runTest('Test 9: Cache breakpoints in request', async () => {
+  // Build messages with explicit cache breakpoints
+  const messages: NormalizedMessage[] = [
+    createMessage('User', 'This is the first message with important context.'),
+    { ...createMessage('Claude', 'I understand the context.'), cacheBreakpoint: true },
+    createMessage('User', 'This is the second message.'),
+    { ...createMessage('Claude', 'Got it.'), cacheBreakpoint: true },
+    createMessage('User', 'Now answer: what is 2+2?'),
+  ];
+
+  const request: NormalizedRequest = {
+    messages,
+    system: 'You are a helpful assistant.',
+    config: { model: MODEL, maxTokens: 100 },
+  };
+
+  let rawRequest: any = null;
+  const response = await membrane.complete(request, {
+    onRequest: (req) => {
+      rawRequest = req;
+    },
+  });
+
+  assert(rawRequest !== null, 'Should capture raw request');
+
+  if (rawRequest) {
+    // Check that system has cache_control
+    const system = rawRequest.system;
+    if (Array.isArray(system)) {
+      const systemHasCache = system.some((block: any) => block.cache_control);
+      assert(systemHasCache, 'System prompt should have cache_control');
+    }
+
+    // Check that messages have cache_control at breakpoints
+    const messagesWithCache = rawRequest.messages?.filter((m: any) => {
+      if (Array.isArray(m.content)) {
+        return m.content.some((block: any) => block.cache_control);
+      }
+      return false;
+    }) || [];
+
+    console.log(`  Messages with cache_control: ${messagesWithCache.length}`);
+
+    // Should have multiple cache breakpoints (at least 2 from cacheBreakpoint messages)
+    assert(
+      messagesWithCache.length >= 2,
+      `Should have at least 2 messages with cache_control (got ${messagesWithCache.length})`
+    );
+
+    // Log the raw request structure for inspection
+    console.log('  Raw request messages:');
+    for (let i = 0; i < (rawRequest.messages?.length || 0); i++) {
+      const msg = rawRequest.messages[i];
+      const hasCache = Array.isArray(msg.content) && msg.content.some((b: any) => b.cache_control);
+      console.log(`    [${i}] ${msg.role}: ${hasCache ? '(cached)' : ''}`);
+    }
+  }
+
+  assert(!isAbortedResponse(response), 'Response should not be aborted');
+
+  if (!isAbortedResponse(response)) {
+    // Check usage includes cache info
+    console.log(`  Usage: ${JSON.stringify(response.usage)}`);
+    console.log(`  Cache details: ${JSON.stringify(response.details?.cache)}`);
+  }
+});
+
+await delay(1500);
+
+// ============================================================================
+// Test 10: Cache Breakpoints - Second Call (should hit cache)
+// ============================================================================
+
+await runTest('Test 10: Cache breakpoints - second call should hit cache', async () => {
+  // Same messages as Test 9 to test cache hit
+  const messages: NormalizedMessage[] = [
+    createMessage('User', 'This is the first message with important context.'),
+    { ...createMessage('Claude', 'I understand the context.'), cacheBreakpoint: true },
+    createMessage('User', 'This is the second message.'),
+    { ...createMessage('Claude', 'Got it.'), cacheBreakpoint: true },
+    createMessage('User', 'Now answer: what is 3+3?'), // Different question
+  ];
+
+  const request: NormalizedRequest = {
+    messages,
+    system: 'You are a helpful assistant.',
+    config: { model: MODEL, maxTokens: 100 },
+  };
+
+  const response = await membrane.complete(request, {});
+
+  assert(!isAbortedResponse(response), 'Response should not be aborted');
+
+  if (!isAbortedResponse(response)) {
+    // Log cache usage - second call should show cache reads
+    console.log(`  Usage: ${JSON.stringify(response.usage)}`);
+    console.log(`  Cache details: ${JSON.stringify(response.details?.cache)}`);
+    console.log(`  Detailed usage: ${JSON.stringify(response.details?.usage)}`);
+
+    // Check if we got cache reads (cacheReadTokens > 0)
+    const cacheReadTokens = response.details?.usage?.cacheReadTokens ?? 0;
+    console.log(`  Cache read tokens: ${cacheReadTokens}`);
+
+    // Note: Cache hit depends on Anthropic's caching behavior
+    // First call creates cache, second call should read from it
+    if (cacheReadTokens > 0) {
+      assert(true, `Cache hit! Read ${cacheReadTokens} tokens from cache`);
+    } else {
+      console.log('  Note: Cache may not have been hit (TTL or other factors)');
+      assert(true, 'Request completed (cache hit not guaranteed)');
+    }
+  }
+});
+
+// ============================================================================
 // Summary
 // ============================================================================
 

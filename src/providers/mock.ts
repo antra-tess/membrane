@@ -155,8 +155,11 @@ export class MockAdapter implements ProviderAdapter {
 
   async complete(
     request: ProviderRequest,
-    _options?: ProviderRequestOptions
+    options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
+    // Call onRequest callback if provided
+    options?.onRequest?.(request);
+
     // Simulate processing delay
     if (this.config.completeDelayMs > 0) {
       await this.sleep(this.config.completeDelayMs);
@@ -180,8 +183,11 @@ export class MockAdapter implements ProviderAdapter {
   async stream(
     request: ProviderRequest,
     callbacks: StreamCallbacks,
-    _options?: ProviderRequestOptions
+    options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
+    // Call onRequest callback if provided
+    options?.onRequest?.(request);
+
     const responseText = this.getResponse(request);
 
     // Stream the response in chunks

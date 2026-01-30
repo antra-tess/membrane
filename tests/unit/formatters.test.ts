@@ -371,6 +371,99 @@ describe('AnthropicXmlFormatter', () => {
       expect(systemContent[0]?.cache_control).toBeUndefined();
       expect(result.cacheMarkersApplied).toBe(0);
     });
+
+    it('applies cache_control when message has cacheBreakpoint', () => {
+      const formatter = new AnthropicXmlFormatter();
+      const messages: NormalizedMessage[] = [
+        textMessage('User', 'Message 1'),
+        textMessage('Claude', 'Response 1'),
+        { ...textMessage('User', 'Message 2'), cacheBreakpoint: true },
+        textMessage('Claude', 'Response 2'),
+        textMessage('User', 'Message 3'),
+        textMessage('Claude', ''),
+      ];
+
+      const result = formatter.buildMessages(messages, {
+        participantMode: 'multiuser',
+        assistantParticipant: 'Claude',
+        promptCaching: true,
+      });
+
+      // Should have cache marker applied for the cacheBreakpoint message
+      expect(result.cacheMarkersApplied).toBeGreaterThanOrEqual(1);
+
+      // Find messages with cache_control
+      const messagesWithCacheControl = result.messages.filter(m => {
+        if (Array.isArray(m.content)) {
+          return (m.content as any[]).some(block => block.cache_control);
+        }
+        return false;
+      });
+
+      expect(messagesWithCacheControl.length).toBeGreaterThanOrEqual(1);
+
+      // The cached content should include Message 2 (the cacheBreakpoint message)
+      const cachedContent = messagesWithCacheControl[0]?.content as any[];
+      expect(cachedContent[0]?.text).toContain('Message 2');
+    });
+
+    it('supports multiple cacheBreakpoint messages', () => {
+      const formatter = new AnthropicXmlFormatter();
+      const messages: NormalizedMessage[] = [
+        textMessage('User', 'Message 1'),
+        { ...textMessage('Claude', 'Response 1'), cacheBreakpoint: true },
+        textMessage('User', 'Message 2'),
+        { ...textMessage('Claude', 'Response 2'), cacheBreakpoint: true },
+        textMessage('User', 'Message 3'),
+        textMessage('Claude', ''),
+      ];
+
+      const result = formatter.buildMessages(messages, {
+        participantMode: 'multiuser',
+        assistantParticipant: 'Claude',
+        promptCaching: true,
+      });
+
+      // Should have at least 2 cache markers in conversation (plus possibly system)
+      // Find messages with cache_control in conversation
+      const messagesWithCacheControl = result.messages.filter(m => {
+        if (Array.isArray(m.content)) {
+          return (m.content as any[]).some(block => block.cache_control);
+        }
+        return false;
+      });
+
+      expect(messagesWithCacheControl.length).toBeGreaterThanOrEqual(2);
+    });
+
+    it('cacheBreakpoint has no effect when promptCaching is false', () => {
+      const formatter = new AnthropicXmlFormatter();
+      const messages: NormalizedMessage[] = [
+        textMessage('User', 'Message 1'),
+        { ...textMessage('Claude', 'Response 1'), cacheBreakpoint: true },
+        textMessage('User', 'Message 2'),
+        textMessage('Claude', ''),
+      ];
+
+      const result = formatter.buildMessages(messages, {
+        participantMode: 'multiuser',
+        assistantParticipant: 'Claude',
+        promptCaching: false,
+      });
+
+      // No cache markers should be applied
+      expect(result.cacheMarkersApplied).toBe(0);
+
+      // No messages should have cache_control
+      const messagesWithCacheControl = result.messages.filter(m => {
+        if (Array.isArray(m.content)) {
+          return (m.content as any[]).some(block => block.cache_control);
+        }
+        return false;
+      });
+
+      expect(messagesWithCacheControl.length).toBe(0);
+    });
   });
 
   describe('formatToolResults', () => {

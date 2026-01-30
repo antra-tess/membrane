@@ -116,8 +116,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     let currentConversation: string[] = [];
     let lastNonEmptyParticipant: string | null = null;
 
-    // Track cache marker state - everything BEFORE we see the marker gets cache_control
-    let passedCacheMarker = false;
+    // Track cache markers applied
     let cacheMarkersApplied = 0;
 
     // Calculate tool injection point
@@ -221,28 +220,26 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         continue;
       }
 
-      // Check if this message has a cache marker - flush content BEFORE it with cache_control
-      if (hasCacheMarker && !passedCacheMarker && hasCacheMarker(message, i)) {
-        // Flush everything before this message WITH cache_control (if caching enabled)
-        if (currentConversation.length > 0) {
+      // Check hasCacheMarker callback - flush content BEFORE this message with cache_control
+      // (backward compatibility: callback marks WHERE cache boundary should be)
+      if (hasCacheMarker && hasCacheMarker(message, i)) {
+        if (currentConversation.length > 0 && promptCaching) {
           const content = currentConversation.join(joiner);
-          if (promptCaching) {
-            const contentBlock: Record<string, unknown> = { type: 'text', text: content };
-            contentBlock.cache_control = { type: 'ephemeral' };
-            cacheMarkersApplied++;
-            providerMessages.push({
-              role: 'assistant',
-              content: [contentBlock],
-            });
-          } else {
-            providerMessages.push({
-              role: 'assistant',
-              content: content,
-            });
-          }
+          const contentBlock: Record<string, unknown> = { type: 'text', text: content };
+          contentBlock.cache_control = { type: 'ephemeral' };
+          cacheMarkersApplied++;
+          providerMessages.push({
+            role: 'assistant',
+            content: [contentBlock],
+          });
+          currentConversation = [];
+        } else if (currentConversation.length > 0) {
+          providerMessages.push({
+            role: 'assistant',
+            content: currentConversation.join(joiner),
+          });
           currentConversation = [];
         }
-        passedCacheMarker = true;
       }
 
       // Inject tools before this message if at injection point
@@ -266,6 +263,20 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         if (!hasToolResult) {
           lastNonEmptyParticipant = message.participant;
         }
+      }
+
+      // Check cacheBreakpoint - flush INCLUDING this message with cache_control
+      // (explicit user control: this message is the last thing to be cached)
+      if (message.cacheBreakpoint && promptCaching && currentConversation.length > 0) {
+        const content = currentConversation.join(joiner);
+        const contentBlock: Record<string, unknown> = { type: 'text', text: content };
+        contentBlock.cache_control = { type: 'ephemeral' };
+        cacheMarkersApplied++;
+        providerMessages.push({
+          role: 'assistant',
+          content: [contentBlock],
+        });
+        currentConversation = [];
       }
     }
 
