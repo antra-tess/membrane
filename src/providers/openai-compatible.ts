@@ -254,6 +254,21 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   private buildRequest(request: ProviderRequest): any {
     const messages = this.convertMessages(request.messages as any[]);
     
+    // Handle system prompt (same as openrouter.ts)
+    if (request.system) {
+      if (typeof request.system === 'string') {
+        messages.unshift({ role: 'system' as const, content: request.system });
+      } else if (Array.isArray(request.system)) {
+        const text = (request.system as any[])
+          .filter((b: any) => b.type === 'text')
+          .map((b: any) => b.text)
+          .join('\n');
+        if (text) {
+          messages.unshift({ role: 'system' as const, content: text });
+        }
+      }
+    }
+    
     const params: any = {
       model: request.model,
       messages,
