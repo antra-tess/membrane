@@ -982,6 +982,7 @@ export class Membrane {
       thinking: request.config.thinking,
       systemPrompt: request.system,
       promptCaching: true,
+      cacheTtl: request.cacheTtl,
       additionalStopSequences,
       maxParticipantsForStop,
     });

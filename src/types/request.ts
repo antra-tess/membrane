@@ -126,6 +126,13 @@ export interface NormalizedRequest {
    */
   maxParticipantsForStop?: number;
   
+  /**
+   * Cache TTL for Anthropic prompt caching.
+   * '5m' (default) = 5 minute TTL
+   * '1h' = 1 hour TTL (extended caching)
+   */
+  cacheTtl?: '5m' | '1h';
+  
   /** Provider-specific parameters (pass-through) */
   providerParams?: Record<string, unknown>;
 }

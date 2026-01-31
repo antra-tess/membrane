@@ -58,6 +58,9 @@ export interface BuildOptions {
   /** Enable prompt caching (Anthropic-specific) */
   promptCaching?: boolean;
 
+  /** Cache TTL for Anthropic prompt caching - '5m' (default) or '1h' for extended */
+  cacheTtl?: '5m' | '1h';
+
   /** Additional stop sequences to include */
   additionalStopSequences?: string[];
 

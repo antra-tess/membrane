@@ -105,9 +105,16 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
       thinking,
       systemPrompt,
       promptCaching = false,
+      cacheTtl,
       contextPrefix,
       hasCacheMarker,
     } = options;
+
+    // Build cache_control object (with optional TTL for extended caching)
+    const cacheControl: Record<string, unknown> = { type: 'ephemeral' };
+    if (cacheTtl) {
+      cacheControl.ttl = cacheTtl;
+    }
 
     const providerMessages: ProviderMessage[] = [];
     const joiner = this.config.messageDelimiter ? '' : '\n';
@@ -150,7 +157,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     if (systemText) {
       const systemBlock: Record<string, unknown> = { type: 'text', text: systemText };
       if (promptCaching) {
-        systemBlock.cache_control = { type: 'ephemeral' };
+        systemBlock.cache_control = cacheControl;
         cacheMarkersApplied++;
       }
       systemContent = [systemBlock];
@@ -160,7 +167,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     if (contextPrefix) {
       const prefixBlock: Record<string, unknown> = { type: 'text', text: contextPrefix };
       if (promptCaching) {
-        prefixBlock.cache_control = { type: 'ephemeral' };
+        prefixBlock.cache_control = cacheControl;
         cacheMarkersApplied++;
       }
       providerMessages.push({
@@ -226,7 +233,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         if (currentConversation.length > 0 && promptCaching) {
           const content = currentConversation.join(joiner);
           const contentBlock: Record<string, unknown> = { type: 'text', text: content };
-          contentBlock.cache_control = { type: 'ephemeral' };
+          contentBlock.cache_control = cacheControl;
           cacheMarkersApplied++;
           providerMessages.push({
             role: 'assistant',
@@ -270,7 +277,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
       if (message.cacheBreakpoint && promptCaching && currentConversation.length > 0) {
         const content = currentConversation.join(joiner);
         const contentBlock: Record<string, unknown> = { type: 'text', text: content };
-        contentBlock.cache_control = { type: 'ephemeral' };
+        contentBlock.cache_control = cacheControl;
         cacheMarkersApplied++;
         providerMessages.push({
           role: 'assistant',

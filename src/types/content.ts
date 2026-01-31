@@ -8,6 +8,8 @@
 
 export interface CacheControl {
   type: 'ephemeral';
+  /** TTL for cache - '5m' (default) or '1h' for extended caching */
+  ttl?: '5m' | '1h';
 }
 
 // ============================================================================
