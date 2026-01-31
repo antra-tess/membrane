@@ -362,9 +362,10 @@ export class OpenAIAdapter implements ProviderAdapter {
       params.tools = this.convertTools(request.tools as any[]);
     }
     
-    // Apply extra params (can override automatic choices)
+    // Apply extra params (filter out internal membrane fields)
     if (request.extra) {
-      Object.assign(params, request.extra);
+      const { normalizedMessages, prompt, ...rest } = request.extra as Record<string, unknown>;
+      Object.assign(params, rest);
     }
     
     return params;

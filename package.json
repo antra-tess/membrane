@@ -1,6 +1,6 @@
 {
   "name": "@animalabs/membrane",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "LLM middleware - a selective boundary that transforms what passes through",
   "type": "module",
   "main": "./dist/index.js",
