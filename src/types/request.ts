@@ -127,6 +127,13 @@ export interface NormalizedRequest {
   maxParticipantsForStop?: number;
   
   /**
+   * Enable prompt caching (Anthropic/Bedrock).
+   * Defaults to true for backward compatibility.
+   * Set to false to disable cache_control markers in requests.
+   */
+  promptCaching?: boolean;
+
+  /**
    * Cache TTL for Anthropic prompt caching.
    * '5m' (default) = 5 minute TTL
    * '1h' = 1 hour TTL (extended caching)

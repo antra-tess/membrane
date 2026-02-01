@@ -981,7 +981,7 @@ export class Membrane {
       tools: request.tools,
       thinking: request.config.thinking,
       systemPrompt: request.system,
-      promptCaching: true,
+      promptCaching: request.promptCaching ?? true, // Default true for backward compat
       cacheTtl: request.cacheTtl,
       additionalStopSequences,
       maxParticipantsForStop,
