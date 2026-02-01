@@ -41,3 +41,8 @@ export {
   createCannedAdapter,
   type MockAdapterConfig,
 } from './mock.js';
+
+export {
+  BedrockAdapter,
+  type BedrockAdapterConfig,
+} from './bedrock.js';
