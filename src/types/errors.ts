@@ -3,6 +3,42 @@
  */
 
 // ============================================================================
+// Error Serialization Helper
+// ============================================================================
+
+/**
+ * Serialize an error for storage in rawError field.
+ * Error objects don't JSON.stringify well (become {}), so we extract key properties.
+ */
+export function serializeError(error: unknown): unknown {
+  if (error === undefined || error === null) {
+    return error;
+  }
+
+  if (error instanceof Error) {
+    const serialized: Record<string, unknown> = {
+      name: error.name,
+      message: error.message,
+    };
+
+    // Include stack trace in non-production
+    if (process.env.NODE_ENV !== 'production' && error.stack) {
+      serialized.stack = error.stack;
+    }
+
+    // Copy any additional enumerable properties (like status, code, etc.)
+    for (const key of Object.keys(error)) {
+      serialized[key] = (error as unknown as Record<string, unknown>)[key];
+    }
+
+    return serialized;
+  }
+
+  // For non-Error objects, return as-is (they should serialize fine)
+  return error;
+}
+
+// ============================================================================
 // Error Types
 // ============================================================================
 
@@ -70,7 +106,8 @@ export class MembraneError extends Error {
     this.retryAfterMs = info.retryAfterMs;
     this.httpStatus = info.httpStatus;
     this.providerErrorCode = info.providerErrorCode;
-    this.rawError = info.rawError;
+    // Serialize error objects so they don't become {} when JSON.stringify'd
+    this.rawError = serializeError(info.rawError);
     this.rawRequest = info.rawRequest;
   }
 
@@ -207,6 +244,9 @@ export function classifyError(error: unknown): ErrorInfo {
     return error.toErrorInfo();
   }
 
+  // Serialize the error once for use in all return paths
+  const serializedError = serializeError(error);
+
   if (error instanceof Error) {
     const message = error.message.toLowerCase();
     
@@ -217,7 +257,7 @@ export function classifyError(error: unknown): ErrorInfo {
         message: error.message,
         retryable: true,
         httpStatus: 429,
-        rawError: error,
+        rawError: serializedError,
       };
     }
     
@@ -227,7 +267,7 @@ export function classifyError(error: unknown): ErrorInfo {
         type: 'context_length',
         message: error.message,
         retryable: false,
-        rawError: error,
+        rawError: serializedError,
       };
     }
     
@@ -238,7 +278,7 @@ export function classifyError(error: unknown): ErrorInfo {
         message: error.message,
         retryable: false,
         httpStatus: 401,
-        rawError: error,
+        rawError: serializedError,
       };
     }
     
@@ -248,7 +288,7 @@ export function classifyError(error: unknown): ErrorInfo {
         type: 'network',
         message: error.message,
         retryable: true,
-        rawError: error,
+        rawError: serializedError,
       };
     }
     
@@ -258,7 +298,7 @@ export function classifyError(error: unknown): ErrorInfo {
         type: 'timeout',
         message: error.message,
         retryable: true,
-        rawError: error,
+        rawError: serializedError,
       };
     }
     
@@ -268,7 +308,7 @@ export function classifyError(error: unknown): ErrorInfo {
         type: 'abort',
         message: error.message,
         retryable: false,
-        rawError: error,
+        rawError: serializedError,
       };
     }
     
@@ -278,7 +318,7 @@ export function classifyError(error: unknown): ErrorInfo {
         type: 'server',
         message: error.message,
         retryable: true,
-        rawError: error,
+        rawError: serializedError,
       };
     }
   }
@@ -288,6 +328,6 @@ export function classifyError(error: unknown): ErrorInfo {
     type: 'unknown',
     message: error instanceof Error ? error.message : String(error),
     retryable: false,
-    rawError: error,
+    rawError: serializedError,
   };
 }

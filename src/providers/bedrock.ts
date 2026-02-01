@@ -265,6 +265,11 @@ export class BedrockAdapter implements ProviderAdapter {
    * Convert a standard Claude model ID to Bedrock format if needed
    */
   private toBedrockModelId(modelId: string): string {
+    // Strip bedrock: routing prefix if present (used for explicit routing to this adapter)
+    if (modelId.startsWith('bedrock:')) {
+      modelId = modelId.slice('bedrock:'.length);
+    }
+
     // If already in Bedrock format, use as-is
     if (modelId.startsWith('anthropic.')) {
       return modelId;

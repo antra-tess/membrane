@@ -148,14 +148,23 @@ function noTemperatureSupport(model: string): boolean {
 }
 
 /**
- * Models that don't support stop sequences (reasoning models)
+ * Models that don't support stop sequences
+ * 
+ * NOTE: Verified via API testing 2026-02-01. Some models that previously
+ * didn't support stop (o1, o3-mini) now do. Keep this list updated!
+ * 
+ * Models using v1/responses endpoint (gpt-5-pro, o1-pro, etc.) are not
+ * included here as they use a different API path entirely.
  */
 const NO_STOP_MODELS = [
-  'o1',          // Reasoning models don't support stop sequences
-  'o1-mini',
-  'o1-preview',
-  'o3',
-  'o3-mini',
+  // GPT-5.x chat models (all variants)
+  'gpt-5',
+  'gpt-5-mini',
+  'gpt-5-nano',
+  'gpt-5.1',
+  'gpt-5.2',
+  // Reasoning models that still don't support stop
+  'o3',          // o3 (full) doesn't support stop, but o3-mini does!
   'o4-mini',
 ];
 
