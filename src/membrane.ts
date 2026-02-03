@@ -906,10 +906,13 @@ export class Membrane {
         }
       : undefined;
 
+    // Anthropic requires temperature=1 when extended thinking is enabled
+    const temperature = thinking ? 1 : request.config.temperature;
+
     return {
       model: request.config.model,
       maxTokens: request.config.maxTokens,
-      temperature: request.config.temperature,
+      temperature,
       messages: providerMessages,
       system: request.system,
       tools,
