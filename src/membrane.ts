@@ -866,7 +866,11 @@ export class Membrane {
       const content: any[] = [];
       for (const block of msg.content) {
         if (block.type === 'text') {
-          content.push({ type: 'text', text: block.text });
+          const textBlock: Record<string, unknown> = { type: 'text', text: block.text };
+          if ((block as any).cache_control) {
+            textBlock.cache_control = (block as any).cache_control;
+          }
+          content.push(textBlock);
         } else if (block.type === 'tool_use') {
           content.push({
             type: 'tool_use',
@@ -902,10 +906,13 @@ export class Membrane {
         }
       : undefined;
 
+    // Anthropic requires temperature=1 when extended thinking is enabled
+    const temperature = thinking ? 1 : request.config.temperature;
+
     return {
       model: request.config.model,
       maxTokens: request.config.maxTokens,
-      temperature: request.config.temperature,
+      temperature,
       messages: providerMessages,
       system: request.system,
       tools,
