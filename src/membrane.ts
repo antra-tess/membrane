@@ -866,7 +866,11 @@ export class Membrane {
       const content: any[] = [];
       for (const block of msg.content) {
         if (block.type === 'text') {
-          content.push({ type: 'text', text: block.text });
+          const textBlock: Record<string, unknown> = { type: 'text', text: block.text };
+          if ((block as any).cache_control) {
+            textBlock.cache_control = (block as any).cache_control;
+          }
+          content.push(textBlock);
         } else if (block.type === 'tool_use') {
           content.push({
             type: 'tool_use',
