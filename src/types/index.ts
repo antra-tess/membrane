@@ -120,6 +120,29 @@ export type {
   BlockDelta,
 } from './streaming.js';
 
+// Yielding Stream
+export type {
+  TokensEvent,
+  StreamBlockEvent,
+  ToolCallsEvent,
+  UsageEvent,
+  CompleteEvent,
+  ErrorEvent,
+  AbortedEvent,
+  StreamEvent,
+  YieldingStream,
+  YieldingStreamOptions,
+} from './yielding-stream.js';
+
+export {
+  isTokensEvent,
+  isToolCallsEvent,
+  isCompleteEvent,
+  isErrorEvent,
+  isAbortedEvent,
+  isTerminalEvent,
+} from './yielding-stream.js';
+
 // Errors
 export type {
   MembraneErrorType,

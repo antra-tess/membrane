@@ -12,6 +12,7 @@ import type {
   ProviderResponse,
   StreamCallbacks,
 } from '../types/provider.js';
+import { abortError } from '../types/errors.js';
 
 export interface MockAdapterConfig {
   /** Default response text when no specific response is configured */
@@ -157,12 +158,15 @@ export class MockAdapter implements ProviderAdapter {
     request: ProviderRequest,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
+    // Check for abort before starting
+    this.checkAbort(options?.signal);
+
     // Call onRequest callback if provided
     options?.onRequest?.(request);
 
     // Simulate processing delay
     if (this.config.completeDelayMs > 0) {
-      await this.sleep(this.config.completeDelayMs);
+      await this.abortableSleep(this.config.completeDelayMs, options?.signal);
     }
 
     const responseText = this.getResponse(request);
@@ -185,20 +189,28 @@ export class MockAdapter implements ProviderAdapter {
     callbacks: StreamCallbacks,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
+    // Check for abort before starting
+    this.checkAbort(options?.signal);
+
     // Call onRequest callback if provided
     options?.onRequest?.(request);
 
     const responseText = this.getResponse(request);
+    let streamedText = '';
 
     // Stream the response in chunks
     let offset = 0;
     while (offset < responseText.length) {
+      // Check for abort before each chunk
+      this.checkAbort(options?.signal);
+
       const chunk = responseText.slice(offset, offset + this.config.streamChunkSize);
       callbacks.onChunk(chunk);
+      streamedText += chunk;
       offset += this.config.streamChunkSize;
 
       if (offset < responseText.length && this.config.streamChunkDelayMs > 0) {
-        await this.sleep(this.config.streamChunkDelayMs);
+        await this.abortableSleep(this.config.streamChunkDelayMs, options?.signal);
       }
     }
 
@@ -213,6 +225,34 @@ export class MockAdapter implements ProviderAdapter {
       rawRequest: request,
       raw: { mock: true, responseText },
     };
+  }
+
+  /**
+   * Check if the abort signal is set and throw if so.
+   */
+  private checkAbort(signal?: AbortSignal): void {
+    if (signal?.aborted) {
+      throw abortError('Request aborted');
+    }
+  }
+
+  /**
+   * Sleep that can be interrupted by an abort signal.
+   */
+  private abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(abortError('Request aborted'));
+        return;
+      }
+
+      const timeout = setTimeout(resolve, ms);
+
+      signal?.addEventListener('abort', () => {
+        clearTimeout(timeout);
+        reject(abortError('Request aborted'));
+      }, { once: true });
+    });
   }
 
   private sleep(ms: number): Promise<void> {

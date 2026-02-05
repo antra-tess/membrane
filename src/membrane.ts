@@ -44,8 +44,15 @@ import {
 } from './utils/tool-parser.js';
 import { IncrementalXmlParser, type ProcessChunkResult } from './utils/stream-parser.js';
 import type { ChunkMeta, BlockEvent } from './types/streaming.js';
+import type {
+  YieldingStream,
+  YieldingStreamOptions,
+  StreamEvent,
+  ToolCallsEvent,
+} from './types/yielding-stream.js';
 import type { PrefillFormatter, StreamParser } from './formatters/types.js';
 import { AnthropicXmlFormatter } from './formatters/anthropic-xml.js';
+import { YieldingStreamImpl } from './yielding-stream.js';
 
 // ============================================================================
 // Membrane Class
@@ -1416,5 +1423,684 @@ export class Membrane {
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       toolResults: toolResults.length > 0 ? toolResults : undefined,
     };
+  }
+
+  // ============================================================================
+  // Yielding Stream API
+  // ============================================================================
+
+  /**
+   * Stream inference with yielding control for tool execution.
+   *
+   * Unlike `stream()` which uses callbacks for tool execution, this method
+   * returns an async iterator that yields control back to the caller when
+   * tool calls are detected. The caller provides results via `provideToolResults()`.
+   *
+   * @example
+   * ```typescript
+   * const stream = membrane.streamYielding(request, options);
+   *
+   * for await (const event of stream) {
+   *   switch (event.type) {
+   *     case 'tokens':
+   *       process.stdout.write(event.content);
+   *       break;
+   *     case 'tool-calls':
+   *       const results = await executeTools(event.calls);
+   *       stream.provideToolResults(results);
+   *       break;
+   *     case 'complete':
+   *       console.log('Done:', event.response);
+   *       break;
+   *   }
+   * }
+   * ```
+   */
+  streamYielding(
+    request: NormalizedRequest,
+    options: YieldingStreamOptions = {}
+  ): YieldingStream {
+    const toolMode = this.resolveToolMode(request);
+
+    // Create the yielding stream with the appropriate inference runner
+    const runInference = toolMode === 'native'
+      ? (stream: YieldingStreamImpl) => this.runNativeToolsYielding(request, options, stream)
+      : (stream: YieldingStreamImpl) => this.runXmlToolsYielding(request, options, stream);
+
+    return new YieldingStreamImpl(options, runInference);
+  }
+
+  /**
+   * Run XML-based tool execution with yielding stream.
+   */
+  private async runXmlToolsYielding(
+    request: NormalizedRequest,
+    options: YieldingStreamOptions,
+    stream: YieldingStreamImpl
+  ): Promise<void> {
+    const startTime = Date.now();
+    const {
+      maxToolDepth = 10,
+      emitTokens = true,
+      emitBlocks = true,
+      emitUsage = true,
+    } = options;
+
+    // Initialize parser from formatter for format-specific tracking
+    const formatter = this.formatter;
+    const parser = formatter.createStreamParser();
+    let toolDepth = 0;
+    let totalUsage: BasicUsage = { inputTokens: 0, outputTokens: 0 };
+    const contentBlocks: ContentBlock[] = [];
+    let lastStopReason: StopReason = 'end_turn';
+    let rawRequest: unknown;
+    let rawResponse: unknown;
+
+    // Track executed tool calls and results
+    const executedToolCalls: ToolCall[] = [];
+    const executedToolResults: ToolResult[] = [];
+
+    // Transform initial request using the formatter
+    let { providerRequest, prefillResult } = this.transformRequest(request, formatter);
+
+    // Initialize parser with prefill content
+    let initialPrefillLength = 0;
+    let initialBlockType: 'thinking' | 'tool_call' | 'tool_result' | null = null;
+    if (prefillResult.assistantPrefill) {
+      parser.push(prefillResult.assistantPrefill);
+      initialPrefillLength = prefillResult.assistantPrefill.length;
+      if (parser.isInsideBlock()) {
+        const blockType = parser.getCurrentBlockType();
+        if (blockType === 'thinking' || blockType === 'tool_call' || blockType === 'tool_result') {
+          initialBlockType = blockType;
+        }
+      }
+    }
+
+    try {
+      // Tool execution loop
+      while (toolDepth <= maxToolDepth) {
+        // Check for cancellation
+        if (stream.isCancelled) {
+          const fullAccumulated = parser.getAccumulated();
+          const newContent = fullAccumulated.slice(initialPrefillLength);
+          stream.emit({
+            type: 'aborted',
+            reason: 'user',
+            partialContent: parseAccumulatedIntoBlocks(newContent).blocks,
+            rawAssistantText: newContent,
+            toolCalls: executedToolCalls,
+            toolResults: executedToolResults,
+          });
+          return;
+        }
+
+        // Track if we manually detected a stop sequence
+        let detectedStopSequence: string | null = null;
+        let truncatedAccumulated: string | null = null;
+        const checkFromIndex = parser.getAccumulated().length;
+
+        // Stream from provider
+        const streamResult = await this.streamOnce(
+          providerRequest,
+          {
+            onChunk: (chunk) => {
+              if (detectedStopSequence || stream.isCancelled) {
+                return;
+              }
+
+              // Process chunk with enriched streaming API
+              const { emissions } = parser.processChunk(chunk);
+
+              // Check for stop sequences only in NEW content
+              const accumulated = parser.getAccumulated();
+              const newContent = accumulated.slice(checkFromIndex);
+
+              for (const stopSeq of prefillResult.stopSequences) {
+                const idx = newContent.indexOf(stopSeq);
+                if (idx !== -1) {
+                  const absoluteIdx = checkFromIndex + idx;
+                  detectedStopSequence = stopSeq;
+                  truncatedAccumulated = accumulated.slice(0, absoluteIdx);
+
+                  // Emit only the portion up to stop sequence
+                  const alreadyEmitted = accumulated.length - chunk.length;
+                  if (emitTokens && absoluteIdx > alreadyEmitted) {
+                    const truncatedChunk = accumulated.slice(alreadyEmitted, absoluteIdx);
+                    const meta: ChunkMeta = {
+                      type: parser.getCurrentBlockType(),
+                      visible: parser.getCurrentBlockType() === 'text',
+                      blockIndex: 0,
+                    };
+                    stream.emit({ type: 'tokens', content: truncatedChunk, meta });
+                  }
+                  return;
+                }
+              }
+
+              // Emit in correct interleaved order
+              for (const emission of emissions) {
+                if (emission.kind === 'blockEvent') {
+                  if (emitBlocks) {
+                    stream.emit({ type: 'block', event: emission.event });
+                  }
+                } else {
+                  if (emitTokens) {
+                    stream.emit({ type: 'tokens', content: emission.text, meta: emission.meta });
+                  }
+                }
+              }
+            },
+            onContentBlock: undefined,
+          },
+          {
+            signal: stream.signal,
+          }
+        );
+
+        // If we detected stop sequence manually, fix up the parser and result
+        if (detectedStopSequence && truncatedAccumulated !== null) {
+          parser.reset();
+          parser.push(truncatedAccumulated);
+          streamResult.stopReason = 'stop_sequence';
+          streamResult.stopSequence = detectedStopSequence;
+        }
+
+        rawResponse = streamResult.raw;
+        lastStopReason = this.mapStopReason(streamResult.stopReason);
+
+        // Accumulate usage
+        totalUsage.inputTokens += streamResult.usage.inputTokens;
+        totalUsage.outputTokens += streamResult.usage.outputTokens;
+        if (emitUsage) {
+          stream.emit({ type: 'usage', usage: { ...totalUsage } });
+        }
+
+        // Flush the parser
+        const flushResult = parser.flush();
+        for (const emission of flushResult.emissions) {
+          if (emission.kind === 'blockEvent' && emitBlocks) {
+            stream.emit({ type: 'block', event: emission.event });
+          }
+        }
+
+        // Check for tool calls
+        if (streamResult.stopSequence === '</function_calls>') {
+          const closeTag = '</function_calls>';
+          parser.push(closeTag);
+
+          const parsed = parseToolCalls(parser.getAccumulated());
+
+          if (parsed && parsed.calls.length > 0) {
+            // Emit block events for each tool call
+            if (emitBlocks) {
+              for (const call of parsed.calls) {
+                const toolCallBlockIndex = parser.getBlockIndex();
+                stream.emit({
+                  type: 'block',
+                  event: {
+                    event: 'block_start',
+                    index: toolCallBlockIndex,
+                    block: { type: 'tool_call' },
+                  },
+                });
+                stream.emit({
+                  type: 'block',
+                  event: {
+                    event: 'block_complete',
+                    index: toolCallBlockIndex,
+                    block: {
+                      type: 'tool_call',
+                      toolId: call.id,
+                      toolName: call.name,
+                      input: call.input,
+                    },
+                  },
+                });
+                parser.incrementBlockIndex();
+              }
+            }
+
+            // Track the tool calls
+            executedToolCalls.push(...parsed.calls);
+
+            // Build tool context
+            const context: ToolContext = {
+              rawText: parsed.fullMatch,
+              preamble: parsed.beforeText,
+              depth: toolDepth,
+              previousResults: executedToolResults,
+              accumulated: parser.getAccumulated(),
+            };
+
+            // Yield control for tool execution
+            const toolCallsEvent: ToolCallsEvent = {
+              type: 'tool-calls',
+              calls: parsed.calls,
+              context,
+            };
+
+            const results = await stream.requestToolExecution(toolCallsEvent);
+
+            // Track the tool results
+            executedToolResults.push(...results);
+
+            // Check if results contain images
+            if (hasImageInToolResults(results)) {
+              const splitContent = formatToolResultsForSplitTurn(results);
+
+              // Emit block events for tool results
+              if (emitBlocks) {
+                stream.emit({
+                  type: 'block',
+                  event: {
+                    event: 'block_start',
+                    index: parser.getBlockIndex(),
+                    block: { type: 'tool_result' },
+                  },
+                });
+              }
+
+              parser.push(splitContent.beforeImageXml);
+
+              // Emit tool result content
+              for (const result of results) {
+                const resultContent = typeof result.content === 'string'
+                  ? result.content
+                  : JSON.stringify(result.content);
+
+                if (emitTokens) {
+                  const toolResultMeta: ChunkMeta = {
+                    type: 'tool_result',
+                    visible: false,
+                    blockIndex: parser.getBlockIndex(),
+                    toolId: result.toolUseId,
+                  };
+                  stream.emit({ type: 'tokens', content: resultContent, meta: toolResultMeta });
+                }
+
+                if (emitBlocks) {
+                  stream.emit({
+                    type: 'block',
+                    event: {
+                      event: 'block_complete',
+                      index: parser.getBlockIndex(),
+                      block: {
+                        type: 'tool_result',
+                        toolId: result.toolUseId,
+                        content: resultContent,
+                        isError: result.isError,
+                      },
+                    },
+                  });
+                }
+                parser.incrementBlockIndex();
+              }
+
+              let afterImageXml = splitContent.afterImageXml;
+              if (request.config.thinking?.enabled) {
+                afterImageXml += '\n<thinking>';
+              }
+
+              providerRequest = this.buildContinuationRequestWithImages(
+                request,
+                prefillResult,
+                parser.getAccumulated(),
+                splitContent.images,
+                afterImageXml
+              );
+
+              parser.push(afterImageXml);
+              prefillResult.assistantPrefill = parser.getAccumulated();
+              parser.resetForNewIteration();
+            } else {
+              // Standard path: no images
+              const resultsXml = formatToolResults(results);
+
+              if (emitBlocks) {
+                stream.emit({
+                  type: 'block',
+                  event: {
+                    event: 'block_start',
+                    index: parser.getBlockIndex(),
+                    block: { type: 'tool_result' },
+                  },
+                });
+              }
+
+              parser.push(resultsXml);
+
+              for (const result of results) {
+                const resultContent = typeof result.content === 'string'
+                  ? result.content
+                  : JSON.stringify(result.content);
+
+                if (emitTokens) {
+                  const toolResultMeta: ChunkMeta = {
+                    type: 'tool_result',
+                    visible: false,
+                    blockIndex: parser.getBlockIndex(),
+                    toolId: result.toolUseId,
+                  };
+                  stream.emit({ type: 'tokens', content: resultContent, meta: toolResultMeta });
+                }
+
+                if (emitBlocks) {
+                  stream.emit({
+                    type: 'block',
+                    event: {
+                      event: 'block_complete',
+                      index: parser.getBlockIndex(),
+                      block: {
+                        type: 'tool_result',
+                        toolId: result.toolUseId,
+                        content: resultContent,
+                        isError: result.isError,
+                      },
+                    },
+                  });
+                }
+                parser.incrementBlockIndex();
+              }
+
+              if (request.config.thinking?.enabled) {
+                parser.push('\n<thinking>');
+              }
+
+              prefillResult.assistantPrefill = parser.getAccumulated();
+              providerRequest = this.buildContinuationRequest(
+                request,
+                prefillResult,
+                parser.getAccumulated()
+              );
+            }
+
+            parser.resetForNewIteration();
+            toolDepth++;
+            continue;
+          }
+        }
+
+        // Check for false-positive stop (unclosed block)
+        if (lastStopReason === 'stop_sequence' && parser.isInsideBlock()) {
+          if (streamResult.stopSequence) {
+            parser.push(streamResult.stopSequence);
+            if (emitTokens) {
+              const meta: ChunkMeta = {
+                type: parser.getCurrentBlockType(),
+                visible: parser.getCurrentBlockType() === 'text',
+                blockIndex: 0,
+              };
+              stream.emit({ type: 'tokens', content: streamResult.stopSequence, meta });
+            }
+          }
+
+          toolDepth++;
+          if (toolDepth > maxToolDepth) {
+            break;
+          }
+          prefillResult.assistantPrefill = parser.getAccumulated();
+          providerRequest = this.buildContinuationRequest(
+            request,
+            prefillResult,
+            parser.getAccumulated()
+          );
+          parser.resetForNewIteration();
+          continue;
+        }
+
+        // No more tools, we're done
+        break;
+      }
+
+      // Build final response
+      const fullAccumulated = parser.getAccumulated();
+      const newContent = fullAccumulated.slice(initialPrefillLength);
+
+      const response = this.buildFinalResponse(
+        newContent,
+        contentBlocks,
+        lastStopReason,
+        totalUsage,
+        request,
+        prefillResult,
+        startTime,
+        1,
+        rawRequest,
+        rawResponse,
+        executedToolCalls,
+        executedToolResults,
+        initialBlockType
+      );
+
+      stream.emit({ type: 'complete', response });
+    } catch (error) {
+      if (this.isAbortError(error)) {
+        const fullAccumulated = parser.getAccumulated();
+        const newContent = fullAccumulated.slice(initialPrefillLength);
+        stream.emit({
+          type: 'aborted',
+          reason: 'user',
+          partialContent: parseAccumulatedIntoBlocks(newContent).blocks,
+          rawAssistantText: newContent,
+          toolCalls: executedToolCalls,
+          toolResults: executedToolResults,
+        });
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  /**
+   * Run native tool execution with yielding stream.
+   */
+  private async runNativeToolsYielding(
+    request: NormalizedRequest,
+    options: YieldingStreamOptions,
+    stream: YieldingStreamImpl
+  ): Promise<void> {
+    const startTime = Date.now();
+    const {
+      maxToolDepth = 10,
+      emitTokens = true,
+      emitUsage = true,
+    } = options;
+
+    let toolDepth = 0;
+    let totalUsage: BasicUsage = { inputTokens: 0, outputTokens: 0 };
+    let lastStopReason: StopReason = 'end_turn';
+    let rawRequest: unknown;
+    let rawResponse: unknown;
+
+    let allTextAccumulated = '';
+    const executedToolCalls: ToolCall[] = [];
+    const executedToolResults: ToolResult[] = [];
+
+    let messages = [...request.messages];
+    let allContentBlocks: ContentBlock[] = [];
+
+    try {
+      // Tool execution loop
+      while (toolDepth <= maxToolDepth) {
+        // Check for cancellation
+        if (stream.isCancelled) {
+          stream.emit({
+            type: 'aborted',
+            reason: 'user',
+            rawAssistantText: allTextAccumulated,
+            toolCalls: executedToolCalls,
+            toolResults: executedToolResults,
+          });
+          return;
+        }
+
+        // Build provider request with native tools
+        const providerRequest = this.buildNativeToolRequest(request, messages);
+
+        // Stream from provider
+        let textAccumulated = '';
+        let blockIndex = 0;
+        const streamResult = await this.streamOnce(
+          providerRequest,
+          {
+            onChunk: (chunk) => {
+              if (stream.isCancelled) return;
+
+              textAccumulated += chunk;
+              allTextAccumulated += chunk;
+
+              if (emitTokens) {
+                const meta: ChunkMeta = {
+                  type: 'text',
+                  visible: true,
+                  blockIndex,
+                };
+                stream.emit({ type: 'tokens', content: chunk, meta });
+              }
+            },
+            onContentBlock: undefined,
+          },
+          {
+            signal: stream.signal,
+          }
+        );
+
+        rawResponse = streamResult.raw;
+        lastStopReason = this.mapStopReason(streamResult.stopReason);
+
+        // Accumulate usage
+        totalUsage.inputTokens += streamResult.usage.inputTokens;
+        totalUsage.outputTokens += streamResult.usage.outputTokens;
+        if (emitUsage) {
+          stream.emit({ type: 'usage', usage: { ...totalUsage } });
+        }
+
+        // Parse content blocks from response
+        const responseBlocks = this.parseProviderContent(streamResult.content);
+        allContentBlocks.push(...responseBlocks);
+
+        // Check for tool_use blocks
+        const toolUseBlocks = responseBlocks.filter(
+          (b): b is ContentBlock & { type: 'tool_use' } => b.type === 'tool_use'
+        );
+
+        if (toolUseBlocks.length > 0 && lastStopReason === 'tool_use') {
+          // Convert to normalized ToolCall[]
+          const toolCalls: ToolCall[] = toolUseBlocks.map(block => ({
+            id: block.id,
+            name: block.name,
+            input: block.input as Record<string, unknown>,
+          }));
+
+          // Track tool calls
+          executedToolCalls.push(...toolCalls);
+
+          // Build tool context
+          const context: ToolContext = {
+            rawText: JSON.stringify(toolUseBlocks),
+            preamble: textAccumulated,
+            depth: toolDepth,
+            previousResults: executedToolResults,
+            accumulated: allTextAccumulated,
+          };
+
+          // Yield control for tool execution
+          const toolCallsEvent: ToolCallsEvent = {
+            type: 'tool-calls',
+            calls: toolCalls,
+            context,
+          };
+
+          const results = await stream.requestToolExecution(toolCallsEvent);
+
+          // Track tool results
+          executedToolResults.push(...results);
+
+          // Add tool results to content blocks
+          for (const result of results) {
+            allContentBlocks.push({
+              type: 'tool_result',
+              toolUseId: result.toolUseId,
+              content: result.content,
+              isError: result.isError,
+            });
+          }
+
+          // Add messages for next iteration
+          messages.push({
+            participant: 'Claude',
+            content: responseBlocks,
+          });
+
+          messages.push({
+            participant: 'User',
+            content: results.map(r => ({
+              type: 'tool_result' as const,
+              toolUseId: r.toolUseId,
+              content: r.content,
+              isError: r.isError,
+            })),
+          });
+
+          toolDepth++;
+          continue;
+        }
+
+        // No more tools, we're done
+        break;
+      }
+
+      const durationMs = Date.now() - startTime;
+
+      const response: NormalizedResponse = {
+        content: allContentBlocks,
+        rawAssistantText: allTextAccumulated,
+        toolCalls: executedToolCalls,
+        toolResults: executedToolResults,
+        stopReason: lastStopReason,
+        usage: totalUsage,
+        details: {
+          stop: {
+            reason: lastStopReason,
+            wasTruncated: lastStopReason === 'max_tokens',
+          },
+          usage: { ...totalUsage },
+          timing: {
+            totalDurationMs: durationMs,
+            attempts: 1,
+          },
+          model: {
+            requested: request.config.model,
+            actual: request.config.model,
+            provider: this.adapter.name,
+          },
+          cache: {
+            markersInRequest: 0,
+            tokensCreated: 0,
+            tokensRead: 0,
+            hitRatio: 0,
+          },
+        },
+        raw: {
+          request: rawRequest,
+          response: rawResponse,
+        },
+      };
+
+      stream.emit({ type: 'complete', response });
+    } catch (error) {
+      if (this.isAbortError(error)) {
+        stream.emit({
+          type: 'aborted',
+          reason: 'user',
+          rawAssistantText: allTextAccumulated,
+          toolCalls: executedToolCalls,
+          toolResults: executedToolResults,
+        });
+      } else {
+        throw error;
+      }
+    }
   }
 }
