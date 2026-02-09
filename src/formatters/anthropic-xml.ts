@@ -312,6 +312,15 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
       });
     }
 
+    // Ensure first message is user role (required by Claude Messages API,
+    // strictly enforced by Bedrock and older Claude models)
+    if (providerMessages.length > 0 && providerMessages[0]!.role !== 'user') {
+      providerMessages.unshift({
+        role: 'user',
+        content: '[Start]',
+      });
+    }
+
     // Build stop sequences
     const stopSequences = this.buildStopSequences(messages, assistantParticipant, options);
 

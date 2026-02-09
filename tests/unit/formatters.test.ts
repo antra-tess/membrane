@@ -284,15 +284,19 @@ describe('AnthropicXmlFormatter', () => {
         promptCaching: true,
       });
 
-      // First message should be the context prefix as assistant
-      expect(result.messages.length).toBeGreaterThanOrEqual(2);
-      expect(result.messages[0]?.role).toBe('assistant');
+      // First message should be user role (required by Claude Messages API)
+      expect(result.messages.length).toBeGreaterThanOrEqual(3);
+      expect(result.messages[0]?.role).toBe('user');
+      expect(result.messages[0]?.content).toBe('[Start]');
+
+      // Second message should be the context prefix as assistant
+      expect(result.messages[1]?.role).toBe('assistant');
 
       // Should be an array with cache_control
-      const firstContent = result.messages[0]?.content as any[];
-      expect(Array.isArray(firstContent)).toBe(true);
-      expect(firstContent[0]?.text).toBe('You are a helpful assistant named Bob.');
-      expect(firstContent[0]?.cache_control).toEqual({ type: 'ephemeral' });
+      const prefixContent = result.messages[1]?.content as any[];
+      expect(Array.isArray(prefixContent)).toBe(true);
+      expect(prefixContent[0]?.text).toBe('You are a helpful assistant named Bob.');
+      expect(prefixContent[0]?.cache_control).toEqual({ type: 'ephemeral' });
 
       // Cache markers should be counted: system + prefix = 2
       expect(result.cacheMarkersApplied).toBe(2);
