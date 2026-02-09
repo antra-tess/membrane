@@ -287,7 +287,8 @@ export class GeminiAdapter implements ProviderAdapter {
     }
 
     if (request.stopSequences && request.stopSequences.length > 0) {
-      geminiRequest.generationConfig.stopSequences = request.stopSequences;
+      // Gemini API limits stop sequences to 5
+      geminiRequest.generationConfig.stopSequences = request.stopSequences.slice(0, 5);
     }
 
     // Tools
@@ -513,17 +514,17 @@ export class GeminiAdapter implements ProviderAdapter {
     if (error instanceof Error) {
       const message = error.message;
 
-      if (message.includes('429') || message.includes('RESOURCE_EXHAUSTED') || message.includes('rate')) {
+      if (message.includes('401') || message.includes('403') || message.includes('API_KEY_INVALID') || message.includes('PERMISSION_DENIED')) {
+        return authError(message, error, rawRequest);
+      }
+
+      if (message.includes('429') || message.includes('RESOURCE_EXHAUSTED')) {
         const retryMatch = message.match(/retry.after[:\s]*(\d+)/i);
         const retryAfter = retryMatch?.[1] ? parseInt(retryMatch[1], 10) * 1000 : undefined;
         return rateLimitError(message, retryAfter, error, rawRequest);
       }
 
-      if (message.includes('401') || message.includes('403') || message.includes('API_KEY_INVALID') || message.includes('PERMISSION_DENIED')) {
-        return authError(message, error, rawRequest);
-      }
-
-      if (message.includes('context') || message.includes('too long') || message.includes('token')) {
+      if (message.includes('context') || message.includes('too long') || message.includes('token limit')) {
         return contextLengthError(message, error, rawRequest);
       }
 
