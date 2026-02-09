@@ -46,3 +46,10 @@ export {
   BedrockAdapter,
   type BedrockAdapterConfig,
 } from './bedrock.js';
+
+export {
+  GeminiAdapter,
+  toGeminiParts,
+  fromGeminiParts,
+  type GeminiAdapterConfig,
+} from './gemini.js';
