@@ -885,6 +885,17 @@ export class Membrane {
             content: block.content,
             is_error: block.isError,
           });
+        } else if (block.type === 'image') {
+          if (block.source.type === 'base64') {
+            content.push({
+              type: 'image',
+              source: {
+                type: 'base64',
+                media_type: block.source.mediaType,
+                data: block.source.data,
+              },
+            });
+          }
         }
       }
       
