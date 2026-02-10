@@ -238,6 +238,49 @@ export class GeminiAdapter implements ProviderAdapter {
         }
       }
 
+      // Process any remaining data in the buffer (final chunk may not end with newline)
+      if (buffer.trim()) {
+        const remaining = buffer.trim();
+        const dataLine = remaining.startsWith('data: ') ? remaining.slice(6).trim() : remaining;
+        if (dataLine && dataLine !== '[DONE]') {
+          try {
+            const parsed = JSON.parse(dataLine) as GeminiResponse;
+            const candidate = parsed.candidates?.[0];
+
+            if (candidate?.content?.parts) {
+              for (const part of candidate.content.parts) {
+                if (part.text) {
+                  accumulated += part.text;
+                  callbacks.onChunk(part.text);
+                }
+                if (part.inlineData) {
+                  images.push({
+                    data: part.inlineData.data,
+                    mimeType: part.inlineData.mimeType,
+                  });
+                }
+                if (part.functionCall) {
+                  toolCalls.push({
+                    name: part.functionCall.name,
+                    args: part.functionCall.args,
+                  });
+                }
+              }
+            }
+
+            if (candidate?.finishReason) {
+              finishReason = candidate.finishReason;
+            }
+
+            if (parsed.usageMetadata) {
+              lastUsage = parsed.usageMetadata;
+            }
+          } catch {
+            // Final buffer wasn't valid JSON — nothing to do
+          }
+        }
+      }
+
       return {
         content: this.buildContentBlocks(accumulated, toolCalls, images),
         stopReason: this.mapFinishReason(finishReason),
