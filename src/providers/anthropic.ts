@@ -142,7 +142,9 @@ export class AnthropicAdapter implements ProviderAdapter {
       params.temperature = request.temperature;
     }
 
-    if (request.topP !== undefined) {
+    // Anthropic API rejects requests with both temperature and top_p set.
+    // When both are provided, prefer temperature (more commonly tuned) and drop top_p.
+    if (request.topP !== undefined && request.temperature === undefined) {
       params.top_p = request.topP;
     }
 

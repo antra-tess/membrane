@@ -299,7 +299,9 @@ export class OpenRouterAdapter implements ProviderAdapter {
       params.temperature = request.temperature;
     }
 
-    if (request.topP !== undefined) {
+    // Anthropic models (routed via OpenRouter) reject both temperature and top_p.
+    const isAnthropicModel = /claude|anthropic/i.test(request.model);
+    if (request.topP !== undefined && !(isAnthropicModel && request.temperature !== undefined)) {
       params.top_p = request.topP;
     }
 

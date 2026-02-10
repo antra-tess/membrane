@@ -345,7 +345,8 @@ export class BedrockAdapter implements ProviderAdapter {
       params.temperature = request.temperature;
     }
 
-    if (request.topP !== undefined) {
+    // Anthropic API (via Bedrock) rejects requests with both temperature and top_p set.
+    if (request.topP !== undefined && request.temperature === undefined) {
       params.top_p = request.topP;
     }
 
