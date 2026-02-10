@@ -140,6 +140,8 @@ export class NativeFormatter implements PrefillFormatter {
       promptCaching = false,
       cacheTtl,
       hasCacheMarker,
+      contextPrefix,
+      additionalStopSequences,
     } = options;
 
     // Build cache_control object if prompt caching is enabled
@@ -148,6 +150,18 @@ export class NativeFormatter implements PrefillFormatter {
       : undefined;
 
     const providerMessages: ProviderMessage[] = [];
+
+    // Add context prefix as first assistant message (for simulacrum seeding)
+    if (contextPrefix) {
+      const prefixBlock: Record<string, unknown> = { type: 'text', text: contextPrefix };
+      if (promptCaching && cacheControl) {
+        prefixBlock.cache_control = cacheControl;
+      }
+      providerMessages.push({
+        role: 'assistant',
+        content: [prefixBlock],
+      });
+    }
 
     // Validate simple mode participants
     if (participantMode === 'simple' && !humanParticipant) {
@@ -231,7 +245,7 @@ export class NativeFormatter implements PrefillFormatter {
     return {
       messages: mergedMessages,
       systemContent,
-      stopSequences: [], // Native mode doesn't use custom stop sequences
+      stopSequences: additionalStopSequences ?? [],
       nativeTools,
     };
   }

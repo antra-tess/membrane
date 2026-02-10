@@ -139,7 +139,14 @@ export interface NormalizedRequest {
    * '1h' = 1 hour TTL (extended caching)
    */
   cacheTtl?: '5m' | '1h';
-  
+
+  /**
+   * Context prefix for simulacrum seeding.
+   * Injected as first assistant message (before conversation history).
+   * Cached when promptCaching is enabled.
+   */
+  contextPrefix?: string;
+
   /** Provider-specific parameters (pass-through) */
   providerParams?: Record<string, unknown>;
 }

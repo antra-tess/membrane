@@ -1015,6 +1015,7 @@ export class Membrane {
       cacheTtl: request.cacheTtl,
       additionalStopSequences,
       maxParticipantsForStop,
+      contextPrefix: request.contextPrefix,
     });
 
     const providerRequest = {

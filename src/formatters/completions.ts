@@ -172,6 +172,7 @@ export class CompletionsFormatter implements PrefillFormatter {
       systemPrompt,
       additionalStopSequences,
       maxParticipantsForStop = this.config.maxParticipantsForStop,
+      contextPrefix,
     } = options;
 
     const parts: string[] = [];
@@ -190,6 +191,12 @@ export class CompletionsFormatter implements PrefillFormatter {
       if (systemText) {
         parts.push(systemText);
       }
+    }
+
+    // Add context prefix after system prompt (for simulacrum seeding)
+    if (contextPrefix) {
+      const assistantPrefix = this.config.nameFormat.replace('{name}', assistantParticipant);
+      parts.push(`${assistantPrefix}${contextPrefix}${this.config.eotToken}`);
     }
 
     // Serialize each message
