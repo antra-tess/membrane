@@ -182,6 +182,7 @@ export class GeminiAdapter implements ProviderAdapter {
       let accumulated = '';
       let finishReason = 'STOP';
       let toolCalls: { name: string; args: Record<string, unknown> }[] = [];
+      let images: { data: string; mimeType: string }[] = [];
       let lastUsage: GeminiResponse['usageMetadata'] | undefined;
       let buffer = '';
 
@@ -209,6 +210,12 @@ export class GeminiAdapter implements ProviderAdapter {
                   accumulated += part.text;
                   callbacks.onChunk(part.text);
                 }
+                if (part.inlineData) {
+                  images.push({
+                    data: part.inlineData.data,
+                    mimeType: part.inlineData.mimeType,
+                  });
+                }
                 if (part.functionCall) {
                   toolCalls.push({
                     name: part.functionCall.name,
@@ -232,7 +239,7 @@ export class GeminiAdapter implements ProviderAdapter {
       }
 
       return {
-        content: this.buildContentBlocks(accumulated, toolCalls),
+        content: this.buildContentBlocks(accumulated, toolCalls, images),
         stopReason: this.mapFinishReason(finishReason),
         stopSequence: undefined,
         usage: {
@@ -436,9 +443,16 @@ export class GeminiAdapter implements ProviderAdapter {
 
     let text = '';
     const toolCalls: { name: string; args: Record<string, unknown> }[] = [];
+    const images: { data: string; mimeType: string }[] = [];
 
     for (const part of parts) {
       if (part.text) text += part.text;
+      if (part.inlineData) {
+        images.push({
+          data: part.inlineData.data,
+          mimeType: part.inlineData.mimeType,
+        });
+      }
       if (part.functionCall) {
         toolCalls.push({
           name: part.functionCall.name,
@@ -448,7 +462,7 @@ export class GeminiAdapter implements ProviderAdapter {
     }
 
     return {
-      content: this.buildContentBlocks(text, toolCalls),
+      content: this.buildContentBlocks(text, toolCalls, images),
       stopReason: this.mapFinishReason(candidate?.finishReason),
       stopSequence: undefined,
       usage: {
@@ -466,12 +480,21 @@ export class GeminiAdapter implements ProviderAdapter {
 
   private buildContentBlocks(
     text: string,
-    toolCalls: { name: string; args: Record<string, unknown> }[]
+    toolCalls: { name: string; args: Record<string, unknown> }[],
+    images: { data: string; mimeType: string }[] = []
   ): ContentBlock[] {
     const content: ContentBlock[] = [];
 
     if (text) {
       content.push({ type: 'text', text });
+    }
+
+    for (const img of images) {
+      content.push({
+        type: 'generated_image',
+        data: img.data,
+        mimeType: img.mimeType,
+      } as ContentBlock);
     }
 
     for (const tc of toolCalls) {
