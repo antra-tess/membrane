@@ -141,7 +141,15 @@ export class AnthropicAdapter implements ProviderAdapter {
     if (request.temperature !== undefined) {
       params.temperature = request.temperature;
     }
-    
+
+    if (request.topP !== undefined) {
+      params.top_p = request.topP;
+    }
+
+    if (request.topK !== undefined) {
+      params.top_k = request.topK;
+    }
+
     if (request.stopSequences && request.stopSequences.length > 0) {
       params.stop_sequences = request.stopSequences;
     }

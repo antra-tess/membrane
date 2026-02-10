@@ -202,7 +202,19 @@ export interface ProviderRequest {
   
   /** Temperature */
   temperature?: number;
-  
+
+  /** Top P nucleus sampling */
+  topP?: number;
+
+  /** Top K sampling */
+  topK?: number;
+
+  /** Presence penalty */
+  presencePenalty?: number;
+
+  /** Frequency penalty */
+  frequencyPenalty?: number;
+
   /** Stop sequences */
   stopSequences?: string[];
   

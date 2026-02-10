@@ -278,7 +278,19 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     if (request.temperature !== undefined) {
       params.temperature = request.temperature;
     }
-    
+
+    if (request.topP !== undefined) {
+      params.top_p = request.topP;
+    }
+
+    if (request.presencePenalty !== undefined) {
+      params.presence_penalty = request.presencePenalty;
+    }
+
+    if (request.frequencyPenalty !== undefined) {
+      params.frequency_penalty = request.frequencyPenalty;
+    }
+
     if (request.stopSequences && request.stopSequences.length > 0) {
       params.stop = request.stopSequences;
     }

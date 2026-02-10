@@ -376,7 +376,19 @@ export class OpenAIAdapter implements ProviderAdapter {
     if (request.temperature !== undefined && !noTemperatureSupport(model)) {
       params.temperature = request.temperature;
     }
-    
+
+    if (request.topP !== undefined && !noTemperatureSupport(model)) {
+      params.top_p = request.topP;
+    }
+
+    if (request.presencePenalty !== undefined) {
+      params.presence_penalty = request.presencePenalty;
+    }
+
+    if (request.frequencyPenalty !== undefined) {
+      params.frequency_penalty = request.frequencyPenalty;
+    }
+
     // Reasoning models (o1, o3, o4) don't support stop sequences
     if (request.stopSequences && request.stopSequences.length > 0 && !noStopSupport(model)) {
       params.stop = request.stopSequences;

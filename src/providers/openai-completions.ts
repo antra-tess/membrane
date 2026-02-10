@@ -37,6 +37,9 @@ interface CompletionsRequest {
   prompt: string;
   max_tokens?: number;
   temperature?: number;
+  top_p?: number;
+  presence_penalty?: number;
+  frequency_penalty?: number;
   stop?: string[];
   stream?: boolean;
 }
@@ -342,6 +345,18 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
 
     if (request.temperature !== undefined) {
       params.temperature = request.temperature;
+    }
+
+    if (request.topP !== undefined) {
+      params.top_p = request.topP;
+    }
+
+    if (request.presencePenalty !== undefined) {
+      params.presence_penalty = request.presencePenalty;
+    }
+
+    if (request.frequencyPenalty !== undefined) {
+      params.frequency_penalty = request.frequencyPenalty;
     }
 
     // Generate stop sequences from participant names + EOT token + any extras

@@ -58,6 +58,8 @@ interface BedrockMessageRequest {
   }>;
   system?: string | Array<{ type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }>;
   temperature?: number;
+  top_p?: number;
+  top_k?: number;
   stop_sequences?: string[];
   tools?: unknown[];
   thinking?: { type: 'enabled'; budget_tokens: number };
@@ -341,6 +343,14 @@ export class BedrockAdapter implements ProviderAdapter {
 
     if (request.temperature !== undefined) {
       params.temperature = request.temperature;
+    }
+
+    if (request.topP !== undefined) {
+      params.top_p = request.topP;
+    }
+
+    if (request.topK !== undefined) {
+      params.top_k = request.topK;
     }
 
     if (request.stopSequences && request.stopSequences.length > 0) {

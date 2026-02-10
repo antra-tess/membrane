@@ -52,6 +52,7 @@ interface GeminiRequest {
     maxOutputTokens?: number;
     temperature?: number;
     topP?: number;
+    topK?: number;
     stopSequences?: string[];
   };
   tools?: { functionDeclarations: GeminiFunctionDeclaration[] }[];
@@ -334,6 +335,14 @@ export class GeminiAdapter implements ProviderAdapter {
 
     if (request.temperature !== undefined) {
       geminiRequest.generationConfig.temperature = request.temperature;
+    }
+
+    if (request.topP !== undefined) {
+      geminiRequest.generationConfig.topP = request.topP;
+    }
+
+    if (request.topK !== undefined) {
+      geminiRequest.generationConfig.topK = request.topK;
     }
 
     if (request.stopSequences && request.stopSequences.length > 0) {
