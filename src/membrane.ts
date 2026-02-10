@@ -233,7 +233,7 @@ export class Membrane {
     // Initialize parser from formatter for format-specific tracking
     const parser = formatter.createStreamParser();
     let toolDepth = 0;
-    let totalUsage: BasicUsage = { inputTokens: 0, outputTokens: 0 };
+    let totalUsage: DetailedUsage = { inputTokens: 0, outputTokens: 0 };
     const contentBlocks: ContentBlock[] = [];
     let lastStopReason: StopReason = 'end_turn';
     let rawRequest: unknown;
@@ -352,9 +352,15 @@ export class Membrane {
 
         lastStopReason = this.mapStopReason(streamResult.stopReason);
 
-        // Accumulate usage
+        // Accumulate usage (including cache metrics)
         totalUsage.inputTokens += streamResult.usage.inputTokens;
         totalUsage.outputTokens += streamResult.usage.outputTokens;
+        if (streamResult.usage.cacheCreationTokens) {
+          totalUsage.cacheCreationTokens = (totalUsage.cacheCreationTokens ?? 0) + streamResult.usage.cacheCreationTokens;
+        }
+        if (streamResult.usage.cacheReadTokens) {
+          totalUsage.cacheReadTokens = (totalUsage.cacheReadTokens ?? 0) + streamResult.usage.cacheReadTokens;
+        }
         onUsage?.(totalUsage);
 
         // Flush the parser to complete any in-progress streaming block
@@ -649,7 +655,7 @@ export class Membrane {
     } = options;
 
     let toolDepth = 0;
-    let totalUsage: BasicUsage = { inputTokens: 0, outputTokens: 0 };
+    let totalUsage: DetailedUsage = { inputTokens: 0, outputTokens: 0 };
     let lastStopReason: StopReason = 'end_turn';
     let rawRequest: unknown;
     let rawResponse: unknown;
@@ -709,9 +715,15 @@ export class Membrane {
 
         lastStopReason = this.mapStopReason(streamResult.stopReason);
 
-        // Accumulate usage
+        // Accumulate usage (including cache metrics)
         totalUsage.inputTokens += streamResult.usage.inputTokens;
         totalUsage.outputTokens += streamResult.usage.outputTokens;
+        if (streamResult.usage.cacheCreationTokens) {
+          totalUsage.cacheCreationTokens = (totalUsage.cacheCreationTokens ?? 0) + streamResult.usage.cacheCreationTokens;
+        }
+        if (streamResult.usage.cacheReadTokens) {
+          totalUsage.cacheReadTokens = (totalUsage.cacheReadTokens ?? 0) + streamResult.usage.cacheReadTokens;
+        }
         onUsage?.(totalUsage);
 
         // Parse content blocks from response
@@ -822,9 +834,9 @@ export class Membrane {
           },
           cache: {
             markersInRequest: 0,
-            tokensCreated: 0,
-            tokensRead: 0,
-            hitRatio: 0,
+            tokensCreated: totalUsage.cacheCreationTokens ?? 0,
+            tokensRead: totalUsage.cacheReadTokens ?? 0,
+            hitRatio: this.calculateCacheHitRatio(totalUsage),
           },
         },
         raw: {
@@ -1272,7 +1284,7 @@ export class Membrane {
     accumulated: string,
     contentBlocks: ContentBlock[],
     stopReason: StopReason,
-    usage: BasicUsage,
+    usage: DetailedUsage,
     request: NormalizedRequest,
     prefillResult: {
       cacheMarkersApplied?: number;
@@ -1334,10 +1346,10 @@ export class Membrane {
           provider: this.adapter.name,
         },
         cache: {
-          markersInRequest: 0,
-          tokensCreated: 0,
-          tokensRead: 0,
-          hitRatio: 0,
+          markersInRequest: prefillResult.cacheMarkersApplied ?? 0,
+          tokensCreated: usage.cacheCreationTokens ?? 0,
+          tokensRead: usage.cacheReadTokens ?? 0,
+          hitRatio: this.calculateCacheHitRatio(usage),
         },
       },
       raw: {
