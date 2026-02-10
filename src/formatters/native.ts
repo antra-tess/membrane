@@ -137,7 +137,15 @@ export class NativeFormatter implements PrefillFormatter {
       humanParticipant,
       tools,
       systemPrompt,
+      promptCaching = false,
+      cacheTtl,
+      hasCacheMarker,
     } = options;
+
+    // Build cache_control object if prompt caching is enabled
+    const cacheControl: Record<string, unknown> | undefined = promptCaching
+      ? { type: 'ephemeral', ...(cacheTtl ? { ttl: cacheTtl } : {}) }
+      : undefined;
 
     const providerMessages: ProviderMessage[] = [];
 
@@ -146,7 +154,10 @@ export class NativeFormatter implements PrefillFormatter {
       throw new Error('NativeFormatter in simple mode requires humanParticipant option');
     }
 
-    for (const message of messages) {
+    for (let i = 0; i < messages.length; i++) {
+      const message = messages[i];
+      if (!message) continue;
+
       // Determine role
       const isAssistant = message.participant === assistantParticipant;
 
@@ -171,18 +182,47 @@ export class NativeFormatter implements PrefillFormatter {
         continue; // Skip empty messages
       }
 
+      // hasCacheMarker: cache boundary is BEFORE this message — tag previous message's last block
+      if (hasCacheMarker && hasCacheMarker(message, i) && cacheControl && providerMessages.length > 0) {
+        const prevMsg = providerMessages[providerMessages.length - 1]!;
+        const prevContent = Array.isArray(prevMsg.content) ? prevMsg.content as Record<string, unknown>[] : [];
+        if (prevContent.length > 0) {
+          prevContent[prevContent.length - 1]!.cache_control = cacheControl;
+        }
+      }
+
       providerMessages.push({ role, content });
+
+      // cacheBreakpoint: cache up to and INCLUDING this message — tag last block
+      if (message.cacheBreakpoint && cacheControl && content.length > 0) {
+        (content[content.length - 1] as Record<string, unknown>).cache_control = cacheControl;
+      }
     }
 
     // Merge consecutive same-role messages (API requires alternating)
     const mergedMessages = this.mergeConsecutiveRoles(providerMessages);
 
-    // Build system content
+    // Build system content with optional cache control
     let systemContent: unknown;
     if (typeof systemPrompt === 'string') {
-      systemContent = systemPrompt;
+      if (cacheControl) {
+        // Must use array format for cache_control support
+        systemContent = [{ type: 'text', text: systemPrompt, cache_control: cacheControl }];
+      } else {
+        systemContent = systemPrompt;
+      }
     } else if (Array.isArray(systemPrompt)) {
-      systemContent = systemPrompt;
+      if (cacheControl && systemPrompt.length > 0) {
+        // Add cache_control to the last system block
+        systemContent = systemPrompt.map((block, idx) => {
+          if (idx === systemPrompt.length - 1) {
+            return { ...block, cache_control: cacheControl };
+          }
+          return block;
+        });
+      } else {
+        systemContent = systemPrompt;
+      }
     }
 
     // Native tools
