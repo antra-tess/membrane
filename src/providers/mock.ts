@@ -246,12 +246,17 @@ export class MockAdapter implements ProviderAdapter {
         return;
       }
 
-      const timeout = setTimeout(resolve, ms);
-
-      signal?.addEventListener('abort', () => {
+      const onAbort = () => {
         clearTimeout(timeout);
         reject(abortError('Request aborted'));
-      }, { once: true });
+      };
+
+      const timeout = setTimeout(() => {
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+
+      signal?.addEventListener('abort', onAbort, { once: true });
     });
   }
 

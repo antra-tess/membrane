@@ -1021,7 +1021,7 @@ export class Membrane {
   private async streamOnce(
     request: any,
     callbacks: { onChunk: (chunk: string) => void; onContentBlock?: (index: number, block: unknown) => void },
-    options: { signal?: AbortSignal; onRequest?: (rawRequest: unknown) => void }
+    options: { signal?: AbortSignal; timeoutMs?: number; onRequest?: (rawRequest: unknown) => void }
   ) {
     return await this.adapter.stream(request, callbacks, options);
   }
@@ -1595,6 +1595,8 @@ export class Membrane {
           },
           {
             signal: stream.signal,
+            timeoutMs: options.timeoutMs,
+            onRequest: (req: unknown) => { rawRequest = req; },
           }
         );
 
@@ -1963,6 +1965,8 @@ export class Membrane {
           },
           {
             signal: stream.signal,
+            timeoutMs: options.timeoutMs,
+            onRequest: (req: unknown) => { rawRequest = req; },
           }
         );
 

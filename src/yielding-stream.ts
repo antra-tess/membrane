@@ -139,6 +139,9 @@ export class YieldingStreamImpl implements YieldingStream {
       this.pendingToolResults = null;
     }
 
+    // Emit aborted event and wake the iterator so it can deliver it
+    this.emit({ type: 'aborted', reason: 'user' });
+    this.producerDone = true;
     this.state = { status: 'done' };
   }
 
