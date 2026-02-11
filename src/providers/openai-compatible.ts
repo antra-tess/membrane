@@ -291,8 +291,9 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       params.frequency_penalty = request.frequencyPenalty;
     }
 
+    // OpenAI-compatible APIs may limit stop sequences (OpenAI: 4) — truncate to be safe
     if (request.stopSequences && request.stopSequences.length > 0) {
-      params.stop = request.stopSequences;
+      params.stop = request.stopSequences.slice(0, 4);
     }
     
     if (request.tools && request.tools.length > 0) {

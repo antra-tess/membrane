@@ -390,8 +390,9 @@ export class OpenAIAdapter implements ProviderAdapter {
     }
 
     // Reasoning models (o1, o3, o4) don't support stop sequences
+    // OpenAI limits stop sequences to 4 — truncate to fit
     if (request.stopSequences && request.stopSequences.length > 0 && !noStopSupport(model)) {
-      params.stop = request.stopSequences;
+      params.stop = request.stopSequences.slice(0, 4);
     }
     
     if (request.tools && request.tools.length > 0) {
