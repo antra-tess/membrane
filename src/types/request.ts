@@ -147,6 +147,13 @@ export interface NormalizedRequest {
    */
   contextPrefix?: string;
 
+  /**
+   * Custom content for the synthetic user message injected when the first
+   * provider message is an assistant turn (required by Claude Messages API).
+   * Defaults to '[Start]' if not specified.
+   */
+  prefillUserMessage?: string;
+
   /** Provider-specific parameters (pass-through) */
   providerParams?: Record<string, unknown>;
 }

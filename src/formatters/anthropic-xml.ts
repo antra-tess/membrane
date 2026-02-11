@@ -107,6 +107,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
       promptCaching = false,
       cacheTtl,
       contextPrefix,
+      prefillUserMessage,
       hasCacheMarker,
     } = options;
 
@@ -317,7 +318,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     if (providerMessages.length > 0 && providerMessages[0]!.role !== 'user') {
       providerMessages.unshift({
         role: 'user',
-        content: '[Start]',
+        content: prefillUserMessage || '[Start]',
       });
     }
 

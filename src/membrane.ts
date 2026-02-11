@@ -1016,6 +1016,7 @@ export class Membrane {
       additionalStopSequences,
       maxParticipantsForStop,
       contextPrefix: request.contextPrefix,
+      prefillUserMessage: request.prefillUserMessage,
     });
 
     const providerRequest = {

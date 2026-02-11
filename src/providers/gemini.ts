@@ -463,6 +463,7 @@ export class GeminiAdapter implements ProviderAdapter {
     }
 
     // Gemini also requires the first message to be "user"
+    // TODO: Accept prefillUserMessage from request when Gemini bots need C2 migration
     if (merged.length > 0 && merged[0]!.role !== 'user') {
       merged.unshift({ role: 'user', parts: [{ text: '[Start]' }] });
     }

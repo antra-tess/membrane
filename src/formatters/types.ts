@@ -70,6 +70,10 @@ export interface BuildOptions {
   /** Context prefix for simulacrum seeding (injected as first cached assistant message) */
   contextPrefix?: string;
 
+  /** Custom content for the synthetic user message when first message is assistant role.
+   *  Defaults to '[Start]' if not specified. */
+  prefillUserMessage?: string;
+
   /**
    * Function to check if a message has a cache marker.
    * When provided, content before the marked message gets cache_control.
