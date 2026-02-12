@@ -308,7 +308,7 @@ export class GeminiAdapter implements ProviderAdapter {
   // --------------------------------------------------------------------------
 
   private buildRequest(request: ProviderRequest): GeminiRequest {
-    const contents = this.convertMessages(request.messages as any[]);
+    const contents = this.convertMessages(request.messages as any[], request.model);
     const maxTokens = request.maxTokens || this.defaultMaxTokens;
 
     const geminiRequest: GeminiRequest = { contents };
@@ -375,8 +375,14 @@ export class GeminiAdapter implements ProviderAdapter {
     return geminiRequest;
   }
 
-  private convertMessages(messages: any[]): GeminiContent[] {
+  private convertMessages(messages: any[], model?: string): GeminiContent[] {
     const contents: GeminiContent[] = [];
+
+    // Gemini 3.x models require thought_signature on image parts in context.
+    // Since images from other sources (user uploads, other models) don't carry
+    // thought signatures, strip images from context for these models to avoid
+    // 400 INVALID_ARGUMENT errors. They can still GENERATE images via responseModalities.
+    const stripContextImages = model?.startsWith('gemini-3');
 
     for (const msg of messages) {
       const role: 'user' | 'model' = msg.role === 'assistant' ? 'model' : 'user';
@@ -396,6 +402,9 @@ export class GeminiAdapter implements ProviderAdapter {
           if (block.type === 'text') {
             if (block.text) parts.push({ text: block.text });
           } else if (block.type === 'image') {
+            // Skip images in context for models that require thought_signature
+            if (stripContextImages) continue;
+
             // Anthropic image format → Gemini inlineData
             const source = block.source;
             if (source?.type === 'base64' && source.data) {
