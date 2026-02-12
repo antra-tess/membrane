@@ -250,6 +250,10 @@ export class Membrane {
     const executedToolCalls: ToolCall[] = [];
     const executedToolResults: ToolResult[] = [];
 
+    // Track non-text content blocks from provider (e.g., generated_image from Gemini)
+    // These can't be handled by the text-based XML parser, so we capture and append them
+    const extraContentBlocks: ContentBlock[] = [];
+
     // Transform initial request using the formatter
     let { providerRequest, prefillResult } = this.transformRequest(request, formatter);
 
@@ -350,6 +354,20 @@ export class Membrane {
           parser.push(truncatedAccumulated);
           streamResult.stopReason = 'stop_sequence';
           streamResult.stopSequence = detectedStopSequence;
+        }
+
+        // Capture non-text content blocks from provider response (e.g., generated_image from Gemini)
+        // The XML parser only handles text — binary content blocks need to be preserved separately
+        if (Array.isArray(streamResult.content)) {
+          for (const block of streamResult.content) {
+            if (block.type === 'generated_image') {
+              extraContentBlocks.push({
+                type: 'generated_image',
+                data: (block as any).data,
+                mimeType: (block as any).mimeType,
+              } as ContentBlock);
+            }
+          }
         }
 
         rawResponse = streamResult.raw;
@@ -605,7 +623,7 @@ export class Membrane {
       const fullAccumulated = parser.getAccumulated();
       const newContent = fullAccumulated.slice(initialPrefillLength);
 
-      return this.buildFinalResponse(
+      const response = this.buildFinalResponse(
         newContent,
         contentBlocks,
         lastStopReason,
@@ -620,6 +638,13 @@ export class Membrane {
         executedToolResults,
         initialBlockType
       );
+
+      // Append non-text content blocks (e.g., generated_image) that the XML parser can't handle
+      if (extraContentBlocks.length > 0) {
+        response.content.push(...extraContentBlocks);
+      }
+
+      return response;
     } catch (error) {
       // Check if this is an abort error
       if (this.isAbortError(error)) {
@@ -975,6 +1000,12 @@ export class Membrane {
             thinking: item.thinking,
             signature: item.signature,
           });
+        } else if (item.type === 'generated_image') {
+          blocks.push({
+            type: 'generated_image',
+            data: item.data,
+            mimeType: item.mimeType,
+          });
         }
       }
       return blocks;
@@ -1209,6 +1240,12 @@ export class Membrane {
             type: 'thinking',
             thinking: block.thinking,
             signature: block.signature,
+          });
+        } else if (block.type === 'generated_image') {
+          content.push({
+            type: 'generated_image',
+            data: block.data,
+            mimeType: block.mimeType,
           });
         }
       }

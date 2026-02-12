@@ -54,6 +54,7 @@ interface GeminiRequest {
     topP?: number;
     topK?: number;
     stopSequences?: string[];
+    responseModalities?: string[];
   };
   tools?: { functionDeclarations: GeminiFunctionDeclaration[] }[];
 }
@@ -350,6 +351,11 @@ export class GeminiAdapter implements ProviderAdapter {
       geminiRequest.generationConfig.stopSequences = request.stopSequences.slice(0, 5);
     }
 
+    // Auto-detect image generation models by name
+    if (request.model?.includes('image')) {
+      geminiRequest.generationConfig.responseModalities = ['TEXT', 'IMAGE'];
+    }
+
     // Tools
     if (request.tools && request.tools.length > 0) {
       geminiRequest.tools = [{
@@ -357,10 +363,13 @@ export class GeminiAdapter implements ProviderAdapter {
       }];
     }
 
-    // Extra params
+    // Extra params — deep-merge generationConfig to preserve auto-detected settings
     if (request.extra) {
-      const { normalizedMessages, prompt, ...rest } = request.extra as Record<string, unknown>;
+      const { normalizedMessages, prompt, generationConfig: extraGenConfig, ...rest } = request.extra as Record<string, unknown>;
       Object.assign(geminiRequest, rest);
+      if (extraGenConfig && typeof extraGenConfig === 'object') {
+        Object.assign(geminiRequest.generationConfig, extraGenConfig);
+      }
     }
 
     return geminiRequest;
