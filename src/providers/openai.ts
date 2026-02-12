@@ -449,16 +449,21 @@ export class OpenAIAdapter implements ProviderAdapter {
           return toolResults;
         }
         
+        // Skip messages with no usable content (image-only, embed-only messages)
+        if (textParts.length === 0 && toolCalls.length === 0) {
+          return [];
+        }
+
         // Otherwise build normal message
         const result: OpenAIMessage = {
           role: msg.role,
-          content: textParts.join('\n') || null,
+          content: textParts.length > 0 ? textParts.join('\n') : null,
         };
-        
+
         if (toolCalls.length > 0) {
           result.tool_calls = toolCalls;
         }
-        
+
         return [result];
       }
       

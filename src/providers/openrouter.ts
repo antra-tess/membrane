@@ -407,17 +407,22 @@ export class OpenRouterAdapter implements ProviderAdapter {
           return toolResults;
         }
         
+        // Skip messages with no usable content (image-only, embed-only messages)
+        if (textParts.length === 0 && toolCalls.length === 0) {
+          return [];
+        }
+
         // Otherwise build normal message
         const result: OpenRouterMessage = {
           role: msg.role,
           // Use content blocks array if caching is in use, otherwise concatenate text
-          content: hasCache ? contentBlocks : (textParts.join('\n') || null),
+          content: hasCache ? contentBlocks : (textParts.length > 0 ? textParts.join('\n') : null),
         };
-        
+
         if (toolCalls.length > 0) {
           result.tool_calls = toolCalls;
         }
-        
+
         return [result];
       }
       
