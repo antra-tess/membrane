@@ -417,17 +417,19 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     const toolsForPrompt: ToolDefinitionForPrompt[] = tools.map((tool) => ({
       name: tool.name,
       description: tool.description,
-      parameters: Object.fromEntries(
-        Object.entries(tool.inputSchema.properties).map(([name, schema]) => [
-          name,
-          {
-            type: schema.type,
-            description: schema.description,
-            required: tool.inputSchema.required?.includes(name),
-            enum: schema.enum,
-          },
-        ])
-      ),
+      parameters: tool.inputSchema.properties
+        ? Object.fromEntries(
+            Object.entries(tool.inputSchema.properties).map(([name, schema]) => [
+              name,
+              {
+                type: schema.type,
+                description: schema.description,
+                required: tool.inputSchema.required?.includes(name),
+                enum: schema.enum,
+              },
+            ])
+          )
+        : {},
     }));
 
     return formatToolDefinitions(toolsForPrompt);
