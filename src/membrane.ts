@@ -902,8 +902,11 @@ export class Membrane {
     // Convert messages to provider format
     const providerMessages: any[] = [];
     
+    const assistantName = request.assistantParticipant
+      ?? this.config.assistantParticipant ?? 'Claude';
+
     for (const msg of messages) {
-      const isAssistant = msg.participant === 'Claude';
+      const isAssistant = msg.participant === assistantName;
       const role = isAssistant ? 'assistant' : 'user';
       
       // Convert content blocks
