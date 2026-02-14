@@ -1,17 +1,25 @@
 /**
- * OpenAI Responses API provider adapter
+ * OpenAI Images API provider adapter
  *
- * Adapter for OpenAI's `/v1/responses` endpoint, required for image generation
- * models like `gpt-image-1`. The Responses API differs from Chat Completions:
+ * Adapter for OpenAI's Images API endpoints, used for image generation
+ * models like `gpt-image-1`:
  *
- * - Uses `input` array instead of `messages`
- * - Content types: `input_text` / `input_image` (not `text` / `image_url`)
- * - Image generation is a tool: `{"type": "image_generation"}`
- * - Generated images come back as `image_generation_call` output items
- * - Streaming uses different event types
+ * - `/v1/images/generations` — text-to-image (no image input)
+ * - `/v1/images/edits` — image editing (accepts input images + prompt)
  *
- * This adapter converts membrane's ProviderRequest into the Responses API format,
- * sends the request, and converts the response back into membrane ContentBlocks.
+ * The adapter automatically selects the right endpoint:
+ * - If conversation contains images → uses /edits with images as data URLs
+ * - If text-only → uses /generations
+ *
+ * Both endpoints:
+ * - Take a single `prompt` string (not conversation messages)
+ * - Return base64-encoded images in `data[].b64_json`
+ * - No streaming support (returns complete image)
+ * - Support `size`, `quality`, `n`, `background`, `output_format`
+ *
+ * Note: File retains the name openai-responses.ts and class name
+ * OpenAIResponsesAdapter for compatibility with existing factory
+ * routing and vendor configs (`openairesponses-*` prefix).
  */
 
 import type {
@@ -33,77 +41,53 @@ import {
 } from '../types/index.js';
 
 // ============================================================================
-// Responses API Types
+// Images API Types
 // ============================================================================
 
-interface ResponsesInputTextPart {
-  type: 'input_text';
-  text: string;
-}
-
-interface ResponsesInputImagePart {
-  type: 'input_image';
-  image_url: string; // data URI: "data:image/jpeg;base64,..."
-  detail?: 'auto' | 'low' | 'high';
-}
-
-type ResponsesInputPart = ResponsesInputTextPart | ResponsesInputImagePart;
-
-interface ResponsesInputMessage {
-  role: 'user' | 'assistant' | 'system' | 'developer';
-  content: ResponsesInputPart[] | string;
-}
-
-interface ResponsesRequest {
+interface ImagesGenerateRequest {
   model: string;
-  input: (ResponsesInputMessage | string)[];
-  instructions?: string;
-  tools?: { type: string; [key: string]: unknown }[];
-  temperature?: number;
-  top_p?: number;
-  max_output_tokens?: number;
-  stream?: boolean;
+  prompt: string;
+  n?: number;
+  size?: string;
+  quality?: string;
+  background?: string;
+  output_format?: string;
   [key: string]: unknown;
 }
 
-interface ResponsesOutputText {
-  type: 'output_text';
-  text: string;
-}
-
-interface ResponsesImageGenerationCall {
-  type: 'image_generation_call';
-  id: string;
-  result: string; // base64 image data
-  status?: string;
-}
-
-type ResponsesOutputContent = ResponsesOutputText | ResponsesImageGenerationCall;
-
-interface ResponsesOutputMessage {
-  type: 'message';
-  id: string;
-  role: 'assistant';
-  content: ResponsesOutputContent[];
-}
-
-type ResponsesOutputItem = ResponsesOutputMessage | ResponsesImageGenerationCall;
-
-interface ResponsesAPIResponse {
-  id: string;
-  object: string;
+interface ImagesEditRequest {
   model: string;
-  output: ResponsesOutputItem[];
+  prompt: string;
+  image: string[];  // base64 data URLs
+  n?: number;
+  size?: string;
+  quality?: string;
+  [key: string]: unknown;
+}
+
+type ImagesRequest = ImagesGenerateRequest | ImagesEditRequest;
+
+interface ImagesResponseData {
+  b64_json?: string;
+  url?: string;
+  revised_prompt?: string;
+}
+
+interface ImagesAPIResponse {
+  created: number;
+  data: ImagesResponseData[];
   usage?: {
     input_tokens: number;
     output_tokens: number;
     total_tokens: number;
     input_tokens_details?: {
-      cached_tokens?: number;
+      text_tokens?: number;
+      image_tokens?: number;
+    };
+    output_tokens_details?: {
+      image_tokens?: number;
     };
   };
-  status?: string;
-  error?: { code: string; message: string };
 }
 
 // ============================================================================
@@ -120,12 +104,20 @@ export interface OpenAIResponsesAdapterConfig {
   /** Organization ID (optional) */
   organization?: string;
 
-  /** Default max output tokens */
+  /** Default max output tokens (unused by Images API, kept for interface compat) */
   defaultMaxTokens?: number;
+
+  /**
+   * Whether to allow image editing via /v1/images/edits when images
+   * are present in the conversation context. When true (default),
+   * the adapter auto-detects images and routes to the edits endpoint.
+   * When false, always uses /v1/images/generations (text-only).
+   */
+  allowImageEditing?: boolean;
 }
 
 // ============================================================================
-// OpenAI Responses Adapter
+// OpenAI Images Adapter
 // ============================================================================
 
 export class OpenAIResponsesAdapter implements ProviderAdapter {
@@ -133,13 +125,13 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
   private apiKey: string;
   private baseURL: string;
   private organization?: string;
-  private defaultMaxTokens: number;
+  private allowImageEditing: boolean;
 
   constructor(config: OpenAIResponsesAdapterConfig = {}) {
     this.apiKey = config.apiKey ?? process.env.OPENAI_API_KEY ?? '';
     this.baseURL = (config.baseURL ?? 'https://api.openai.com/v1').replace(/\/$/, '');
     this.organization = config.organization;
-    this.defaultMaxTokens = config.defaultMaxTokens ?? 4096;
+    this.allowImageEditing = config.allowImageEditing ?? true;
 
     if (!this.apiKey) {
       throw new Error('OpenAI API key not provided');
@@ -154,31 +146,58 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
     request: ProviderRequest,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const responsesRequest = this.buildRequest(request);
-    options?.onRequest?.(responsesRequest);
+    const inputImages = this.allowImageEditing ? this.extractImages(request) : [];
+    const isEdit = inputImages.length > 0;
+    const endpoint = isEdit ? 'images/edits' : 'images/generations';
+    const imagesRequest = this.buildRequest(request, inputImages);
+    options?.onRequest?.(imagesRequest);
 
     try {
-      const response = await fetch(`${this.baseURL}/responses`, {
+      const fetchOptions: RequestInit = {
         method: 'POST',
-        headers: this.getHeaders(),
-        body: JSON.stringify(responsesRequest),
         signal: options?.signal,
-      });
+      };
+
+      if (isEdit) {
+        // /v1/images/edits requires multipart/form-data with file uploads
+        const formData = new FormData();
+        formData.append('model', imagesRequest.model);
+        formData.append('prompt', imagesRequest.prompt);
+        if (imagesRequest.n != null) formData.append('n', String(imagesRequest.n));
+        if (imagesRequest.quality) formData.append('quality', String(imagesRequest.quality));
+        if (imagesRequest.size) formData.append('size', String(imagesRequest.size));
+
+        // Convert base64 data URLs to Blobs and append as file uploads
+        for (const dataUrl of inputImages) {
+          const { buffer, mimeType } = this.dataUrlToBuffer(dataUrl);
+          const ext = mimeType.split('/')[1] || 'png';
+          const blob = new Blob([buffer], { type: mimeType });
+          formData.append('image[]', blob, `image.${ext}`);
+        }
+
+        // Auth header only — don't set Content-Type, let fetch set multipart boundary
+        fetchOptions.headers = {
+          Authorization: `Bearer ${this.apiKey}`,
+          ...(this.organization ? { 'OpenAI-Organization': this.organization } : {}),
+        };
+        fetchOptions.body = formData;
+      } else {
+        // /v1/images/generations accepts JSON
+        fetchOptions.headers = this.getHeaders();
+        fetchOptions.body = JSON.stringify(imagesRequest);
+      }
+
+      const response = await fetch(`${this.baseURL}/${endpoint}`, fetchOptions);
 
       if (!response.ok) {
         const errorText = await response.text();
-        throw new Error(`OpenAI Responses API error: ${response.status} ${errorText}`);
+        throw new Error(`OpenAI Images API error: ${response.status} ${errorText}`);
       }
 
-      const data = (await response.json()) as ResponsesAPIResponse;
-
-      if (data.error) {
-        throw new Error(`OpenAI Responses API error: ${data.error.code} ${data.error.message}`);
-      }
-
-      return this.parseResponse(data, request.model, responsesRequest);
+      const data = (await response.json()) as ImagesAPIResponse;
+      return this.parseResponse(data, request.model, imagesRequest);
     } catch (error) {
-      throw this.handleError(error, responsesRequest);
+      throw this.handleError(error, imagesRequest);
     }
   }
 
@@ -187,135 +206,18 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
     callbacks: StreamCallbacks,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const responsesRequest = this.buildRequest(request);
-    responsesRequest.stream = true;
-    options?.onRequest?.(responsesRequest);
+    // Images API doesn't support streaming — do a full request
+    // and emit any text content as a single chunk
+    const response = await this.complete(request, options);
 
-    try {
-      const response = await fetch(`${this.baseURL}/responses`, {
-        method: 'POST',
-        headers: this.getHeaders(),
-        body: JSON.stringify(responsesRequest),
-        signal: options?.signal,
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`OpenAI Responses API error: ${response.status} ${errorText}`);
+    const blocks = response.content as ContentBlock[];
+    for (const block of blocks) {
+      if (block.type === 'text' && (block as any).text) {
+        callbacks.onChunk((block as any).text);
       }
-
-      const reader = response.body?.getReader();
-      if (!reader) {
-        throw new Error('No response body');
-      }
-
-      const decoder = new TextDecoder();
-      let accumulated = '';
-      let images: { data: string; mimeType: string }[] = [];
-      let lastUsage: ResponsesAPIResponse['usage'] | undefined;
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const data = line.slice(6).trim();
-          if (!data || data === '[DONE]') continue;
-
-          try {
-            const parsed = JSON.parse(data);
-
-            // Handle text deltas
-            if (parsed.type === 'response.output_text.delta') {
-              const delta = parsed.delta ?? '';
-              accumulated += delta;
-              callbacks.onChunk(delta);
-            }
-
-            // Handle completed text
-            if (parsed.type === 'response.output_text.done') {
-              // Text already accumulated via deltas
-            }
-
-            // Handle image generation results
-            if (parsed.type === 'response.image_generation_call.done') {
-              if (parsed.result) {
-                images.push({
-                  data: parsed.result,
-                  mimeType: 'image/png',
-                });
-              }
-            }
-
-            // Handle completed response (has usage)
-            if (parsed.type === 'response.completed' || parsed.type === 'response.done') {
-              const resp = parsed.response ?? parsed;
-              if (resp.usage) {
-                lastUsage = resp.usage;
-              }
-              // Extract any images from the completed response output
-              if (resp.output) {
-                for (const item of resp.output) {
-                  if (item.type === 'image_generation_call' && item.result) {
-                    // Only add if not already captured via streaming events
-                    const alreadyCaptured = images.some(img => img.data === item.result);
-                    if (!alreadyCaptured) {
-                      images.push({
-                        data: item.result,
-                        mimeType: 'image/png',
-                      });
-                    }
-                  }
-                }
-              }
-            }
-          } catch {
-            // Ignore parse errors in stream chunks
-          }
-        }
-      }
-
-      // Process remaining buffer
-      if (buffer.trim()) {
-        const remaining = buffer.trim();
-        const dataLine = remaining.startsWith('data: ') ? remaining.slice(6).trim() : remaining;
-        if (dataLine && dataLine !== '[DONE]') {
-          try {
-            const parsed = JSON.parse(dataLine);
-            if (parsed.type === 'response.completed' || parsed.type === 'response.done') {
-              const resp = parsed.response ?? parsed;
-              if (resp.usage) lastUsage = resp.usage;
-            }
-          } catch {
-            // Final buffer wasn't valid JSON
-          }
-        }
-      }
-
-      const cachedTokens = lastUsage?.input_tokens_details?.cached_tokens ?? 0;
-
-      return {
-        content: this.buildContentBlocks(accumulated, images),
-        stopReason: 'end_turn',
-        stopSequence: undefined,
-        usage: {
-          inputTokens: lastUsage?.input_tokens ?? 0,
-          outputTokens: lastUsage?.output_tokens ?? 0,
-          cacheReadTokens: cachedTokens > 0 ? cachedTokens : undefined,
-        },
-        model: request.model,
-        rawRequest: responsesRequest,
-        raw: { usage: lastUsage },
-      };
-    } catch (error) {
-      throw this.handleError(error, responsesRequest);
     }
+
+    return response;
   }
 
   // --------------------------------------------------------------------------
@@ -335,17 +237,86 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
     return headers;
   }
 
-  private buildRequest(request: ProviderRequest): ResponsesRequest {
-    const input = this.convertMessages(request.messages as any[]);
-    const maxTokens = request.maxTokens || this.defaultMaxTokens;
+  /**
+   * Extract base64 images from conversation messages as data URLs.
+   * Used to determine whether to use /edits (with images) or /generations.
+   * Returns up to 16 images (OpenAI limit for /v1/images/edits).
+   */
+  private extractImages(request: ProviderRequest): string[] {
+    const dataUrls: string[] = [];
+    const MAX_IMAGES = 16;
 
-    const responsesRequest: ResponsesRequest = {
+    if (!request.messages) return dataUrls;
+
+    for (const msg of request.messages as any[]) {
+      if (!Array.isArray(msg.content)) continue;
+
+      for (const block of msg.content) {
+        if (dataUrls.length >= MAX_IMAGES) break;
+
+        if (block.type === 'image') {
+          const source = block.source;
+          if (source?.type === 'base64' && source.data) {
+            const mimeType = source.media_type ?? source.mediaType ?? 'image/png';
+            dataUrls.push(`data:${mimeType};base64,${source.data}`);
+          }
+        }
+      }
+    }
+
+    return dataUrls;
+  }
+
+  /**
+   * Convert a base64 data URL to a Buffer + mimeType for file upload.
+   */
+  private dataUrlToBuffer(dataUrl: string): { buffer: Buffer; mimeType: string } {
+    const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/s);
+    if (!match || !match[1] || !match[2]) {
+      throw new Error('Invalid data URL format');
+    }
+    return {
+      mimeType: match[1],
+      buffer: Buffer.from(match[2], 'base64'),
+    };
+  }
+
+  private buildRequest(request: ProviderRequest, inputImages: string[]): ImagesRequest {
+    const prompt = this.flattenToPrompt(request);
+
+    const imagesRequest: ImagesRequest = {
       model: request.model,
-      input,
-      max_output_tokens: maxTokens,
+      prompt,
+      n: 1,
+      quality: 'auto',
     };
 
-    // System prompt → instructions
+    // Include input images for the /edits endpoint
+    if (inputImages.length > 0) {
+      (imagesRequest as ImagesEditRequest).image = inputImages;
+    }
+
+    // Apply extra params (allow overriding size, quality, n, etc.)
+    if (request.extra) {
+      const { normalizedMessages, prompt: _p, ...rest } = request.extra as Record<string, unknown>;
+      Object.assign(imagesRequest, rest);
+    }
+
+    return imagesRequest;
+  }
+
+  /**
+   * Flatten conversation messages into a single prompt string.
+   *
+   * The Images API takes a single text prompt, not a conversation.
+   * We include the system prompt as context and concatenate all
+   * message text with role labels so the model understands the
+   * full conversation when deciding what image to generate.
+   */
+  private flattenToPrompt(request: ProviderRequest): string {
+    const parts: string[] = [];
+
+    // Include system prompt as context
     if (request.system) {
       const systemText =
         typeof request.system === 'string'
@@ -356,94 +327,32 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
               .join('\n');
 
       if (systemText) {
-        responsesRequest.instructions = systemText;
+        parts.push(systemText);
       }
     }
 
-    if (request.temperature !== undefined) {
-      responsesRequest.temperature = request.temperature;
-    }
+    // Extract text from messages with role labels
+    if (request.messages) {
+      for (const msg of request.messages as any[]) {
+        const role = msg.role === 'assistant' ? 'Assistant' : 'User';
+        let text = '';
 
-    if (request.topP !== undefined) {
-      responsesRequest.top_p = request.topP;
-    }
-
-    // Auto-include image_generation tool for image models
-    if (request.model?.includes('image')) {
-      responsesRequest.tools = [{ type: 'image_generation' }];
-    }
-
-    // Apply extra params (filter out internal membrane fields)
-    if (request.extra) {
-      const { normalizedMessages, prompt, ...rest } = request.extra as Record<string, unknown>;
-      Object.assign(responsesRequest, rest);
-    }
-
-    return responsesRequest;
-  }
-
-  private convertMessages(messages: any[]): ResponsesInputMessage[] {
-    const result: ResponsesInputMessage[] = [];
-
-    for (const msg of messages) {
-      const role = this.mapRole(msg.role);
-
-      // Simple string content
-      if (typeof msg.content === 'string') {
-        result.push({ role, content: msg.content });
-        continue;
-      }
-
-      // Array content blocks (Anthropic-style)
-      if (Array.isArray(msg.content)) {
-        const parts: ResponsesInputPart[] = [];
-
-        for (const block of msg.content) {
-          if (block.type === 'text') {
-            if (block.text) {
-              parts.push({ type: 'input_text', text: block.text });
-            }
-          } else if (block.type === 'image') {
-            const source = block.source;
-            if (source?.type === 'base64' && source.data) {
-              const mimeType = source.media_type ?? source.mediaType ?? 'image/jpeg';
-              parts.push({
-                type: 'input_image',
-                image_url: `data:${mimeType};base64,${source.data}`,
-              });
-            }
-          }
-          // tool_use and tool_result are not supported in the Responses API input
-          // for image models — skip them silently
+        if (typeof msg.content === 'string') {
+          text = msg.content;
+        } else if (Array.isArray(msg.content)) {
+          text = msg.content
+            .filter((b: any) => b.type === 'text' && b.text)
+            .map((b: any) => b.text)
+            .join('\n');
         }
 
-        if (parts.length > 0) {
-          result.push({ role, content: parts });
+        if (text) {
+          parts.push(`${role}: ${text}`);
         }
-        continue;
       }
-
-      // Null/empty content — skip
-      if (msg.content === null || msg.content === undefined) continue;
-
-      // Fallback
-      result.push({ role, content: String(msg.content) });
     }
 
-    return result;
-  }
-
-  private mapRole(role: string): 'user' | 'assistant' | 'system' | 'developer' {
-    switch (role) {
-      case 'user':
-        return 'user';
-      case 'assistant':
-        return 'assistant';
-      case 'system':
-        return 'developer';
-      default:
-        return 'user';
-    }
+    return parts.join('\n\n');
   }
 
   // --------------------------------------------------------------------------
@@ -451,52 +360,41 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
   // --------------------------------------------------------------------------
 
   private parseResponse(
-    response: ResponsesAPIResponse,
+    response: ImagesAPIResponse,
     requestedModel: string,
     rawRequest: unknown
   ): ProviderResponse {
-    let text = '';
     const images: { data: string; mimeType: string }[] = [];
+    let revisedPrompt: string | undefined;
 
-    for (const item of response.output) {
-      if (item.type === 'message') {
-        for (const content of item.content) {
-          if (content.type === 'output_text') {
-            text += content.text;
-          } else if (content.type === 'image_generation_call') {
-            images.push({
-              data: content.result,
-              mimeType: 'image/png',
-            });
-          }
-        }
-      } else if (item.type === 'image_generation_call') {
+    for (const item of response.data) {
+      if (item.b64_json) {
         images.push({
-          data: item.result,
+          data: item.b64_json,
           mimeType: 'image/png',
         });
       }
+      if (item.revised_prompt) {
+        revisedPrompt = item.revised_prompt;
+      }
     }
 
-    const cachedTokens = response.usage?.input_tokens_details?.cached_tokens ?? 0;
-
     return {
-      content: this.buildContentBlocks(text, images),
+      content: this.buildContentBlocks(revisedPrompt, images),
       stopReason: 'end_turn',
       stopSequence: undefined,
       usage: {
         inputTokens: response.usage?.input_tokens ?? 0,
         outputTokens: response.usage?.output_tokens ?? 0,
-        cacheReadTokens: cachedTokens > 0 ? cachedTokens : undefined,
       },
-      model: response.model ?? requestedModel,
+      model: requestedModel,
       rawRequest,
       raw: response,
     };
   }
 
   private buildContentBlocks(
-    text: string,
+    text: string | undefined,
     images: { data: string; mimeType: string }[] = []
   ): ContentBlock[] {
     const content: ContentBlock[] = [];
@@ -546,6 +444,20 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
         message.includes('too long')
       ) {
         return contextLengthError(message, error, rawRequest);
+      }
+
+      if (
+        message.includes('content_policy') ||
+        message.includes('safety_system') ||
+        message.includes('moderation')
+      ) {
+        return new MembraneError({
+          type: 'unknown',
+          message: `Content policy violation: ${message}`,
+          retryable: false,
+          rawError: error,
+          rawRequest,
+        });
       }
 
       if (
