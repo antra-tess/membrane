@@ -313,14 +313,19 @@ export class NativeFormatter implements PrefillFormatter {
         result.push(textBlock);
       } else if (block.type === 'image') {
         if (block.source.type === 'base64') {
-          result.push({
+          const imageBlock: Record<string, unknown> = {
             type: 'image',
             source: {
               type: 'base64',
               media_type: block.source.mediaType,
               data: block.source.data,
             },
-          });
+          };
+          // Preserve sourceUrl for providers that use URL-as-text (Gemini 3.x)
+          if (block.sourceUrl) {
+            imageBlock.sourceUrl = block.sourceUrl;
+          }
+          result.push(imageBlock);
         }
       } else if (block.type === 'tool_use') {
         result.push({

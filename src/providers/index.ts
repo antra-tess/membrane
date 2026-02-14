@@ -53,3 +53,8 @@ export {
   fromGeminiParts,
   type GeminiAdapterConfig,
 } from './gemini.js';
+
+export {
+  OpenAIResponsesAdapter,
+  type OpenAIResponsesAdapterConfig,
+} from './openai-responses.js';

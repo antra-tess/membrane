@@ -48,6 +48,10 @@ export interface ImageContent {
   type: 'image';
   source: MediaSource;
   tokenEstimate?: number;
+  /** Original URL of the image (e.g., Discord CDN). Used by providers that
+   *  can auto-fetch URLs from text (like Gemini 3.x) when inlineData is
+   *  not viable (e.g., missing thought_signature on model-role images). */
+  sourceUrl?: string;
 }
 
 export interface DocumentContent {

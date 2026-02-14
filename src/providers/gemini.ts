@@ -378,11 +378,13 @@ export class GeminiAdapter implements ProviderAdapter {
   private convertMessages(messages: any[], model?: string): GeminiContent[] {
     const contents: GeminiContent[] = [];
 
-    // Gemini 3.x models require thought_signature on image parts in context.
-    // Since images from other sources (user uploads, other models) don't carry
-    // thought signatures, strip images from context for these models to avoid
-    // 400 INVALID_ARGUMENT errors. They can still GENERATE images via responseModalities.
-    const stripContextImages = model?.startsWith('gemini-3');
+    // Gemini 3.x requires thought_signature on image parts from model outputs.
+    // Images that round-trip through Discord lose their thought_signature metadata,
+    // causing 400 INVALID_ARGUMENT when sent back as inlineData. For gemini-3.x
+    // model-role images, we fall back to embedding the source URL as text — Gemini
+    // auto-fetches URLs from text content, enabling iterative editing without
+    // thought_signature. User images pass through as normal inlineData.
+    const useUrlForModelImages = model?.startsWith('gemini-3');
 
     for (const msg of messages) {
       const role: 'user' | 'model' = msg.role === 'assistant' ? 'model' : 'user';
@@ -402,8 +404,12 @@ export class GeminiAdapter implements ProviderAdapter {
           if (block.type === 'text') {
             if (block.text) parts.push({ text: block.text });
           } else if (block.type === 'image') {
-            // Skip images in context for models that require thought_signature
-            if (stripContextImages) continue;
+            // Gemini 3.x model-role images: use URL-as-text so Gemini auto-fetches
+            // the image without needing thought_signature metadata
+            if (useUrlForModelImages && role === 'model' && block.sourceUrl) {
+              parts.push({ text: block.sourceUrl });
+              continue;
+            }
 
             // Anthropic image format → Gemini inlineData
             const source = block.source;
