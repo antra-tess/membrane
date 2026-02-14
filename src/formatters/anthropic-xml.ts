@@ -389,18 +389,14 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         parts.push(block.text);
       } else if (block.type === 'image') {
         if (block.source.type === 'base64') {
-          const imageBlock: Record<string, unknown> = {
+          images.push({
             type: 'image',
             source: {
               type: 'base64',
               media_type: block.source.mediaType,
               data: block.source.data,
             },
-          };
-          if (block.sourceUrl) {
-            imageBlock.sourceUrl = block.sourceUrl;
-          }
-          images.push(imageBlock);
+          });
         }
       } else if (block.type === 'tool_use') {
         parts.push(`${participant}>[${block.name}]: ${JSON.stringify(block.input)}`);

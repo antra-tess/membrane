@@ -122,10 +122,26 @@ export class AnthropicAdapter implements ProviderAdapter {
   }
 
   private buildRequest(request: ProviderRequest): Anthropic.MessageCreateParams {
+    // Strip provider-specific fields (e.g., sourceUrl for Gemini) from image blocks
+    // before sending to Anthropic, which rejects extra inputs
+    const sanitizedMessages = (request.messages as any[]).map((msg: any) => {
+      if (!Array.isArray(msg.content)) return msg;
+      return {
+        ...msg,
+        content: msg.content.map((block: any) => {
+          if (block.type === 'image' && block.sourceUrl !== undefined) {
+            const { sourceUrl, ...rest } = block;
+            return rest;
+          }
+          return block;
+        }),
+      };
+    });
+
     const params: Anthropic.MessageCreateParams = {
       model: request.model,
       max_tokens: request.maxTokens || this.defaultMaxTokens,
-      messages: request.messages as Anthropic.MessageParam[],
+      messages: sanitizedMessages as Anthropic.MessageParam[],
     };
     
     // Handle system prompt - can be string or content blocks with cache_control
