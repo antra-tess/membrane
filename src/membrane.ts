@@ -196,14 +196,19 @@ export class Membrane {
     if (request.toolMode && request.toolMode !== 'auto') {
       return request.toolMode;
     }
-    
-    // Auto mode: choose based on provider
-    // OpenRouter and OpenAI-compatible APIs use native tools
-    // Anthropic direct with prefill mode uses XML tools
+
+    // Auto mode: choose based on formatter
+    // NativeFormatter → native tools via API
+    // AnthropicXmlFormatter (default) → XML tools in prefill
+    if (this.formatter.name === 'native') {
+      return 'native';
+    }
+
+    // Also handle known native-tool providers regardless of formatter
     if (this.adapter.name === 'openrouter') {
       return 'native';
     }
-    
+
     // Default to XML for prefill compatibility
     return 'xml';
   }
