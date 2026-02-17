@@ -1,8 +1,6 @@
 /**
- * Tests for the three dogfood-driveby fixes:
- * 1. XML formatter crash on tools with no inputSchema.properties
- * 2. assistantParticipant role mapping in buildNativeToolRequest
- * 3. resolveToolMode detection of NativeFormatter
+ * Tests for tool schema handling, participant role mapping,
+ * and tool mode resolution in Membrane.
  */
 
 import { describe, it, expect } from 'vitest';
