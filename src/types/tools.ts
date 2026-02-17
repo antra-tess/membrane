@@ -20,7 +20,7 @@ export interface ToolDefinition {
   description: string;
   inputSchema: {
     type: 'object';
-    properties: Record<string, ToolParameter>;
+    properties?: Record<string, ToolParameter>;
     required?: string[];
   };
 }
