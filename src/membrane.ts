@@ -275,6 +275,11 @@ export class Membrane {
       }
     }
 
+    // Capture parser depths after prefill initialization so we can distinguish
+    // blocks inherited from prefill context (e.g., unclosed <thinking> from other bots)
+    // from blocks the model itself opened during generation
+    const prefillDepths = parser.getDepths();
+
     try {
       // Tool execution loop
       while (toolDepth <= maxToolDepth) {
@@ -584,8 +589,17 @@ export class Membrane {
 
         // Check for false-positive stop (unclosed block)
         // Only resume if we stopped on a stop_sequence (not end_turn or max_tokens)
-        // Use parser's nesting detection instead of regex-based hasUnclosedToolBlock
-        if (lastStopReason === 'stop_sequence' && parser.isInsideBlock()) {
+        // Use depth delta vs prefill baseline: only treat as false positive if the MODEL
+        // opened a new block (depth increased beyond what was inherited from prefill context).
+        // This prevents unclosed tags from other bots' messages in prefill from triggering
+        // infinite continuation loops.
+        const currentDepths = parser.getDepths();
+        const modelOpenedNewBlock =
+          currentDepths.functionCalls > prefillDepths.functionCalls ||
+          currentDepths.functionResults > prefillDepths.functionResults ||
+          currentDepths.thinking > prefillDepths.thinking;
+
+        if (lastStopReason === 'stop_sequence' && modelOpenedNewBlock) {
           // False positive! The stop sequence (e.g., "\nUser:") appeared inside XML content
           // Re-add the consumed stop sequence and resume streaming
           if (streamResult.stopSequence) {
@@ -1588,6 +1602,11 @@ export class Membrane {
       }
     }
 
+    // Capture parser depths after prefill initialization so we can distinguish
+    // blocks inherited from prefill context (e.g., unclosed <thinking> from other bots)
+    // from blocks the model itself opened during generation
+    const prefillDepths = parser.getDepths();
+
     try {
       // Tool execution loop
       while (toolDepth <= maxToolDepth) {
@@ -1895,7 +1914,14 @@ export class Membrane {
         }
 
         // Check for false-positive stop (unclosed block)
-        if (lastStopReason === 'stop_sequence' && parser.isInsideBlock()) {
+        // Use depth delta vs prefill baseline — see streamWithXmlTools for detailed comment
+        const currentDepths = parser.getDepths();
+        const modelOpenedNewBlock =
+          currentDepths.functionCalls > prefillDepths.functionCalls ||
+          currentDepths.functionResults > prefillDepths.functionResults ||
+          currentDepths.thinking > prefillDepths.thinking;
+
+        if (lastStopReason === 'stop_sequence' && modelOpenedNewBlock) {
           if (streamResult.stopSequence) {
             parser.push(streamResult.stopSequence);
             if (emitTokens) {

@@ -442,4 +442,123 @@ describe('IncrementalXmlParser', () => {
       expect(afterClose[0].meta.type).toBe('text');
     });
   });
+
+  describe('prefill thinking tag poisoning (continuation loop bug)', () => {
+    // Bug: In prefill mode, the entire conversation history is pushed into the parser.
+    // Other bots' messages contain <thinking> tags that are never closed within the same
+    // message. The parser counts these and sets thinkingDepth > 0. When the model later
+    // hits a stop sequence, membrane's continuation logic sees isInsideBlock() === true
+    // and assumes the stop sequence was a false positive inside an XML block, looping
+    // indefinitely. See trace 46a05853.
+
+    it('should detect unclosed thinking tags from conversation prefill', () => {
+      // Simulate a prefill containing messages from multiple bots,
+      // some of which include <thinking> tags that are never closed
+      const prefill = [
+        'QA-Tester: hey whats up',
+        'kappa: <thinking> *beams* Hi there! How are you doing today?',
+        'QA-Tester: doing great!',
+        'Claude3Sonnet: <thinking> The user seems happy. Let me respond warmly.',
+        'QA-Tester: tell me a joke',
+        'kappa: <thinking> <thinking> <thinking> okay let me think of something funny',
+      ].join('\n');
+
+      parser.push(prefill);
+
+      // The parser sees 5 <thinking> opens and 0 </thinking> closes
+      expect(parser.isInsideBlock()).toBe(true);
+      expect(parser.getDepths().thinking).toBe(5);
+    });
+
+    it('should persist poisoned depth across resetForNewIteration', () => {
+      // Push prefill with unclosed thinking tags
+      const prefill = 'kappa: <thinking> hello\nuser: hi\nbot: <thinking> thinking about it';
+      parser.push(prefill);
+
+      expect(parser.isInsideBlock()).toBe(true);
+      expect(parser.getDepths().thinking).toBe(2);
+
+      // resetForNewIteration is called between streaming iterations in membrane
+      // It should NOT reset depths (and currently doesn't — that's the bug)
+      parser.resetForNewIteration();
+
+      expect(parser.isInsideBlock()).toBe(true);
+      expect(parser.getDepths().thinking).toBe(2);
+    });
+
+    it('should simulate the full continuation loop scenario', () => {
+      // 1. Prefill with unclosed thinking tags (from other bots in context)
+      const prefill = [
+        'user: hello everyone',
+        'kappa: <thinking> *waves* hi there!',
+        'user: how are you',
+        'Sonnet: <thinking> they seem friendly, let me engage',
+        'user: nyan',
+      ].join('\n');
+
+      parser.push(prefill);
+      const prefillLength = parser.getAccumulated().length;
+
+      expect(parser.isInsideBlock()).toBe(true);
+      expect(parser.getDepths().thinking).toBe(2);
+
+      // 2. Model generates a short response and hits a stop sequence
+      //    (stop sequence consumes the matched text, so we don't include it)
+      const modelResponse = ' I aim to be helpful. Is there something I can help with?';
+      parser.push(modelResponse);
+
+      // Parser still thinks we're inside a block because of prefill thinking tags
+      expect(parser.isInsideBlock()).toBe(true);
+
+      // 3. This is where membrane's continuation loop fires:
+      //    lastStopReason === 'stop_sequence' && parser.isInsideBlock() === true
+      //    It re-adds the stop sequence and continues...
+
+      // Simulate: re-add consumed stop sequence
+      parser.push('\nuser:');
+      parser.resetForNewIteration();
+
+      // Depth persists — loop will continue
+      expect(parser.isInsideBlock()).toBe(true);
+      expect(parser.getDepths().thinking).toBe(2);
+
+      // 4. Model generates another short response, hits another stop sequence
+      parser.push(' What does it feel like?');
+      expect(parser.isInsideBlock()).toBe(true);
+
+      // This would repeat up to maxToolDepth times (82 in the original trace)
+    });
+
+    it('should NOT be poisoned by balanced thinking tags in prefill', () => {
+      // If thinking tags are properly opened AND closed, depth should be 0
+      const prefill = [
+        'user: hello',
+        'bot: <thinking>let me think</thinking> Here is my response!',
+        'user: thanks',
+        'bot: <thinking>they appreciated it</thinking> You are welcome!',
+      ].join('\n');
+
+      parser.push(prefill);
+
+      expect(parser.isInsideBlock()).toBe(false);
+      expect(parser.getDepths().thinking).toBe(0);
+    });
+
+    it('should be poisoned even by a single unclosed thinking tag in a long prefill', () => {
+      // In real multi-bot channels, even one unclosed <thinking> tag is enough
+      const prefill = [
+        'user: hey',
+        'bot1: <thinking>hmm</thinking> Hello!',
+        'bot2: <thinking>interesting</thinking> Hi there!',
+        'bot3: <thinking> ooh a new user, let me say hi',  // <-- single unclosed tag
+        'user: whats up',
+        'bot1: Not much! Just chatting.',
+      ].join('\n');
+
+      parser.push(prefill);
+
+      expect(parser.isInsideBlock()).toBe(true);
+      expect(parser.getDepths().thinking).toBe(1);
+    });
+  });
 });

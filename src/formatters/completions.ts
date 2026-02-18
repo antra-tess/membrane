@@ -131,6 +131,10 @@ class CompletionsStreamParser implements StreamParser {
     return false;
   }
 
+  getDepths(): { functionCalls: number; functionResults: number; thinking: number } {
+    return { functionCalls: 0, functionResults: 0, thinking: 0 };
+  }
+
   resetForNewIteration(): void {
     // No special reset needed
   }

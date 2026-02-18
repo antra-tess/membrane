@@ -168,6 +168,12 @@ export interface StreamParser {
   isInsideBlock(): boolean;
 
   /**
+   * Get current nesting depths for each block type.
+   * Used to compare against prefill baseline for false-positive detection.
+   */
+  getDepths(): { functionCalls: number; functionResults: number; thinking: number };
+
+  /**
    * Reset streaming state for a new API iteration.
    * Keeps accumulated text and block depth state, but resets
    * per-stream tracking so processChunk works correctly.
