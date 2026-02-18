@@ -316,10 +316,35 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     // Ensure first message is user role (required by Claude Messages API,
     // strictly enforced by Bedrock and older Claude models)
     if (providerMessages.length > 0 && providerMessages[0]!.role !== 'user') {
-      providerMessages.unshift({
-        role: 'user',
-        content: prefillUserMessage || '[Start]',
-      });
+      if (prefillUserMessage) {
+        // Explicit custom prefill user message from config
+        providerMessages.unshift({
+          role: 'user',
+          content: prefillUserMessage,
+        });
+      } else if (!systemText) {
+        // No system prompt and no custom prefill: default to CLI simulation mode
+        // for context purity in prefill format (chapter2 parity)
+        const cliSystemBlock: Record<string, unknown> = {
+          type: 'text',
+          text: 'The assistant is in CLI simulation mode, and responds to the user\'s CLI commands only with the output of the command.',
+        };
+        if (promptCaching) {
+          cliSystemBlock.cache_control = cacheControl;
+          cacheMarkersApplied++;
+        }
+        systemContent = [cliSystemBlock];
+        providerMessages.unshift({
+          role: 'user',
+          content: '<cmd>cat untitled.txt</cmd>',
+        });
+      } else {
+        // System prompt is set but no custom prefill — use generic marker
+        providerMessages.unshift({
+          role: 'user',
+          content: '[Start]',
+        });
+      }
     }
 
     // Build stop sequences
