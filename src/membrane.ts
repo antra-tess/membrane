@@ -821,9 +821,12 @@ export class Membrane {
             });
           }
 
-          // Add assistant message with tool use and user message with tool results
+          // Add assistant message with tool use and user message with tool results.
+          // Use the request's participant name so role mapping is consistent.
+          const asstName = request.assistantParticipant
+            ?? this.config.assistantParticipant ?? 'Claude';
           messages.push({
-            participant: 'Claude',
+            participant: asstName,
             content: responseBlocks,
           });
 
@@ -927,7 +930,7 @@ export class Membrane {
           content.push({
             type: 'tool_use',
             id: block.id,
-            name: block.name,
+            name: sanitizeToolName(block.name),
             input: block.input,
           });
         } else if (block.type === 'tool_result') {
@@ -959,9 +962,11 @@ export class Membrane {
       providerMessages.push({ role, content });
     }
     
-    // Convert tools to provider format
+    // Convert tools to provider format.
+    // Native tool names must match ^[a-zA-Z0-9_-]{1,128}$ — sanitize colons
+    // from the module:tool namespace convention. Reversed in parseProviderContent.
     const tools = request.tools?.map(tool => ({
-      name: tool.name,
+      name: sanitizeToolName(tool.name),
       description: tool.description,
       input_schema: tool.inputSchema,
     }));
@@ -1004,7 +1009,7 @@ export class Membrane {
           blocks.push({
             type: 'tool_use',
             id: item.id,
-            name: item.name,
+            name: unsanitizeToolName(item.name),
             input: item.input,
           });
         } else if (item.type === 'thinking') {
@@ -2110,14 +2115,16 @@ export class Membrane {
             });
           }
 
-          // Add messages for next iteration
+          // Add messages for next iteration — use the request's participant names
+          const assistantName = request.assistantParticipant
+            ?? this.config.assistantParticipant ?? 'Claude';
           messages.push({
-            participant: 'Claude',
+            participant: assistantName,
             content: responseBlocks,
           });
 
           messages.push({
-            participant: 'User',
+            participant: assistantName === 'Claude' ? 'User' : 'user',
             content: results.map(r => ({
               type: 'tool_result' as const,
               toolUseId: r.toolUseId,
@@ -2186,4 +2193,15 @@ export class Membrane {
       }
     }
   }
+}
+
+// Native tool names must match ^[a-zA-Z0-9_-]{1,128}$.
+// The framework uses module:tool namespacing, so we round-trip colons
+// through a double-underscore encoding for the API wire format.
+function sanitizeToolName(name: string): string {
+  return name.replace(/:/g, '__');
+}
+
+function unsanitizeToolName(name: string): string {
+  return name.replace(/__/g, ':');
 }

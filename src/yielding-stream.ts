@@ -246,7 +246,9 @@ export class YieldingStreamImpl implements YieldingStream {
         this.markDone();
       })
       .catch((error) => {
-        this.emit({ type: 'error', error });
+        if (!this.isCancelled) {
+          this.emit({ type: 'error', error });
+        }
         this.markDone();
       });
   }
