@@ -154,6 +154,13 @@ export interface NormalizedRequest {
    */
   prefillUserMessage?: string;
 
+  /**
+   * Participant name that maps to the 'assistant' role.
+   * Messages with this participant are formatted as assistant turns.
+   * Default: 'Claude'
+   */
+  assistantParticipant?: string;
+
   /** Provider-specific parameters (pass-through) */
   providerParams?: Record<string, unknown>;
 }
