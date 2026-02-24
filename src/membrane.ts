@@ -136,7 +136,14 @@ export class Membrane {
         const errorInfo = classifyError(error);
         errorInfo.rawRequest = rawRequest;
 
-        if (errorInfo.retryable && attempts < this.retryConfig.maxRetries) {
+        // Rate limits (429) always retry up to 5 attempts regardless of config.
+        // Other retryable errors only retry when maxRetries > 0.
+        const isRateLimit = errorInfo.type === 'rate_limit';
+        const effectiveMax = isRateLimit
+          ? Math.max(this.retryConfig.maxRetries, 5)
+          : this.retryConfig.maxRetries;
+
+        if (errorInfo.retryable && attempts < effectiveMax) {
           // Check hook for retry decision
           if (this.config.hooks?.onError) {
             const decision = await this.config.hooks.onError(errorInfo, attempts);

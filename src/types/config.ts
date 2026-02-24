@@ -164,7 +164,7 @@ export interface MembraneConfig {
 // ============================================================================
 
 export const DEFAULT_RETRY_CONFIG: RetryConfig = {
-  maxRetries: 3,
+  maxRetries: 0,
   retryDelayMs: 1000,
   backoffMultiplier: 2,
   maxRetryDelayMs: 30000,
