@@ -28,6 +28,8 @@ import type {
   ProviderMessage,
   ParseResult,
   BlockType,
+  BlockEvent,
+  StreamEmission,
 } from './types.js';
 
 // ============================================================================
@@ -79,6 +81,7 @@ export interface CompletionsFormatterConfig extends FormatterConfig {
 class CompletionsStreamParser implements StreamParser {
   private accumulated = '';
   private blockIndex = 0;
+  private blockStarted = false;
 
   processChunk(chunk: string): ParseResult {
     this.accumulated += chunk;
@@ -87,19 +90,43 @@ class CompletionsStreamParser implements StreamParser {
       visible: true,
       blockIndex: this.blockIndex,
     };
-    return {
-      emissions: [{
-        kind: 'content' as const,
-        text: chunk,
-        meta,
-      }],
-      content: [{ text: chunk, meta }],
-      blockEvents: [],
-    };
+
+    const emissions: StreamEmission[] = [];
+    const blockEvents: BlockEvent[] = [];
+
+    // Emit block_start on first chunk
+    if (!this.blockStarted) {
+      const startEvent: BlockEvent = {
+        event: 'block_start',
+        index: this.blockIndex,
+        block: { type: 'text' },
+      };
+      emissions.push({ kind: 'blockEvent', event: startEvent });
+      blockEvents.push(startEvent);
+      this.blockStarted = true;
+    }
+
+    emissions.push({ kind: 'content', text: chunk, meta });
+
+    return { emissions, content: [{ text: chunk, meta }], blockEvents };
   }
 
   flush(): ParseResult {
-    return { emissions: [], content: [], blockEvents: [] };
+    const emissions: StreamEmission[] = [];
+    const blockEvents: BlockEvent[] = [];
+
+    if (this.blockStarted) {
+      const completeEvent: BlockEvent = {
+        event: 'block_complete',
+        index: this.blockIndex,
+        block: { type: 'text', content: this.accumulated },
+      };
+      emissions.push({ kind: 'blockEvent', event: completeEvent });
+      blockEvents.push(completeEvent);
+      this.blockStarted = false;
+    }
+
+    return { emissions, content: [], blockEvents };
   }
 
   getAccumulated(): string {
@@ -109,6 +136,7 @@ class CompletionsStreamParser implements StreamParser {
   reset(): void {
     this.accumulated = '';
     this.blockIndex = 0;
+    this.blockStarted = false;
   }
 
   push(content: string): void {
