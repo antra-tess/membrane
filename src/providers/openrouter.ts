@@ -408,7 +408,9 @@ export class OpenRouterAdapter implements ProviderAdapter {
         }
         
         // Skip messages with no usable content (image-only, embed-only messages)
-        if (textParts.length === 0 && toolCalls.length === 0) {
+        // When hasCache is true, text goes to contentBlocks instead of textParts,
+        // so we must check contentBlocks too to avoid dropping cached text messages.
+        if (textParts.length === 0 && contentBlocks.length === 0 && toolCalls.length === 0) {
           return [];
         }
 
