@@ -544,7 +544,13 @@ export class BedrockAdapter implements ProviderAdapter {
               const payloadJson = JSON.parse(new TextDecoder().decode(payloadBytes));
               if (payloadJson.bytes) {
                 // Decode base64 payload
-                const eventData = JSON.parse(atob(payloadJson.bytes)) as BedrockStreamEvent;
+                // Decode base64 → bytes → UTF-8 string (atob returns Latin-1, mangling multi-byte emoji)
+                const binaryStr = atob(payloadJson.bytes);
+                const bytes = new Uint8Array(binaryStr.length);
+                for (let i = 0; i < binaryStr.length; i++) {
+                  bytes[i] = binaryStr.charCodeAt(i);
+                }
+                const eventData = JSON.parse(new TextDecoder().decode(bytes)) as BedrockStreamEvent;
 
                 if (eventData.type === 'message_start' && eventData.message) {
                   inputTokens = eventData.message.usage?.input_tokens ?? 0;
