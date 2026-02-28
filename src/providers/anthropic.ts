@@ -85,9 +85,31 @@ export class AnthropicAdapter implements ProviderAdapter {
     const fullRequest = { ...anthropicRequest, stream: true };
     options?.onRequest?.(fullRequest);
 
+    // Idle timeout: abort if no SSE event arrives within the deadline.
+    // The SDK's timeout only covers the initial HTTP response headers;
+    // once streaming starts, a silently dropped connection waits forever.
+    const idleMs = options?.idleTimeoutMs ?? 120_000;
+    const idleAbort = new AbortController();
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    let idleTimedOut = false;
+
+    // Link caller's signal so external cancellation still works
+    const onExternalAbort = () => idleAbort.abort();
+    if (options?.signal) {
+      if (options.signal.aborted) { idleAbort.abort(); }
+      else { options.signal.addEventListener('abort', onExternalAbort, { once: true }); }
+    }
+
+    const resetIdleTimer = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => { idleTimedOut = true; idleAbort.abort(); }, idleMs);
+    };
+
+    resetIdleTimer();
+
     try {
       const stream = await this.client.messages.stream(anthropicRequest, {
-        signal: options?.signal,
+        signal: idleAbort.signal,
       });
 
       let accumulated = '';
@@ -109,6 +131,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       let currentBlockInputJson = '';
 
       for await (const event of stream) {
+        resetIdleTimer();
         if (event.type === 'message_start') {
           model = event.message.model;
           const usage = event.message.usage as unknown as Record<string, number>;
@@ -162,6 +185,10 @@ export class AnthropicAdapter implements ProviderAdapter {
         }
       }
 
+      // Clean up idle timer and external signal listener
+      if (idleTimer) clearTimeout(idleTimer);
+      options?.signal?.removeEventListener('abort', onExternalAbort);
+
       // Force-close the HTTP connection so we don't block on SSE drain
       try { stream.controller.abort(); } catch { /* already closed */ }
 
@@ -192,6 +219,19 @@ export class AnthropicAdapter implements ProviderAdapter {
       };
 
     } catch (error) {
+      // Clean up timer on error path too
+      if (idleTimer) clearTimeout(idleTimer);
+      options?.signal?.removeEventListener('abort', onExternalAbort);
+
+      if (idleTimedOut && error instanceof Error && error.name === 'AbortError') {
+        throw new MembraneError({
+          type: 'timeout',
+          message: `SSE stream idle timeout — no events received within ${idleMs}ms`,
+          retryable: true,
+          rawError: error,
+          rawRequest: fullRequest,
+        });
+      }
       throw this.handleError(error, fullRequest);
     }
   }

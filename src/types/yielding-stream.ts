@@ -170,6 +170,9 @@ export interface YieldingStreamOptions {
   /** Request timeout (per API call, not total) */
   timeoutMs?: number;
 
+  /** Abort if no SSE event arrives within this many ms (default: 120000) */
+  idleTimeoutMs?: number;
+
   /** Request ID for correlation/logging */
   requestId?: string;
 

@@ -228,6 +228,8 @@ export interface ProviderRequest {
 export interface ProviderRequestOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
+  /** Abort if no SSE event arrives within this many ms (default: 120000) */
+  idleTimeoutMs?: number;
   /** Called with the raw API request body right before fetch */
   onRequest?: (rawRequest: unknown) => void;
 }
