@@ -831,7 +831,7 @@ export class Membrane {
           });
 
           messages.push({
-            participant: 'User',
+            participant: asstName === 'Claude' ? 'User' : 'user',
             content: results.map(r => ({
               type: 'tool_result' as const,
               toolUseId: r.toolUseId,
@@ -2199,11 +2199,12 @@ export class Membrane {
 
 // Native tool names must match ^[a-zA-Z0-9_-]{1,128}$.
 // The framework uses module:tool namespacing, so we round-trip colons
-// through a double-underscore encoding for the API wire format.
+// through an escape encoding for the API wire format.
+// Lossless: escape underscores first (_u), then encode colons (_c).
 function sanitizeToolName(name: string): string {
-  return name.replace(/:/g, '__');
+  return name.replace(/_/g, '_u').replace(/:/g, '_c');
 }
 
 function unsanitizeToolName(name: string): string {
-  return name.replace(/__/g, ':');
+  return name.replace(/_c/g, ':').replace(/_u/g, '_');
 }

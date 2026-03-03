@@ -112,8 +112,6 @@ export class AnthropicAdapter implements ProviderAdapter {
         signal: idleAbort.signal,
       });
 
-      let accumulated = '';
-
       // Accumulate response metadata from SSE events directly, so we can
       // skip finalMessage() and its variable-latency connection teardown.
       let model = '';
@@ -149,7 +147,6 @@ export class AnthropicAdapter implements ProviderAdapter {
         } else if (event.type === 'content_block_delta') {
           if (event.delta.type === 'text_delta') {
             const chunk = event.delta.text;
-            accumulated += chunk;
             currentBlockContent += chunk;
             callbacks.onChunk(chunk);
           } else if (event.delta.type === 'thinking_delta') {
@@ -160,8 +157,9 @@ export class AnthropicAdapter implements ProviderAdapter {
           }
 
         } else if (event.type === 'content_block_stop') {
-          // Finalize block with accumulated content
-          const block = contentBlocks[currentBlockIndex];
+          // Finalize block — use event.index for defensive correctness
+          const blockIdx = (event as { index: number }).index;
+          const block = contentBlocks[blockIdx];
           if (block) {
             if (block.type === 'text') {
               block.text = currentBlockContent;
@@ -171,7 +169,7 @@ export class AnthropicAdapter implements ProviderAdapter {
               try { block.input = JSON.parse(currentBlockInputJson); } catch { /* partial JSON */ }
             }
           }
-          callbacks.onContentBlock?.(currentBlockIndex, contentBlocks[currentBlockIndex]);
+          callbacks.onContentBlock?.(blockIdx, contentBlocks[blockIdx]);
 
         } else if (event.type === 'message_delta') {
           // All content blocks are finalized by the time message_delta arrives.
