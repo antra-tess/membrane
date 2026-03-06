@@ -96,7 +96,7 @@ export class Membrane {
       attempts++;
 
       try {
-        const { providerRequest, prefillResult } = this.transformRequest(request);
+        const { providerRequest, prefillResult } = this.transformRequest(request, options.formatter);
 
         // Call beforeRequest hook
         let finalRequest = providerRequest;

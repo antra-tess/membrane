@@ -262,4 +262,10 @@ export interface CompleteOptions {
 
   /** Called with raw provider response after API call (for logging) */
   onResponse?: OnResponseCallback;
+
+  /**
+   * Override the default formatter for this request.
+   * Useful for switching between prefill and native modes per-request.
+   */
+  formatter?: PrefillFormatter;
 }
