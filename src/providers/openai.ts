@@ -34,9 +34,15 @@ import {
 // Types
 // ============================================================================
 
+interface OpenAIContentPart {
+  type: 'text' | 'image_url';
+  text?: string;
+  image_url?: { url: string; detail?: string };
+}
+
 interface OpenAIMessage {
   role: 'user' | 'assistant' | 'system' | 'tool';
-  content?: string | null;
+  content?: string | OpenAIContentPart[] | null;
   tool_calls?: OpenAIToolCall[];
   tool_call_id?: string;
 }
@@ -418,13 +424,27 @@ export class OpenAIAdapter implements ProviderAdapter {
       
       // Convert from Anthropic-style format
       if (Array.isArray(msg.content)) {
-        const textParts: string[] = [];
+        const contentParts: OpenAIContentPart[] = [];
         const toolCalls: OpenAIToolCall[] = [];
         const toolResults: OpenAIMessage[] = [];
-        
+
         for (const block of msg.content) {
           if (block.type === 'text') {
-            textParts.push(block.text);
+            contentParts.push({ type: 'text', text: block.text });
+          } else if (block.type === 'image') {
+            // Convert Anthropic-style image to OpenAI image_url with data URI
+            if (block.source?.type === 'base64') {
+              const mediaType = block.source.media_type ?? block.source.mediaType ?? 'image/png';
+              contentParts.push({
+                type: 'image_url',
+                image_url: { url: `data:${mediaType};base64,${block.source.data}` },
+              });
+            } else if (block.source?.type === 'url') {
+              contentParts.push({
+                type: 'image_url',
+                image_url: { url: block.source.url },
+              });
+            }
           } else if (block.type === 'tool_use') {
             toolCalls.push({
               id: block.id,
@@ -443,21 +463,24 @@ export class OpenAIAdapter implements ProviderAdapter {
             });
           }
         }
-        
+
         // If we have tool results, return them (possibly multiple)
         if (toolResults.length > 0) {
           return toolResults;
         }
-        
-        // Skip messages with no usable content (image-only, embed-only messages)
-        if (textParts.length === 0 && toolCalls.length === 0) {
+
+        // Skip messages with no usable content
+        if (contentParts.length === 0 && toolCalls.length === 0) {
           return [];
         }
 
-        // Otherwise build normal message
+        // Build message — use string content when there are no images (simpler, more compatible)
+        const hasImages = contentParts.some(p => p.type === 'image_url');
+        const textOnly = contentParts.filter(p => p.type === 'text').map(p => p.text!).join('\n');
+
         const result: OpenAIMessage = {
           role: msg.role,
-          content: textParts.length > 0 ? textParts.join('\n') : null,
+          content: hasImages ? contentParts : (textOnly || null),
         };
 
         if (toolCalls.length > 0) {
@@ -556,11 +579,13 @@ export class OpenAIAdapter implements ProviderAdapter {
 
   private messageToContent(message: OpenAIMessage | undefined): ContentBlock[] {
     if (!message) return [];
-    
+
     const content: ContentBlock[] = [];
-    
+
     if (message.content) {
-      content.push({ type: 'text', text: message.content });
+      // Response content is always a string (array format is request-only)
+      const text = typeof message.content === 'string' ? message.content : message.content.filter(p => p.type === 'text').map(p => p.text!).join('\n');
+      if (text) content.push({ type: 'text', text });
     }
     
     if (message.tool_calls) {
@@ -653,9 +678,10 @@ export function toOpenAIContent(blocks: ContentBlock[]): string | null {
  */
 export function fromOpenAIContent(message: OpenAIMessage): ContentBlock[] {
   const result: ContentBlock[] = [];
-  
+
   if (message.content) {
-    result.push({ type: 'text', text: message.content });
+    const text = typeof message.content === 'string' ? message.content : message.content.filter(p => p.type === 'text').map(p => p.text!).join('\n');
+    if (text) result.push({ type: 'text', text });
   }
   
   if (message.tool_calls) {

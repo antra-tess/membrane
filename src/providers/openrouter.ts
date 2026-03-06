@@ -27,16 +27,14 @@ import {
 // Types
 // ============================================================================
 
-/** Content block for Anthropic-style caching through OpenRouter */
-interface OpenRouterContentBlock {
-  type: 'text';
-  text: string;
-  cache_control?: { type: 'ephemeral' };
-}
+/** Content block for messages through OpenRouter */
+type OpenRouterContentBlock =
+  | { type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }
+  | { type: 'image_url'; image_url: { url: string; detail?: string } };
 
 interface OpenRouterMessage {
   role: 'user' | 'assistant' | 'system' | 'tool';
-  /** Can be string, null, or content blocks array (for Claude cache_control) */
+  /** Can be string, null, or content blocks array (for Claude cache_control / images) */
   content?: string | null | OpenRouterContentBlock[];
   tool_calls?: OpenRouterToolCall[];
   tool_call_id?: string;
@@ -362,26 +360,47 @@ export class OpenRouterAdapter implements ProviderAdapter {
         // Check if any block has cache_control - if so, preserve the array format
         // This is needed for Claude models through OpenRouter to use prompt caching
         const hasCache = msg.content.some((block: any) => block.cache_control);
-        
+
         const toolCalls: OpenRouterToolCall[] = [];
         const contentBlocks: OpenRouterContentBlock[] = [];
         const textParts: string[] = [];
         const toolResults: OpenRouterMessage[] = [];
-        
+        let hasImages = false;
+
         for (const block of msg.content) {
           if (block.type === 'text') {
-            if (hasCache) {
-              // Preserve cache_control in content block format
+            if (hasCache || hasImages) {
               const contentBlock: OpenRouterContentBlock = {
                 type: 'text',
                 text: block.text,
               };
               if (block.cache_control) {
-                contentBlock.cache_control = block.cache_control;
+                (contentBlock as any).cache_control = block.cache_control;
               }
               contentBlocks.push(contentBlock);
             } else {
               textParts.push(block.text);
+            }
+          } else if (block.type === 'image') {
+            hasImages = true;
+            // Migrate any already-collected textParts into contentBlocks
+            // (we didn't know we'd need array format until hitting an image)
+            for (const text of textParts) {
+              contentBlocks.push({ type: 'text', text });
+            }
+            textParts.length = 0;
+
+            if (block.source?.type === 'base64') {
+              const mediaType = block.source.media_type ?? block.source.mediaType ?? 'image/png';
+              contentBlocks.push({
+                type: 'image_url',
+                image_url: { url: `data:${mediaType};base64,${block.source.data}` },
+              });
+            } else if (block.source?.type === 'url') {
+              contentBlocks.push({
+                type: 'image_url',
+                image_url: { url: block.source.url },
+              });
             }
           } else if (block.type === 'tool_use') {
             toolCalls.push({
@@ -401,24 +420,22 @@ export class OpenRouterAdapter implements ProviderAdapter {
             });
           }
         }
-        
+
         // If we have tool results, return them (possibly multiple)
         if (toolResults.length > 0) {
           return toolResults;
         }
-        
-        // Skip messages with no usable content (image-only, embed-only messages)
-        // When hasCache is true, text goes to contentBlocks instead of textParts,
-        // so we must check contentBlocks too to avoid dropping cached text messages.
+
+        // Skip messages with no usable content
         if (textParts.length === 0 && contentBlocks.length === 0 && toolCalls.length === 0) {
           return [];
         }
 
-        // Otherwise build normal message
+        // Use content blocks array if caching or images require it, otherwise concatenate text
+        const useArray = hasCache || hasImages;
         const result: OpenRouterMessage = {
           role: msg.role,
-          // Use content blocks array if caching is in use, otherwise concatenate text
-          content: hasCache ? contentBlocks : (textParts.length > 0 ? textParts.join('\n') : null),
+          content: useArray ? contentBlocks : (textParts.length > 0 ? textParts.join('\n') : null),
         };
 
         if (toolCalls.length > 0) {
