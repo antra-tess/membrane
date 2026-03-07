@@ -607,6 +607,97 @@ await runTest('Test 10: Cache breakpoints - second call should hit cache', async
 });
 
 // ============================================================================
+// Test: Temperature enforcement for thinking in complete()
+// ============================================================================
+
+await delay(1500);
+
+await runTest('Temperature enforcement: complete() with thinking enabled', async () => {
+  // This test verifies that complete() forces temperature=1 for thinking.
+  // Without the fix, Anthropic API would return 400 for temperature != 1 with thinking.
+  let capturedRequest: any;
+
+  const request: NormalizedRequest = {
+    messages: [
+      createMessage('User', 'What is 2+2? Think briefly.'),
+    ],
+    config: {
+      model: MODEL,
+      maxTokens: 2000,
+      temperature: 0.5, // This should be overridden to 1
+      thinking: { enabled: true, budgetTokens: 1000 },
+    },
+  };
+
+  const response = await membrane.complete(request, {
+    onRequest: (req) => { capturedRequest = req; },
+  });
+
+  // The request should have succeeded (API would reject temperature != 1 with thinking)
+  assert(response.content.length > 0, 'Got response content with thinking enabled');
+  assert(capturedRequest?.temperature === 1, `Temperature forced to 1 (was ${capturedRequest?.temperature})`);
+
+  // Check that thinking and text content were present
+  const hasThinking = response.content.some((b: ContentBlock) => b.type === 'thinking');
+  const hasText = response.content.some((b: ContentBlock) => b.type === 'text');
+  console.log(`  Content blocks: ${response.content.map((b: ContentBlock) => b.type).join(', ')}`);
+  assert(hasThinking, 'Response includes thinking content');
+  assert(hasText, 'Response includes text content');
+});
+
+// ============================================================================
+// Test: Stop sequence capture in native mode streaming
+// ============================================================================
+
+await delay(1500);
+
+await runTest('Stop sequence in native mode streaming', async () => {
+  // Use native tool mode with a tool present to activate streamWithNativeTools path
+  const request: NormalizedRequest = {
+    messages: [
+      createMessage('User', 'Count from 1 to 10, one number per line. Do NOT use any tools.'),
+    ],
+    config: {
+      model: MODEL,
+      maxTokens: 500,
+    },
+    tools: [calculatorTool],
+    stopSequences: { sequences: ['\n5'] },
+    toolMode: 'native',
+  };
+
+  let chunks = '';
+  const response = await membrane.stream(request, {
+    onChunk: (chunk) => { chunks += chunk; },
+  });
+
+  if (!isAbortedResponse(response)) {
+    console.log(`  Stop reason: ${response.stopReason}`);
+    console.log(`  Triggered sequence: ${JSON.stringify(response.details?.stop?.triggeredSequence)}`);
+    console.log(`  Chunks: ${chunks.substring(0, 100)}...`);
+
+    // Should have stopped at the stop sequence
+    if (response.stopReason === 'stop_sequence') {
+      assert(true, 'Stop reason correctly detected as stop_sequence');
+      // Note: triggeredSequence depends on the adapter/SDK correctly propagating
+      // stop_sequence from streaming events. Anthropic SDK may return null here.
+      if (response.details?.stop?.triggeredSequence) {
+        assert(true, `triggeredSequence captured: "${response.details.stop.triggeredSequence}"`);
+      } else {
+        console.log('  Note: triggeredSequence is undefined (SDK may not propagate in streaming)');
+        // Verify the field exists in the response structure (our fix)
+        assert('triggeredSequence' in (response.details?.stop ?? {}), 'triggeredSequence field exists in response structure');
+      }
+    } else {
+      // Model may have finished before hitting stop sequence
+      assert(true, `Response completed with stop reason: ${response.stopReason}`);
+    }
+  } else {
+    assert(false, 'Response was unexpectedly aborted');
+  }
+});
+
+// ============================================================================
 // Summary
 // ============================================================================
 

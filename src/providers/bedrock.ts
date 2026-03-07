@@ -477,7 +477,7 @@ export class BedrockAdapter implements ProviderAdapter {
     }
 
     // Parse the binary event stream
-    const contentBlocks: Array<{ type: string; text?: string }> = [];
+    const contentBlocks: Array<{ type: string; text?: string; thinking?: string; signature?: string }> = [];
     let currentBlockIndex = -1;
     let finalMessage: BedrockMessageResponse | undefined;
     let inputTokens = 0;
@@ -583,6 +583,13 @@ export class BedrockAdapter implements ProviderAdapter {
                     }
                   } else if (eventData.delta?.type === 'thinking_delta' && eventData.delta.thinking) {
                     callbacks.onChunk(eventData.delta.thinking);
+                    if (contentBlocks[currentBlockIndex]) {
+                      contentBlocks[currentBlockIndex]!.thinking = (contentBlocks[currentBlockIndex]!.thinking ?? '') + eventData.delta.thinking;
+                    }
+                  } else if (eventData.delta?.type === 'signature_delta' && (eventData.delta as any).signature) {
+                    if (contentBlocks[currentBlockIndex]) {
+                      contentBlocks[currentBlockIndex]!.signature = (contentBlocks[currentBlockIndex]!.signature ?? '') + (eventData.delta as any).signature;
+                    }
                   }
                 } else if (eventData.type === 'message_delta') {
                   if (eventData.usage) {
@@ -611,10 +618,12 @@ export class BedrockAdapter implements ProviderAdapter {
       id: 'msg_stream',
       type: 'message',
       role: 'assistant',
-      content: contentBlocks.map(b => ({
-        type: b.type as 'text',
-        text: b.text,
-      })),
+      content: contentBlocks.map(b => {
+        if (b.type === 'thinking') {
+          return { type: 'thinking' as const, thinking: b.thinking, signature: b.signature };
+        }
+        return { type: b.type as 'text', text: b.text };
+      }),
       model: modelId,
       stop_reason: stopReason as BedrockMessageResponse['stop_reason'],
       usage: {

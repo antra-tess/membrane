@@ -22,6 +22,7 @@ import {
   abortError,
   networkError,
 } from '../types/index.js';
+import { safeParseJson } from './utils.js';
 
 // ============================================================================
 // Types
@@ -549,7 +550,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
           type: 'tool_use',
           id: tc.id,
           name: tc.function.name,
-          input: JSON.parse(tc.function.arguments || '{}'),
+          input: safeParseJson(tc.function.arguments),
         });
       }
     }
@@ -698,7 +699,7 @@ export function fromOpenRouterMessage(message: OpenRouterMessage): ContentBlock[
         type: 'tool_use',
         id: tc.id,
         name: tc.function.name,
-        input: JSON.parse(tc.function.arguments || '{}'),
+        input: safeParseJson(tc.function.arguments),
       });
     }
   }
