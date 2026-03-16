@@ -39,6 +39,7 @@ import {
   abortError,
   networkError,
 } from '../types/index.js';
+import { createCombinedSignal } from './utils.js';
 
 // ============================================================================
 // Images API Types
@@ -152,10 +153,11 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
     const imagesRequest = this.buildRequest(request, inputImages);
     options?.onRequest?.(imagesRequest);
 
+    const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
       const fetchOptions: RequestInit = {
         method: 'POST',
-        signal: options?.signal,
+        signal: combinedSignal,
       };
 
       if (isEdit) {
@@ -198,6 +200,8 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
       return this.parseResponse(data, request.model, imagesRequest);
     } catch (error) {
       throw this.handleError(error, imagesRequest);
+    } finally {
+      cleanup?.();
     }
   }
 

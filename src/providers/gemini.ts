@@ -28,6 +28,7 @@ import {
   abortError,
   networkError,
 } from '../types/index.js';
+import { createCombinedSignal } from './utils.js';
 
 // ============================================================================
 // Gemini API Types
@@ -127,13 +128,14 @@ export class GeminiAdapter implements ProviderAdapter {
     const geminiRequest = this.buildRequest(request);
     options?.onRequest?.(geminiRequest);
 
+    const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
       const url = `${this.baseURL}/models/${request.model}:generateContent?key=${this.apiKey}`;
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(geminiRequest),
-        signal: options?.signal,
+        signal: combinedSignal,
       });
 
       if (!response.ok) {
@@ -150,6 +152,8 @@ export class GeminiAdapter implements ProviderAdapter {
       return this.parseResponse(data, request.model, geminiRequest);
     } catch (error) {
       throw this.handleError(error, geminiRequest);
+    } finally {
+      cleanup?.();
     }
   }
 
@@ -161,13 +165,14 @@ export class GeminiAdapter implements ProviderAdapter {
     const geminiRequest = this.buildRequest(request);
     options?.onRequest?.(geminiRequest);
 
+    const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
       const url = `${this.baseURL}/models/${request.model}:streamGenerateContent?alt=sse&key=${this.apiKey}`;
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(geminiRequest),
-        signal: options?.signal,
+        signal: combinedSignal,
       });
 
       if (!response.ok) {
@@ -300,6 +305,8 @@ export class GeminiAdapter implements ProviderAdapter {
       };
     } catch (error) {
       throw this.handleError(error, geminiRequest);
+    } finally {
+      cleanup?.();
     }
   }
 

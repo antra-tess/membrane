@@ -29,7 +29,7 @@ import {
   abortError,
   networkError,
 } from '../types/index.js';
-import { safeParseJson } from './utils.js';
+import { safeParseJson, createCombinedSignal } from './utils.js';
 
 // ============================================================================
 // Types
@@ -240,12 +240,13 @@ export class OpenAIAdapter implements ProviderAdapter {
     openAIRequest.stream_options = { include_usage: true };
     options?.onRequest?.(openAIRequest);
 
+    const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
       const response = await fetch(`${this.baseURL}/chat/completions`, {
         method: 'POST',
         headers: this.getHeaders(),
         body: JSON.stringify(openAIRequest),
-        signal: options?.signal,
+        signal: combinedSignal,
       });
 
       if (!response.ok) {
@@ -331,6 +332,8 @@ export class OpenAIAdapter implements ProviderAdapter {
 
     } catch (error) {
       throw this.handleError(error, openAIRequest);
+    } finally {
+      cleanup?.();
     }
   }
 
@@ -514,19 +517,24 @@ export class OpenAIAdapter implements ProviderAdapter {
   }
 
   private async makeRequest(request: any, options?: ProviderRequestOptions): Promise<OpenAIResponse> {
-    const response = await fetch(`${this.baseURL}/chat/completions`, {
-      method: 'POST',
-      headers: this.getHeaders(),
-      body: JSON.stringify(request),
-      signal: options?.signal,
-    });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`OpenAI API error: ${response.status} ${errorText}`);
+    const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
+    try {
+      const response = await fetch(`${this.baseURL}/chat/completions`, {
+        method: 'POST',
+        headers: this.getHeaders(),
+        body: JSON.stringify(request),
+        signal: combinedSignal,
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`OpenAI API error: ${response.status} ${errorText}`);
+      }
+
+      return await response.json() as OpenAIResponse;
+    } finally {
+      cleanup?.();
     }
-    
-    return response.json() as Promise<OpenAIResponse>;
   }
 
   private parseResponse(response: OpenAIResponse, requestedModel: string, rawRequest: unknown): ProviderResponse {
