@@ -27,6 +27,7 @@ import {
   abortError,
   networkError,
 } from '../types/index.js';
+import { createCombinedSignal } from './utils.js';
 
 // ============================================================================
 // Types
@@ -169,12 +170,13 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
     completionsRequest.stream = true;
     options?.onRequest?.(completionsRequest);
 
+    const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
       const response = await fetch(`${this.baseURL}/completions`, {
         method: 'POST',
         headers: this.getHeaders(),
         body: JSON.stringify(completionsRequest),
-        signal: options?.signal,
+        signal: combinedSignal,
       });
 
       if (!response.ok) {
@@ -224,6 +226,8 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
 
     } catch (error) {
       throw this.handleError(error, completionsRequest);
+    } finally {
+      cleanup?.();
     }
   }
 
@@ -333,9 +337,29 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
   }
 
   private buildRequest(request: ProviderRequest): CompletionsRequest {
-    // Prefer normalizedMessages (has participant names) over messages (has role)
-    const messages = (request.extra?.normalizedMessages as any[]) || (request.messages as any[]);
-    const { prompt, participants } = this.serializeToPrompt(messages);
+    let prompt: string;
+    let stopSequences: string[];
+
+    if (typeof request.extra?.prompt === 'string') {
+      // Continuation path: prompt is already serialized, skip re-serialization.
+      // No participant-based stops or eotToken — the prompt already contains them.
+      prompt = request.extra.prompt;
+      stopSequences = [
+        ...this.extraStopSequences,
+        ...(request.stopSequences || []),
+      ];
+    } else {
+      // Normal path: serialize messages into prompt format
+      const messages = (request.extra?.normalizedMessages as any[]) || (request.messages as any[]);
+      const result = this.serializeToPrompt(messages);
+      prompt = result.prompt;
+      stopSequences = [
+        ...this.generateStopSequences(result.participants),
+        ...(this.eotToken ? [this.eotToken] : []),
+        ...this.extraStopSequences,
+        ...(request.stopSequences || []),
+      ];
+    }
 
     const params: CompletionsRequest = {
       model: request.model,
@@ -359,13 +383,6 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
       params.frequency_penalty = request.frequencyPenalty;
     }
 
-    // Generate stop sequences from participant names + EOT token + any extras
-    const stopSequences = [
-      ...this.generateStopSequences(participants),
-      ...(this.eotToken ? [this.eotToken] : []),
-      ...this.extraStopSequences,
-      ...(request.stopSequences || []),
-    ];
     if (stopSequences.length > 0) {
       params.stop = stopSequences;
     }
@@ -380,19 +397,24 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
   }
 
   private async makeRequest(request: CompletionsRequest, options?: ProviderRequestOptions): Promise<CompletionsResponse> {
-    const response = await fetch(`${this.baseURL}/completions`, {
-      method: 'POST',
-      headers: this.getHeaders(),
-      body: JSON.stringify(request),
-      signal: options?.signal,
-    });
+    const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
+    try {
+      const response = await fetch(`${this.baseURL}/completions`, {
+        method: 'POST',
+        headers: this.getHeaders(),
+        body: JSON.stringify(request),
+        signal: combinedSignal,
+      });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`API error: ${response.status} ${errorText}`);
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`API error: ${response.status} ${errorText}`);
+      }
+
+      return await response.json() as CompletionsResponse;
+    } finally {
+      cleanup?.();
     }
-
-    return response.json() as Promise<CompletionsResponse>;
   }
 
   private parseResponse(response: CompletionsResponse, requestedModel: string, rawRequest: unknown): ProviderResponse {

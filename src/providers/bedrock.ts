@@ -20,6 +20,7 @@ import {
   serverError,
   abortError,
 } from '../types/index.js';
+import { createCombinedSignal } from './utils.js';
 
 // ============================================================================
 // Adapter Configuration
@@ -306,11 +307,14 @@ export class BedrockAdapter implements ProviderAdapter {
     const fullRequest = { modelId: bedrockModelId, ...bedrockRequest };
     options?.onRequest?.(fullRequest);
 
+    const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
-      const response = await this.invokeModel(bedrockModelId, bedrockRequest, options?.signal);
+      const response = await this.invokeModel(bedrockModelId, bedrockRequest, combinedSignal);
       return this.parseResponse(response, fullRequest);
     } catch (error) {
       throw this.handleError(error, fullRequest);
+    } finally {
+      cleanup?.();
     }
   }
 
@@ -324,10 +328,13 @@ export class BedrockAdapter implements ProviderAdapter {
     const fullRequest = { modelId: bedrockModelId, ...bedrockRequest, stream: true };
     options?.onRequest?.(fullRequest);
 
+    const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
-      return await this.invokeModelWithStream(bedrockModelId, bedrockRequest, callbacks, options?.signal);
+      return await this.invokeModelWithStream(bedrockModelId, bedrockRequest, callbacks, combinedSignal);
     } catch (error) {
       throw this.handleError(error, fullRequest);
+    } finally {
+      cleanup?.();
     }
   }
 

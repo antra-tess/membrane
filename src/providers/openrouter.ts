@@ -22,7 +22,7 @@ import {
   abortError,
   networkError,
 } from '../types/index.js';
-import { safeParseJson } from './utils.js';
+import { safeParseJson, createCombinedSignal } from './utils.js';
 
 // ============================================================================
 // Types
@@ -157,12 +157,13 @@ export class OpenRouterAdapter implements ProviderAdapter {
     openRouterRequest.stream_options = { include_usage: true };
     options?.onRequest?.(openRouterRequest);
 
+    const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
       const response = await fetch(`${this.baseURL}/chat/completions`, {
         method: 'POST',
         headers: this.getHeaders(),
         body: JSON.stringify(openRouterRequest),
-        signal: options?.signal,
+        signal: combinedSignal,
       });
 
       if (!response.ok) {
@@ -248,6 +249,8 @@ export class OpenRouterAdapter implements ProviderAdapter {
 
     } catch (error) {
       throw this.handleError(error, openRouterRequest);
+    } finally {
+      cleanup?.();
     }
   }
 
@@ -465,19 +468,24 @@ export class OpenRouterAdapter implements ProviderAdapter {
   }
 
   private async makeRequest(request: any, options?: ProviderRequestOptions): Promise<OpenRouterResponse> {
-    const response = await fetch(`${this.baseURL}/chat/completions`, {
-      method: 'POST',
-      headers: this.getHeaders(),
-      body: JSON.stringify(request),
-      signal: options?.signal,
-    });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`OpenRouter error: ${response.status} ${errorText}`);
+    const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
+    try {
+      const response = await fetch(`${this.baseURL}/chat/completions`, {
+        method: 'POST',
+        headers: this.getHeaders(),
+        body: JSON.stringify(request),
+        signal: combinedSignal,
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`OpenRouter error: ${response.status} ${errorText}`);
+      }
+
+      return await response.json() as OpenRouterResponse;
+    } finally {
+      cleanup?.();
     }
-    
-    return response.json() as Promise<OpenRouterResponse>;
   }
 
   private parseResponse(response: OpenRouterResponse, requestedModel: string, rawRequest: unknown): ProviderResponse {
@@ -541,7 +549,15 @@ export class OpenRouterAdapter implements ProviderAdapter {
     const content: any[] = [];
     
     if (message.content) {
-      content.push({ type: 'text', text: message.content });
+      if (typeof message.content === 'string') {
+        content.push({ type: 'text', text: message.content });
+      } else if (Array.isArray(message.content)) {
+        for (const block of message.content) {
+          if (block.type === 'text') {
+            content.push({ type: 'text', text: block.text });
+          }
+        }
+      }
     }
     
     if (message.tool_calls) {

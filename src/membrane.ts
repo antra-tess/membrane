@@ -1068,6 +1068,24 @@ export class Membrane {
   // ==========================================================================
 
   /**
+   * Extract base provider params from config, with thinking temperature enforcement.
+   * Used by transformRequest, buildContinuationRequest, and buildContinuationRequestWithImages.
+   */
+  private getBaseProviderParams(config: NormalizedRequest['config']) {
+    // Anthropic requires temperature=1 when extended thinking is enabled
+    const temperature = config.thinking?.enabled ? 1 : config.temperature;
+    return {
+      model: config.model,
+      maxTokens: config.maxTokens,
+      temperature,
+      topP: config.topP,
+      topK: config.topK,
+      presencePenalty: config.presencePenalty,
+      frequencyPenalty: config.frequencyPenalty,
+    };
+  }
+
+  /**
    * Transform a normalized request into provider format using the formatter
    */
   private transformRequest(request: NormalizedRequest, formatter?: PrefillFormatter): {
@@ -1102,19 +1120,8 @@ export class Membrane {
       prefillUserMessage: request.prefillUserMessage,
     });
 
-    // Anthropic requires temperature=1 when extended thinking is enabled
-    const temperature = request.config.thinking?.enabled
-      ? 1
-      : request.config.temperature;
-
     const providerRequest = {
-      model: request.config.model,
-      maxTokens: request.config.maxTokens,
-      temperature,
-      topP: request.config.topP,
-      topK: request.config.topK,
-      presencePenalty: request.config.presencePenalty,
-      frequencyPenalty: request.config.frequencyPenalty,
+      ...this.getBaseProviderParams(request.config),
       messages: buildResult.messages,
       system: buildResult.systemContent,
       stopSequences: buildResult.stopSequences,
@@ -1163,9 +1170,7 @@ export class Membrane {
     }
     
     return {
-      model: originalRequest.config.model,
-      maxTokens: originalRequest.config.maxTokens,
-      temperature: originalRequest.config.temperature,
+      ...this.getBaseProviderParams(originalRequest.config),
       messages,
       system: prefillResult.systemContent
         ? (Array.isArray(prefillResult.systemContent) && prefillResult.systemContent.length > 0
@@ -1173,7 +1178,11 @@ export class Membrane {
           : prefillResult.systemContent)
         : undefined,
       stopSequences: prefillResult.stopSequences,
-      extra: originalRequest.providerParams,
+      extra: {
+        ...originalRequest.providerParams,
+        // Pre-serialized prompt for completions adapters — skip re-serialization
+        prompt: trimmedAccumulated,
+      },
     };
   }
 
@@ -1204,42 +1213,34 @@ export class Membrane {
     // Anthropic quirk: assistant content cannot end with trailing whitespace
     const trimmedAccumulated = accumulated.trimEnd();
 
-    // Build messages: copy existing, then modify/add for split-turn
-    const messages: any[] = [];
+    // Build messages: copy all, then replace only the last assistant with split-turn
+    const messages: any[] = prefillResult.messages.map(msg => ({ ...msg }));
 
-    // Copy all messages except the last assistant message
-    for (const msg of prefillResult.messages) {
-      if (msg.role === 'assistant') {
-        // Skip - we'll add our own assistant messages
-        continue;
+    // Find last assistant — replace in-place via splice to preserve history
+    let insertIdx = messages.length;
+    for (let idx = messages.length - 1; idx >= 0; idx--) {
+      if (messages[idx].role === 'assistant') {
+        insertIdx = idx;
+        break;
       }
-      messages.push({ ...msg });
     }
 
-    // Add assistant message with accumulated content (ends mid-XML)
-    messages.push({
-      role: 'assistant',
-      content: trimmedAccumulated,
-    });
-
-    // Add user message with just the images
-    messages.push({
-      role: 'user',
-      content: images,
-    });
-
-    // Add assistant prefill with closing XML tags
     // Anthropic quirk: assistant content cannot end with trailing whitespace
     const trimmedAfterXml = afterImageXml.trimEnd();
-    messages.push({
-      role: 'assistant',
-      content: trimmedAfterXml,
-    });
+    const splitTurnMessages = [
+      { role: 'assistant', content: trimmedAccumulated },
+      { role: 'user', content: images },
+      { role: 'assistant', content: trimmedAfterXml },
+    ];
+
+    if (insertIdx < messages.length) {
+      messages.splice(insertIdx, 1, ...splitTurnMessages);
+    } else {
+      messages.push(...splitTurnMessages);
+    }
 
     return {
-      model: originalRequest.config.model,
-      maxTokens: originalRequest.config.maxTokens,
-      temperature: originalRequest.config.temperature,
+      ...this.getBaseProviderParams(originalRequest.config),
       messages,
       system: prefillResult.systemContent
         ? (Array.isArray(prefillResult.systemContent) && prefillResult.systemContent.length > 0
