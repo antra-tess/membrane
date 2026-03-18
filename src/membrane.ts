@@ -205,9 +205,9 @@ export class Membrane {
     }
 
     // Auto mode: choose based on formatter
-    // NativeFormatter → native tools via API
-    // AnthropicXmlFormatter (default) → XML tools in prefill
-    if (this.formatter.name === 'native') {
+    // Non-prefill formatters (NativeFormatter, PseudoPrefillFormatter) → native tools via API
+    // Prefill formatters (AnthropicXmlFormatter, CompletionsFormatter) → XML tools in prefill
+    if (!this.formatter.usesPrefill) {
       return 'native';
     }
 

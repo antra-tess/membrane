@@ -105,6 +105,11 @@ export interface BuildResult {
 
   /** Number of cache control markers applied (for Anthropic prompt caching) */
   cacheMarkersApplied?: number;
+
+  /** Formatter-specific metadata for callers.
+   *  e.g., pseudo-prefill includes conversationLog and continuationMode
+   *  so the caller can strip the repeated log from 'cat' mode responses. */
+  metadata?: Record<string, unknown>;
 }
 
 export interface ProviderMessage {
