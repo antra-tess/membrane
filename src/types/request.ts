@@ -161,6 +161,15 @@ export interface NormalizedRequest {
    */
   assistantParticipant?: string;
 
+  /**
+   * Control streaming behavior when calling membrane.stream().
+   * - true or undefined: use streaming (default)
+   * - false: force non-streaming — membrane.stream() will internally use
+   *   complete() and synthesize streaming callbacks from the full response.
+   *   Useful for working around provider streaming bugs.
+   */
+  streaming?: boolean;
+
   /** Provider-specific parameters (pass-through) */
   providerParams?: Record<string, unknown>;
 }

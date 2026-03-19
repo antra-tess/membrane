@@ -29,7 +29,7 @@ import {
   abortError,
   networkError,
 } from '../types/index.js';
-import { safeParseJson, createCombinedSignal } from './utils.js';
+import { safeParseJson, createCombinedSignal, SSELineParser } from './utils.js';
 
 // ============================================================================
 // Types
@@ -260,6 +260,7 @@ export class OpenAIAdapter implements ProviderAdapter {
       }
 
       const decoder = new TextDecoder();
+      const sseParser = new SSELineParser();
       let accumulated = '';
       let finishReason = 'stop';
       let toolCalls: OpenAIToolCall[] = [];
@@ -270,10 +271,9 @@ export class OpenAIAdapter implements ProviderAdapter {
         if (done) break;
 
         const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split('\n').filter(line => line.startsWith('data: '));
+        const dataLines = sseParser.feed(chunk);
 
-        for (const line of lines) {
-          const data = line.slice(6);
+        for (const data of dataLines) {
           if (data === '[DONE]') continue;
 
           try {

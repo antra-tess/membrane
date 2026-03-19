@@ -55,3 +55,55 @@ export function createCombinedSignal(
     },
   };
 }
+
+/**
+ * SSE (Server-Sent Events) line parser that correctly handles events
+ * split across multiple TCP chunks.
+ *
+ * The naive approach of `chunk.split('\n').filter(l => l.startsWith('data: '))`
+ * silently drops events when an SSE line spans two chunks:
+ *   Chunk 1: `data: {"choices":[{"delta":{"content":"don'`  (no newline — incomplete)
+ *   Chunk 2: `t do that"}}]}\n`                              (doesn't start with `data: `)
+ * Result: the entire event is lost, causing "skipped words" in output.
+ *
+ * This parser buffers partial lines and only yields complete `data: ...` lines.
+ */
+export class SSELineParser {
+  private buffer: string = '';
+
+  /**
+   * Feed a raw chunk from the stream reader and get back complete SSE data lines.
+   * Each returned string is the content after `data: ` (e.g. the JSON payload or `[DONE]`).
+   */
+  feed(chunk: string): string[] {
+    this.buffer += chunk;
+    const results: string[] = [];
+
+    // Split on newlines, keeping the last (potentially incomplete) segment in the buffer
+    const lines = this.buffer.split('\n');
+    this.buffer = lines.pop() || '';
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith('data: ')) {
+        results.push(trimmed.slice(6));
+      }
+      // Skip empty lines, comments (`:...`), and other SSE fields (event:, id:, retry:)
+    }
+
+    return results;
+  }
+
+  /**
+   * Flush any remaining buffered content (call when stream ends).
+   */
+  flush(): string[] {
+    if (!this.buffer.trim()) return [];
+    const trimmed = this.buffer.trim();
+    this.buffer = '';
+    if (trimmed.startsWith('data: ')) {
+      return [trimmed.slice(6)];
+    }
+    return [];
+  }
+}

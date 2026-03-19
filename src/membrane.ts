@@ -185,6 +185,26 @@ export class Membrane {
     request: NormalizedRequest,
     options: StreamOptions = {}
   ): Promise<NormalizedResponse | AbortedResponse> {
+    // If streaming is explicitly disabled on the request, fall back to complete()
+    // and synthesize the streaming callbacks from the full response
+    if (request.streaming === false) {
+      const response = await this.complete(request, options);
+      // Synthesize onChunk callbacks so callers that depend on them still work
+      if (options.onChunk && 'content' in response) {
+        for (let i = 0; i < response.content.length; i++) {
+          const block = response.content[i]!;
+          if (block.type === 'text' && block.text) {
+            options.onChunk(block.text, {
+              type: 'text',
+              visible: true,
+              blockIndex: i,
+            });
+          }
+        }
+      }
+      return response;
+    }
+
     // Determine tool mode
     const toolMode = this.resolveToolMode(request);
 
