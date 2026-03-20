@@ -17,3 +17,4 @@ export type {
 export { AnthropicXmlFormatter, type AnthropicXmlFormatterConfig } from './anthropic-xml.js';
 export { NativeFormatter, type NativeFormatterConfig } from './native.js';
 export { CompletionsFormatter, type CompletionsFormatterConfig } from './completions.js';
+export { PseudoPrefillFormatter, type PseudoPrefillFormatterConfig } from './pseudo-prefill.js';
