@@ -274,8 +274,8 @@ export class BedrockAdapter implements ProviderAdapter {
 
     // If already in Bedrock format, use as-is
     // Supports both direct model IDs (anthropic.claude-...) and
-    // cross-region inference profile IDs (us.anthropic.claude-..., eu.anthropic.claude-...)
-    if (modelId.startsWith('anthropic.') || /^[a-z]{2}\.anthropic\./.test(modelId)) {
+    // cross-region inference profile IDs (us.anthropic.claude-..., eu.anthropic.claude-..., apac.anthropic.claude-...)
+    if (modelId.startsWith('anthropic.') || /^[a-z]{2,4}\.anthropic\./.test(modelId)) {
       return modelId;
     }
 
