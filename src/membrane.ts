@@ -53,6 +53,8 @@ import type {
 import type { PrefillFormatter, StreamParser } from './formatters/types.js';
 import { AnthropicXmlFormatter } from './formatters/anthropic-xml.js';
 import { YieldingStreamImpl } from './yielding-stream.js';
+import { calculateCost } from './utils/cost.js';
+import { getDefaultPricing } from './registry/default-pricing.js';
 
 // ============================================================================
 // Membrane Class
@@ -425,6 +427,7 @@ export class Membrane {
         if (streamResult.usage.cacheReadTokens) {
           totalUsage.cacheReadTokens = (totalUsage.cacheReadTokens ?? 0) + streamResult.usage.cacheReadTokens;
         }
+        totalUsage.estimatedCost = this.calculateEstimatedCost(totalUsage, request.config.model);
         onUsage?.(totalUsage);
 
         // Flush the parser to complete any in-progress streaming block
@@ -807,6 +810,7 @@ export class Membrane {
         if (streamResult.usage.cacheReadTokens) {
           totalUsage.cacheReadTokens = (totalUsage.cacheReadTokens ?? 0) + streamResult.usage.cacheReadTokens;
         }
+        totalUsage.estimatedCost = this.calculateEstimatedCost(totalUsage, request.config.model);
         onUsage?.(totalUsage);
 
         // Parse content blocks from response
@@ -1377,6 +1381,7 @@ export class Membrane {
           outputTokens: providerResponse.usage.outputTokens,
           cacheCreationTokens: providerResponse.usage.cacheCreationTokens,
           cacheReadTokens: providerResponse.usage.cacheReadTokens,
+          estimatedCost: this.calculateEstimatedCost(providerResponse.usage as DetailedUsage, request.config.model),
         },
         timing: {
           totalDurationMs: durationMs,
@@ -1458,6 +1463,7 @@ export class Membrane {
         },
         usage: {
           ...usage,
+          estimatedCost: usage.estimatedCost ?? this.calculateEstimatedCost(usage, request.config.model),
         },
         timing: {
           totalDurationMs: durationMs,
@@ -1502,6 +1508,12 @@ export class Membrane {
     const total = usage.inputTokens ?? 0;
     if (total === 0) return 0;
     return cacheRead / total;
+  }
+
+  private calculateEstimatedCost(usage: DetailedUsage, model: string): import('./types/response.js').CostBreakdown | undefined {
+    const pricing = this.registry?.getPricing(model) ?? getDefaultPricing(model);
+    if (!pricing) return undefined;
+    return calculateCost(usage, pricing);
   }
 
   private calculateRetryDelay(attempt: number): number {
@@ -1777,6 +1789,7 @@ export class Membrane {
         if (streamResult.usage.cacheReadTokens) {
           totalUsage.cacheReadTokens = (totalUsage.cacheReadTokens ?? 0) + streamResult.usage.cacheReadTokens;
         }
+        totalUsage.estimatedCost = this.calculateEstimatedCost(totalUsage, request.config.model);
         if (emitUsage) {
           stream.emit({ type: 'usage', usage: { ...totalUsage } });
         }
@@ -2156,6 +2169,7 @@ export class Membrane {
         if (streamResult.usage.cacheReadTokens) {
           totalUsage.cacheReadTokens = (totalUsage.cacheReadTokens ?? 0) + streamResult.usage.cacheReadTokens;
         }
+        totalUsage.estimatedCost = this.calculateEstimatedCost(totalUsage, request.config.model);
         if (emitUsage) {
           stream.emit({ type: 'usage', usage: { ...totalUsage } });
         }
