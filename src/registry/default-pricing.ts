@@ -61,11 +61,13 @@ const PRICING_TABLE: Array<{ prefix: string; pricing: ModelPricing }> = [
 ];
 
 export function getDefaultPricing(modelId: string): ModelPricing | undefined {
-  // Longest prefix match — table is ordered so more specific entries come first
+  let best: ModelPricing | undefined;
+  let bestLen = 0;
   for (const entry of PRICING_TABLE) {
-    if (modelId.startsWith(entry.prefix)) {
-      return entry.pricing;
+    if (modelId.startsWith(entry.prefix) && entry.prefix.length > bestLen) {
+      best = entry.pricing;
+      bestLen = entry.prefix.length;
     }
   }
-  return undefined;
+  return best;
 }

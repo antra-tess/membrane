@@ -275,6 +275,7 @@ export class Membrane {
     const parser = formatter.createStreamParser();
     let toolDepth = 0;
     let totalUsage: DetailedUsage = { inputTokens: 0, outputTokens: 0 };
+    const pricing = this.resolvePricing(request.config.model);
     const contentBlocks: ContentBlock[] = [];
     let lastStopReason: StopReason = 'end_turn';
     let lastStopSequence: string | undefined;
@@ -427,7 +428,7 @@ export class Membrane {
         if (streamResult.usage.cacheReadTokens) {
           totalUsage.cacheReadTokens = (totalUsage.cacheReadTokens ?? 0) + streamResult.usage.cacheReadTokens;
         }
-        totalUsage.estimatedCost = this.calculateEstimatedCost(totalUsage, request.config.model);
+        if (pricing) totalUsage.estimatedCost = calculateCost(totalUsage, pricing);
         onUsage?.(totalUsage);
 
         // Flush the parser to complete any in-progress streaming block
@@ -740,6 +741,7 @@ export class Membrane {
 
     let toolDepth = 0;
     let totalUsage: DetailedUsage = { inputTokens: 0, outputTokens: 0 };
+    const pricing = this.resolvePricing(request.config.model);
     let lastStopReason: StopReason = 'end_turn';
     let lastStopSequence: string | undefined;
     let rawRequest: unknown;
@@ -810,7 +812,7 @@ export class Membrane {
         if (streamResult.usage.cacheReadTokens) {
           totalUsage.cacheReadTokens = (totalUsage.cacheReadTokens ?? 0) + streamResult.usage.cacheReadTokens;
         }
-        totalUsage.estimatedCost = this.calculateEstimatedCost(totalUsage, request.config.model);
+        if (pricing) totalUsage.estimatedCost = calculateCost(totalUsage, pricing);
         onUsage?.(totalUsage);
 
         // Parse content blocks from response
@@ -1407,7 +1409,7 @@ export class Membrane {
           outputTokens: providerResponse.usage.outputTokens,
           cacheCreationTokens: providerResponse.usage.cacheCreationTokens,
           cacheReadTokens: providerResponse.usage.cacheReadTokens,
-          estimatedCost: this.calculateEstimatedCost(providerResponse.usage as DetailedUsage, request.config.model),
+          estimatedCost: this.estimateCost(providerResponse.usage, request.config.model),
         },
         timing: {
           totalDurationMs: durationMs,
@@ -1489,7 +1491,7 @@ export class Membrane {
         },
         usage: {
           ...usage,
-          estimatedCost: usage.estimatedCost ?? this.calculateEstimatedCost(usage, request.config.model),
+          estimatedCost: usage.estimatedCost ?? this.estimateCost(usage, request.config.model),
         },
         timing: {
           totalDurationMs: durationMs,
@@ -1529,17 +1531,21 @@ export class Membrane {
     }
   }
 
-  private calculateCacheHitRatio(usage: any): number {
+  private calculateCacheHitRatio(usage: Pick<DetailedUsage, 'inputTokens' | 'cacheReadTokens'>): number {
     const cacheRead = usage.cacheReadTokens ?? 0;
     const total = usage.inputTokens ?? 0;
     if (total === 0) return 0;
     return cacheRead / total;
   }
 
-  private calculateEstimatedCost(usage: DetailedUsage, model: string): import('./types/response.js').CostBreakdown | undefined {
-    const pricing = this.registry?.getPricing(model) ?? getDefaultPricing(model);
-    if (!pricing) return undefined;
-    return calculateCost(usage, pricing);
+  private resolvePricing(model: string): import('./types/provider.js').ModelPricing | undefined {
+    return this.registry?.getPricing(model) ?? getDefaultPricing(model);
+  }
+
+  /** Resolve pricing + calculate cost in one call (for one-shot use outside loops). */
+  private estimateCost(usage: import('./utils/cost.js').CostableUsage, model: string): import('./types/response.js').CostBreakdown | undefined {
+    const pricing = this.resolvePricing(model);
+    return pricing ? calculateCost(usage, pricing) : undefined;
   }
 
   private calculateRetryDelay(attempt: number): number {
@@ -1678,6 +1684,7 @@ export class Membrane {
     const parser = formatter.createStreamParser();
     let toolDepth = 0;
     let totalUsage: DetailedUsage = { inputTokens: 0, outputTokens: 0 };
+    const pricing = this.resolvePricing(request.config.model);
     const contentBlocks: ContentBlock[] = [];
     let lastStopReason: StopReason = 'end_turn';
     let lastStopSequence: string | undefined;
@@ -1815,7 +1822,7 @@ export class Membrane {
         if (streamResult.usage.cacheReadTokens) {
           totalUsage.cacheReadTokens = (totalUsage.cacheReadTokens ?? 0) + streamResult.usage.cacheReadTokens;
         }
-        totalUsage.estimatedCost = this.calculateEstimatedCost(totalUsage, request.config.model);
+        if (pricing) totalUsage.estimatedCost = calculateCost(totalUsage, pricing);
         if (emitUsage) {
           stream.emit({ type: 'usage', usage: { ...totalUsage } });
         }
@@ -2121,6 +2128,7 @@ export class Membrane {
 
     let toolDepth = 0;
     let totalUsage: DetailedUsage = { inputTokens: 0, outputTokens: 0 };
+    const pricing = this.resolvePricing(request.config.model);
     let lastStopReason: StopReason = 'end_turn';
     let lastStopSequence: string | undefined;
     let rawRequest: unknown;
@@ -2195,7 +2203,7 @@ export class Membrane {
         if (streamResult.usage.cacheReadTokens) {
           totalUsage.cacheReadTokens = (totalUsage.cacheReadTokens ?? 0) + streamResult.usage.cacheReadTokens;
         }
-        totalUsage.estimatedCost = this.calculateEstimatedCost(totalUsage, request.config.model);
+        if (pricing) totalUsage.estimatedCost = calculateCost(totalUsage, pricing);
         if (emitUsage) {
           stream.emit({ type: 'usage', usage: { ...totalUsage } });
         }

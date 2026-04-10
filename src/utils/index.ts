@@ -15,3 +15,4 @@ export {
 } from './tool-parser.js';
 
 export { calculateCost } from './cost.js';
+export type { CostableUsage } from './cost.js';
