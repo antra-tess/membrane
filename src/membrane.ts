@@ -2278,9 +2278,9 @@ export class Membrane {
           },
           cache: {
             markersInRequest: 0,
-            tokensCreated: 0,
-            tokensRead: 0,
-            hitRatio: 0,
+            tokensCreated: totalUsage.cacheCreationTokens ?? 0,
+            tokensRead: totalUsage.cacheReadTokens ?? 0,
+            hitRatio: this.calculateCacheHitRatio(totalUsage),
           },
         },
         raw: {

@@ -178,7 +178,15 @@ export class AnthropicAdapter implements ProviderAdapter {
           const delta = event.delta as { stop_reason?: string; stop_sequence?: string };
           stopReason = delta.stop_reason ?? 'end_turn';
           stopSequence = delta.stop_sequence ?? undefined;
-          outputTokens = (event.usage as { output_tokens: number }).output_tokens ?? 0;
+          const deltaUsage = event.usage as unknown as Record<string, number | null>;
+          outputTokens = deltaUsage.output_tokens ?? 0;
+          // message_delta carries cumulative cache metrics — use as authoritative
+          if (deltaUsage.cache_creation_input_tokens != null) {
+            cacheCreationTokens = deltaUsage.cache_creation_input_tokens;
+          }
+          if (deltaUsage.cache_read_input_tokens != null) {
+            cacheReadTokens = deltaUsage.cache_read_input_tokens;
+          }
           break;
         }
       }
