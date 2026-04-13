@@ -10,7 +10,7 @@
 
 import type { ContentBlock } from './content.js';
 import type { ToolCall, ToolResult, ToolContext } from './tools.js';
-import type { BasicUsage, NormalizedResponse, StopReason } from './response.js';
+import type { DetailedUsage, NormalizedResponse, StopReason } from './response.js';
 import type { ChunkMeta, BlockEvent } from './streaming.js';
 
 // ============================================================================
@@ -49,7 +49,7 @@ export interface ToolCallsEvent {
  */
 export interface UsageEvent {
   type: 'usage';
-  usage: BasicUsage;
+  usage: DetailedUsage;
 }
 
 /**

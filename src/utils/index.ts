@@ -13,3 +13,6 @@ export {
   unescapeXml,
   type ToolDefinitionForPrompt,
 } from './tool-parser.js';
+
+export { calculateCost } from './cost.js';
+export type { CostableUsage } from './cost.js';
