@@ -64,6 +64,14 @@ export interface CompletionsFormatterConfig extends FormatterConfig {
   maxParticipantsForStop?: number;
 
   /**
+   * Add lowercased variants of participant stop sequences.
+   * Useful for models whose tokenizer doesn't normalize casing,
+   * allowing simmed names with different casing to still trigger stops.
+   * Default: false
+   */
+  caseInsensitiveStops?: boolean;
+
+  /**
    * Whether to warn when images are stripped.
    * Default: true
    */
@@ -187,6 +195,7 @@ export class CompletionsFormatter implements PrefillFormatter {
       nameFormat: config.nameFormat ?? '{name}: ',
       messageSeparator: config.messageSeparator ?? '\n\n',
       maxParticipantsForStop: config.maxParticipantsForStop ?? 10,
+      caseInsensitiveStops: config.caseInsensitiveStops ?? false,
       warnOnImageStrip: config.warnOnImageStrip ?? true,
       // Completions models don't support images - always strip
       unsupportedMedia: 'strip',
@@ -364,6 +373,16 @@ export class CompletionsFormatter implements PrefillFormatter {
       const prefix = this.config.nameFormat.replace('{name}', participant).trimEnd();
       stops.push(`\n\n${prefix}`);
       stops.push(`\n${prefix}`);
+
+      // Add lowercased variants if casing differs (for models that generate mixed-case names)
+      if (this.config.caseInsensitiveStops) {
+        const lower = this.config.nameFormat.replace('{name}', participant.toLowerCase()).trimEnd();
+        if (lower !== prefix) {
+          stops.push(`\n\n${lower}`);
+          stops.push(`\n${lower}`);
+        }
+      }
+
       count++;
     }
 
