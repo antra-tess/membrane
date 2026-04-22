@@ -533,8 +533,9 @@ export class BedrockAdapter implements ProviderAdapter {
           const payloadEnd = totalLength - 4;
           const payloadBytes = buffer.slice(payloadStart, payloadEnd);
 
-          // Parse headers to find event type
+          // Parse headers to find event type and exception type
           let eventType = '';
+          let exceptionType = '';
           let headerOffset = 12;
           const headerEnd = 12 + headersLength;
           while (headerOffset < headerEnd) {
@@ -554,11 +555,28 @@ export class BedrockAdapter implements ProviderAdapter {
 
               if (name === ':event-type') {
                 eventType = value;
+              } else if (name === ':exception-type') {
+                exceptionType = value;
               }
             } else {
               // Skip other header types
               break;
             }
+          }
+
+          // Handle exception events from Bedrock (throttling, model errors, etc.)
+          if (exceptionType) {
+            let errorMessage = exceptionType;
+            try {
+              const exPayload = JSON.parse(new TextDecoder().decode(payloadBytes));
+              errorMessage = exPayload.message || exPayload.Message || exceptionType;
+            } catch {
+              // Use exception type as message
+            }
+            throw new BedrockError(
+              exceptionType.toLowerCase().includes('throttl') ? 429 : 500,
+              `Bedrock stream error (${exceptionType}): ${errorMessage}`
+            );
           }
 
           // Parse the JSON payload
@@ -574,6 +592,14 @@ export class BedrockAdapter implements ProviderAdapter {
                   bytes[i] = binaryStr.charCodeAt(i);
                 }
                 const eventData = JSON.parse(new TextDecoder().decode(bytes)) as BedrockStreamEvent;
+
+                // Check for error events within the stream
+                if (eventData.type === 'error') {
+                  throw new BedrockError(
+                    500,
+                    `Bedrock stream error: ${(eventData as any).error?.message || JSON.stringify(eventData)}`
+                  );
+                }
 
                 if (eventData.type === 'message_start' && eventData.message) {
                   inputTokens = eventData.message.usage?.input_tokens ?? 0;
@@ -607,8 +633,11 @@ export class BedrockAdapter implements ProviderAdapter {
                   }
                 }
               }
-            } catch {
-              // Skip malformed events
+            } catch (e) {
+              // Re-throw BedrockErrors (from error events above)
+              if (e instanceof BedrockError) throw e;
+              // Skip genuinely malformed events (e.g. truncated JSON)
+              console.warn('[membrane:bedrock] Skipping malformed stream event:', e);
             }
           }
 
@@ -618,6 +647,14 @@ export class BedrockAdapter implements ProviderAdapter {
       }
     } finally {
       reader.releaseLock();
+    }
+
+    // Detect empty responses — Bedrock returned no content and no tokens
+    if (contentBlocks.length === 0 && inputTokens === 0 && outputTokens === 0) {
+      throw new BedrockError(
+        500,
+        'Bedrock returned empty response: no content blocks, 0 input/output tokens. This may indicate a transient service issue.'
+      );
     }
 
     // Build response from accumulated data
