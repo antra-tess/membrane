@@ -975,9 +975,14 @@ export class Membrane {
 
       // Convert content blocks
       const content: any[] = [];
+      const includeNamePrefix = !isAssistant;
       for (const block of msg.content) {
         if (block.type === 'text') {
-          const textBlock: Record<string, unknown> = { type: 'text', text: block.text };
+          let text = block.text;
+          if (includeNamePrefix && msg.participant) {
+            text = `${msg.participant}: ${text}`;
+          }
+          const textBlock: Record<string, unknown> = { type: 'text', text };
           if ((block as any).cache_control) {
             textBlock.cache_control = (block as any).cache_control;
           }
