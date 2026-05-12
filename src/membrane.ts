@@ -100,11 +100,12 @@ export class Membrane {
       try {
         const { providerRequest, prefillResult } = this.transformRequest(request, options.formatter);
 
-        // Call beforeRequest hook
-        let finalRequest = providerRequest;
-        if (this.config.hooks?.beforeRequest) {
-          finalRequest = await this.config.hooks.beforeRequest(request, providerRequest) ?? providerRequest;
-        }
+        // Route through the single canonical hook helper so any future
+        // change to hook semantics (logging, retry interaction, error
+        // handling) applies to both complete() and the streaming paths.
+        // Cast back to the local provider-request shape: the hook returns
+        // `unknown` deliberately, and we acknowledge the cast at the boundary.
+        const finalRequest = (await this.applyBeforeRequestHook(request, providerRequest)) as typeof providerRequest;
 
         const providerResponse = await this.adapter.complete(finalRequest, {
           signal: options.signal,
@@ -382,6 +383,7 @@ export class Membrane {
           },
           {
             signal,
+            normalizedRequest: request,
             onRequest: (req) => {
               rawRequest = req;
               onRequest?.(req);
@@ -788,6 +790,7 @@ export class Membrane {
           },
           {
             signal,
+            normalizedRequest: request,
             onRequest: (req) => {
               rawRequest = req;
               onRequest?.(req);
@@ -1125,6 +1128,23 @@ export class Membrane {
   // ==========================================================================
 
   /**
+   * Apply the configured `beforeRequest` hook to a provider-format request.
+   * Returns the (possibly modified) request, or the original if no hook is
+   * configured. This is the single point that all request-build sites should
+   * route through before invoking the adapter, so observers / mutators
+   * (logging, redaction, model rewriting) see every API call regardless of
+   * whether it came from `complete()`, `stream()`, or `streamYielding()`.
+   */
+  private async applyBeforeRequestHook(
+    normalizedRequest: NormalizedRequest,
+    providerRequest: unknown,
+  ): Promise<unknown> {
+    if (!this.config.hooks?.beforeRequest) return providerRequest;
+    const result = await this.config.hooks.beforeRequest(normalizedRequest, providerRequest);
+    return result ?? providerRequest;
+  }
+
+  /**
    * Extract base provider params from config, with thinking temperature enforcement.
    * Used by transformRequest, buildContinuationRequest, and buildContinuationRequestWithImages.
    */
@@ -1195,9 +1215,30 @@ export class Membrane {
   private async streamOnce(
     request: any,
     callbacks: { onChunk: (chunk: string) => void; onContentBlock?: (index: number, block: unknown) => void },
-    options: { signal?: AbortSignal; timeoutMs?: number; idleTimeoutMs?: number; onRequest?: (rawRequest: unknown) => void }
+    options: {
+      signal?: AbortSignal;
+      timeoutMs?: number;
+      idleTimeoutMs?: number;
+      onRequest?: (rawRequest: unknown) => void;
+      /**
+       * The original NormalizedRequest, threaded through so the
+       * `beforeRequest` hook can see both shapes (normalized + provider).
+       * Required: forgetting this is the failure mode the helper exists to
+       * prevent (the streaming paths previously skipped the hook entirely).
+       * If a future caller genuinely needs to bypass the hook, introduce a
+       * separate `streamOnceWithoutHook` so the bypass is intentional.
+       */
+      normalizedRequest: NormalizedRequest;
+    }
   ) {
-    return await this.adapter.stream(request, callbacks, options);
+    // Strip `normalizedRequest` before forwarding to the adapter — it's
+    // not part of `ProviderRequestOptions` and TypeScript's structural
+    // compatibility won't catch the excess field (checked only on object
+    // literals, not on variables). Leaving it in would silently leak the
+    // normalized form into every adapter's options.
+    const { normalizedRequest, ...adapterOptions } = options;
+    const finalRequest = (await this.applyBeforeRequestHook(normalizedRequest, request)) as typeof request;
+    return await this.adapter.stream(finalRequest, callbacks, adapterOptions);
   }
 
   private buildContinuationRequest(
@@ -1802,6 +1843,7 @@ export class Membrane {
             signal: stream.signal,
             timeoutMs: options.timeoutMs,
             idleTimeoutMs: options.idleTimeoutMs,
+            normalizedRequest: request,
             onRequest: (req: unknown) => { rawRequest = req; },
           }
         );
@@ -2191,6 +2233,7 @@ export class Membrane {
             signal: stream.signal,
             timeoutMs: options.timeoutMs,
             idleTimeoutMs: options.idleTimeoutMs,
+            normalizedRequest: request,
             onRequest: (req: unknown) => { rawRequest = req; },
           }
         );
