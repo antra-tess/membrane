@@ -43,7 +43,7 @@ import {
   type ProviderImageBlock,
 } from './utils/tool-parser.js';
 import { IncrementalXmlParser, type ProcessChunkResult } from './utils/stream-parser.js';
-import type { ChunkMeta, BlockEvent } from './types/streaming.js';
+import type { ChunkMeta, BlockEvent, MembraneBlockType, MembraneBlock } from './types/streaming.js';
 import type {
   YieldingStream,
   YieldingStreamOptions,
@@ -2179,6 +2179,7 @@ export class Membrane {
     const {
       maxToolDepth: maxToolDepthOpt,
       emitTokens = true,
+      emitBlocks = true,
       emitUsage = true,
     } = options;
     // Yielding paths default to unlimited (the caller — typically an agent
@@ -2227,6 +2228,17 @@ export class Membrane {
         // Stream from provider
         let textAccumulated = '';
         let blockIndex = 0;
+        // Track block-type from the provider's content_block_start signal so
+        // every token chunk is tagged with the membrane block it belongs to.
+        // Without this, thinking_delta chunks get mislabelled as 'text' and
+        // downstream consumers (TUIs, WebUIs) can't render them distinctly.
+        let currentBlockType: MembraneBlockType = 'text';
+        const seenBlockIndices = new Set<number>();
+        const mapApiBlockType = (apiType: string | undefined): MembraneBlockType => {
+          if (apiType === 'thinking') return 'thinking';
+          if (apiType === 'tool_use') return 'tool_call';
+          return 'text';
+        };
         const streamResult = await this.streamOnce(
           providerRequest,
           {
@@ -2238,14 +2250,55 @@ export class Membrane {
 
               if (emitTokens) {
                 const meta: ChunkMeta = {
-                  type: 'text',
-                  visible: true,
+                  type: currentBlockType,
+                  visible: currentBlockType === 'text',
                   blockIndex,
                 };
                 stream.emit({ type: 'tokens', content: chunk, meta });
               }
             },
-            onContentBlock: undefined,
+            onContentBlock: (index, block) => {
+              if (stream.isCancelled) return;
+              const apiType = (block as { type?: string } | undefined)?.type;
+              const mbType = mapApiBlockType(apiType);
+              const isStart = !seenBlockIndices.has(index);
+              if (isStart) {
+                seenBlockIndices.add(index);
+                currentBlockType = mbType;
+                blockIndex = index;
+                if (emitBlocks) {
+                  stream.emit({
+                    type: 'block',
+                    event: { event: 'block_start', index, block: { type: mbType } },
+                  });
+                }
+              } else if (emitBlocks) {
+                // Second call for the same index = content_block_stop. The
+                // provider has filled the block with final content; surface
+                // a block_complete with the relevant fields for consumers
+                // that want full block payloads (e.g. context-manager).
+                const apiBlock = block as {
+                  type?: string;
+                  text?: string;
+                  thinking?: string;
+                  id?: string;
+                  name?: string;
+                  input?: unknown;
+                } | undefined;
+                const mb: MembraneBlock = { type: mbType };
+                if (mbType === 'text') mb.content = apiBlock?.text;
+                else if (mbType === 'thinking') mb.content = apiBlock?.thinking;
+                else if (mbType === 'tool_call') {
+                  mb.toolId = apiBlock?.id;
+                  mb.toolName = apiBlock?.name;
+                  mb.input = apiBlock?.input as Record<string, unknown> | undefined;
+                }
+                stream.emit({
+                  type: 'block',
+                  event: { event: 'block_complete', index, block: mb },
+                });
+              }
+            },
           },
           {
             signal: stream.signal,
