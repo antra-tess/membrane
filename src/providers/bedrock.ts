@@ -633,6 +633,14 @@ export class BedrockAdapter implements ProviderAdapter {
                       contentBlocks[currentBlockIndex]!.signature = (contentBlocks[currentBlockIndex]!.signature ?? '') + (eventData.delta as any).signature;
                     }
                   }
+                } else if (eventData.type === 'content_block_stop') {
+                  // Mirror the Anthropic adapter: fire onContentBlock a second
+                  // time with the finalised block so consumers can distinguish
+                  // start from stop. Without this, downstream code that depends
+                  // on the dual-fire convention (e.g. membrane's native
+                  // yielding path) silently drops block_complete on Bedrock.
+                  const blockIdx = (eventData as { index?: number }).index ?? currentBlockIndex;
+                  callbacks.onContentBlock?.(blockIdx, contentBlocks[blockIdx]);
                 } else if (eventData.type === 'message_delta') {
                   if (eventData.usage) {
                     outputTokens = eventData.usage.output_tokens;
