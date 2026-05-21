@@ -2,6 +2,10 @@
   "name": "@animalabs/membrane",
   "version": "0.5.49",
   "description": "LLM middleware - a selective boundary that transforms what passes through",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/antra-tess/membrane.git"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
