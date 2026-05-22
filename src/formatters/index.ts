@@ -17,3 +17,12 @@ export type {
 export { AnthropicXmlFormatter, type AnthropicXmlFormatterConfig } from './anthropic-xml.js';
 export { NativeFormatter, type NativeFormatterConfig } from './native.js';
 export { CompletionsFormatter, type CompletionsFormatterConfig } from './completions.js';
+
+export {
+  normalizeToolPairs,
+  MembraneNormalizerError,
+  type NormalizeOptions,
+  type NormalizeResult,
+  type ProviderBlock,
+} from './normalize-tool-pairs.js';
+export type { NormalizeEvent } from './types.js';

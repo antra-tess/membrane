@@ -998,3 +998,109 @@ describe('CompletionsFormatter', () => {
     });
   });
 });
+
+// ============================================================================
+// NativeFormatter — tool block routing (wire-boundary normalizer integration)
+// ============================================================================
+//
+// These tests cover the integration between the NativeFormatter and the
+// tool-pair normalizer (see `normalize-tool-pairs.ts`). The normalizer's
+// own behavior is unit-tested in `normalize-tool-pairs.test.ts`; these
+// tests verify the formatter calls it correctly and that role-misplaced
+// blocks reach the API on the correct side.
+
+describe('NativeFormatter > tool blocks', () => {
+  it('positive: well-formed [u: tool_use] → [u: tool_result] passes through unchanged', () => {
+    const formatter = new NativeFormatter();
+    const messages: NormalizedMessage[] = [
+      { participant: 'Human', content: [{ type: 'text', text: 'go' }] },
+      { participant: 'Claude', content: [
+        { type: 'tool_use', id: 'A', name: 'calculate', input: { expression: '1+1' } },
+      ]},
+      { participant: 'Human', content: [
+        { type: 'tool_result', toolUseId: 'A', content: '2' },
+      ]},
+    ];
+    const result = formatter.buildMessages(messages, {
+      participantMode: 'simple',
+      assistantParticipant: 'Claude',
+      humanParticipant: 'Human',
+    });
+
+    expect(result.ready).toBe(true);
+    expect(result.messages.length).toBe(3);
+    expect(result.messages[0]!.role).toBe('user');
+    expect(result.messages[1]!.role).toBe('assistant');
+    expect(result.messages[2]!.role).toBe('user');
+    const assistantContent = result.messages[1]!.content as { type: string }[];
+    expect(assistantContent.some((b) => b.type === 'tool_use')).toBe(true);
+    const userContent = result.messages[2]!.content as { type: string }[];
+    expect(userContent.some((b) => b.type === 'tool_result')).toBe(true);
+  });
+
+  it('inverse: tool_use in a user-participant message is re-roled to assistant', () => {
+    // This is the postmortem case at the formatter level: a participant
+    // tagged with the human role (or with an unknown participant in
+    // multiuser mode that maps to user) is carrying a tool_use block.
+    // Pre-normalizer, this would ship `{role:'user', content:[tool_use]}`
+    // and the API would 400. Post-normalizer, the tool_use lands on the
+    // assistant side and the result is API-valid.
+    const formatter = new NativeFormatter();
+    const messages: NormalizedMessage[] = [
+      {
+        participant: 'Human',
+        content: [
+          { type: 'text', text: 'hi' },
+          { type: 'tool_use', id: 'A', name: 'calculate', input: {} },
+          { type: 'tool_result', toolUseId: 'A', content: 'ok' },
+          { type: 'text', text: 'continuing' },
+        ],
+      },
+    ];
+    const result = formatter.buildMessages(messages, {
+      participantMode: 'simple',
+      assistantParticipant: 'Claude',
+      humanParticipant: 'Human',
+    });
+
+    // Find the assistant envelope; it must contain the tool_use, and
+    // its content must NOT include any tool_result.
+    const assistantEnv = result.messages.find((m) => m.role === 'assistant');
+    expect(assistantEnv).toBeDefined();
+    const assistantBlocks = assistantEnv!.content as { type: string }[];
+    expect(assistantBlocks.some((b) => b.type === 'tool_use')).toBe(true);
+    expect(assistantBlocks.some((b) => b.type === 'tool_result')).toBe(false);
+
+    // The tool_result must appear in a user envelope (and the envelope
+    // immediately following the assistant one).
+    const assistantIdx = result.messages.findIndex((m) => m.role === 'assistant');
+    const after = result.messages[assistantIdx + 1];
+    expect(after).toBeDefined();
+    expect(after!.role).toBe('user');
+    const afterBlocks = after!.content as { type: string }[];
+    expect(afterBlocks.some((b) => b.type === 'tool_result')).toBe(true);
+  });
+
+  it('emits NormalizeEvents via onNormalize callback', () => {
+    const formatter = new NativeFormatter();
+    const events: Array<{ kind: string }> = [];
+    formatter.buildMessages(
+      [
+        {
+          participant: 'Human',
+          content: [
+            { type: 'tool_use', id: 'A', name: 'calc', input: {} },
+            { type: 'tool_result', toolUseId: 'A', content: 'ok' },
+          ],
+        },
+      ],
+      {
+        participantMode: 'simple',
+        assistantParticipant: 'Claude',
+        humanParticipant: 'Human',
+        onNormalize: (e) => events.push(e),
+      },
+    );
+    expect(events.some((e) => e.kind === 'block_re_roled')).toBe(true);
+  });
+});
