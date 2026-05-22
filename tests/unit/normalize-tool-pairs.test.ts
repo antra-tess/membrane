@@ -416,4 +416,63 @@ describe('normalizeToolPairs', () => {
       expect(out.ready).toBe(true);
     });
   });
+
+  // --------------------------------------------------------------------------
+  // Coverage-gap tests flagged in PR #22 QA — these guard the narrow checks
+  // in validate() and the synthetic write format.
+  // --------------------------------------------------------------------------
+
+  describe('validate: pending exemption is narrow', () => {
+    it('still synthesizes (and validates) non-pending unmatched ids when one id is pending', () => {
+      // A is pending — must NOT be synthesized; ready=false expected.
+      // B is NOT pending — phase 5 must synthesize it. Validate's
+      // pending-exemption must NOT cover B; if a hypothetical phase-5
+      // bug failed to synthesize B, validate must still throw.
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('A'), u('B')),
+        // No following user envelope: A trailing+pending, B trailing+abandoned.
+      ];
+      const { events, onEvent } = collectEvents();
+      const out = normalizeToolPairs(input, {
+        pendingToolCallIds: new Set(['A']),
+        onEvent,
+      });
+
+      expect(out.ready).toBe(false);
+      // B must have been synthesized despite A being pending.
+      const userEnvWithResults = out.messages.find((m) => m.role === 'user' && resultIds(m.content).length > 0);
+      expect(userEnvWithResults).toBeDefined();
+      expect(resultIds(userEnvWithResults!.content)).toContain('B');
+      expect(resultIds(userEnvWithResults!.content)).not.toContain('A');
+      // pending_in_flight for A; synthetic_pending_result for B.
+      expect(events.some((e) => e.kind === 'pending_in_flight' && e.toolUseId === 'A')).toBe(true);
+      expect(events.some((e) => e.kind === 'synthetic_pending_result' && e.toolUseId === 'B')).toBe(true);
+    });
+  });
+
+  describe('synthetic result canonical field names', () => {
+    it('writes tool_use_id (snake_case) — never toolUseId (camelCase)', () => {
+      // Anthropic API requires snake_case on the wire. The dual-form
+      // read in getToolUseId is defensive against producers, but
+      // synthetics are produced *by* this module and must lock down
+      // to the canonical form so a "drive-by camelCase fix" can't
+      // regress us silently.
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('A')),
+      ];
+      const out = normalizeToolPairs(input);
+      // Find the synthetic tool_result.
+      const userWithSynth = out.messages.find(
+        (m) => m.role === 'user' && m.content.some((b) => b.type === 'tool_result'),
+      );
+      const synth = userWithSynth!.content.find((b) => b.type === 'tool_result') as Record<string, unknown>;
+      expect(synth).toBeDefined();
+      expect(synth.tool_use_id).toBe('A');
+      expect(synth).not.toHaveProperty('toolUseId');
+      expect(synth.content).toBe('[pending]');
+      expect(synth.is_error).toBe(false);
+    });
+  });
 });

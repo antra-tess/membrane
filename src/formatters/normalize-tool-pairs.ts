@@ -16,21 +16,30 @@
  * output is shipped, so producer-side bugs cannot leak the same 400 family
  * (compression-bug 5/6/7/8/9, agent-framework #37, 2026-05-22 miner stall).
  *
- * Companion design doc: `membrane/docs/normalize-tool-pairs-plan.md`.
+ * Algorithm overview (six phases): reclassify blocks by required role,
+ * reflow into role-correct envelopes, hoist matching tool_results across
+ * the assistant→user boundary, evict interlopers wedged between use and
+ * result, synthesize `[pending]` results for trailing orphans (or signal
+ * not-ready when the id is in the caller-supplied pending set), validate.
  */
 
+import type { ProviderMessage as LooseProviderMessage } from './types.js';
 import type { NormalizeEvent } from './types.js';
 
 // ============================================================================
 // Public API
 // ============================================================================
 
+/**
+ * Block shape used internally and exposed for callers that want to
+ * build inputs without the full Anthropic SDK types. The required
+ * `type` discriminator names the kind of block; any block whose `type`
+ * matches a strict-role entry in `requiredRoleOf` is re-roled to its
+ * required role during normalization. Unrecognized `tool_*` or
+ * `thinking*` types fall through as `inherit` — see the one-shot
+ * warning below.
+ */
 export type ProviderBlock = Record<string, unknown> & { type: string };
-
-export interface ProviderMessage {
-  role: 'user' | 'assistant';
-  content: ProviderBlock[];
-}
 
 export interface NormalizeOptions {
   /** See `BuildOptions.pendingToolCallIds`. */
@@ -42,7 +51,14 @@ export interface NormalizeOptions {
 }
 
 export interface NormalizeResult {
-  messages: ProviderMessage[];
+  /**
+   * Normalized messages, structurally compatible with the loose
+   * `ProviderMessage` from `./types.js`. Block contents are
+   * `ProviderBlock[]` at runtime; the loose type is preserved at the
+   * public boundary so callers wired against `./types.js` don't need
+   * to cast.
+   */
+  messages: LooseProviderMessage[];
   /**
    * `false` iff a trailing unmatched tool_use's id was in
    * `pendingToolCallIds`. Caller should wait for the in-flight result
@@ -54,8 +70,8 @@ export interface NormalizeResult {
 export class MembraneNormalizerError extends Error {
   constructor(
     message: string,
-    public readonly input: ProviderMessage[],
-    public readonly output: ProviderMessage[],
+    public readonly input: ReadonlyArray<LooseProviderMessage>,
+    public readonly output: ReadonlyArray<LooseProviderMessage>,
   ) {
     super(message);
     this.name = 'MembraneNormalizerError';
@@ -75,7 +91,7 @@ export class MembraneNormalizerError extends Error {
  * so existing cache-control / breakpoint logic continues to work.
  */
 export function normalizeToolPairs(
-  input: ReadonlyArray<ProviderMessage>,
+  input: ReadonlyArray<LooseProviderMessage>,
   options: NormalizeOptions = {},
 ): NormalizeResult {
   const pending = options.pendingToolCallIds ?? new Set<string>();
@@ -135,10 +151,10 @@ export function normalizeToolPairs(
     envelopes.unshift({ role: 'user', content: [{ type: 'text', text: '[continuing]' }] });
   }
 
-  // Validate. When `ready === false` we intentionally have an unmatched
-  // tool_use (the in-flight one), so we skip the use→result invariant.
-  // Other invariants still apply.
-  validate(envelopes, input, ready);
+  // Validate. When `ready === false` we intentionally have unmatched
+  // tool_uses — but ONLY the ones in `pending` are allowed to remain
+  // unsynthesized. Any other gap is a bug in phase 5 and must throw.
+  validate(envelopes, input, pending);
 
   return { messages: envelopes.map(toProviderMessage), ready };
 }
@@ -154,6 +170,14 @@ interface Envelope {
 
 type RequiredRole = 'user' | 'assistant' | 'inherit';
 
+/**
+ * Role-strict block types. Extending Anthropic's tool surface
+ * (e.g. `server_tool_use`, `web_search_tool_result`, `computer_use`)
+ * means adding entries here. Unknown block types whose `type` starts
+ * with `tool_` or `thinking` fall through to 'inherit' and trigger a
+ * one-shot console warning so the next addition doesn't sail silently
+ * through the safety net.
+ */
 function requiredRoleOf(block: ProviderBlock): RequiredRole {
   switch (block.type) {
     case 'tool_use':
@@ -163,12 +187,27 @@ function requiredRoleOf(block: ProviderBlock): RequiredRole {
     case 'tool_result':
       return 'user';
     default:
+      if (block.type.startsWith('tool_') || block.type.startsWith('thinking')) {
+        warnUnknownStrictType(block.type);
+      }
       return 'inherit';
   }
 }
 
+const _warnedTypes = new Set<string>();
+function warnUnknownStrictType(blockType: string): void {
+  if (_warnedTypes.has(blockType)) return;
+  _warnedTypes.add(blockType);
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[membrane:normalize-tool-pairs] Unknown strict-role block type '${blockType}' — ` +
+      `falling through as 'inherit'. If this type has role placement rules at the API, ` +
+      `add it to requiredRoleOf in normalize-tool-pairs.ts.`,
+  );
+}
+
 function rebuildEnvelopes(
-  input: ReadonlyArray<ProviderMessage>,
+  input: ReadonlyArray<LooseProviderMessage>,
   onEvent: (e: NormalizeEvent) => void,
 ): Envelope[] {
   const out: Envelope[] = [];
@@ -188,7 +227,7 @@ function rebuildEnvelopes(
       continue;
     }
 
-    for (const block of msg.content) {
+    for (const block of msg.content as ProviderBlock[]) {
       const req = requiredRoleOf(block);
       const targetRole: 'user' | 'assistant' = req === 'inherit' ? msg.role : req;
 
@@ -235,7 +274,7 @@ function hoistMatchingResults(
     const presentIds = new Set(
       nextEnv.content
         .filter((b) => b.type === 'tool_result')
-        .map((b) => (b as { tool_use_id?: string; toolUseId?: string }).tool_use_id ?? (b as { toolUseId?: string }).toolUseId)
+        .map(getToolUseId)
         .filter((id): id is string => typeof id === 'string'),
     );
 
@@ -291,10 +330,7 @@ function evictInterlopers(
     let seenMatching = false;
     for (const block of next.content) {
       const isResult = block.type === 'tool_result';
-      const resultId = isResult
-        ? ((block as { tool_use_id?: string; toolUseId?: string }).tool_use_id
-            ?? (block as { toolUseId?: string }).toolUseId)
-        : undefined;
+      const resultId = isResult ? getToolUseId(block) : undefined;
       const isMatching = isResult && typeof resultId === 'string' && useIds.has(resultId);
 
       if (isMatching) {
@@ -365,8 +401,7 @@ function resolveOrphans(
     if (env.role !== 'user') continue;
     env.content = env.content.map((block) => {
       if (block.type !== 'tool_result') return block;
-      const id = (block as { tool_use_id?: string; toolUseId?: string }).tool_use_id
-        ?? (block as { toolUseId?: string }).toolUseId;
+      const id = getToolUseId(block);
       if (typeof id !== 'string' || !allUseIds.has(id)) {
         const inner = (block as { content?: unknown }).content;
         const innerText = typeof inner === 'string' ? inner : '';
@@ -404,7 +439,7 @@ function resolveOrphans(
     const presentIds = new Set(
       nextEnv.content
         .filter((b) => b.type === 'tool_result')
-        .map((b) => (b as { tool_use_id?: string; toolUseId?: string }).tool_use_id ?? (b as { toolUseId?: string }).toolUseId)
+        .map(getToolUseId)
         .filter((id): id is string => typeof id === 'string'),
     );
 
@@ -436,15 +471,24 @@ function suppressCacheControlFrom(
   startIndex: number,
   onEvent: (e: NormalizeEvent) => void,
 ): void {
+  // Strip cache_control from blocks at-or-after startIndex. We must NOT
+  // mutate the caller's input blocks (envelopes share references with
+  // the input via rebuildEnvelopes), so clone-on-write: replace any
+  // block carrying cache_control with a shallow copy that omits it.
+  // The envelope's content array is replaced wholesale via .map; this
+  // is the only place in the normalizer that creates new block objects
+  // out of existing ones (synthetics aside).
   let suppressed = false;
   for (let i = startIndex; i < envelopes.length; i++) {
     const env = envelopes[i]!;
-    for (const block of env.content) {
-      if ('cache_control' in block) {
-        delete (block as Record<string, unknown>).cache_control;
-        suppressed = true;
-      }
-    }
+    env.content = env.content.map((block) => {
+      if (!('cache_control' in block)) return block;
+      suppressed = true;
+      const { cache_control: _drop, ...rest } = block as ProviderBlock & {
+        cache_control?: unknown;
+      };
+      return rest as ProviderBlock;
+    });
   }
   if (suppressed) {
     onEvent({ kind: 'cache_suppressed_for_synthetic', envelopeIndex: startIndex });
@@ -453,8 +497,8 @@ function suppressCacheControlFrom(
 
 function validate(
   envelopes: Envelope[],
-  input: ReadonlyArray<ProviderMessage>,
-  ready: boolean,
+  input: ReadonlyArray<LooseProviderMessage>,
+  pending: ReadonlySet<string>,
 ): void {
   // Empty input → empty output is fine.
   if (envelopes.length === 0) return;
@@ -470,12 +514,11 @@ function validate(
     );
   }
 
-  // When ready=false, an unmatched trailing tool_use is intentional
-  // (the in-flight one). Skip the use→result invariant in that case.
-  if (!ready) return;
-
   // Every tool_use in an assistant envelope must have a matching
-  // tool_result in the immediately-following user envelope.
+  // tool_result in the immediately-following user envelope — except
+  // tool_uses whose id is in `pending` (the in-flight set the caller
+  // declared off-limits for synthesis). A gap on any other id is a
+  // phase-5 bug and must throw.
   for (let i = 0; i < envelopes.length; i++) {
     const env = envelopes[i]!;
     if (env.role !== 'assistant') continue;
@@ -486,20 +529,20 @@ function validate(
       next?.role === 'user'
         ? next.content
             .filter((b) => b.type === 'tool_result')
-            .map((b) => (b as { tool_use_id?: string; toolUseId?: string }).tool_use_id ?? (b as { toolUseId?: string }).toolUseId)
+            .map(getToolUseId)
             .filter((id): id is string => typeof id === 'string')
         : [],
     );
     for (const useId of useIds) {
-      if (!presentIds.has(useId)) {
-        throw new MembraneNormalizerError(
-          `tool_use id='${useId}' in envelope ${i} has no matching tool_result in envelope ${i + 1}. ` +
-            `This indicates a bug in the normalizer itself — phase 5 should have synthesized one ` +
-            `unless the id was marked pending (in which case ready=false should have been returned).`,
-          input.map(cloneMsg),
-          envelopes.map(toProviderMessage),
-        );
-      }
+      if (presentIds.has(useId)) continue;
+      if (pending.has(useId)) continue; // legitimately in-flight
+      throw new MembraneNormalizerError(
+        `tool_use id='${useId}' in envelope ${i} has no matching tool_result in envelope ${i + 1}, ` +
+          `and the id is not in pendingToolCallIds. This indicates a bug in the normalizer itself — ` +
+          `phase 5 should have synthesized a result for any non-pending unmatched id.`,
+        input.map(cloneMsg),
+        envelopes.map(toProviderMessage),
+      );
     }
   }
 }
@@ -507,6 +550,21 @@ function validate(
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/**
+ * Read a tool_result's id, tolerating either Anthropic's canonical
+ * `tool_use_id` (snake_case) or the camelCase `toolUseId` some
+ * Membrane producers ship. Only used for *reading*; synthetic
+ * tool_results MUST be written in the canonical snake_case form
+ * (see {@link syntheticToolResult}) — the dual-form read is defensive
+ * against producers, not a license to mix.
+ */
+function getToolUseId(block: ProviderBlock): string | undefined {
+  const b = block as { tool_use_id?: unknown; toolUseId?: unknown };
+  if (typeof b.tool_use_id === 'string') return b.tool_use_id;
+  if (typeof b.toolUseId === 'string') return b.toolUseId;
+  return undefined;
+}
 
 function collectToolUseIds(env: Envelope): string[] {
   const ids: string[] = [];
@@ -530,9 +588,10 @@ function removeFirstMatchingResult(
     for (let j = 0; j < env.content.length; j++) {
       const block = env.content[j]!;
       if (block.type !== 'tool_result') continue;
-      const id = (block as { tool_use_id?: string; toolUseId?: string }).tool_use_id
-        ?? (block as { toolUseId?: string }).toolUseId;
-      if (id === useId) {
+      if (getToolUseId(block) === useId) {
+        // Mutates the envelope's content array in place. Caller
+        // (phase 3) is expected to handle the possibly-empty source
+        // envelope; phase 6's filter sweeps any envelope left empty.
         env.content.splice(j, 1);
         return { block, fromEnvelope: i };
       }
@@ -541,6 +600,15 @@ function removeFirstMatchingResult(
   return null;
 }
 
+/**
+ * Synthetic tool_result for an unmatched tool_use. Writes
+ * `tool_use_id` in Anthropic's canonical snake_case form — do NOT
+ * change to camelCase without auditing every consumer of the
+ * downstream message. The "[pending]" content is intentionally
+ * tombstone-shaped (is_error: false) — most synthesis triggers are
+ * normal-flow gaps (cancellations, stream restarts), not failures
+ * worth alarming the agent about.
+ */
 function syntheticToolResult(toolUseId: string): ProviderBlock {
   return {
     type: 'tool_result',
@@ -550,11 +618,11 @@ function syntheticToolResult(toolUseId: string): ProviderBlock {
   };
 }
 
-function toProviderMessage(env: Envelope): ProviderMessage {
+function toProviderMessage(env: Envelope): LooseProviderMessage {
   return { role: env.role, content: env.content };
 }
 
-function cloneMsg(msg: ProviderMessage): ProviderMessage {
+function cloneMsg(msg: LooseProviderMessage): LooseProviderMessage {
   return {
     role: msg.role,
     content: Array.isArray(msg.content) ? [...msg.content] : msg.content,
