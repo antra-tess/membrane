@@ -264,22 +264,23 @@ describe('YieldingStream', () => {
         expect(wireMessages[i]!.role).not.toBe(wireMessages[i - 1]!.role);
       }
 
-      // Every tool_use has a matching tool_result immediately after.
-      const toolUseIds = new Set<string>();
-      const resultIds = new Set<string>();
-      for (const msg of wireMessages) {
-        if (msg.role === 'assistant') {
-          for (const block of msg.content) {
-            if (block.type === 'tool_use') toolUseIds.add(block.id);
-          }
-        } else {
-          for (const block of msg.content) {
-            if (block.type === 'tool_result') resultIds.add(block.tool_use_id);
-          }
+      // Every tool_use must be followed *immediately* by a user envelope
+      // containing its tool_result. Set-membership alone wouldn't catch
+      // a regression that synthesizes the result in the wrong envelope.
+      for (let i = 0; i < wireMessages.length; i++) {
+        const msg = wireMessages[i]!;
+        if (msg.role !== 'assistant') continue;
+        for (const block of msg.content) {
+          if (block.type !== 'tool_use') continue;
+          const nextMsg = wireMessages[i + 1];
+          expect(nextMsg).toBeDefined();
+          expect(nextMsg!.role).toBe('user');
+          const resultIds = nextMsg!.content
+            .filter((b: any) => b.type === 'tool_result')
+            .map((b: any) => b.tool_use_id);
+          expect(resultIds).toContain(block.id);
         }
       }
-      expect(resultIds.has('toolu_orphan')).toBe(true);
-      expect([...toolUseIds].every((id) => resultIds.has(id))).toBe(true);
     });
 
     it('appends synthetic tool_result for a trailing unmatched tool_use', async () => {

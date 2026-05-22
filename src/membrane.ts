@@ -1044,6 +1044,13 @@ export class Membrane {
     // so an in-flight gap can't poison the prompt cache. Merging after
     // normalize collapses any same-role neighbours the upstream may have
     // produced before they reach the API's alternating-role check.
+    //
+    // `pendingToolCallIds` is intentionally not threaded here: by the
+    // time runNativeToolsYielding rebuilds the request between
+    // tool-execution rounds, it has already appended the corresponding
+    // tool_results to `messages`. Any unmatched tool_use that reaches
+    // this splice is upstream stranding (the bug class this fix exists
+    // to catch) — `[pending]` is exactly the right synthesis.
     const normalized = normalizeToolPairs(providerMessages);
     const mergedMessages = mergeConsecutiveRoles(normalized.messages);
 
