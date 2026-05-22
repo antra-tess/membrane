@@ -28,7 +28,7 @@ import type {
   BlockEvent,
   StreamEmission,
 } from './types.js';
-import { normalizeToolPairs } from './normalize-tool-pairs.js';
+import { normalizeToolPairs, mergeConsecutiveRoles } from './normalize-tool-pairs.js';
 
 // ============================================================================
 // Configuration
@@ -256,7 +256,7 @@ export class NativeFormatter implements PrefillFormatter {
     });
 
     // Merge consecutive same-role messages (API requires alternating)
-    const mergedMessages = this.mergeConsecutiveRoles(normalized.messages);
+    const mergedMessages = mergeConsecutiveRoles(normalized.messages);
 
     // Build system content with optional cache control
     let systemContent: unknown;
@@ -403,33 +403,6 @@ export class NativeFormatter implements PrefillFormatter {
     }
 
     return result;
-  }
-
-  private mergeConsecutiveRoles(messages: ProviderMessage[]): ProviderMessage[] {
-    if (messages.length === 0) return [];
-
-    const merged: ProviderMessage[] = [];
-    let current: ProviderMessage = messages[0]!;
-
-    for (let i = 1; i < messages.length; i++) {
-      const next: ProviderMessage = messages[i]!;
-
-      if (next.role === current.role) {
-        // Merge content arrays
-        const currentContent = Array.isArray(current.content) ? current.content : [current.content];
-        const nextContent = Array.isArray(next.content) ? next.content : [next.content];
-        current = {
-          role: current.role,
-          content: [...currentContent, ...nextContent],
-        };
-      } else {
-        merged.push(current);
-        current = next;
-      }
-    }
-
-    merged.push(current);
-    return merged;
   }
 
   private convertToNativeTools(tools: ToolDefinition[]): unknown[] {

@@ -85,8 +85,10 @@ export class MembraneNormalizerError extends Error {
  * with respect to Anthropic's tool-cycle structural rules.
  *
  * This function does NOT merge consecutive same-role envelopes — that
- * remains the caller's responsibility (NativeFormatter.mergeConsecutiveRoles)
- * so existing cache-control / breakpoint logic continues to work.
+ * is the responsibility of `mergeConsecutiveRoles` (exported below). Run
+ * the two together at every wire boundary; splitting them keeps the
+ * normalize step independently testable and lets callers preserve their
+ * own cache-control / breakpoint logic between the two steps if needed.
  */
 export function normalizeToolPairs(
   input: ReadonlyArray<LooseProviderMessage>,
@@ -619,4 +621,43 @@ function cloneMsg(msg: LooseProviderMessage): LooseProviderMessage {
 
 function noop(): void {
   /* intentionally empty */
+}
+
+/**
+ * Merge consecutive same-role envelopes by concatenating their content
+ * arrays. Anthropic's API requires strictly alternating user/assistant
+ * roles, and `normalizeToolPairs` can leave adjacent same-role envelopes
+ * (e.g. an assistant turn re-roled out of a user message, or two
+ * assistant turns stranded by an upstream chunker that dropped the
+ * tool_result message between them).
+ *
+ * This is the second half of the wire-boundary safety net and should run
+ * AFTER `normalizeToolPairs` at every callsite that ships messages to
+ * Anthropic. Hoisted here so both `NativeFormatter.buildMessages` and
+ * `Membrane.buildNativeToolRequest` share one implementation.
+ */
+export function mergeConsecutiveRoles(
+  messages: ReadonlyArray<LooseProviderMessage>,
+): LooseProviderMessage[] {
+  if (messages.length === 0) return [];
+
+  const merged: LooseProviderMessage[] = [];
+  let current: LooseProviderMessage = { ...messages[0]! };
+
+  for (let i = 1; i < messages.length; i++) {
+    const next = messages[i]!;
+    if (next.role === current.role) {
+      const currentContent = Array.isArray(current.content) ? current.content : [current.content];
+      const nextContent = Array.isArray(next.content) ? next.content : [next.content];
+      current = {
+        role: current.role,
+        content: [...currentContent, ...nextContent],
+      };
+    } else {
+      merged.push(current);
+      current = { ...next };
+    }
+  }
+  merged.push(current);
+  return merged;
 }

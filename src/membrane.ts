@@ -52,6 +52,7 @@ import type {
 } from './types/yielding-stream.js';
 import type { PrefillFormatter, StreamParser } from './formatters/types.js';
 import { AnthropicXmlFormatter } from './formatters/anthropic-xml.js';
+import { normalizeToolPairs, mergeConsecutiveRoles } from './formatters/normalize-tool-pairs.js';
 import { YieldingStreamImpl } from './yielding-stream.js';
 import { calculateCost } from './utils/cost.js';
 import { getDefaultPricing } from './registry/default-pricing.js';
@@ -1030,7 +1031,29 @@ export class Membrane {
 
       providerMessages.push({ role, content });
     }
-    
+
+    // Wire-boundary safety net: repair upstream-produced violations of
+    // Anthropic's tool-cycle structural rules (orphan tool_use, mis-roled
+    // blocks, consecutive same-role envelopes from upstream chunkers that
+    // dropped a tool_result). Mirrors NativeFormatter.buildMessages — the
+    // streaming-native path (runNativeToolsYielding) used to bypass this
+    // and exposed every agent inference to the 400 family.
+    //
+    // Synthesized [pending] tool_results land in fresh user envelopes;
+    // the normalizer also suppresses cache_control on those envelopes
+    // so an in-flight gap can't poison the prompt cache. Merging after
+    // normalize collapses any same-role neighbours the upstream may have
+    // produced before they reach the API's alternating-role check.
+    //
+    // `pendingToolCallIds` is intentionally not threaded here: by the
+    // time runNativeToolsYielding rebuilds the request between
+    // tool-execution rounds, it has already appended the corresponding
+    // tool_results to `messages`. Any unmatched tool_use that reaches
+    // this splice is upstream stranding (the bug class this fix exists
+    // to catch) — `[pending]` is exactly the right synthesis.
+    const normalized = normalizeToolPairs(providerMessages);
+    const mergedMessages = mergeConsecutiveRoles(normalized.messages);
+
     // Convert tools to provider format.
     // Native tool names must match ^[a-zA-Z0-9_-]{1,128}$ — sanitize colons
     // from the module:tool namespace convention. Reversed in parseProviderContent.
@@ -1073,7 +1096,7 @@ export class Membrane {
       model: request.config.model,
       maxTokens: request.config.maxTokens,
       temperature,
-      messages: providerMessages,
+      messages: mergedMessages,
       system,
       tools,
       thinking,

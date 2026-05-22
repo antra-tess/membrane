@@ -213,4 +213,130 @@ describe('YieldingStream', () => {
       }).toThrow(/not waiting for tools/);
     });
   });
+
+  // Wire-boundary safety net — regression for the 2026-05-22 clerk 400.
+  // Background: NativeFormatter.buildMessages already ran the tool-pair
+  // normalizer, but `runNativeToolsYielding` → `buildNativeToolRequest`
+  // reimplemented message construction and bypassed it. An upstream
+  // context-manager bug that dropped a tool_result message produced two
+  // consecutive assistant envelopes with orphan tool_use blocks; the API
+  // rejected with 400 (`tool_use ids ... without tool_result blocks
+  // immediately after`). The fix wires normalize+merge into the streaming
+  // path too. These tests assert the wire request never carries the
+  // structural defects again.
+  describe('tool-pair normalization at wire boundary (streaming-native path)', () => {
+    function nativeRequest(messages: NormalizedRequest['messages']): NormalizedRequest {
+      return {
+        messages,
+        toolMode: 'native',
+        tools: [
+          { name: 'search', description: 'Search', inputSchema: { type: 'object', properties: {} } },
+        ],
+        config: { model: 'test-model', maxTokens: 1000 },
+      };
+    }
+
+    async function drain(stream: ReturnType<typeof membrane.streamYielding>): Promise<void> {
+      for await (const _event of stream) { /* drain */ }
+    }
+
+    it('synthesizes [pending] tool_result for orphan tool_use stranded by upstream chunker', async () => {
+      // The 2026-05-22 shape: assistant turn with tool_use, then another
+      // assistant turn (the matching tool_result message was dropped
+      // upstream by autobio strategy).
+      adapter.queueResponse('ok');
+      const request = nativeRequest([
+        { participant: 'User', content: [{ type: 'text', text: 'Hi' }] },
+        { participant: 'Claude', content: [
+          { type: 'tool_use', id: 'toolu_orphan', name: 'search', input: { q: 'x' } },
+        ] },
+        { participant: 'Claude', content: [{ type: 'text', text: 'Next turn' }] },
+      ]);
+
+      await drain(membrane.streamYielding(request));
+
+      const wire = adapter.getLastRequest();
+      expect(wire).toBeDefined();
+      const wireMessages = (wire as any).messages as Array<{ role: string; content: any[] }>;
+
+      // No two consecutive same-role envelopes — Anthropic's hard rule.
+      for (let i = 1; i < wireMessages.length; i++) {
+        expect(wireMessages[i]!.role).not.toBe(wireMessages[i - 1]!.role);
+      }
+
+      // Every tool_use must be followed *immediately* by a user envelope
+      // containing its tool_result. Set-membership alone wouldn't catch
+      // a regression that synthesizes the result in the wrong envelope.
+      for (let i = 0; i < wireMessages.length; i++) {
+        const msg = wireMessages[i]!;
+        if (msg.role !== 'assistant') continue;
+        for (const block of msg.content) {
+          if (block.type !== 'tool_use') continue;
+          const nextMsg = wireMessages[i + 1];
+          expect(nextMsg).toBeDefined();
+          expect(nextMsg!.role).toBe('user');
+          const resultIds = nextMsg!.content
+            .filter((b: any) => b.type === 'tool_result')
+            .map((b: any) => b.tool_use_id);
+          expect(resultIds).toContain(block.id);
+        }
+      }
+    });
+
+    it('appends synthetic tool_result for a trailing unmatched tool_use', async () => {
+      adapter.queueResponse('ok');
+      const request = nativeRequest([
+        { participant: 'User', content: [{ type: 'text', text: 'Hi' }] },
+        { participant: 'Claude', content: [
+          { type: 'tool_use', id: 'toolu_trail', name: 'search', input: {} },
+        ] },
+      ]);
+
+      await drain(membrane.streamYielding(request));
+
+      const wire = adapter.getLastRequest();
+      const wireMessages = (wire as any).messages as Array<{ role: string; content: any[] }>;
+
+      // Last message must be a user turn containing the synthetic result.
+      const last = wireMessages[wireMessages.length - 1]!;
+      expect(last.role).toBe('user');
+      const resultBlock = last.content.find((b: any) => b.type === 'tool_result');
+      expect(resultBlock).toBeDefined();
+      expect(resultBlock.tool_use_id).toBe('toolu_trail');
+      expect(resultBlock.content).toBe('[pending]');
+      expect(resultBlock.is_error).toBe(false);
+    });
+
+    it('passes well-formed tool cycles through unchanged', async () => {
+      // Sanity check: no normalization for valid input.
+      adapter.queueResponse('ok');
+      const request = nativeRequest([
+        { participant: 'User', content: [{ type: 'text', text: 'Hi' }] },
+        { participant: 'Claude', content: [
+          { type: 'tool_use', id: 'toolu_ok', name: 'search', input: {} },
+        ] },
+        { participant: 'User', content: [
+          { type: 'tool_result', toolUseId: 'toolu_ok', content: 'result' },
+        ] },
+      ]);
+
+      await drain(membrane.streamYielding(request));
+
+      const wire = adapter.getLastRequest();
+      const wireMessages = (wire as any).messages as Array<{ role: string; content: any[] }>;
+
+      expect(wireMessages).toHaveLength(3);
+      const realResults = wireMessages[2]!.content.filter((b: any) => b.type === 'tool_result');
+      expect(realResults).toHaveLength(1);
+      expect(realResults[0].content).toBe('result');
+      // No injected [pending] should appear anywhere.
+      for (const msg of wireMessages) {
+        for (const block of msg.content) {
+          if (block.type === 'tool_result') {
+            expect(block.content).not.toBe('[pending]');
+          }
+        }
+      }
+    });
+  });
 });
