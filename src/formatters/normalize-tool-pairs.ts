@@ -44,8 +44,6 @@ export type ProviderBlock = Record<string, unknown> & { type: string };
 export interface NormalizeOptions {
   /** See `BuildOptions.pendingToolCallIds`. */
   pendingToolCallIds?: ReadonlySet<string>;
-  /** See `BuildOptions.normalizationPolicy`. Default: 'live'. */
-  policy?: 'live' | 'compression';
   /** See `BuildOptions.onNormalize`. */
   onEvent?: (event: NormalizeEvent) => void;
 }
@@ -95,7 +93,6 @@ export function normalizeToolPairs(
   options: NormalizeOptions = {},
 ): NormalizeResult {
   const pending = options.pendingToolCallIds ?? new Set<string>();
-  const policy = options.policy ?? 'live';
   const onEvent = options.onEvent ?? noop;
 
   // ---------------------------------------------------------------------
@@ -111,7 +108,7 @@ export function normalizeToolPairs(
   // ---------------------------------------------------------------------
   // Phase 4: evict interlopers wedged between a tool_use and its result
   // ---------------------------------------------------------------------
-  envelopes = evictInterlopers(envelopes, policy, onEvent);
+  envelopes = evictInterlopers(envelopes, onEvent);
 
   // ---------------------------------------------------------------------
   // Phase 5: resolve orphans
@@ -304,7 +301,6 @@ function hoistMatchingResults(
 
 function evictInterlopers(
   envelopes: Envelope[],
-  policy: 'live' | 'compression',
   onEvent: (e: NormalizeEvent) => void,
 ): Envelope[] {
   // For every assistant envelope ending with a tool_use, the
@@ -314,7 +310,11 @@ function evictInterlopers(
   // tool result." Phase 3 already places hoisted results at the front,
   // but locally-present results may sit after text in the same envelope
   // (e.g. user sent a chat message and the tool_result is appended
-  // afterward by the producer).
+  // afterward by the producer). We always defer interlopers — never
+  // drop — so that a mid-cycle user event isn't lost to the agent's
+  // long-term memory after the chunk gets summarized. A summarizer LLM
+  // can tolerate slight temporal reordering; it cannot reconstruct a
+  // message that was discarded.
   for (let i = 0; i < envelopes.length; i++) {
     const env = envelopes[i]!;
     if (env.role !== 'assistant') continue;
@@ -348,26 +348,14 @@ function evictInterlopers(
 
     if (interlopers.length === 0) continue;
 
-    if (policy === 'compression') {
-      for (const block of interlopers) {
-        onEvent({
-          kind: 'interloper_dropped',
-          blockType: block.type,
-          fromEnvelope: i + 1,
-        });
-      }
-      next.content = [...matching, ...rest];
-    } else {
-      // 'live': defer interlopers to after the matching tool_results.
-      for (const block of interlopers) {
-        onEvent({
-          kind: 'interloper_deferred',
-          blockType: block.type,
-          fromEnvelope: i + 1,
-        });
-      }
-      next.content = [...matching, ...interlopers, ...rest];
+    for (const block of interlopers) {
+      onEvent({
+        kind: 'interloper_deferred',
+        blockType: block.type,
+        fromEnvelope: i + 1,
+      });
     }
+    next.content = [...matching, ...interlopers, ...rest];
   }
   return envelopes;
 }

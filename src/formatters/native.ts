@@ -252,7 +252,6 @@ export class NativeFormatter implements PrefillFormatter {
     // merge sees role-correct envelopes.
     const normalized = normalizeToolPairs(providerMessages, {
       pendingToolCallIds: options.pendingToolCallIds,
-      policy: options.normalizationPolicy ?? 'live',
       onEvent: options.onNormalize,
     });
 

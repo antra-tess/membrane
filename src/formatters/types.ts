@@ -97,17 +97,6 @@ export interface BuildOptions {
    * specific logger. See `NormalizeEvent` for the event shapes.
    */
   onNormalize?: (event: NormalizeEvent) => void;
-
-  /**
-   * Interloper-handling policy used by the tool-pair normalizer.
-   *
-   *   - 'live' (default): non-tool-result blocks wedged between a tool_use
-   *     and its matching tool_result are deferred past the result so the
-   *     forward timeline stays observation-ordered.
-   *   - 'compression': interlopers are dropped so the resulting summary
-   *     reads cleanly. Telemetry still surfaces the drop.
-   */
-  normalizationPolicy?: 'live' | 'compression';
 }
 
 /**
@@ -119,7 +108,6 @@ export type NormalizeEvent =
   | { kind: 'block_re_roled'; blockType: string; from: 'user' | 'assistant'; to: 'user' | 'assistant' }
   | { kind: 'tool_result_hoisted'; toolUseId: string; fromEnvelope: number; toEnvelope: number }
   | { kind: 'interloper_deferred'; blockType: string; fromEnvelope: number }
-  | { kind: 'interloper_dropped'; blockType: string; fromEnvelope: number }
   | { kind: 'synthetic_pending_result'; toolUseId: string; reason: 'trailing' | 'mid_stream' }
   | { kind: 'orphan_tool_result_textified'; toolUseId: string }
   | { kind: 'pending_in_flight'; toolUseId: string }

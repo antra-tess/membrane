@@ -147,8 +147,13 @@ describe('normalizeToolPairs', () => {
     });
   });
 
-  describe('#2 — live interloper between tool_use and tool_result', () => {
-    it("live policy defers interloper after the matching tool_result", () => {
+  describe('#2 — interloper between tool_use and tool_result', () => {
+    it('defers the interloper after the matching tool_result (never drops)', () => {
+      // A mid-cycle user event must survive normalization — losing it
+      // would mean the agent permanently forgets a message that did
+      // happen. Deferring it past the tool_result is fine; the
+      // summarizer can handle slight temporal reordering, but cannot
+      // reconstruct a discarded message.
       const input: ProviderMessage[] = [
         user(t('hi')),
         assistant(u('A')),
@@ -156,7 +161,7 @@ describe('normalizeToolPairs', () => {
         user(r('A')),
       ];
       const { events, onEvent } = collectEvents();
-      const out = normalize(input, { policy: 'live', onEvent });
+      const out = normalize(input, { onEvent });
 
       // The two user envelopes will be re-tagged correctly during
       // phase 2 walking; phase 3 will hoist the r(A). The interloper
@@ -167,7 +172,7 @@ describe('normalizeToolPairs', () => {
       expect(after).toBeDefined();
       expect(after!.role).toBe('user');
       expect(after!.content[0]!.type).toBe('tool_result');
-      // The mid-cycle event should still be present somewhere in the
+      // The mid-cycle event must still be present somewhere in the
       // output, after the tool_result.
       const seen = out.messages.flatMap((m) =>
         m.content.map((b) => (b as { text?: string }).text ?? ''),
@@ -175,23 +180,6 @@ describe('normalizeToolPairs', () => {
       expect(seen.some((s) => s.includes('mid-cycle event'))).toBe(true);
       // At least one deferred event should have been emitted.
       expect(events.some((e) => e.kind === 'interloper_deferred')).toBe(true);
-    });
-
-    it("compression policy drops interloper with a warning", () => {
-      const input: ProviderMessage[] = [
-        user(t('hi')),
-        assistant(u('A')),
-        user(t('mid-cycle event')),
-        user(r('A')),
-      ];
-      const { events, onEvent } = collectEvents();
-      const out = normalize(input, { policy: 'compression', onEvent });
-
-      const seen = out.messages.flatMap((m) =>
-        m.content.map((b) => (b as { text?: string }).text ?? ''),
-      );
-      expect(seen.some((s) => s.includes('mid-cycle event'))).toBe(false);
-      expect(events.some((e) => e.kind === 'interloper_dropped')).toBe(true);
     });
   });
 
