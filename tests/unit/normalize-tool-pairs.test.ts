@@ -15,10 +15,17 @@ import { describe, it, expect } from 'vitest';
 import {
   normalizeToolPairs,
   MembraneNormalizerError,
-  type ProviderMessage,
   type ProviderBlock,
 } from '../../src/formatters/normalize-tool-pairs.js';
 import type { NormalizeEvent } from '../../src/formatters/types.js';
+
+// Test-local strict alias. The public `ProviderMessage` in
+// `src/formatters/types.ts` has `content: unknown` so the formatter
+// pipeline can carry arbitrary provider-shaped blocks without
+// committing to a runtime schema. Within these tests we always
+// construct ProviderBlock arrays, so a stricter alias keeps the
+// assertions readable without spreading `as ProviderBlock[]` everywhere.
+type ProviderMessage = { role: 'user' | 'assistant'; content: ProviderBlock[] };
 
 // ============================================================================
 // Helpers (mirror the shorthand used in context-manager tests)
@@ -54,13 +61,30 @@ function collectEvents(): { events: NormalizeEvent[]; onEvent: (e: NormalizeEven
 function resultIds(content: ProviderBlock[]): string[] {
   return content
     .filter((b) => b.type === 'tool_result')
-    .map((b) => (b as { tool_use_id: string }).tool_use_id);
+    .map((b) => (b as ProviderBlock & { tool_use_id: string }).tool_use_id);
 }
 
 function useIds(content: ProviderBlock[]): string[] {
   return content
     .filter((b) => b.type === 'tool_use')
-    .map((b) => (b as { id: string }).id);
+    .map((b) => (b as ProviderBlock & { id: string }).id);
+}
+
+/**
+ * Wrap normalizeToolPairs so tests see the strict ProviderMessage
+ * shape on the result side. The public boundary returns the loose
+ * type from `./types.js` (content: unknown), which is correct for
+ * production but verbose to assert against — every test would
+ * otherwise need to cast `out.messages[i].content` before reading
+ * blocks. This wrapper is the one place the strict-vs-loose
+ * bridge lives.
+ */
+function normalize(
+  input: ProviderMessage[],
+  options?: Parameters<typeof normalizeToolPairs>[1],
+): { messages: ProviderMessage[]; ready: boolean } {
+  const out = normalizeToolPairs(input, options);
+  return out as { messages: ProviderMessage[]; ready: boolean };
 }
 
 function blockTypes(msg: ProviderMessage): string[] {
@@ -88,7 +112,7 @@ describe('normalizeToolPairs', () => {
         t('k'),
       ];
       const { events, onEvent } = collectEvents();
-      const out = normalizeToolPairs([user(...blocks)], { onEvent });
+      const out = normalize([user(...blocks)], { onEvent });
 
       // Should produce alternating user/assistant envelopes, every
       // tool_use immediately followed by a user envelope containing
@@ -132,7 +156,7 @@ describe('normalizeToolPairs', () => {
         user(r('A')),
       ];
       const { events, onEvent } = collectEvents();
-      const out = normalizeToolPairs(input, { policy: 'live', onEvent });
+      const out = normalize(input, { policy: 'live', onEvent });
 
       // The two user envelopes will be re-tagged correctly during
       // phase 2 walking; phase 3 will hoist the r(A). The interloper
@@ -161,7 +185,7 @@ describe('normalizeToolPairs', () => {
         user(r('A')),
       ];
       const { events, onEvent } = collectEvents();
-      const out = normalizeToolPairs(input, { policy: 'compression', onEvent });
+      const out = normalize(input, { policy: 'compression', onEvent });
 
       const seen = out.messages.flatMap((m) =>
         m.content.map((b) => (b as { text?: string }).text ?? ''),
@@ -179,14 +203,14 @@ describe('normalizeToolPairs', () => {
         user(r('B')),
       ];
       const { events, onEvent } = collectEvents();
-      const out = normalizeToolPairs(input, { onEvent });
+      const out = normalize(input, { onEvent });
 
       // The user envelope following the assistant must contain BOTH r(A) and r(B).
       const assistantIdx = out.messages.findIndex((m) => m.role === 'assistant');
       const after = out.messages[assistantIdx + 1]!;
       expect(resultIds(after.content).sort()).toEqual(['A', 'B']);
       const aResult = after.content.find(
-        (b) => b.type === 'tool_result' && (b as { tool_use_id: string }).tool_use_id === 'A',
+        (b) => b.type === 'tool_result' && (b as ProviderBlock & { tool_use_id?: string }).tool_use_id === 'A',
       ) as { content: string; is_error: boolean } | undefined;
       expect(aResult?.content).toBe('[pending]');
       expect(aResult?.is_error).toBe(false);
@@ -203,7 +227,7 @@ describe('normalizeToolPairs', () => {
         assistant(u('A')),
       ];
       const { events, onEvent } = collectEvents();
-      const out = normalizeToolPairs(input, {
+      const out = normalize(input, {
         pendingToolCallIds: new Set(['A']),
         onEvent,
       });
@@ -229,7 +253,7 @@ describe('normalizeToolPairs', () => {
         assistant(u('A')),
       ];
       const { events, onEvent } = collectEvents();
-      const out = normalizeToolPairs(input, { onEvent });
+      const out = normalize(input, { onEvent });
 
       expect(out.ready).toBe(true);
       const last = out.messages[out.messages.length - 1]!;
@@ -249,13 +273,13 @@ describe('normalizeToolPairs', () => {
         assistant(t('ok')),
       ];
       const { events, onEvent } = collectEvents();
-      const out = normalizeToolPairs(input, { onEvent });
+      const out = normalize(input, { onEvent });
 
       // The orphan should be turned into a text block somewhere in
       // the user envelope.
       const firstUser = out.messages.find((m) => m.role === 'user')!;
       const hasOrphanText = firstUser.content.some(
-        (b) => b.type === 'text' && /orphan tool_result/.test((b as { text: string }).text),
+        (b) => b.type === 'text' && /orphan tool_result/.test((b as ProviderBlock & { text?: string }).text ?? ''),
       );
       expect(hasOrphanText).toBe(true);
       expect(events.some((e) => e.kind === 'orphan_tool_result_textified')).toBe(true);
@@ -271,7 +295,7 @@ describe('normalizeToolPairs', () => {
         assistant(t('done')),
       ];
       const { events, onEvent } = collectEvents();
-      const out = normalizeToolPairs(input, { onEvent });
+      const out = normalize(input, { onEvent });
 
       expect(out.ready).toBe(true);
       expect(out.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant']);
@@ -288,7 +312,7 @@ describe('normalizeToolPairs', () => {
         assistant(t('hi')),
       ];
       const { events, onEvent } = collectEvents();
-      const out = normalizeToolPairs(input, { onEvent });
+      const out = normalize(input, { onEvent });
 
       // The thinking block must end up on the assistant side.
       const assistantEnvs = out.messages.filter((m) => m.role === 'assistant');
@@ -308,7 +332,7 @@ describe('normalizeToolPairs', () => {
         assistant(u('B')),
         user(r('A'), r('B')),
       ];
-      const out = normalizeToolPairs(input);
+      const out = normalize(input);
 
       // Each tool_use should be followed by a user envelope containing
       // ITS specific tool_result.
@@ -333,7 +357,7 @@ describe('normalizeToolPairs', () => {
         assistant(t('I greet first')),
         user(t('hi')),
       ];
-      expect(() => normalizeToolPairs(input)).toThrow(MembraneNormalizerError);
+      expect(() => normalize(input)).toThrow(MembraneNormalizerError);
     });
   });
 
@@ -346,7 +370,7 @@ describe('normalizeToolPairs', () => {
         assistant(t('continuing')),
       ];
       const { events, onEvent } = collectEvents();
-      const out = normalizeToolPairs(input, { onEvent });
+      const out = normalize(input, { onEvent });
 
       // A synthetic should have been inserted; since there's a next
       // assistant envelope after the user envelope, the synthesis is
@@ -379,7 +403,7 @@ describe('normalizeToolPairs', () => {
         assistant(t('continuing')),
       ];
       const { events, onEvent } = collectEvents();
-      const out = normalizeToolPairs(input, { onEvent });
+      const out = normalize(input, { onEvent });
 
       // The synthetic was inserted in the user envelope at index 2.
       // After phase 5.5, no block at index >= 2 should carry cache_control.
@@ -401,7 +425,7 @@ describe('normalizeToolPairs', () => {
         assistant(t('ok')),
       ];
       const { events, onEvent } = collectEvents();
-      const out = normalizeToolPairs(input, { onEvent });
+      const out = normalize(input, { onEvent });
 
       const firstBlock = out.messages[0]!.content[0]! as ProviderBlock & { cache_control?: unknown };
       expect(firstBlock.cache_control).toBeDefined();
@@ -411,7 +435,7 @@ describe('normalizeToolPairs', () => {
 
   describe('empty input', () => {
     it('returns empty messages and ready=true', () => {
-      const out = normalizeToolPairs([]);
+      const out = normalize([]);
       expect(out.messages).toEqual([]);
       expect(out.ready).toBe(true);
     });
@@ -434,7 +458,7 @@ describe('normalizeToolPairs', () => {
         // No following user envelope: A trailing+pending, B trailing+abandoned.
       ];
       const { events, onEvent } = collectEvents();
-      const out = normalizeToolPairs(input, {
+      const out = normalize(input, {
         pendingToolCallIds: new Set(['A']),
         onEvent,
       });
@@ -462,7 +486,7 @@ describe('normalizeToolPairs', () => {
         user(t('go')),
         assistant(u('A')),
       ];
-      const out = normalizeToolPairs(input);
+      const out = normalize(input);
       // Find the synthetic tool_result.
       const userWithSynth = out.messages.find(
         (m) => m.role === 'user' && m.content.some((b) => b.type === 'tool_result'),
