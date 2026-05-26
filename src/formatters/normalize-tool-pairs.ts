@@ -16,11 +16,13 @@
  * output is shipped, so producer-side bugs cannot leak the same 400 family
  * (compression-bug 5/6/7/8/9, agent-framework #37, 2026-05-22 miner stall).
  *
- * Algorithm overview (six phases): reclassify blocks by required role,
+ * Algorithm overview (eight phases): reclassify blocks by required role,
  * reflow into role-correct envelopes, hoist matching tool_results across
  * the assistant→user boundary, evict interlopers wedged between use and
  * result, synthesize `[pending]` results for trailing orphans (or signal
- * not-ready when the id is in the caller-supplied pending set), validate.
+ * not-ready when the id is in the caller-supplied pending set), drop
+ * empty envelopes, prepend a synthetic `[continuing]` user envelope when
+ * the first envelope ended up assistant-role, validate.
  */
 
 import type { ProviderMessage as LooseProviderMessage } from './types.js';
@@ -123,36 +125,108 @@ export function normalizeToolPairs(
   // Phase 5.5: suppress cache_control on/after any envelope containing
   // a synthetic block, so cache keys don't get invalidated when the
   // real result arrives in a later round.
+  //
+  // The suppression itself happens here (we know which envelope is the
+  // first synthetic by its position in the current array), but the
+  // `cache_suppressed_for_synthetic` telemetry is deferred until after
+  // phase 6 (which can drop empty envelopes before the synthetic) and
+  // phase 7 (which can prepend a `[continuing]` envelope, shifting
+  // everything by +1). The event's `envelopeIndex` must refer to the
+  // final output array so consumers can index back into it reliably.
+  // We pin the envelope by reference and recompute the index after
+  // those phases settle.
   // ---------------------------------------------------------------------
+  let pendingCacheSuppressionRef: Envelope | null = null;
   if (orphanRes.firstSyntheticEnvelope !== null) {
-    suppressCacheControlFrom(envelopes, orphanRes.firstSyntheticEnvelope, onEvent);
+    const ref = envelopes[orphanRes.firstSyntheticEnvelope]!;
+    const suppressed = suppressCacheControlFrom(envelopes, orphanRes.firstSyntheticEnvelope);
+    if (suppressed) {
+      pendingCacheSuppressionRef = ref;
+    }
   }
 
   // ---------------------------------------------------------------------
   // Phase 6: drop empty envelopes (can arise from phase 4 dropping or
-  // phase 3 hoisting), repair first-message-must-be-user, validate. We
-  // deliberately do NOT merge consecutive same-role envelopes here —
-  // that's the formatter's job.
+  // phase 3 hoisting). We deliberately do NOT merge consecutive
+  // same-role envelopes here — that's the formatter's job.
+  //
+  // The synthetic-bearing envelope (held by `pendingCacheSuppressionRef`)
+  // cannot be dropped here — phase 5 unshifts its synthetic block onto
+  // that envelope's content, so it's guaranteed non-empty.
   // ---------------------------------------------------------------------
   envelopes = envelopes.filter((e) => e.content.length > 0);
 
-  // First-message-must-be-user repair: only repair the case where the
-  // original input's first message WAS user, but re-roling moved blocks
-  // to a leading assistant envelope (e.g. misplaced thinking block).
-  // If the producer genuinely shipped an assistant-first conversation,
-  // that's a real bug and validate() will throw.
-  const originalFirstRole = input.length > 0 ? input[0]!.role : 'user';
-  if (
-    envelopes.length > 0 &&
-    envelopes[0]!.role === 'assistant' &&
-    originalFirstRole === 'user'
-  ) {
+  // ---------------------------------------------------------------------
+  // Phase 7: ensure first envelope is user-role.
+  //
+  // Anthropic requires `messages[0].role === 'user'`. The leading
+  // envelope can become assistant for two distinct reasons:
+  //
+  //   (a) Re-roling artifact — a strict-role block (thinking, tool_use)
+  //       lived under a user-role input message and phase 1+2 moved it
+  //       to a new leading assistant envelope. `originalFirstRole`
+  //       is `'user'`.
+  //
+  //   (b) Producer bug — a context strategy genuinely selected an
+  //       assistant message as the first message of its compiled view
+  //       (the 2026-05-26 reviewer postmortem: PassthroughStrategy
+  //       `selectFromEnd` cut on an assistant turn). `originalFirstRole`
+  //       is `'assistant'`.
+  //
+  // Both cases get the same repair (prepend a `[continuing]` user
+  // envelope) because deletion would lose content in case (a) — the
+  // re-roled blocks are real conversation content the producer
+  // expected to ship. The synthetic costs a leading cache miss
+  // (deterministic literal, so idempotent across identical inputs)
+  // but preserves API correctness and producer simplicity. We emit
+  // a warn-level event so telemetry can distinguish the causes and
+  // alert on (b) without coupling control flow to attribution.
+  //
+  // Idempotency: the synthetic content is a fixed literal. Running
+  // normalize twice on the same input produces identical output the
+  // second time (envelope[0] is user, gate doesn't fire).
+  // ---------------------------------------------------------------------
+  if (envelopes.length > 0 && envelopes[0]!.role === 'assistant') {
+    // `input` is guaranteed non-empty here: rebuildEnvelopes only
+    // produces envelopes when iterating input messages, so a non-empty
+    // envelopes implies a non-empty input.
+    const originalFirstRole = input[0]!.role;
+    const leadingBlockTypes = envelopes[0]!.content.map((b) => b.type);
     envelopes.unshift({ role: 'user', content: [{ type: 'text', text: '[continuing]' }] });
+    onEvent({ kind: 'leading_user_synthesized', originalFirstRole, leadingBlockTypes });
   }
 
-  // Validate. When `ready === false` we intentionally have unmatched
-  // tool_uses — but ONLY the ones in `pending` are allowed to remain
-  // unsynthesized. Any other gap is a bug in phase 5 and must throw.
+  // ---------------------------------------------------------------------
+  // Deferred phase 5.5 telemetry: emit `cache_suppressed_for_synthetic`
+  // now that index-mutating phases (6, 7) have settled. The envelope
+  // reference pinned in phase 5.5 survives both — phase 6 can't drop it
+  // (the synthetic block keeps it non-empty), and phase 7 either leaves
+  // it in place or shifts it by +1 via unshift.
+  // ---------------------------------------------------------------------
+  if (pendingCacheSuppressionRef !== null) {
+    const envelopeIndex = envelopes.indexOf(pendingCacheSuppressionRef);
+    // Assertion: indexOf must succeed. Phases 6 and 7 only filter/prepend;
+    // neither can remove an envelope holding a synthetic block.
+    if (envelopeIndex < 0) {
+      throw new MembraneNormalizerError(
+        `Phase 5.5 envelope reference vanished between phase 6 and phase 7 — ` +
+          `internal bug: synthetic-bearing envelope should be reachable after both phases.`,
+        input.map(cloneMsg),
+        envelopes.map(toProviderMessage),
+      );
+    }
+    onEvent({ kind: 'cache_suppressed_for_synthetic', envelopeIndex });
+  }
+
+  // ---------------------------------------------------------------------
+  // Phase 8: validate. When `ready === false` we intentionally have
+  // unmatched tool_uses — but ONLY the ones in `pending` are allowed to
+  // remain unsynthesized. Any other gap is a bug in phase 5 and must
+  // throw. The first-message-must-be-user branch should be unreachable
+  // after phase 7; it remains as defense-in-depth against a future
+  // phase introducing a leading assistant envelope without firing
+  // phase 7.
+  // ---------------------------------------------------------------------
   validate(envelopes, input, pending);
 
   return { messages: envelopes.map(toProviderMessage), ready };
@@ -459,8 +533,7 @@ function resolveOrphans(
 function suppressCacheControlFrom(
   envelopes: Envelope[],
   startIndex: number,
-  onEvent: (e: NormalizeEvent) => void,
-): void {
+): boolean {
   // Strip cache_control from blocks at-or-after startIndex. We must NOT
   // mutate the caller's input blocks (envelopes share references with
   // the input via rebuildEnvelopes), so clone-on-write: replace any
@@ -468,6 +541,10 @@ function suppressCacheControlFrom(
   // The envelope's content array is replaced wholesale via .map; this
   // is the only place in the normalizer that creates new block objects
   // out of existing ones (synthetics aside).
+  //
+  // Returns whether any block was actually suppressed, so the caller
+  // can decide whether to emit telemetry. Emission is deferred until
+  // after phases 6 and 7 settle the final envelope ordering.
   let suppressed = false;
   for (let i = startIndex; i < envelopes.length; i++) {
     const env = envelopes[i]!;
@@ -480,9 +557,7 @@ function suppressCacheControlFrom(
       return rest as ProviderBlock;
     });
   }
-  if (suppressed) {
-    onEvent({ kind: 'cache_suppressed_for_synthetic', envelopeIndex: startIndex });
-  }
+  return suppressed;
 }
 
 function validate(

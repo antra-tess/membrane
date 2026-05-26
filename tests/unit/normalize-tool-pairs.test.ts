@@ -14,7 +14,6 @@
 import { describe, it, expect } from 'vitest';
 import {
   normalizeToolPairs,
-  MembraneNormalizerError,
   type ProviderBlock,
 } from '../../src/formatters/normalize-tool-pairs.js';
 import type { NormalizeEvent } from '../../src/formatters/types.js';
@@ -339,13 +338,127 @@ describe('normalizeToolPairs', () => {
     });
   });
 
-  describe('#10 — first message is assistant: hard fail', () => {
-    it('throws MembraneNormalizerError', () => {
+  describe('#10 — first message is assistant: synthesize [continuing] + warn', () => {
+    it('prepends a user envelope and fires leading_user_synthesized with originalFirstRole=assistant', () => {
       const input: ProviderMessage[] = [
         assistant(t('I greet first')),
         user(t('hi')),
       ];
-      expect(() => normalize(input)).toThrow(MembraneNormalizerError);
+      const { events, onEvent } = collectEvents();
+      const out = normalize(input, { onEvent });
+
+      // First envelope must now be user-role with the [continuing] literal.
+      expect(out.messages[0]!.role).toBe('user');
+      expect(out.messages[0]!.content).toHaveLength(1);
+      const firstBlock = out.messages[0]!.content[0]!;
+      expect(firstBlock.type).toBe('text');
+      expect((firstBlock as ProviderBlock & { text: string }).text).toBe('[continuing]');
+
+      // Original assistant envelope is preserved at index 1 (no content loss).
+      expect(out.messages[1]!.role).toBe('assistant');
+      expect((out.messages[1]!.content[0]! as ProviderBlock & { text: string }).text).toBe(
+        'I greet first',
+      );
+
+      // Telemetry distinguishes producer-bug from re-roling.
+      const ev = events.find((e) => e.kind === 'leading_user_synthesized');
+      expect(ev).toBeDefined();
+      expect(ev).toMatchObject({
+        kind: 'leading_user_synthesized',
+        originalFirstRole: 'assistant',
+        leadingBlockTypes: ['text'],
+      });
+    });
+
+    it('is idempotent: re-running on the output is a no-op for this gate', () => {
+      const input: ProviderMessage[] = [
+        assistant(t('I greet first')),
+        user(t('hi')),
+      ];
+      const first = normalize(input);
+      const { events, onEvent } = collectEvents();
+      const second = normalize(first.messages, { onEvent });
+
+      expect(second.messages).toEqual(first.messages);
+      expect(events.some((e) => e.kind === 'leading_user_synthesized')).toBe(false);
+    });
+  });
+
+  describe('#10b — re-roled leading assistant (thinking block under user)', () => {
+    it('synthesizes [continuing] with originalFirstRole=user (preserves re-roled content)', () => {
+      // A producer ships a user-role message whose only content is a
+      // thinking block. rebuildEnvelopes moves it to a new assistant
+      // envelope, leaving the input's first envelope effectively
+      // assistant-roled. Repair must engage AND must not drop the
+      // thinking block.
+      const input: ProviderMessage[] = [
+        user(think('user is thinking???')),
+        assistant(t('hi')),
+      ];
+      const { events, onEvent } = collectEvents();
+      const out = normalize(input, { onEvent });
+
+      expect(out.messages[0]!.role).toBe('user');
+      expect((out.messages[0]!.content[0]! as ProviderBlock & { text: string }).text).toBe(
+        '[continuing]',
+      );
+
+      // The thinking block survives on the assistant side.
+      const assistantEnvs = out.messages.filter((m) => m.role === 'assistant');
+      expect(assistantEnvs.some((m) => blockTypes(m).includes('thinking'))).toBe(true);
+
+      const ev = events.find((e) => e.kind === 'leading_user_synthesized');
+      expect(ev).toBeDefined();
+      expect(ev).toMatchObject({
+        kind: 'leading_user_synthesized',
+        originalFirstRole: 'user',
+      });
+      expect((ev as { leadingBlockTypes: string[] }).leadingBlockTypes).toContain('thinking');
+    });
+  });
+
+  describe('#10c — producer-bug case from 2026-05-26 reviewer postmortem', () => {
+    it('repairs a passthrough-style assistant-first cut without dropping tool cycles', () => {
+      // Mirrors the reviewer-recipe failure: PassthroughStrategy.selectFromEnd
+      // cut on an assistant turn that opens a tool_use cycle. The leading
+      // envelope has [text, tool_use], followed by a user envelope with
+      // the matching tool_result. Repair must prepend [continuing] AND
+      // leave the tool_use → tool_result pair intact.
+      const input: ProviderMessage[] = [
+        assistant(t('Now I have all the material I need...'), u('A')),
+        user(r('A')),
+        assistant(t('Now let me check...'), u('B')),
+        user(r('B')),
+      ];
+      const { events, onEvent } = collectEvents();
+      const out = normalize(input, { onEvent });
+
+      // Synthetic prepended.
+      expect(out.messages[0]!.role).toBe('user');
+      expect((out.messages[0]!.content[0]! as ProviderBlock & { text: string }).text).toBe(
+        '[continuing]',
+      );
+
+      // Original tool cycles preserved in order.
+      expect(out.messages[1]!.role).toBe('assistant');
+      expect(useIds(out.messages[1]!.content)).toEqual(['A']);
+      expect(out.messages[2]!.role).toBe('user');
+      expect(resultIds(out.messages[2]!.content)).toEqual(['A']);
+      expect(out.messages[3]!.role).toBe('assistant');
+      expect(useIds(out.messages[3]!.content)).toEqual(['B']);
+      expect(out.messages[4]!.role).toBe('user');
+      expect(resultIds(out.messages[4]!.content)).toEqual(['B']);
+
+      // No spurious orphan synthesis — the pairs were well-formed,
+      // just shifted by the leading-edge cut.
+      expect(events.some((e) => e.kind === 'synthetic_pending_result')).toBe(false);
+      expect(events.some((e) => e.kind === 'orphan_tool_result_textified')).toBe(false);
+
+      // Telemetry classes this as a producer bug.
+      const ev = events.find((e) => e.kind === 'leading_user_synthesized') as
+        | { originalFirstRole: string }
+        | undefined;
+      expect(ev?.originalFirstRole).toBe('assistant');
     });
   });
 
@@ -401,6 +514,56 @@ describe('normalizeToolPairs', () => {
         }
       }
       expect(events.some((e) => e.kind === 'cache_suppressed_for_synthetic')).toBe(true);
+    });
+
+    it('cache_suppressed_for_synthetic.envelopeIndex stays correct after phase-7 prepend', () => {
+      // Regression: when phase 5 synthesizes a [pending] result AND phase 7
+      // prepends a [continuing] envelope (both fire for an assistant-first
+      // input with an unmatched tool_use), the cache-suppression event's
+      // envelopeIndex must refer to the FINAL output array, not the
+      // pre-phase-7 working array.
+      const cached = (block: ProviderBlock): ProviderBlock => ({
+        ...block,
+        cache_control: { type: 'ephemeral' },
+      });
+      const input: ProviderMessage[] = [
+        // Assistant-first (triggers phase 7) with an orphan tool_use
+        // (triggers phase 5 synthesis + phase 5.5 cache suppression).
+        assistant(u('A')),
+        user(cached(t('would-be cache breakpoint after the synthetic'))),
+        assistant(t('continuing')),
+      ];
+      const { events, onEvent } = collectEvents();
+      const out = normalize(input, { onEvent });
+
+      // Both events must fire.
+      const leadEv = events.find((e) => e.kind === 'leading_user_synthesized');
+      const cacheEv = events.find((e) => e.kind === 'cache_suppressed_for_synthetic') as
+        | { envelopeIndex: number }
+        | undefined;
+      expect(leadEv).toBeDefined();
+      expect(cacheEv).toBeDefined();
+
+      // The cache-suppressed envelope index must point at an envelope
+      // actually containing a synthetic tool_result in the FINAL output.
+      const idx = cacheEv!.envelopeIndex;
+      expect(idx).toBeGreaterThanOrEqual(0);
+      expect(idx).toBeLessThan(out.messages.length);
+      const targetEnv = out.messages[idx]!;
+      const hasSyntheticPending = targetEnv.content.some(
+        (b) =>
+          b.type === 'tool_result' &&
+          (b as ProviderBlock & { content?: unknown }).content === '[pending]',
+      );
+      expect(hasSyntheticPending).toBe(true);
+
+      // And it must NOT point at the synthesized [continuing] user turn.
+      expect(targetEnv.role).toBe('user');
+      const isContinuing =
+        targetEnv.content.length === 1 &&
+        targetEnv.content[0]!.type === 'text' &&
+        (targetEnv.content[0] as ProviderBlock & { text: string }).text === '[continuing]';
+      expect(isContinuing).toBe(false);
     });
 
     it('leaves cache_control alone when no synthetic was needed', () => {
