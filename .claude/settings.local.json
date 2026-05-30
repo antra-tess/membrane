@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm whoami:*)",
+      "Bash(npm view:*)",
+      "Bash(npm run build:*)",
+      "Bash(npm publish:*)",
+      "Bash(npx tsx:*)",
+      "Bash(for f in test/*.test.ts)",
+      "Bash(do echo \"=== Running $f ===\")",
+      "Bash(done)",
+      "Bash(git stash:*)",
+      "Bash(do echo \"=== $f ===\")",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(node:*)",
+      "Bash(git push:*)",
+      "Bash(npm version:*)",
+      "WebSearch",
+      "Bash(npm config set:*)",
+      "Bash(npm deprecate @antra_tessera/membrane \"Moved to @animalabs/membrane\")",
+      "Bash(npm config:*)",
+      "Bash(grep:*)",
+      "Bash(git reset:*)",
+      "Bash(npm test:*)",
+      "Bash(npm run:*)",
+      "Bash(~/.npmrc)",
+      "Bash(npm install:*)",
+      "Bash(npm cache clean:*)",
+      "Bash(curl:*)",
+      "Bash(python3:*)"
+    ]
+  }
+}

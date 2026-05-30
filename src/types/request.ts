@@ -30,7 +30,10 @@ export interface GenerationConfig {
   
   /** Frequency penalty (provider-specific) */
   frequencyPenalty?: number;
-  
+
+  /** Repetition penalty — multiplicative (vLLM/HuggingFace style, typically 1.0-1.2) */
+  repetitionPenalty?: number;
+
   /** Enable thinking/reasoning mode */
   thinking?: {
     enabled: boolean;

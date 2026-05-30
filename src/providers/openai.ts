@@ -399,6 +399,10 @@ export class OpenAIAdapter implements ProviderAdapter {
       params.frequency_penalty = request.frequencyPenalty;
     }
 
+    if (request.repetitionPenalty !== undefined) {
+      params.repetition_penalty = request.repetitionPenalty;
+    }
+
     // Reasoning models (o1, o3, o4) don't support stop sequences
     // OpenAI limits stop sequences to 4 — truncate to fit
     if (request.stopSequences && request.stopSequences.length > 0 && !noStopSupport(model)) {

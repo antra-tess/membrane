@@ -215,6 +215,9 @@ export interface ProviderRequest {
   /** Frequency penalty */
   frequencyPenalty?: number;
 
+  /** Repetition penalty (multiplicative, vLLM/HuggingFace style) */
+  repetitionPenalty?: number;
+
   /** Stop sequences */
   stopSequences?: string[];
   

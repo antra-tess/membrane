@@ -1159,6 +1159,7 @@ export class Membrane {
       topK: config.topK,
       presencePenalty: config.presencePenalty,
       frequencyPenalty: config.frequencyPenalty,
+      repetitionPenalty: config.repetitionPenalty,
     };
   }
 

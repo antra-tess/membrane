@@ -41,6 +41,7 @@ interface CompletionsRequest {
   top_p?: number;
   presence_penalty?: number;
   frequency_penalty?: number;
+  repetition_penalty?: number;
   stop?: string[];
   stream?: boolean;
 }
@@ -381,6 +382,10 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
 
     if (request.frequencyPenalty !== undefined) {
       params.frequency_penalty = request.frequencyPenalty;
+    }
+
+    if (request.repetitionPenalty !== undefined) {
+      params.repetition_penalty = request.repetitionPenalty;
     }
 
     if (stopSequences.length > 0) {
