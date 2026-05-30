@@ -2390,13 +2390,16 @@ export class Membrane {
 }
 
 // Native tool names must match ^[a-zA-Z0-9_-]{1,128}$.
-// The framework uses module:tool namespacing, so we round-trip colons
-// through an escape encoding for the API wire format.
-// Lossless: escape underscores first (_u), then encode colons (_c).
+// Tool names use `--` namespacing, which is already API-valid; the only
+// character that ever needs escaping is a literal colon, encoded losslessly as
+// `__` and back. We deliberately do NOT escape underscores — they are valid,
+// and escaping them (the previous `_u`/`_c` scheme) garbled every
+// underscore-containing tool name in the request the model actually sees
+// (`send_message` → `send_umessage`), polluting its reasoning for no benefit.
 function sanitizeToolName(name: string): string {
-  return name.replace(/_/g, '_u').replace(/:/g, '_c');
+  return name.replace(/:/g, '__');
 }
 
 function unsanitizeToolName(name: string): string {
-  return name.replace(/_c/g, ':').replace(/_u/g, '_');
+  return name.replace(/__/g, ':');
 }
