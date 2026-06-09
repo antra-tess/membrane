@@ -480,6 +480,11 @@ export function toAnthropicContent(blocks: ContentBlock[]): Anthropic.ContentBlo
               data: block.source.data,
             },
           });
+        } else if (block.source.type === 'url') {
+          result.push({
+            type: 'image',
+            source: { type: 'url', url: block.source.url },
+          });
         }
         break;
         
