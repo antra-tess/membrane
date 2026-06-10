@@ -1624,6 +1624,11 @@ export class Membrane {
         return 'stop_sequence';
       case 'tool_use':
         return 'tool_use';
+      case 'refusal':
+        // Safety refusal (e.g., Fable 5 reasoning_extraction). Must survive
+        // mapping — downstream consumers react to refusals (chapterx adds a
+        // Discord reaction). Defaulting this to end_turn silently hid them.
+        return 'refusal';
       default:
         return 'end_turn';
     }

@@ -122,6 +122,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       let cacheReadTokens: number | undefined;
       let stopReason: string = 'end_turn';
       let stopSequence: string | undefined;
+      let stopDetails: unknown;
 
       // Content block tracking — finalized on content_block_stop
       const contentBlocks: Record<string, unknown>[] = [];
@@ -201,9 +202,15 @@ export class AnthropicAdapter implements ProviderAdapter {
           // All content blocks are finalized by the time message_delta arrives.
           // Capture final metadata and exit — message_stop and the SSE connection
           // teardown after it add only variable latency with no useful data.
-          const delta = event.delta as { stop_reason?: string; stop_sequence?: string };
+          const delta = event.delta as {
+            stop_reason?: string;
+            stop_sequence?: string;
+            stop_details?: unknown;
+          };
           stopReason = delta.stop_reason ?? 'end_turn';
           stopSequence = delta.stop_sequence ?? undefined;
+          // stop_details carries refusal metadata (e.g., category: 'reasoning_extraction')
+          stopDetails = delta.stop_details ?? undefined;
           const deltaUsage = event.usage as unknown as {
             output_tokens: number;
             cache_creation_input_tokens?: number | null;
@@ -244,6 +251,7 @@ export class AnthropicAdapter implements ProviderAdapter {
           content: contentBlocks,
           stop_reason: stopReason,
           stop_sequence: stopSequence ?? null,
+          stop_details: stopDetails ?? null,
           model,
           usage: {
             input_tokens: inputTokens,
