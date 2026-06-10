@@ -38,6 +38,8 @@ export interface GenerationConfig {
   thinking?: {
     enabled: boolean;
     budgetTokens?: number;
+    /** Thinking type for the API: 'enabled' (default, explicit budget) or 'adaptive' (model-managed) */
+    type?: 'enabled' | 'adaptive';
   };
   
   /** Image generation config (Gemini) */

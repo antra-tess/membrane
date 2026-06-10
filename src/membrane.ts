@@ -1082,11 +1082,14 @@ export class Membrane {
     }
 
     // Build thinking config for native extended thinking
+    const nativeThinkingType = request.config.thinking?.type ?? 'enabled';
     const thinking = request.config.thinking?.enabled
-      ? {
-          type: 'enabled' as const,
-          budget_tokens: request.config.thinking.budgetTokens ?? 5000,
-        }
+      ? (nativeThinkingType === 'adaptive'
+        ? { type: 'adaptive' as const }
+        : {
+            type: 'enabled' as const,
+            budget_tokens: request.config.thinking.budgetTokens ?? 5000,
+          })
       : undefined;
 
     // Anthropic requires temperature=1 when extended thinking is enabled
@@ -1174,6 +1177,16 @@ export class Membrane {
   private getBaseProviderParams(config: NormalizedRequest['config']) {
     // Anthropic requires temperature=1 when extended thinking is enabled
     const temperature = config.thinking?.enabled ? 1 : config.temperature;
+    // Build thinking config for native extended thinking
+    const thinkingType = config.thinking?.type ?? 'enabled';
+    const thinking = config.thinking?.enabled
+      ? (thinkingType === 'adaptive'
+        ? { type: 'adaptive' as const }
+        : {
+            type: 'enabled' as const,
+            budget_tokens: config.thinking!.budgetTokens ?? 5000,
+          })
+      : undefined;
     return {
       model: config.model,
       maxTokens: config.maxTokens,
@@ -1183,6 +1196,7 @@ export class Membrane {
       presencePenalty: config.presencePenalty,
       frequencyPenalty: config.frequencyPenalty,
       repetitionPenalty: config.repetitionPenalty,
+      thinking,
     };
   }
 
