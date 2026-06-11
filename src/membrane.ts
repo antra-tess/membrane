@@ -1265,6 +1265,15 @@ export class Membrane {
       },
     };
 
+    // The API rejects extended thinking combined with an assistant prefill.
+    // Prefill-style builds (XML formatter) use the thinking config for the
+    // literal `<thinking>` text prefix instead of the API feature — drop the
+    // API param when the built request actually ends in an assistant prefill.
+    // Chat-style builds (no prefill) keep it.
+    if (buildResult.assistantPrefill && providerRequest.thinking) {
+      delete providerRequest.thinking;
+    }
+
     return { providerRequest, prefillResult: buildResult };
   }
 
@@ -1327,6 +1336,9 @@ export class Membrane {
     
     return {
       ...this.getBaseProviderParams(originalRequest.config),
+      // Continuations always end in an assistant prefill — the API rejects
+      // extended thinking combined with prefill, so never send the param here
+      thinking: undefined,
       messages,
       system: prefillResult.systemContent
         ? (Array.isArray(prefillResult.systemContent) && prefillResult.systemContent.length > 0
@@ -1397,6 +1409,9 @@ export class Membrane {
 
     return {
       ...this.getBaseProviderParams(originalRequest.config),
+      // Continuations always end in an assistant prefill — the API rejects
+      // extended thinking combined with prefill, so never send the param here
+      thinking: undefined,
       messages,
       system: prefillResult.systemContent
         ? (Array.isArray(prefillResult.systemContent) && prefillResult.systemContent.length > 0

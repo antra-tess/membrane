@@ -10,6 +10,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
+import { NativeFormatter } from '../../src/formatters/native.js';
 import { MockAdapter } from '../../src/providers/mock.js';
 import type { NormalizedRequest, NormalizedMessage } from '../../src/types/index.js';
 
@@ -110,7 +111,8 @@ describe('Temperature enforcement for thinking', () => {
   it('clamps thinking budget_tokens below max_tokens', async () => {
     let capturedRequest: any;
     const adapter = new MockAdapter({ defaultResponse: 'Hello' });
-    const membrane = new Membrane(adapter);
+    // Native formatter — no assistant prefill, so the thinking param is kept
+    const membrane = new Membrane(adapter, { formatter: new NativeFormatter() });
 
     const request = makeRequest({
       config: {
@@ -153,7 +155,8 @@ describe('Temperature enforcement for thinking', () => {
   it('does not clamp adaptive thinking (no budget)', async () => {
     let capturedRequest: any;
     const adapter = new MockAdapter({ defaultResponse: 'Hello' });
-    const membrane = new Membrane(adapter);
+    // Native formatter — no assistant prefill, so the thinking param is kept
+    const membrane = new Membrane(adapter, { formatter: new NativeFormatter() });
 
     const request = makeRequest({
       config: {
@@ -168,6 +171,33 @@ describe('Temperature enforcement for thinking', () => {
     });
 
     expect(capturedRequest.thinking).toEqual({ type: 'adaptive', display: 'summarized' });
+  });
+
+  it('drops API thinking param for prefill-style builds (XML formatter)', async () => {
+    let capturedRequest: any;
+    const adapter = new MockAdapter({ defaultResponse: 'Hello' });
+    // Default AnthropicXmlFormatter — produces an assistant prefill, which the
+    // API rejects in combination with extended thinking. The thinking config
+    // still drives the literal <thinking> text prefix; only the API param is dropped.
+    const membrane = new Membrane(adapter);
+
+    const request = makeRequest({
+      config: {
+        model: 'claude-sonnet-4-5-20250929',
+        maxTokens: 4096,
+        thinking: { enabled: true, budgetTokens: 2048 },
+      },
+    });
+
+    await membrane.complete(request, {
+      onRequest: (req) => { capturedRequest = req; },
+    });
+
+    expect(capturedRequest.thinking).toBeUndefined();
+    // The prefill should still carry the <thinking> text convention
+    const lastMsg = capturedRequest.messages[capturedRequest.messages.length - 1];
+    expect(lastMsg.role).toBe('assistant');
+    expect(String(lastMsg.content)).toContain('<thinking>');
   });
 });
 
