@@ -312,8 +312,9 @@ export function classifyError(error: unknown): ErrorInfo {
       };
     }
     
-    // Server error
-    if (message.includes('500') || message.includes('502') || message.includes('503') || message.includes('504')) {
+    // Server error (529/overloaded: Anthropic capacity errors — transient,
+    // always worth retrying)
+    if (message.includes('500') || message.includes('502') || message.includes('503') || message.includes('504') || message.includes('529') || message.includes('overloaded')) {
       return {
         type: 'server',
         message: error.message,

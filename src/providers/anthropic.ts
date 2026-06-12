@@ -355,7 +355,23 @@ export class AnthropicAdapter implements ProviderAdapter {
 
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
     if (error instanceof Anthropic.APIError) {
-      const status = error.status;
+      // Mid-stream SSE `error` events are rethrown by the SDK as APIError
+      // with status === undefined (sdk core/streaming.js), so the HTTP
+      // status branches below would never match them — overloaded_error
+      // (529) most commonly arrives exactly this way and used to fall
+      // through to `unknown, retryable: false`. Recover the effective
+      // status from the error body's type instead.
+      const bodyType = (error.error as { error?: { type?: string } } | undefined)?.error?.type;
+      const status = error.status ?? (bodyType !== undefined ? {
+        invalid_request_error: 400,
+        authentication_error: 401,
+        permission_error: 403,
+        not_found_error: 404,
+        request_too_large: 413,
+        rate_limit_error: 429,
+        api_error: 500,
+        overloaded_error: 529,
+      }[bodyType] : undefined);
       const message = error.message;
 
       if (status === 429) {
@@ -383,8 +399,15 @@ export class AnthropicAdapter implements ProviderAdapter {
         return invalidRequestError(message, error, rawRequest);
       }
 
-      if (status >= 500) {
+      if (status !== undefined && status >= 500) {
         return serverError(message, status, error, rawRequest);
+      }
+
+      // Safety net: if the SSE error body wasn't parseable JSON, neither
+      // status nor bodyType resolves — match the message itself rather
+      // than let a transient capacity error become non-retryable.
+      if (message.toLowerCase().includes('overloaded')) {
+        return serverError(message, 529, error, rawRequest);
       }
     }
 
