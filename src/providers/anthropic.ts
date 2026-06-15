@@ -482,7 +482,7 @@ function toAnthropicToolResultContent(
           type: 'image',
           source: {
             type: 'base64',
-            media_type: block.source.mediaType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
+            media_type: detectImageMediaType(block.source.data, block.source.mediaType as string) as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
             data: block.source.data,
           },
         });
@@ -501,6 +501,24 @@ function toAnthropicToolResultContent(
  * Convert normalized content blocks to Anthropic format
  * Preserves cache_control for prompt caching
  */
+
+/** Detect image media type from the base64 payload's magic bytes. Storage/ingest
+ *  can lose or mislabel mediaType (e.g. a PNG tagged image/jpeg), which the
+ *  Anthropic API rejects with a 400. Trust the bytes; fall back to the declared
+ *  type, then jpeg. */
+function detectImageMediaType(data: string | undefined, fallback?: string): string {
+  try {
+    const b = Buffer.from((data || "").slice(0, 24), "base64");
+    if (b[0]===0x89&&b[1]===0x50&&b[2]===0x4e&&b[3]===0x47) return "image/png";
+    if (b[0]===0xff&&b[1]===0xd8&&b[2]===0xff) return "image/jpeg";
+    if (b[0]===0x47&&b[1]===0x49&&b[2]===0x46) return "image/gif";
+    if (b[0]===0x52&&b[1]===0x49&&b[2]===0x46) return "image/webp";
+  } catch {}
+  const f = (fallback || "").toLowerCase();
+  if (f==="image/jpeg"||f==="image/png"||f==="image/gif"||f==="image/webp") return f;
+  return "image/jpeg";
+}
+
 export function toAnthropicContent(blocks: ContentBlock[]): Anthropic.ContentBlockParam[] {
   const result: Anthropic.ContentBlockParam[] = [];
   
@@ -522,7 +540,7 @@ export function toAnthropicContent(blocks: ContentBlock[]): Anthropic.ContentBlo
             type: 'image',
             source: {
               type: 'base64',
-              media_type: block.source.mediaType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
+              media_type: detectImageMediaType(block.source.data, block.source.mediaType as string) as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
               data: block.source.data,
             },
           });
