@@ -103,4 +103,14 @@ describe('classifyError generic fallback', () => {
       retryable: true,
     });
   });
+
+  it('does not promote unrelated "overloaded" messages to retryable', () => {
+    // The generic fallback matches the exact `overloaded_error` type token,
+    // not a bare 'overloaded' — a non-Anthropic capacity message must not be
+    // silently reclassified as a retryable server error.
+    expect(classifyError(new Error('worker pool overloaded'))).toMatchObject({
+      type: 'unknown',
+      retryable: false,
+    });
+  });
 });
