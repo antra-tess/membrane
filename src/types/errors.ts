@@ -312,8 +312,13 @@ export function classifyError(error: unknown): ErrorInfo {
       };
     }
     
-    // Server error
-    if (message.includes('500') || message.includes('502') || message.includes('503') || message.includes('504')) {
+    // Server error (529/overloaded_error: Anthropic capacity errors —
+    // transient, always worth retrying). This is the provider-agnostic
+    // fallback path (handled Anthropic errors short-circuit above as
+    // MembraneError), so match the exact `overloaded_error` type token
+    // rather than a bare 'overloaded' that would also promote unrelated
+    // messages like "worker pool overloaded" to retryable.
+    if (message.includes('500') || message.includes('502') || message.includes('503') || message.includes('504') || message.includes('529') || message.includes('overloaded_error')) {
       return {
         type: 'server',
         message: error.message,
