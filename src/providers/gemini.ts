@@ -428,6 +428,20 @@ export class GeminiAdapter implements ProviderAdapter {
                 },
               });
             }
+          } else if (block.type === 'audio') {
+            // Audio input → Gemini inlineData (same mechanism as images). This is
+            // pure plumbing: whether a given model accepts/understands audio is the
+            // model's concern (the caller decides what to send). Common MIME types:
+            // audio/mp3, audio/wav, audio/ogg, audio/flac.
+            const source = block.source;
+            if (source?.type === 'base64' && source.data) {
+              parts.push({
+                inlineData: {
+                  mimeType: source.mediaType ?? source.media_type ?? 'audio/mpeg',
+                  data: source.data,
+                },
+              });
+            }
           } else if (block.type === 'tool_use') {
             parts.push({
               functionCall: {
