@@ -230,8 +230,27 @@ export class OpenRouterAdapter implements ProviderAdapter {
         for (const data of dataLines) {
           if (data === '[DONE]') continue;
 
+          // Parse first; only JSON noise is ignorable. Everything after the
+          // parse must NOT be swallowed by the catch below.
+          let parsed: Record<string, any>;
           try {
-            const parsed = JSON.parse(data);
+            parsed = JSON.parse(data);
+          } catch {
+            continue; // Ignore parse errors (partial/keep-alive lines)
+          }
+
+          // OpenRouter delivers mid-stream failures (e.g. upstream 429s) as an
+          // SSE data line with an `error` payload. Silently ignoring it would
+          // yield a fake-successful empty completion — surface it instead so
+          // retry logic can handle it.
+          if (typeof parsed === 'object' && parsed !== null && parsed.error) {
+            const err = parsed.error as { code?: number | string; message?: string };
+            throw new Error(
+              `OpenRouter stream error${err.code !== undefined ? ` (${err.code})` : ''}: ${err.message ?? JSON.stringify(err)}`
+            );
+          }
+
+          try {
             const delta = parsed.choices?.[0]?.delta;
 
             if (delta?.content) {
