@@ -46,6 +46,15 @@ describe('OpenRouterAdapter audio input', () => {
     });
   });
 
+  it('maps the legacy audio/mpeg3 alias to the mp3 format', async () => {
+    const req = await buildRequest([
+      { type: 'audio', source: { type: 'base64', data: 'QUJDRA==', mediaType: 'audio/mpeg3' } },
+    ]);
+    expect(req.messages[0].content).toContainEqual({
+      type: 'input_audio', input_audio: { data: 'QUJDRA==', format: 'mp3' },
+    });
+  });
+
   it('maps audio/wav to the wav format', async () => {
     const req = await buildRequest([
       { type: 'audio', source: { type: 'base64', data: 'V0FWRA==', mediaType: 'audio/wav' } },

@@ -46,6 +46,8 @@ function audioMimeToFormat(mimeType: string): string | undefined {
   switch (mimeType.toLowerCase()) {
     case 'audio/mpeg':
     case 'audio/mp3':
+    case 'audio/mpeg3':      // legacy MP3 aliases some clients (e.g. Discord) report
+    case 'audio/x-mpeg-3':
       return 'mp3';
     case 'audio/wav':
     case 'audio/x-wav':
