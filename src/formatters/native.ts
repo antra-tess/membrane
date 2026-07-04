@@ -370,6 +370,20 @@ export class NativeFormatter implements PrefillFormatter {
           }
           result.push(imageBlock);
         }
+      } else if (block.type === 'audio') {
+        // Pass audio through in the same shape as images — the provider
+        // adapters convert it (Gemini → inlineData, OpenRouter → input_audio).
+        // Whether a given model accepts audio is the provider/model's concern.
+        if (block.source.type === 'base64') {
+          result.push({
+            type: 'audio',
+            source: {
+              type: 'base64',
+              media_type: block.source.mediaType,
+              data: block.source.data,
+            },
+          });
+        }
       } else if (block.type === 'tool_use') {
         result.push({
           type: 'tool_use',
@@ -399,7 +413,7 @@ export class NativeFormatter implements PrefillFormatter {
       } else if (block.type === 'redacted_thinking') {
         // Pass through verbatim (carries encrypted data field)
         result.push({ ...(block as unknown as Record<string, unknown>) });
-      } else if (block.type === 'document' || block.type === 'audio') {
+      } else if (block.type === 'document') {
         hasUnsupportedMedia = true;
       }
     }
