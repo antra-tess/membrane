@@ -20,6 +20,52 @@ import {
   serverError,
   abortError,
 } from '../types/index.js';
+import { flattenRootSchemaUnion } from './anthropic-tool-schema.js';
+
+// ============================================================================
+// Model capability gates
+// ============================================================================
+
+/**
+ * Models that reject the sampling parameters (`temperature`, `top_p`,
+ * `top_k`) with a 400 invalid_request_error — which Membrane classifies as
+ * non-retryable, so a single stray `temperature` kills the whole turn.
+ * Mirrors the `noTemperatureSupport` gate in the OpenAI provider.
+ *
+ * This is the always-on-thinking / reasoning-forward tier, which removes the
+ * sampling parameters from the API surface entirely (Sonnet 5 rejects only
+ * non-default values). Everything else — Haiku 4.5, Sonnet 4.6, Opus 4.6 and
+ * older — ACCEPTS `temperature`, so it must NOT be listed here.
+ *
+ *   - Opus 4.7 / Opus 4.8 / Sonnet 5 / Fable 5 / Mythos 5 / Mythos preview:
+ *     documented 400 on any sampling parameter.
+ *
+ * NB: claude-haiku-4-5 was previously listed here on the strength of a single
+ * "observed 400 in production when temperature is sent" anecdote. Haiku 4.5
+ * documentably supports `temperature`; the production 400 was almost certainly
+ * the `extra`-params bypass fixed in this same PR (a sampling param smuggled
+ * through `extra` and re-inserted after the gate — 400s on any model), not a
+ * capability of Haiku. Listing it silently discarded a valid parameter on the
+ * most common cheap model, so it has been removed.
+ *
+ * Prefix-matched, so dated snapshots (e.g. claude-opus-4-8-20251001) are
+ * covered. Keep this list updated as models launch.
+ */
+const NO_TEMPERATURE_MODELS = [
+  'claude-opus-4-7',
+  'claude-opus-4-8',
+  'claude-sonnet-5',
+  'claude-fable-5',
+  'claude-mythos-5',
+  'claude-mythos-preview',
+];
+
+/**
+ * Check if a model doesn't support custom sampling parameters
+ */
+function noTemperatureSupport(model: string): boolean {
+  return NO_TEMPERATURE_MODELS.some(prefix => model.startsWith(prefix));
+}
 
 // ============================================================================
 // Adapter Configuration
@@ -323,17 +369,42 @@ export class AnthropicAdapter implements ProviderAdapter {
       }
     }
     
-    if (request.temperature !== undefined) {
+    // Sampling-parameter gates:
+    //   - Some models reject temperature/top_p/top_k outright with a 400
+    //     (see NO_TEMPERATURE_MODELS) — strip rather than let the whole
+    //     inference die on a non-retryable invalid_request_error.
+    //   - Extended thinking rejects custom temperature/top_k on every model
+    //     (only the defaults are accepted while thinking is on) — strip those
+    //     too when a thinking config is present and not disabled.
+    const stripSampling = noTemperatureSupport(request.model);
+    // Thinking can arrive top-level OR smuggled through `extra` — the same
+    // `Object.assign(params, rest)` below installs `extra.thinking` into the
+    // request AFTER this gate ran. Resolve from both sources so an enabled
+    // thinking config strips sampling params no matter where it came from;
+    // otherwise `extra: { thinking, temperature }` reproduces the exact 400
+    // this gate exists to prevent (same bug class as the extra-sampling bypass,
+    // one field over).
+    const extraThinking = (request.extra as { thinking?: { type?: string } } | undefined)?.thinking;
+    const thinkingConfig = request.thinking ?? extraThinking;
+    const thinkingOn = thinkingConfig !== undefined && thinkingConfig.type !== 'disabled';
+
+    if (request.temperature !== undefined && !stripSampling && !thinkingOn) {
       params.temperature = request.temperature;
     }
 
     // Anthropic API rejects requests with both temperature and top_p set.
     // When both are provided, prefer temperature (more commonly tuned) and drop top_p.
-    if (request.topP !== undefined && request.temperature === undefined) {
+    // With thinking on, top_p is only accepted in [0.95, 1] — strip values below.
+    if (
+      request.topP !== undefined &&
+      params.temperature === undefined &&
+      !stripSampling &&
+      (!thinkingOn || request.topP >= 0.95)
+    ) {
       params.top_p = request.topP;
     }
 
-    if (request.topK !== undefined) {
+    if (request.topK !== undefined && !stripSampling && !thinkingOn) {
       params.top_k = request.topK;
     }
 
@@ -342,17 +413,43 @@ export class AnthropicAdapter implements ProviderAdapter {
     }
     
     if (request.tools && request.tools.length > 0) {
-      params.tools = request.tools as Anthropic.Tool[];
+      // MCP allows a root-level oneOf/anyOf/allOf in a tool's input schema,
+      // but the Anthropic API rejects it ("input_schema does not support
+      // oneOf, allOf, or anyOf at the top level") — one bad tool 400s the
+      // entire inference. Flatten such roots into a single object schema
+      // before shipping (see anthropic-tool-schema.ts).
+      params.tools = (request.tools as Anthropic.Tool[]).map(tool => {
+        const inputSchema = (tool as { input_schema?: unknown }).input_schema;
+        const flattened = flattenRootSchemaUnion(inputSchema);
+        return flattened === inputSchema
+          ? tool
+          : ({ ...tool, input_schema: flattened } as Anthropic.Tool);
+      });
     }
 
     // Handle extended thinking
-    if ((request as any).thinking) {
-      (params as any).thinking = (request as any).thinking;
+    if (request.thinking) {
+      (params as any).thinking = request.thinking;
     }
 
     // Apply extra params, excluding internal membrane fields
     if (request.extra) {
       const { normalizedMessages, prompt, ...rest } = request.extra as Record<string, unknown>;
+      // Sampling params passed through `extra` must obey the same gates as the
+      // top-level ones. Otherwise a caller passing e.g. `extra: { temperature }`
+      // for a reject-list model (or under extended thinking) would re-insert the
+      // stripped value here — via Object.assign, after the gate above — and
+      // reproduce the exact non-retryable 400 this stripping is meant to prevent.
+      if (stripSampling || thinkingOn) {
+        delete rest.temperature;
+        delete rest.top_k;
+        // top_p is accepted in [0.95, 1] while thinking is on, but never when
+        // the model rejects sampling params outright.
+        const extraTopP = rest.top_p;
+        if (stripSampling || typeof extraTopP !== 'number' || extraTopP < 0.95) {
+          delete rest.top_p;
+        }
+      }
       Object.assign(params, rest);
     }
 

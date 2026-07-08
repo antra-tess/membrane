@@ -223,7 +223,13 @@ export interface ProviderRequest {
   
   /** Tools in provider format */
   tools?: unknown[];
-  
+
+  /**
+   * Extended-thinking config (Anthropic). Presence with a `type` other than
+   * `'disabled'` enables thinking, which strips custom sampling parameters.
+   */
+  thinking?: { type?: string; [key: string]: unknown };
+
   /** Additional provider-specific params */
   extra?: Record<string, unknown>;
 }

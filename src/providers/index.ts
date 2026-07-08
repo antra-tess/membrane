@@ -9,6 +9,8 @@ export {
   type AnthropicAdapterConfig,
 } from './anthropic.js';
 
+export { flattenRootSchemaUnion } from './anthropic-tool-schema.js';
+
 export {
   OpenRouterAdapter,
   toOpenRouterMessages,
