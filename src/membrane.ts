@@ -55,7 +55,11 @@ import { AnthropicXmlFormatter } from './formatters/anthropic-xml.js';
 import { normalizeToolPairs, mergeConsecutiveRoles } from './formatters/normalize-tool-pairs.js';
 import { YieldingStreamImpl } from './yielding-stream.js';
 import { calculateCost } from './utils/cost.js';
-import { isAcceptedImageMediaType, strippedImagePlaceholder } from './utils/image-media.js';
+import {
+  isAcceptedImageMediaType,
+  strippedImagePlaceholder,
+  shedImagesToFitByteBudget,
+} from './utils/image-media.js';
 import { getDefaultPricing } from './registry/default-pricing.js';
 
 // ============================================================================
@@ -1139,6 +1143,12 @@ export class Membrane {
 
     // Anthropic requires temperature=1 when extended thinking is enabled
     const temperature = alwaysOnThinking ? undefined : (thinking ? 1 : request.config.temperature);
+
+    // Byte-budget safety net: token budgets are blind to base64 bulk, so an
+    // image-heavy window can pass the context budget yet exceed the API's
+    // total request size (413 request_too_large — Mythos 2026-07-12, 47
+    // images / 34MB). Shed oldest inline images until the request fits.
+    shedImagesToFitByteBudget(mergedMessages);
 
     return {
       model: request.config.model,
