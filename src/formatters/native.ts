@@ -29,6 +29,7 @@ import type {
   StreamEmission,
 } from './types.js';
 import { normalizeToolPairs, mergeConsecutiveRoles } from './normalize-tool-pairs.js';
+import { isAcceptedImageMediaType, strippedImagePlaceholder } from '../utils/image-media.js';
 
 /** Index of the last content block that can carry cache_control. Anthropic
  *  rejects cache_control on thinking / redacted_thinking blocks, so a cache
@@ -365,32 +366,6 @@ export class NativeFormatter implements PrefillFormatter {
   // PRIVATE HELPERS
   // ==========================================================================
 
-  /** Media types the Anthropic API accepts for image blocks. Anything else in
-   *  a request draws a 400 invalid_request — and because blocks live in the
-   *  agent's event store, ONE bad block poisons every subsequent compile and
-   *  hard-downs the agent (LabClaude 2026-07-11: an `image/svg` attachment
-   *  that slipped through an ingest surface). Sanitizing here, at request-
-   *  build time, both guards new content and heals already-stored poison. */
-  private static readonly ACCEPTED_IMAGE_MEDIA_TYPES = new Set([
-    'image/jpeg',
-    'image/png',
-    'image/gif',
-    'image/webp',
-  ]);
-
-  private static imagePlaceholder(mediaType: unknown): { type: 'text'; text: string } {
-    console.warn(
-      `[NativeFormatter] image block stripped: unsupported media type "${String(mediaType)}"`,
-    );
-    return {
-      type: 'text',
-      text:
-        `[system: an image that belongs here was NOT shown to you — its media type ` +
-        `"${String(mediaType)}" is not accepted by the model API (only jpeg/png/gif/webp are). ` +
-        `You are not seeing this image. If it matters, ask for it in a supported format.]`,
-    };
-  }
-
   /** Replace API-unacceptable image blocks nested in tool_result content with
    *  text placeholders. Non-array content passes through untouched. */
   private static sanitizeToolResultContent(content: unknown): unknown {
@@ -402,9 +377,8 @@ export class NativeFormatter implements PrefillFormatter {
         (item as { type?: string }).type === 'image'
       ) {
         const src = (item as { source?: { media_type?: string } }).source;
-        const mt = (src?.media_type ?? '').toLowerCase();
-        if (!NativeFormatter.ACCEPTED_IMAGE_MEDIA_TYPES.has(mt)) {
-          return NativeFormatter.imagePlaceholder(src?.media_type);
+        if (!isAcceptedImageMediaType(src?.media_type)) {
+          return strippedImagePlaceholder(src?.media_type);
         }
       }
       return item;
@@ -433,11 +407,10 @@ export class NativeFormatter implements PrefillFormatter {
         result.push(textBlock);
       } else if (block.type === 'image') {
         if (block.source.type === 'base64') {
-          const mediaType = (block.source.mediaType ?? '').toLowerCase();
-          if (!NativeFormatter.ACCEPTED_IMAGE_MEDIA_TYPES.has(mediaType)) {
+          if (!isAcceptedImageMediaType(block.source.mediaType)) {
             // Unacceptable media type (e.g. image/svg): degrade to a text
             // placeholder instead of poisoning the whole request.
-            result.push(NativeFormatter.imagePlaceholder(block.source.mediaType));
+            result.push(strippedImagePlaceholder(block.source.mediaType));
           } else {
             const imageBlock: Record<string, unknown> = {
               type: 'image',

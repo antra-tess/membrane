@@ -31,6 +31,7 @@ import {
   type ToolDefinitionForPrompt,
 } from '../utils/tool-parser.js';
 import { IncrementalXmlParser } from '../utils/stream-parser.js';
+import { isAcceptedImageMediaType, strippedImagePlaceholder } from '../utils/image-media.js';
 
 // ============================================================================
 // Configuration
@@ -414,14 +415,18 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         parts.push(block.text);
       } else if (block.type === 'image') {
         if (block.source.type === 'base64') {
-          images.push({
-            type: 'image',
-            source: {
-              type: 'base64',
-              media_type: block.source.mediaType,
-              data: block.source.data,
-            },
-          });
+          if (!isAcceptedImageMediaType(block.source.mediaType)) {
+            parts.push(strippedImagePlaceholder(block.source.mediaType).text);
+          } else {
+            images.push({
+              type: 'image',
+              source: {
+                type: 'base64',
+                media_type: block.source.mediaType,
+                data: block.source.data,
+              },
+            });
+          }
         }
       } else if (block.type === 'tool_use') {
         parts.push(`${participant}>[${block.name}]: ${JSON.stringify(block.input)}`);

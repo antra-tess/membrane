@@ -55,6 +55,7 @@ import { AnthropicXmlFormatter } from './formatters/anthropic-xml.js';
 import { normalizeToolPairs, mergeConsecutiveRoles } from './formatters/normalize-tool-pairs.js';
 import { YieldingStreamImpl } from './yielding-stream.js';
 import { calculateCost } from './utils/cost.js';
+import { isAcceptedImageMediaType, strippedImagePlaceholder } from './utils/image-media.js';
 import { getDefaultPricing } from './registry/default-pricing.js';
 
 // ============================================================================
@@ -1045,19 +1046,26 @@ export class Membrane {
           content.push({ ...(block as unknown as Record<string, unknown>) });
         } else if (block.type === 'image') {
           if (block.source.type === 'base64') {
-            const imageBlock: Record<string, unknown> = {
-              type: 'image',
-              source: {
-                type: 'base64',
-                media_type: block.source.mediaType,
-                data: block.source.data,
-              },
-            };
-            // Preserve sourceUrl for providers that use URL-as-text (Gemini 3.x)
-            if (block.sourceUrl) {
-              imageBlock.sourceUrl = block.sourceUrl;
+            if (!isAcceptedImageMediaType(block.source.mediaType)) {
+              // API-unacceptable media type (e.g. image/svg): degrade to a
+              // loud text placeholder instead of poisoning the whole request
+              // (one bad stored block otherwise 400s every compile forever).
+              content.push(strippedImagePlaceholder(block.source.mediaType));
+            } else {
+              const imageBlock: Record<string, unknown> = {
+                type: 'image',
+                source: {
+                  type: 'base64',
+                  media_type: block.source.mediaType,
+                  data: block.source.data,
+                },
+              };
+              // Preserve sourceUrl for providers that use URL-as-text (Gemini 3.x)
+              if (block.sourceUrl) {
+                imageBlock.sourceUrl = block.sourceUrl;
+              }
+              content.push(imageBlock);
             }
-            content.push(imageBlock);
           }
         }
       }
