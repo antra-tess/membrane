@@ -38,6 +38,14 @@ export interface TextContent {
   text: string;
   /** Cache control for Anthropic prompt caching */
   cache_control?: CacheControl;
+  /**
+   * Opaque provider-native item this block was derived from (e.g. an OpenAI
+   * Responses output item). Provider-native formatters replay it verbatim;
+   * other providers must ignore it. A zero-width carrier (`text: ''` plus
+   * `rawItem`) has no normalized equivalent and must be filtered out of
+   * requests for providers that reject empty text blocks (Anthropic).
+   */
+  rawItem?: unknown;
 }
 
 // ============================================================================
@@ -52,24 +60,32 @@ export interface ImageContent {
    *  can auto-fetch URLs from text (like Gemini 3.x) when inlineData is
    *  not viable (e.g., missing thought_signature on model-role images). */
   sourceUrl?: string;
+  /** See {@link TextContent.rawItem}. */
+  rawItem?: unknown;
 }
 
 export interface DocumentContent {
   type: 'document';
   source: Base64Source;
   filename?: string;
+  /** See {@link TextContent.rawItem}. */
+  rawItem?: unknown;
 }
 
 export interface AudioContent {
   type: 'audio';
   source: Base64Source;
   duration?: number; // seconds
+  /** See {@link TextContent.rawItem}. */
+  rawItem?: unknown;
 }
 
 export interface VideoContent {
   type: 'video';
   source: Base64Source;
   duration?: number; // seconds
+  /** See {@link TextContent.rawItem}. */
+  rawItem?: unknown;
 }
 
 // ============================================================================
@@ -81,6 +97,8 @@ export interface GeneratedImageContent {
   data: string;
   mimeType: string;
   isPreview?: boolean; // Streaming: preview vs final
+  /** See {@link TextContent.rawItem}. */
+  rawItem?: unknown;
 }
 
 // ============================================================================
@@ -92,6 +110,8 @@ export interface ToolUseContent {
   id: string;
   name: string;
   input: Record<string, unknown>;
+  /** See {@link TextContent.rawItem}. */
+  rawItem?: unknown;
 }
 
 export interface ToolResultContent {
@@ -99,6 +119,8 @@ export interface ToolResultContent {
   toolUseId: string;
   content: string | ContentBlock[];
   isError?: boolean;
+  /** See {@link TextContent.rawItem}. */
+  rawItem?: unknown;
 }
 
 // ============================================================================
@@ -109,6 +131,8 @@ export interface ThinkingContent {
   type: 'thinking';
   thinking: string;
   signature?: string;
+  /** See {@link TextContent.rawItem}. */
+  rawItem?: unknown;
 }
 
 export interface RedactedThinkingContent {
@@ -119,6 +143,8 @@ export interface RedactedThinkingContent {
    * (the API decrypts it to reconstruct prior reasoning).
    */
   data: string;
+  /** See {@link TextContent.rawItem}. */
+  rawItem?: unknown;
 }
 
 // ============================================================================

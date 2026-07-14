@@ -265,15 +265,24 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
       for (const data of parser.feed(decoder.decode())) processData(data);
       for (const data of parser.flush()) processData(data);
 
-      const completed: OpenAIResponsesAPIResponse = terminalResponse ?? {
-        model: request.model,
-        output: output.filter((item): item is OpenAIResponsesOutputItem => Boolean(item)),
-        status: 'completed',
-        stream_events: events,
-      };
-      this.assertSuccessfulAPIResponse(completed);
+      // A well-formed stream always ends with a terminal event
+      // (response.completed / response.incomplete; response.failed and error
+      // throw above). Reaching EOF without one means the connection was
+      // dropped mid-stream (proxy/LB close, early termination). Fabricating a
+      // 'completed' response here would persist a silently truncated turn
+      // with end_turn/zero usage — signal a retryable stream failure instead.
+      if (!terminalResponse) {
+        throw networkError(
+          'OpenAI Responses API stream ended before a terminal response event ' +
+            `(connection dropped after ${events.length} events)`,
+          undefined,
+          responsesRequest
+        );
+      }
 
-      const parsed = this.parseResponse(completed, request.model, responsesRequest);
+      this.assertSuccessfulAPIResponse(terminalResponse);
+
+      const parsed = this.parseResponse(terminalResponse, request.model, responsesRequest);
       parsed.content.forEach((block, index) => callbacks.onContentBlock?.(index, block));
       return parsed;
     } catch (error) {

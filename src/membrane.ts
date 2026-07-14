@@ -1020,6 +1020,11 @@ export class Membrane {
       const includeNamePrefix = !isAssistant;
       for (const block of msg.content) {
         if (block.type === 'text') {
+          // Empty text blocks are rejected by the Anthropic API. In
+          // particular, zero-width rawItem carriers (opaque Responses items,
+          // see parseProviderContent) must not leak here. Filter BEFORE the
+          // name prefix below would make them non-empty.
+          if (block.text === '') continue;
           let text = block.text;
           if (includeNamePrefix && msg.participant) {
             text = `${msg.participant}: ${text}`;
@@ -1185,7 +1190,7 @@ export class Membrane {
           blocks.push({
             type: 'text', text: item.text,
             ...(item.rawItem ? { rawItem: item.rawItem } : {}),
-          } as ContentBlock);
+          });
         } else if (item.type === 'tool_use') {
           blocks.push({
             type: 'tool_use',
@@ -1193,14 +1198,14 @@ export class Membrane {
             name: unsanitizeToolName(item.name),
             input: item.input,
             ...(item.rawItem ? { rawItem: item.rawItem } : {}),
-          } as ContentBlock);
+          });
         } else if (item.type === 'thinking') {
           blocks.push({
             type: 'thinking',
             thinking: item.thinking ?? '',
             ...(item.signature ? { signature: item.signature } : {}),
             ...(item.rawItem ? { rawItem: item.rawItem } : {}),
-          } as ContentBlock);
+          });
         } else if (item.type === 'redacted_thinking') {
           // Pass through verbatim — carries the encrypted `data` payload
           blocks.push({ ...item } as ContentBlock);
@@ -1215,7 +1220,9 @@ export class Membrane {
           // tool records have no normalized ContentBlock equivalent. Retain a
           // zero-width carrier so Chronicle and the Responses formatter can
           // replay the raw item without surfacing synthetic prompt text.
-          blocks.push({ type: 'text', text: '', rawItem: item.rawItem } as ContentBlock);
+          // Anthropic-bound conversion paths filter these out (empty text
+          // blocks are a 400 there); the Responses formatter replays rawItem.
+          blocks.push({ type: 'text', text: '', rawItem: item.rawItem });
         }
       }
       return blocks;

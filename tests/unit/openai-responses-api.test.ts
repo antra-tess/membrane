@@ -4,6 +4,7 @@ import {
   type OpenAIResponsesOutputItem,
 } from '../../src/providers/openai-responses-api.js';
 import type { ProviderRequest } from '../../src/types/index.js';
+import { MembraneError } from '../../src/types/index.js';
 
 function providerRequest(overrides: Partial<ProviderRequest> = {}): ProviderRequest {
   return {
@@ -247,6 +248,40 @@ describe('OpenAIResponsesAPIAdapter', () => {
     ]);
     expect(blocks).toEqual(result.content);
     expect(result.stopReason).toBe('end_turn');
+  });
+
+  it('raises a retryable error when the stream ends without a terminal event', async () => {
+    // Deltas arrive, then the connection closes cleanly (proxy/LB drop) with
+    // no response.completed / response.incomplete / response.failed / error
+    // event. This must NOT be fabricated into a 'completed' response — that
+    // would permanently persist a truncated turn with end_turn and 0/0 usage.
+    const events = [
+      { type: 'response.output_item.added', output_index: 0, item: { type: 'message', id: 'msg_cut', role: 'assistant', status: 'in_progress', content: [] } },
+      { type: 'response.output_text.delta', output_index: 0, content_index: 0, item_id: 'msg_cut', delta: 'Partial ans' },
+    ];
+    const sse = events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('');
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(sse));
+        controller.close(); // clean EOF, no terminal event
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(body, { status: 200 })));
+
+    const chunks: string[] = [];
+    const adapter = new OpenAIResponsesAPIAdapter({ apiKey: 'sk-test' });
+    const promise = adapter.stream(
+      providerRequest({ messages: [{ type: 'message', role: 'user', content: 'Hi' }] }),
+      { onChunk: (chunk) => chunks.push(chunk) }
+    );
+
+    await expect(promise).rejects.toBeInstanceOf(MembraneError);
+    const error = await promise.catch((e: MembraneError) => e);
+    expect(error.type).toBe('network');
+    expect(error.retryable).toBe(true);
+    expect(error.message).toMatch(/stream ended before a terminal response event/);
+    // The deltas were still surfaced live before the drop was detected.
+    expect(chunks).toEqual(['Partial ans']);
   });
 
   it('maps incomplete max-output responses without losing their items', async () => {

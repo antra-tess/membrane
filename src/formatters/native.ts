@@ -395,6 +395,11 @@ export class NativeFormatter implements PrefillFormatter {
 
     for (const block of content) {
       if (block.type === 'text') {
+        // Empty text blocks are rejected by the Anthropic API. In particular,
+        // zero-width rawItem carriers (opaque provider-native items smuggled
+        // through normalized history) must not leak here. Filter BEFORE the
+        // name prefix below would make them non-empty.
+        if (block.text === '') continue;
         let text = block.text;
         if (options.includeNames) {
           const prefix = this.config.nameFormat.replace('{name}', participant);

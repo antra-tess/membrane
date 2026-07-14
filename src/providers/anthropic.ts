@@ -686,6 +686,9 @@ export function toAnthropicContent(blocks: ContentBlock[]): Anthropic.ContentBlo
   for (const block of blocks) {
     switch (block.type) {
       case 'text': {
+        // Empty text blocks (including zero-width rawItem carriers for opaque
+        // provider-native items) are rejected by the Anthropic API — drop them.
+        if (block.text === '') break;
         const textBlock: any = { type: 'text', text: block.text };
         // Preserve cache_control if present
         if (block.cache_control) {

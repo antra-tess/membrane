@@ -77,13 +77,13 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
 
   buildMessages(messages: NormalizedMessage[], options: BuildOptions): BuildResult {
     const items: NativeItem[] = [];
-    let hasNativeHistory = false;
+    let hasImportedItems = false;
 
     for (const message of messages) {
       const nativeItems = message.metadata?.[OPENAI_RESPONSES_ITEMS_METADATA_KEY];
       if (Array.isArray(nativeItems)) {
         items.push(...nativeItems as NativeItem[]);
-        hasNativeHistory = true;
+        hasImportedItems = true;
         continue;
       }
 
@@ -96,14 +96,13 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
       };
 
       for (const block of message.content) {
-        const rawItem = (block as unknown as { rawItem?: NativeItem }).rawItem;
+        const rawItem = block.rawItem as NativeItem | undefined;
         if (!rawItem || typeof rawItem !== 'object') {
           pendingParts.push(block);
           continue;
         }
 
         flushPending();
-        hasNativeHistory = true;
         const key = typeof rawItem.id === 'string'
           ? `${rawItem.type ?? ''}:${rawItem.id}`
           : JSON.stringify(rawItem);
@@ -115,13 +114,28 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
       flushPending();
     }
 
+    // An imported rollout already carries its own developer/system items, and
+    // re-injecting the recipe prompt over them would double the instructions.
+    // Suppress the system prompt ONLY for imported histories — signalled by
+    // the import metadata key or by a developer/system item in the native
+    // prefix. Blocks with `rawItem` do NOT count: every response from this
+    // provider attaches rawItem (see parseProviderContent), so keying on it
+    // would silently drop a fresh session's system prompt from turn 2 onward
+    // (turn 1 sends it as the top-level `instructions` request field, never
+    // as an input item, and the adapter is stateless — nothing else retains
+    // it). `instructions` is a separate request field, so re-sending it does
+    // not perturb the input-item prefix or its caching.
+    const hasImportedSystemItem = hasImportedItems ||
+      items.some(item =>
+        (item.type === 'message' || item.type === undefined) &&
+        ((item as { role?: unknown }).role === 'developer' ||
+          (item as { role?: unknown }).role === 'system'));
+
     return {
       // BuildResult's historical type says chat envelopes, but Membrane's
       // provider boundary deliberately accepts unknown provider-native items.
       messages: items as unknown as BuildResult['messages'],
-      // An imported rollout already contains its developer/system items.
-      // Re-injecting the recipe prompt would alter the stable prefix.
-      systemContent: hasNativeHistory ? undefined : options.systemPrompt,
+      systemContent: hasImportedSystemItem ? undefined : options.systemPrompt,
       stopSequences: options.additionalStopSequences ?? [],
       nativeTools: options.tools?.map(tool => ({
         type: 'function',
