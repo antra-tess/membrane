@@ -3,6 +3,9 @@ import {
   OpenAIResponsesAPIAdapter,
   type OpenAIResponsesOutputItem,
 } from '../../src/providers/openai-responses-api.js';
+import { Membrane } from '../../src/membrane.js';
+import { NativeFormatter } from '../../src/formatters/native.js';
+import { OpenAIResponsesFormatter } from '../../src/formatters/openai-responses.js';
 import type { ProviderRequest } from '../../src/types/index.js';
 import { MembraneError } from '../../src/types/index.js';
 
@@ -20,6 +23,43 @@ afterEach(() => {
 });
 
 describe('OpenAIResponsesAPIAdapter', () => {
+  it('keeps the provider-native formatter when a caller requests a generic native override', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        id: 'resp_auxiliary',
+        model: 'gpt-5.6',
+        status: 'completed',
+        output: [{
+          type: 'message',
+          id: 'msg_auxiliary',
+          role: 'assistant',
+          status: 'completed',
+          content: [{ type: 'output_text', text: 'summary' }],
+        }],
+        usage: { input_tokens: 5, output_tokens: 1, total_tokens: 6 },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const membrane = new Membrane(
+      new OpenAIResponsesAPIAdapter({ apiKey: 'sk-test' }),
+      { formatter: new OpenAIResponsesFormatter(), assistantParticipant: 'Sol' },
+    );
+
+    await membrane.complete({
+      messages: [{ participant: 'Context Manager', content: [{ type: 'text', text: 'Summarize.' }] }],
+      config: { model: 'gpt-5.6', maxTokens: 100 },
+    }, { formatter: new NativeFormatter() });
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    const body = JSON.parse(String(init.body));
+    expect(body.input).toEqual([{
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: 'Summarize.' }],
+    }]);
+  });
+
   it('sends provider-native input items verbatim with stateless encrypted reasoning', async () => {
     const input = [
       { type: 'message', role: 'user', content: 'Inspect this repository.' },

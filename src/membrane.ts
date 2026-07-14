@@ -1387,8 +1387,17 @@ export class Membrane {
     providerRequest: any;
     prefillResult: BuildResult;
   } {
-    // Use provided formatter or instance formatter
-    const activeFormatter = formatter ?? this.formatter;
+    // The Responses adapter's input is a provider-native item array. A generic
+    // per-request formatter (for example Context Manager's NativeFormatter)
+    // produces Anthropic-style `{ role, content: [{ type: 'text' }] }`
+    // envelopes, which the Responses API rejects before inference. Keep the
+    // configured Responses formatter authoritative at this transport boundary;
+    // per-request formatter overrides remain available for adapters whose wire
+    // format supports them.
+    const activeFormatter =
+      this.adapter.name === 'openai-responses-api' && this.formatter.name === 'openai-responses'
+        ? this.formatter
+        : formatter ?? this.formatter;
 
     // Extract user-provided stop sequences
     const additionalStopSequences = Array.isArray(request.stopSequences)
