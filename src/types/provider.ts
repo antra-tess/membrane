@@ -239,6 +239,12 @@ export interface ProviderRequestOptions {
   timeoutMs?: number;
   /** Abort if no SSE event arrives within this many ms (default: 120000) */
   idleTimeoutMs?: number;
+  /**
+   * Deadline for the FIRST stream event (TTFT). Large contexts on a cache
+   * miss legitimately take minutes before message_start while the SDK
+   * swallows ping keepalives (default: max(idleTimeoutMs, 600000)).
+   */
+  firstEventTimeoutMs?: number;
   /** Called with the raw API request body right before fetch */
   onRequest?: (rawRequest: unknown) => void;
   /**

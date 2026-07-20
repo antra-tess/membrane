@@ -155,10 +155,28 @@ export class AnthropicAdapter implements ProviderAdapter {
     // Idle timeout: abort if no SSE event arrives within the deadline.
     // The SDK's timeout only covers the initial HTTP response headers;
     // once streaming starts, a silently dropped connection waits forever.
-    const idleMs = options?.idleTimeoutMs ?? 120_000;
+    // Default raised 120s → 600s (2026-07-20): on Opus 4.7+/Fable-class models
+    // thinking streams with display:"omitted" by default — a long think emits
+    // NO deltas, and the SDK swallows SSE ping keepalives, so a healthy
+    // request can legitimately be silent for minutes mid-stream. At 120s the
+    // watchdog repeatedly killed real, billing, actively-thinking turns
+    // (Cairn, 2026-07-20: every >120s think died for an hour straight). 600s
+    // matches the SDK's own request timeout; the watchdog now only catches
+    // truly dead connections, at the cost of slower detection.
+    const idleMs = options?.idleTimeoutMs ?? 600_000;
+    // TTFT can legitimately exceed the inter-event idle: on a large context
+    // with a cache miss, the API sends only SSE `ping` keepalives until
+    // message_start — and the SDK swallows pings before they reach this loop
+    // (core/streaming: `if (sse.event === 'ping') continue`). The watchdog is
+    // therefore BLIND until the first real event; killing at idleMs turned
+    // every long-TTFT request into a spurious "idle timeout" (Cairn, 600k
+    // context, 2026-07-20: repeated deaths at exactly 120s). Give the first
+    // event a much longer deadline; keep the tight idle for gaps after that.
+    const firstEventMs = options?.firstEventTimeoutMs ?? Math.max(idleMs, 600_000);
     const idleAbort = new AbortController();
     let idleTimer: ReturnType<typeof setTimeout> | null = null;
     let idleTimedOut = false;
+    let sawEvent = false;
 
     // Link caller's signal so external cancellation still works
     const onExternalAbort = () => idleAbort.abort();
@@ -169,7 +187,10 @@ export class AnthropicAdapter implements ProviderAdapter {
 
     const resetIdleTimer = () => {
       if (idleTimer) clearTimeout(idleTimer);
-      idleTimer = setTimeout(() => { idleTimedOut = true; idleAbort.abort(); }, idleMs);
+      idleTimer = setTimeout(
+        () => { idleTimedOut = true; idleAbort.abort(); },
+        sawEvent ? idleMs : firstEventMs,
+      );
     };
 
     resetIdleTimer();
@@ -209,6 +230,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       let thinkingTagOpen = false;
 
       for await (const event of stream) {
+        sawEvent = true;
         resetIdleTimer();
         if (event.type === 'message_start') {
           model = event.message.model;
@@ -365,7 +387,9 @@ export class AnthropicAdapter implements ProviderAdapter {
       if (idleTimedOut) {
         throw new MembraneError({
           type: 'timeout',
-          message: `SSE stream idle timeout — no events received within ${idleMs}ms`,
+          message: sawEvent
+            ? `SSE stream idle timeout — no events received within ${idleMs}ms`
+            : `SSE stream first-event timeout — no message_start within ${firstEventMs}ms (TTFT deadline)`,
           retryable: true,
           rawError: error,
           rawRequest: fullRequest,
