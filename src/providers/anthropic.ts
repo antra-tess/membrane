@@ -358,7 +358,11 @@ export class AnthropicAdapter implements ProviderAdapter {
       if (idleTimer) clearTimeout(idleTimer);
       options?.signal?.removeEventListener('abort', onExternalAbort);
 
-      if (idleTimedOut && error instanceof Error && error.name === 'AbortError') {
+      // Our own idle watchdog fired: whatever shape the SDK wrapped the
+      // abort into (AbortError, APIUserAbortError "Request was aborted.",
+      // a connection error), the CAUSE is the stalled stream — classify as
+      // the retryable timeout, never as a user abort / unknown error.
+      if (idleTimedOut) {
         throw new MembraneError({
           type: 'timeout',
           message: `SSE stream idle timeout — no events received within ${idleMs}ms`,
@@ -595,7 +599,12 @@ export class AnthropicAdapter implements ProviderAdapter {
       }
     }
 
-    if (error instanceof Error && error.name === 'AbortError') {
+    if (
+      error instanceof Error &&
+      (error.name === 'AbortError' ||
+        error.name === 'APIUserAbortError' ||
+        error.message === 'Request was aborted.')
+    ) {
       return abortError(undefined, rawRequest);
     }
 

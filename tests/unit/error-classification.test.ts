@@ -114,3 +114,27 @@ describe('classifyError generic fallback', () => {
     });
   });
 });
+
+describe('Anthropic handleError: abort classification (fleet incident 2026-07-20)', () => {
+  // The SSE idle watchdog aborts a stalled stream via AbortController; the
+  // SDK surfaces that as APIUserAbortError ("Request was aborted."), whose
+  // .name is NOT 'AbortError'. Before the fix it fell through to
+  // `unknown, retryable: false`, and membrane's message-sniffing then
+  // relabeled it a *user* abort — terminal, never retried, and reported as
+  // "Stream aborted: user" on agents nobody touched (Cairn, 2026-07-20).
+  it('classifies the real SDK APIUserAbortError as abort, not unknown', () => {
+    const err = handleError(new Anthropic.APIUserAbortError());
+    expect(err.type).toBe('abort');
+  });
+
+  it('classifies "Request was aborted." message as abort', () => {
+    const err = handleError(new Error('Request was aborted.'));
+    expect(err.type).toBe('abort');
+  });
+
+  it('still classifies standard AbortError as abort', () => {
+    const e = new Error('The operation was aborted');
+    e.name = 'AbortError';
+    expect(handleError(e).type).toBe('abort');
+  });
+});
