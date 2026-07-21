@@ -137,6 +137,14 @@ export interface MembraneConfig {
   maxParticipantsForStop?: number;
 
   /**
+   * Default for request.promptCaching when the request doesn't set it.
+   * Historical default is true (Anthropic API). Set false for transports
+   * that reject cache_control (e.g. Bedrock legacy Claude models, which 400
+   * with "your request did not allow prompt caching").
+   */
+  defaultPromptCaching?: boolean;
+
+  /**
    * Prefill formatter for message serialization and response parsing.
    * Controls how messages are formatted for the API and how responses are parsed.
    * Default: AnthropicXmlFormatter

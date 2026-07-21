@@ -1001,7 +1001,7 @@ export class Membrane {
     const assistantName = request.assistantParticipant
       ?? this.config.assistantParticipant ?? 'Claude';
 
-    const promptCaching = request.promptCaching ?? true;
+    const promptCaching = request.promptCaching ?? this.config.defaultPromptCaching ?? true;
     const cacheControl = promptCaching ? { type: 'ephemeral' as const, ...(request.cacheTtl ? { ttl: request.cacheTtl } : {}) } : undefined;
 
     // Anthropic allows at most 4 cache_control breakpoints per request. The
@@ -1431,7 +1431,7 @@ export class Membrane {
       tools: request.tools,
       thinking: request.config.thinking,
       systemPrompt: request.system,
-      promptCaching: request.promptCaching ?? true, // Default true for backward compat
+      promptCaching: request.promptCaching ?? this.config.defaultPromptCaching ?? true, // Default true for backward compat
       cacheTtl: request.cacheTtl,
       additionalStopSequences,
       maxParticipantsForStop,
