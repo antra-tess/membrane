@@ -632,6 +632,15 @@ export class BedrockAdapter implements ProviderAdapter {
                     if (contentBlocks[currentBlockIndex]) {
                       contentBlocks[currentBlockIndex]!.signature = (contentBlocks[currentBlockIndex]!.signature ?? '') + (eventData.delta as any).signature;
                     }
+                  } else if (eventData.delta?.type === 'input_json_delta' && (eventData.delta as any).partial_json !== undefined) {
+                    // Tool-call arguments stream as input_json_delta fragments.
+                    // Dropping these (pre-2026-07-21 behavior) gutted every
+                    // tool_use block: stop_reason said tool_use but the block
+                    // lost its input — and then its id/name in final assembly.
+                    const blk = contentBlocks[currentBlockIndex] as (typeof contentBlocks)[number] & { partialJson?: string };
+                    if (blk) {
+                      blk.partialJson = (blk.partialJson ?? '') + (eventData.delta as any).partial_json;
+                    }
                   }
                 } else if (eventData.type === 'content_block_stop') {
                   // Mirror the Anthropic adapter: fire onContentBlock a second
@@ -640,6 +649,13 @@ export class BedrockAdapter implements ProviderAdapter {
                   // on the dual-fire convention (e.g. membrane's native
                   // yielding path) silently drops block_complete on Bedrock.
                   const blockIdx = (eventData as { index?: number }).index ?? currentBlockIndex;
+                  // Finalize tool_use blocks: parse accumulated argument JSON
+                  // into `input` before the block_complete fire, so consumers
+                  // of the dual-fire convention see a complete tool call.
+                  const stoppedBlk = contentBlocks[blockIdx] as ((typeof contentBlocks)[number] & { partialJson?: string; input?: unknown }) | undefined;
+                  if (stoppedBlk?.type === 'tool_use' && stoppedBlk.partialJson !== undefined) {
+                    try { stoppedBlk.input = JSON.parse(stoppedBlk.partialJson || '{}'); } catch { /* keep prior input */ }
+                  }
                   callbacks.onContentBlock?.(blockIdx, contentBlocks[blockIdx]);
                 } else if (eventData.type === 'message_delta') {
                   if (eventData.usage) {
@@ -686,6 +702,17 @@ export class BedrockAdapter implements ProviderAdapter {
         if (b.type === 'redacted_thinking') {
           // Pass through verbatim — carries the encrypted `data` payload
           return { ...b } as unknown as { type: 'text'; text?: string };
+        }
+        if (b.type === 'tool_use') {
+          // Preserve id/name and the input accumulated from input_json_delta
+          // fragments — the generic text mapping below would strip them and
+          // parseResponse would then drop the block (requires id && name).
+          const tb = b as { type: string; id?: string; name?: string; input?: unknown; partialJson?: string };
+          let input: unknown = tb.input ?? {};
+          if (tb.partialJson) {
+            try { input = JSON.parse(tb.partialJson); } catch { /* keep prior input */ }
+          }
+          return { type: 'tool_use', id: tb.id, name: tb.name, input } as unknown as { type: 'text'; text?: string };
         }
         return { type: b.type as 'text', text: b.text };
       }),
