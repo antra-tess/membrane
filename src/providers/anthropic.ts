@@ -68,6 +68,58 @@ function noTemperatureSupport(model: string): boolean {
   return NO_TEMPERATURE_MODELS.some(prefix => model.startsWith(prefix));
 }
 
+/** Beta flag for thinking blocks between tool calls on pre-4.6 Claude 4. */
+const INTERLEAVED_THINKING_BETA = 'interleaved-thinking-2025-05-14';
+
+/**
+ * Interleaved thinking (thinking blocks between tool calls) is native from
+ * Opus/Sonnet 4.6 onward; earlier Claude 4 models only do it behind the
+ * `interleaved-thinking-2025-05-14` beta flag. Matches Claude 4 ids with a
+ * minor version below 6 — dated snapshots (claude-opus-4-1-20250805), bare
+ * bases (claude-opus-4), and date-only 4.0 ids (claude-opus-4-20250514) are
+ * all covered, as are gateway-prefixed ids ('anthropic/claude-opus-4-5').
+ * Claude 3.x never matches (no interleaved support, beta or not); 4.6+ and
+ * the 5-series need no flag.
+ */
+export function needsInterleavedThinkingBeta(model: string): boolean {
+  const m = /claude-(?:opus|sonnet|haiku)-4(?:-(\d+))?/.exec(model);
+  if (!m) return false;
+  const minor = m[1];
+  if (minor === undefined) return true; // bare 'claude-opus-4'
+  if (minor.length >= 8) return true;   // 8-digit date right after the major = a 4.0 id
+  return parseInt(minor, 10) < 6;
+}
+
+/** Pull any anthropic-beta value out of a ClientOptions defaultHeaders bag,
+ *  which the SDK types as record | entries-array | Headers. Case-insensitive
+ *  on the key; non-string values (explicit null override, arrays) are treated
+ *  as absent. */
+function extractBetaHeader(headers: ClientOptions['defaultHeaders']): string | undefined {
+  if (!headers) return undefined;
+  if (typeof (headers as Headers).get === 'function') {
+    return (headers as Headers).get('anthropic-beta') ?? undefined;
+  }
+  const entries = Array.isArray(headers)
+    ? headers
+    : Object.entries(headers as Record<string, unknown>);
+  for (const [key, value] of entries) {
+    if (String(key).toLowerCase() === 'anthropic-beta' && typeof value === 'string') {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+/** Resolve whether a thinking config is enabled on a request. Thinking can
+ *  arrive top-level OR smuggled through `extra` (see the sampling gate in
+ *  buildRequest) — both the sampling strip and the beta header must agree on
+ *  one answer, so they share this resolver. */
+function thinkingEnabled(request: ProviderRequest): boolean {
+  const extraThinking = (request.extra as { thinking?: { type?: string } } | undefined)?.thinking;
+  const thinkingConfig = request.thinking ?? extraThinking;
+  return thinkingConfig !== undefined && thinkingConfig.type !== 'disabled';
+}
+
 // ============================================================================
 // Adapter Configuration
 // ============================================================================
@@ -101,12 +153,18 @@ export class AnthropicAdapter implements ProviderAdapter {
   readonly name = 'anthropic';
   private client: Anthropic;
   private defaultMaxTokens: number;
+  /** Any anthropic-beta value from defaultHeaders (e.g. the oauth beta for
+   *  subscription tokens). Per-request headers REPLACE same-key defaults in
+   *  the SDK rather than merging, so when we add a per-request beta we must
+   *  re-carry this one alongside it or auth breaks. */
+  private defaultBeta: string | undefined;
 
   constructor(config: AnthropicAdapterConfig = {}) {
     const clientOptions: ClientOptions = {
       baseURL: config.baseURL,
       defaultHeaders: config.defaultHeaders,
     };
+    this.defaultBeta = extractBetaHeader(config.defaultHeaders);
 
     if (config.authToken !== undefined) {
       clientOptions.authToken = config.authToken;
@@ -134,6 +192,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     try {
       const response = await this.client.messages.create(fullRequest, {
         signal: options?.signal,
+        headers: this.betaHeaders(request),
       });
 
       return this.parseResponse(response, fullRequest);
@@ -198,6 +257,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     try {
       const stream = await this.client.messages.stream(anthropicRequest, {
         signal: idleAbort.signal,
+        headers: this.betaHeaders(request),
       });
 
       // Accumulate response metadata from SSE events directly, so we can
@@ -399,6 +459,22 @@ export class AnthropicAdapter implements ProviderAdapter {
     }
   }
 
+  /** Per-request headers for both create() and stream(): the interleaved-
+   *  thinking beta when thinking is enabled on a pre-4.6 Claude 4 model.
+   *  Any default anthropic-beta (oauth) is re-carried in the same header —
+   *  the SDK replaces same-key defaults instead of merging, and the API
+   *  accepts comma-separated betas. Undefined when nothing to add, so the
+   *  defaults apply untouched. */
+  private betaHeaders(request: ProviderRequest): Record<string, string> | undefined {
+    if (!thinkingEnabled(request) || !needsInterleavedThinkingBeta(request.model)) {
+      return undefined;
+    }
+    const betas = this.defaultBeta
+      ? `${this.defaultBeta},${INTERLEAVED_THINKING_BETA}`
+      : INTERLEAVED_THINKING_BETA;
+    return { 'anthropic-beta': betas };
+  }
+
   private buildRequest(request: ProviderRequest): Anthropic.MessageCreateParams {
     // Strip provider-specific fields (e.g., sourceUrl for Gemini) from image blocks
     // before sending to Anthropic, which rejects extra inputs.
@@ -464,9 +540,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     // otherwise `extra: { thinking, temperature }` reproduces the exact 400
     // this gate exists to prevent (same bug class as the extra-sampling bypass,
     // one field over).
-    const extraThinking = (request.extra as { thinking?: { type?: string } } | undefined)?.thinking;
-    const thinkingConfig = request.thinking ?? extraThinking;
-    const thinkingOn = thinkingConfig !== undefined && thinkingConfig.type !== 'disabled';
+    const thinkingOn = thinkingEnabled(request);
 
     if (request.temperature !== undefined && !stripSampling && !thinkingOn) {
       params.temperature = request.temperature;
