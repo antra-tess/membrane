@@ -10,10 +10,10 @@
  * - Tool results rendered in previous turns
  */
 
-import { Membrane } from '../src/membrane.js';
-import { AnthropicAdapter } from '../src/providers/anthropic.js';
-import type { NormalizedRequest, NormalizedMessage, ToolCall, ToolResult, ContentBlock } from '../src/types/index.js';
-import { isAbortedResponse } from '../src/types/index.js';
+import { Membrane } from '../../src/membrane.js';
+import { AnthropicAdapter } from '../../src/providers/anthropic.js';
+import type { NormalizedRequest, NormalizedMessage, ToolCall, ToolResult, ContentBlock } from '../../src/types/index.js';
+import { isAbortedResponse } from '../../src/types/index.js';
 
 // ============================================================================
 // Configuration

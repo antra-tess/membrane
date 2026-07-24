@@ -7,10 +7,10 @@
  * rather than specific content.
  */
 
-import { Membrane } from '../src/membrane.js';
-import { AnthropicAdapter } from '../src/providers/anthropic.js';
-import type { NormalizedRequest, ToolCall, ToolResult } from '../src/types/index.js';
-import { isAbortedResponse } from '../src/types/index.js';
+import { Membrane } from '../../src/membrane.js';
+import { AnthropicAdapter } from '../../src/providers/anthropic.js';
+import type { NormalizedRequest, ToolCall, ToolResult } from '../../src/types/index.js';
+import { isAbortedResponse } from '../../src/types/index.js';
 
 // ============================================================================
 // Configuration
