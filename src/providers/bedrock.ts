@@ -21,6 +21,11 @@ import {
   abortError,
 } from '../types/index.js';
 import { createCombinedSignal } from './utils.js';
+import {
+  INTERLEAVED_THINKING_BETA,
+  needsInterleavedThinkingBeta,
+  thinkingEnabled,
+} from './anthropic.js';
 
 // ============================================================================
 // Adapter Configuration
@@ -64,6 +69,8 @@ interface BedrockMessageRequest {
   stop_sequences?: string[];
   tools?: unknown[];
   thinking?: { type: 'enabled'; budget_tokens: number };
+  /** Beta flags. On bedrock-runtime these ride in the body, not a header. */
+  anthropic_beta?: string[];
 }
 
 interface BedrockMessageResponse {
@@ -405,6 +412,17 @@ export class BedrockAdapter implements ProviderAdapter {
     if (request.extra) {
       const { normalizedMessages, prompt, ...rest } = request.extra as Record<string, unknown>;
       Object.assign(params, rest);
+    }
+
+    // Interleaved thinking on pre-4.6 Claude 4: same gate as the Anthropic
+    // adapter, but bedrock-runtime takes betas as the `anthropic_beta` body
+    // field rather than an HTTP header. Runs after the extra-assign so a
+    // consumer-supplied anthropic_beta is merged (Set-deduped), not clobbered.
+    // The gate only matches Claude 4 <4.6 ids, so legacy 3.x models (which
+    // reject unknown beta flags) never receive the field.
+    if (thinkingEnabled(request) && needsInterleavedThinkingBeta(request.model)) {
+      const existing = Array.isArray(params.anthropic_beta) ? params.anthropic_beta : [];
+      params.anthropic_beta = [...new Set([...existing, INTERLEAVED_THINKING_BETA])];
     }
 
     return params;

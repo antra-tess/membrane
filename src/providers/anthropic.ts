@@ -68,8 +68,10 @@ function noTemperatureSupport(model: string): boolean {
   return NO_TEMPERATURE_MODELS.some(prefix => model.startsWith(prefix));
 }
 
-/** Beta flag for thinking blocks between tool calls on pre-4.6 Claude 4. */
-const INTERLEAVED_THINKING_BETA = 'interleaved-thinking-2025-05-14';
+/** Beta flag for thinking blocks between tool calls on pre-4.6 Claude 4.
+ *  Shared with the Bedrock adapter, where it rides in the request body
+ *  (`anthropic_beta`) instead of an HTTP header. */
+export const INTERLEAVED_THINKING_BETA = 'interleaved-thinking-2025-05-14';
 
 /**
  * Interleaved thinking (thinking blocks between tool calls) is native from
@@ -113,8 +115,9 @@ function extractBetaHeader(headers: ClientOptions['defaultHeaders']): string | u
 /** Resolve whether a thinking config is enabled on a request. Thinking can
  *  arrive top-level OR smuggled through `extra` (see the sampling gate in
  *  buildRequest) — both the sampling strip and the beta header must agree on
- *  one answer, so they share this resolver. */
-function thinkingEnabled(request: ProviderRequest): boolean {
+ *  one answer, so they share this resolver. Exported for the Bedrock adapter,
+ *  which applies the same interleaved-thinking gate to its request body. */
+export function thinkingEnabled(request: ProviderRequest): boolean {
   const extraThinking = (request.extra as { thinking?: { type?: string } } | undefined)?.thinking;
   const thinkingConfig = request.thinking ?? extraThinking;
   return thinkingConfig !== undefined && thinkingConfig.type !== 'disabled';
@@ -469,10 +472,13 @@ export class AnthropicAdapter implements ProviderAdapter {
     if (!thinkingEnabled(request) || !needsInterleavedThinkingBeta(request.model)) {
       return undefined;
     }
-    const betas = this.defaultBeta
-      ? `${this.defaultBeta},${INTERLEAVED_THINKING_BETA}`
-      : INTERLEAVED_THINKING_BETA;
-    return { 'anthropic-beta': betas };
+    // Set-join so a default that already carries the interleaved beta
+    // doesn't emit it twice (the API tolerates duplicates; this is hygiene).
+    const betas = new Set(
+      (this.defaultBeta ?? '').split(',').map((b) => b.trim()).filter(Boolean),
+    );
+    betas.add(INTERLEAVED_THINKING_BETA);
+    return { 'anthropic-beta': [...betas].join(',') };
   }
 
   private buildRequest(request: ProviderRequest): Anthropic.MessageCreateParams {
