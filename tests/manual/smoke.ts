@@ -1,6 +1,6 @@
 /**
  * Smoke tests with real Anthropic API
- * Run with: npx tsx test/smoke.test.ts
+ * Run with: npx tsx tests/manual/smoke.ts
  *
  * These tests verify the core streaming and tool execution flow.
  * Model outputs are non-deterministic, so we test structural behavior

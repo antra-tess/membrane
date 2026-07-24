@@ -1,6 +1,6 @@
 /**
  * API Integration Tests
- * Run with: npx tsx test/api-integration.test.ts
+ * Run with: npx tsx tests/manual/api-integration.ts
  *
  * These tests hit the real Anthropic API to verify end-to-end behavior.
  * They specifically test scenarios that unit tests with mocks cannot catch:

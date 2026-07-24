@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { IncrementalXmlParser } from '../../src/utils/stream-parser.js';
+import { IncrementalXmlParser, hasUnclosedXmlBlock } from '../../src/utils/stream-parser.js';
 
 describe('IncrementalXmlParser', () => {
   let parser: IncrementalXmlParser;
@@ -559,6 +559,43 @@ describe('IncrementalXmlParser', () => {
 
       expect(parser.isInsideBlock()).toBe(true);
       expect(parser.getDepths().thinking).toBe(1);
+    });
+  });
+  // Coverage folded in from the legacy tsx script test/stream-parser.test.ts
+  // (pre-vitest layout, never ran in CI) — only the cases this suite lacked.
+  describe('antml: tag prefix', () => {
+    it('recognizes antml-prefixed function_calls open and close', () => {
+      parser.push('<' + 'antml:function_calls>');
+      expect(parser.isInsideBlock()).toBe(true);
+      expect(parser.isInsideFunctionCalls()).toBe(true);
+      parser.push('</' + 'antml:function_calls>');
+      expect(parser.isInsideBlock()).toBe(false);
+    });
+  });
+
+  describe('getContext', () => {
+    it("reports 'none' when outside all blocks", () => {
+      expect(parser.getContext()).toBe('none');
+    });
+
+    it('reports the open block stack and empties on close', () => {
+      parser.push('<function_calls>');
+      expect(parser.getContext()).toContain('function_calls');
+      parser.push('<function_results>');
+      expect(parser.getContext()).toContain('function_calls');
+      expect(parser.getContext()).toContain('function_results');
+      parser.push('</function_results></function_calls>');
+      expect(parser.getContext()).toBe('none');
+    });
+  });
+
+  describe('hasUnclosedXmlBlock utility', () => {
+    it('detects unclosed blocks and ignores balanced or plain text', () => {
+      expect(hasUnclosedXmlBlock('Hello world')).toBe(false);
+      expect(hasUnclosedXmlBlock('<function_calls>')).toBe(true);
+      expect(hasUnclosedXmlBlock('<function_calls></function_calls>')).toBe(false);
+      expect(hasUnclosedXmlBlock('<function_results><result>')).toBe(true);
+      expect(hasUnclosedXmlBlock('<thinking>thoughts')).toBe(true);
     });
   });
 });
