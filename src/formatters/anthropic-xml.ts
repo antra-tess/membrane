@@ -14,6 +14,9 @@ import type {
   ToolDefinition,
   ToolCall,
   ToolResult,
+  ToolUseContent,
+  ToolResultContent,
+  ToolResultContentBlock,
 } from '../types/index.js';
 import type {
   PrefillFormatter,
@@ -71,6 +74,39 @@ export interface AnthropicXmlFormatterConfig extends FormatterConfig {
    * Default: 10
    */
   maxParticipantsForStop?: number;
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+/**
+ * Convert a stored tool_result content block into a ToolResult for XML
+ * re-rendering (legacy path — blocks without rawXml). Only text and base64
+ * image sub-blocks survive; other block types have no XML representation.
+ */
+function toToolResult(block: ToolResultContent): ToolResult {
+  let content: string | ToolResultContentBlock[];
+  if (typeof block.content === 'string') {
+    content = block.content;
+  } else {
+    content = [];
+    for (const sub of block.content) {
+      if (sub.type === 'text') {
+        content.push({ type: 'text', text: sub.text });
+      } else if (sub.type === 'image' && sub.source.type === 'base64') {
+        content.push({
+          type: 'image',
+          source: { type: 'base64', data: sub.source.data, mediaType: sub.source.mediaType },
+        });
+      }
+    }
+  }
+  return {
+    toolUseId: block.toolUseId,
+    content,
+    isError: block.isError ?? false,
+  };
 }
 
 // ============================================================================
@@ -410,7 +446,8 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     const images: unknown[] = [];
     let hasUnsupportedMedia = false;
 
-    for (const block of content) {
+    for (let i = 0; i < content.length; i++) {
+      const block = content[i]!;
       if (block.type === 'text') {
         parts.push(block.text);
       } else if (block.type === 'image') {
@@ -429,18 +466,117 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
           }
         }
       } else if (block.type === 'tool_use') {
-        parts.push(`${participant}>[${block.name}]: ${JSON.stringify(block.input)}`);
+        // Collect the run of consecutive tool_use blocks so calls parsed
+        // from one <function_calls> block (shared rawXml) render once.
+        const run: ToolUseContent[] = [];
+        while (i < content.length && content[i]!.type === 'tool_use') {
+          run.push(content[i] as ToolUseContent);
+          i++;
+        }
+        i--;
+        parts.push(...this.renderToolUseRun(run));
       } else if (block.type === 'tool_result') {
-        const resultText = typeof block.content === 'string'
-          ? block.content
-          : JSON.stringify(block.content);
-        parts.push(`${participant}<[tool_result]: ${resultText}`);
+        const run: ToolResultContent[] = [];
+        while (i < content.length && content[i]!.type === 'tool_result') {
+          run.push(content[i] as ToolResultContent);
+          i++;
+        }
+        i--;
+        parts.push(...this.renderToolResultRun(run));
       } else if (block.type === 'document' || block.type === 'audio') {
         hasUnsupportedMedia = true;
       }
     }
 
     return { text: parts.join('\n'), images, hasUnsupportedMedia };
+  }
+
+  /**
+   * Render a run of consecutive tool_use blocks back into the document.
+   *
+   * Round-trip fidelity (membrane#36): in prefill mode the model's tool call
+   * IS generated text — replaying anything other than that text rewrites the
+   * agent's own past turn and teaches the model a syntax the parser rejects.
+   * Blocks carrying `rawXml` are replayed verbatim (deduped: every invoke
+   * parsed from one <function_calls> block shares the same rawXml). Legacy
+   * blocks stored without rawXml can only be reconstructed — we emit the
+   * canonical <function_calls> form, which at least agrees with the parser
+   * and the injected instructions.
+   */
+  private renderToolUseRun(run: ToolUseContent[]): string[] {
+    const out: string[] = [];
+    let legacy: ToolUseContent[] = [];
+    let lastRaw: string | undefined;
+
+    const flushLegacy = () => {
+      if (legacy.length > 0) {
+        out.push(this.formatLegacyToolUseXml(legacy));
+        legacy = [];
+      }
+    };
+
+    for (const block of run) {
+      if (block.rawXml) {
+        flushLegacy();
+        if (block.rawXml !== lastRaw) {
+          out.push(block.rawXml);
+        }
+        lastRaw = block.rawXml;
+      } else {
+        lastRaw = undefined;
+        legacy.push(block);
+      }
+    }
+    flushLegacy();
+    return out;
+  }
+
+  /** See {@link renderToolUseRun} — same contract for tool results. */
+  private renderToolResultRun(run: ToolResultContent[]): string[] {
+    const out: string[] = [];
+    let legacy: ToolResultContent[] = [];
+    let lastRaw: string | undefined;
+
+    const flushLegacy = () => {
+      if (legacy.length > 0) {
+        out.push(formatToolResultsXml(legacy.map(toToolResult)));
+        legacy = [];
+      }
+    };
+
+    for (const block of run) {
+      if (block.rawXml) {
+        flushLegacy();
+        if (block.rawXml !== lastRaw) {
+          out.push(block.rawXml);
+        }
+        lastRaw = block.rawXml;
+      } else {
+        lastRaw = undefined;
+        legacy.push(block);
+      }
+    }
+    flushLegacy();
+    return out;
+  }
+
+  /**
+   * Reconstruct canonical <function_calls> XML for legacy tool_use blocks
+   * stored without rawXml. Lossy (whitespace, parameter order, antml:
+   * prefix are gone) but consistent with the parser and the instructions.
+   */
+  private formatLegacyToolUseXml(blocks: ToolUseContent[]): string {
+    const lines = ['<function_calls>'];
+    for (const block of blocks) {
+      lines.push(`<invoke name="${block.name}">`);
+      for (const [name, value] of Object.entries(block.input)) {
+        const text = typeof value === 'string' ? value : JSON.stringify(value);
+        lines.push(`<parameter name="${name}">${text}</parameter>`);
+      }
+      lines.push('</invoke>');
+    }
+    lines.push('</function_calls>');
+    return lines.join('\n');
   }
 
   private formatToolDefinitionsXml(tools: ToolDefinition[]): string {
