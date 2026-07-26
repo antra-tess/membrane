@@ -517,6 +517,7 @@ export class BedrockAdapter implements ProviderAdapter {
     let inputTokens = 0;
     let outputTokens = 0;
     let stopReason: string = 'end_turn';
+    let stopSequence: string | undefined;
     let fullText = '';
 
     const reader = response.body?.getReader();
@@ -682,6 +683,16 @@ export class BedrockAdapter implements ProviderAdapter {
                   if (eventData.delta?.stop_reason) {
                     stopReason = eventData.delta.stop_reason;
                   }
+                  // WHICH stop sequence fired, not just that one did. Dropping
+                  // this (pre-2026-07-26) broke prefill/XML tool use on
+                  // Bedrock entirely: membrane's tool gate matches
+                  // stopSequence === '</function_calls>', so calls were never
+                  // parsed or executed, the close tag was never restored, and
+                  // the turn continuation looped forever on the dangling
+                  // block (~6 output tokens per full-prefill round).
+                  if (eventData.delta?.stop_sequence) {
+                    stopSequence = eventData.delta.stop_sequence;
+                  }
                 }
               }
             } catch (e) {
@@ -736,6 +747,7 @@ export class BedrockAdapter implements ProviderAdapter {
       }),
       model: modelId,
       stop_reason: stopReason as BedrockMessageResponse['stop_reason'],
+      stop_sequence: stopSequence ?? null,
       usage: {
         input_tokens: inputTokens,
         output_tokens: outputTokens,
