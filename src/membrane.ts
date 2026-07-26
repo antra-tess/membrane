@@ -476,8 +476,11 @@ export class Membrane {
 
           if (parsed && parsed.calls.length > 0) {
             // Notify about pre-tool content
-            if (onPreToolContent && parsed.beforeText.trim()) {
-              await onPreToolContent(parsed.beforeText);
+            // Slice the seeded prefill off: beforeText starts with the whole
+            // flattened document in XML mode (see ToolContext note below).
+            const preToolNew = parsed.beforeText.slice(initialPrefillLength);
+            if (onPreToolContent && preToolNew.trim()) {
+              await onPreToolContent(preToolNew);
             }
 
             // Emit block events for each tool call
@@ -504,13 +507,24 @@ export class Membrane {
             // Track the tool calls
             executedToolCalls.push(...parsed.calls);
 
-            // Execute tools
+            // Execute tools.
+            // preamble/accumulated must expose the MODEL'S text only. The
+            // parser is seeded with the entire assistant prefill (the whole
+            // flattened document in XML mode), so parsed.beforeText starts
+            // with it — consumers that persist the preamble as "what the
+            // agent said this round" would otherwise write the full document
+            // back into the store as an assistant message (observed on Ash,
+            // 2026-07-26: a died-mid-rounds turn flushed a ~720k-char
+            // document echo into her message store as 62 sharded messages).
+            // The turn-END path already slices (newContent =
+            // fullAccumulated.slice(initialPrefillLength)); the tool-round
+            // path must match it.
             const context: ToolContext = {
               rawText: parsed.fullMatch,
-              preamble: parsed.beforeText,
+              preamble: parsed.beforeText.slice(initialPrefillLength),
               depth: toolDepth,
               previousResults: executedToolResults,
-              accumulated: parser.getAccumulated(),
+              accumulated: parser.getAccumulated().slice(initialPrefillLength),
             };
 
             const results = await onToolCalls(parsed.calls, context);
@@ -2225,13 +2239,24 @@ export class Membrane {
             // Track the tool calls
             executedToolCalls.push(...parsed.calls);
 
-            // Build tool context
+            // Build tool context.
+            // preamble/accumulated must expose the MODEL'S text only: the
+            // parser was seeded with the entire assistant prefill (the whole
+            // flattened document in XML mode), so parsed.beforeText starts
+            // with it. Consumers persist the preamble as "what the agent said
+            // this round" — unsliced, a turn that dies mid-rounds flushes the
+            // full document back into the agent's store as its own message
+            // (observed on Ash 2026-07-26: ~720k-char document echo persisted
+            // as 62 sharded assistant messages, doubling her store and
+            // wedging every subsequent compile). The turn-END path already
+            // slices (newContent = fullAccumulated.slice(initialPrefillLength));
+            // the tool-round path must match it.
             const context: ToolContext = {
               rawText: parsed.fullMatch,
-              preamble: parsed.beforeText,
+              preamble: parsed.beforeText.slice(initialPrefillLength),
               depth: toolDepth,
               previousResults: executedToolResults,
-              accumulated: parser.getAccumulated(),
+              accumulated: parser.getAccumulated().slice(initialPrefillLength),
             };
 
             // Yield control for tool execution
