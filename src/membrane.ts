@@ -1047,6 +1047,13 @@ export class Membrane {
           const textBlock: Record<string, unknown> = { type: 'text', text };
           if ((block as any).cache_control) {
             textBlock.cache_control = (block as any).cache_control;
+            // A block-level passthrough occupies one of the 4 breakpoint slots
+            // exactly like a marked message — count it, so the tools/system
+            // fallback below doesn't stack more on top. (Imported/seeded
+            // conversations can carry stale request-time cache_control on
+            // stored blocks — first seen wedging Sill 2026-07-25: 3 cm markers
+            // + 2 stale Arc-export blocks = 5 → hard 400 on every inference.)
+            messageBreakpoints++;
           }
           content.push(textBlock);
         } else if (block.type === 'tool_use') {
