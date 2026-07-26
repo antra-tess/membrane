@@ -350,6 +350,10 @@ export function parseAccumulatedIntoBlocks(
   let funcMatch: RegExpExecArray | null;
   while ((funcMatch = FUNCTION_BLOCK_WITH_CONTENT_REGEX.exec(processedText)) !== null) {
     const innerContent = funcMatch[2] ?? '';
+    // Verbatim document text of the whole block — carried on each parsed
+    // tool_use so prefill replay reproduces the generation exactly instead
+    // of synthesizing a paraphrase (membrane#36).
+    const rawXml = funcMatch[0];
     const blockToolCalls: ContentBlock[] = [];
 
     // Parse invoke tags in this block
@@ -378,6 +382,7 @@ export function parseAccumulatedIntoBlocks(
         id,
         name: toolName,
         input,
+        rawXml,
       });
     }
 
@@ -394,6 +399,7 @@ export function parseAccumulatedIntoBlocks(
         id,
         name: toolName,
         input: {},
+        rawXml,
       });
     }
 
@@ -411,6 +417,9 @@ export function parseAccumulatedIntoBlocks(
   let resultsMatch: RegExpExecArray | null;
   while ((resultsMatch = FUNCTION_RESULTS_BLOCK_REGEX.exec(processedText)) !== null) {
     const innerContent = resultsMatch[2] ?? '';
+    // Verbatim document text the harness placed — carried for exact replay
+    // on the prefill path (membrane#36).
+    const rawXml = resultsMatch[0];
     const blockResults: ContentBlock[] = [];
 
     // Parse result tags
@@ -426,6 +435,7 @@ export function parseAccumulatedIntoBlocks(
         toolUseId,
         content,
         isError: false,
+        rawXml,
       });
     }
 
@@ -442,6 +452,7 @@ export function parseAccumulatedIntoBlocks(
         toolUseId,
         content,
         isError: true,
+        rawXml,
       });
     }
 

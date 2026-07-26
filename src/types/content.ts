@@ -110,6 +110,17 @@ export interface ToolUseContent {
   id: string;
   name: string;
   input: Record<string, unknown>;
+  /**
+   * Verbatim document text this call was parsed from in prefill/XML mode:
+   * the full `<function_calls>…</function_calls>` block, shared by every
+   * invoke parsed from that block. Prefill formatters replay it exactly
+   * instead of synthesizing a rendering — in prefill mode the context IS
+   * the document the agent authored, and a paraphrase of its own action
+   * both corrupts the record and teaches the model a syntax the parser
+   * does not accept (membrane#36). Analogous to `signature` on a thinking
+   * block. Absent on native-tools blocks and on legacy stored blocks.
+   */
+  rawXml?: string;
   /** See {@link TextContent.rawItem}. */
   rawItem?: unknown;
 }
@@ -119,6 +130,13 @@ export interface ToolResultContent {
   toolUseId: string;
   content: string | ContentBlock[];
   isError?: boolean;
+  /**
+   * Verbatim document text this result was parsed from in prefill/XML mode:
+   * the full `<function_results>…</function_results>` block as the harness
+   * originally placed it in the document, shared by every result parsed
+   * from that block. Replayed exactly on the prefill path (membrane#36).
+   */
+  rawXml?: string;
   /** See {@link TextContent.rawItem}. */
   rawItem?: unknown;
 }
