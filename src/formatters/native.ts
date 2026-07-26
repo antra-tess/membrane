@@ -275,6 +275,18 @@ export class NativeFormatter implements PrefillFormatter {
       }
     }
 
+    // Block-level cache_control can also arrive via convertContent passthrough
+    // (stale request-time markers on imported/stored blocks — Arc exports carry
+    // them). Recount ALL message-level cache_control blocks — deliberate marks
+    // and passthroughs alike — so the system fallback below can't stack on top.
+    markedBreakpoints = 0;
+    for (const msg of providerMessages) {
+      if (!Array.isArray(msg.content)) continue;
+      for (const b of msg.content as Record<string, unknown>[]) {
+        if (b.cache_control) markedBreakpoints++;
+      }
+    }
+
     // Tool-pair normalizer: wire-boundary safety net for Anthropic's
     // structural rules on tool cycles. See `normalize-tool-pairs.ts`
     // for the full rationale. Runs BEFORE mergeConsecutiveRoles so the
