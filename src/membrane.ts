@@ -31,6 +31,7 @@ import {
   DEFAULT_RETRY_CONFIG,
   MembraneError,
   classifyError,
+  isOverloadedError,
   isTextContent,
   isAbortedResponse,
 } from './types/index.js';
@@ -80,7 +81,11 @@ export class Membrane {
   ) {
     this.adapter = adapter;
     this.registry = config.registry;
-    this.retryConfig = { ...DEFAULT_RETRY_CONFIG, ...config.retry };
+    this.retryConfig = {
+      ...DEFAULT_RETRY_CONFIG,
+      ...config.retry,
+      overloaded: { ...DEFAULT_RETRY_CONFIG.overloaded, ...config.retry?.overloaded },
+    };
     this.config = config;
     // Use provided formatter or default to AnthropicXmlFormatter
     this.formatter = config.formatter ?? new AnthropicXmlFormatter();
@@ -146,12 +151,18 @@ export class Membrane {
         const errorInfo = classifyError(error);
         errorInfo.rawRequest = rawRequest;
 
-        // Rate limits (429) always retry up to 5 attempts regardless of config.
-        // Other retryable errors only retry when maxRetries > 0.
+        // Rate limits (429) always retry up to 5 attempts regardless of
+        // config, and overloaded (529) always retries on its own longer
+        // schedule — both are transient by definition, and the default
+        // maxRetries of 0 would otherwise turn a capacity blip into a dead
+        // turn. Other retryable errors only retry when maxRetries > 0.
         const isRateLimit = errorInfo.type === 'rate_limit';
+        const isOverloaded = isOverloadedError(errorInfo);
         const effectiveMax = isRateLimit
           ? Math.max(this.retryConfig.maxRetries, 5)
-          : this.retryConfig.maxRetries;
+          : isOverloaded
+            ? Math.max(this.retryConfig.maxRetries, this.retryConfig.overloaded.maxRetries)
+            : this.retryConfig.maxRetries;
 
         if (errorInfo.retryable && attempts < effectiveMax) {
           // Check hook for retry decision
@@ -163,7 +174,7 @@ export class Membrane {
           }
 
           // Wait before retry (abort-aware)
-          const delay = this.calculateRetryDelay(attempts);
+          const delay = this.calculateRetryDelay(attempts, isOverloaded);
           await this.sleep(delay, options.signal);
           continue;
         }
@@ -217,11 +228,51 @@ export class Membrane {
 
     // Determine tool mode
     const toolMode = this.resolveToolMode(request);
+    const useNative = toolMode === 'native' && !!request.tools && request.tools.length > 0;
 
-    if (toolMode === 'native' && request.tools && request.tools.length > 0) {
-      return this.streamWithNativeTools(request, options);
-    } else {
-      return this.streamWithXmlTools(request, options);
+    // Overloaded (529) pre-emission retry. The streaming paths have no retry
+    // loop of their own, so a capacity error used to kill the turn outright —
+    // and 529s most often arrive INSTEAD of a stream, before anything reaches
+    // the caller, where retrying is transparent. Once any callback has
+    // delivered output (tokens, blocks, usage), retrying would replay content
+    // the caller already consumed, so mid-stream errors still throw.
+    let attempts = 0;
+    while (true) {
+      attempts++;
+      let emitted = false;
+      const mark = <A extends unknown[], R>(fn?: (...args: A) => R) =>
+        fn && ((...args: A): R => { emitted = true; return fn(...args); });
+      const tracked: StreamOptions = {
+        ...options,
+        onChunk: mark(options.onChunk),
+        onContentBlockUpdate: mark(options.onContentBlockUpdate),
+        onToolCalls: mark(options.onToolCalls),
+        onPreToolContent: mark(options.onPreToolContent),
+        onUsage: mark(options.onUsage),
+        onBlock: mark(options.onBlock),
+        onResponse: mark(options.onResponse),
+        // onRequest fires before the send — it is not an emission.
+      };
+
+      try {
+        return useNative
+          ? await this.streamWithNativeTools(request, tracked)
+          : await this.streamWithXmlTools(request, tracked);
+      } catch (error) {
+        const errorInfo = classifyError(error);
+        // Same attempt-bound semantics as complete(): maxRetries bounds
+        // total attempts, and the overloaded floor applies regardless of
+        // the base config.
+        const maxOverloaded = Math.max(
+          this.retryConfig.maxRetries,
+          this.retryConfig.overloaded.maxRetries
+        );
+        if (!emitted && isOverloadedError(errorInfo) && attempts < maxOverloaded) {
+          await this.sleep(this.calculateRetryDelay(attempts, true), options.signal);
+          continue;
+        }
+        throw error;
+      }
     }
   }
 
@@ -1893,10 +1944,15 @@ export class Membrane {
     return pricing ? calculateCost(usage, pricing) : undefined;
   }
 
-  private calculateRetryDelay(attempt: number): number {
-    const { retryDelayMs, backoffMultiplier, maxRetryDelayMs } = this.retryConfig;
-    const delay = retryDelayMs * Math.pow(backoffMultiplier, attempt - 1);
-    return Math.min(delay, maxRetryDelayMs);
+  private calculateRetryDelay(attempt: number, overloaded = false): number {
+    const { retryDelayMs, backoffMultiplier, maxRetryDelayMs } = overloaded
+      ? this.retryConfig.overloaded
+      : this.retryConfig;
+    const delay = Math.min(retryDelayMs * Math.pow(backoffMultiplier, attempt - 1), maxRetryDelayMs);
+    // Equal jitter on the overloaded schedule only: a capacity storm is
+    // exactly the case where a fleet retrying in sync re-creates the
+    // stampede it's backing off from. [delay/2, delay) keeps the wait long.
+    return overloaded ? Math.floor(delay / 2 + Math.random() * (delay / 2)) : delay;
   }
 
   private attachRawRequest(error: unknown, rawRequest: unknown): Error {

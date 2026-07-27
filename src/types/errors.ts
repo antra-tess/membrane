@@ -239,6 +239,20 @@ export function unsupportedError(message: string, rawRequest?: unknown): Membran
 // Error Classification
 // ============================================================================
 
+/**
+ * Provider capacity exhaustion — Anthropic 529 overloaded_error, whichever
+ * path it arrived by (structured status from the provider handler, or the
+ * message-matched fallbacks in classifyError). Used only to CHOOSE the retry
+ * schedule among already-retryable errors, never to decide retryability —
+ * so the loose message match can't promote a non-retryable error.
+ */
+export function isOverloadedError(info: ErrorInfo): boolean {
+  if (!info.retryable) return false;
+  if (info.httpStatus === 529) return true;
+  const m = info.message.toLowerCase();
+  return m.includes('529') || m.includes('overloaded');
+}
+
 export function classifyError(error: unknown): ErrorInfo {
   if (error instanceof MembraneError) {
     return error.toErrorInfo();
