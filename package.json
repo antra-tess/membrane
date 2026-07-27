@@ -24,7 +24,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "version": "node scripts/release-changelog.mjs && git add CHANGELOG.md"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.52.0"
