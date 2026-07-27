@@ -8,6 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { MockAdapter } from '../../src/providers/mock.js';
+import { NativeFormatter } from '../../src/formatters/native.js';
 import type { NormalizedRequest, NormalizedMessage } from '../../src/types/index.js';
 
 function createMessage(participant: string, text: string): NormalizedMessage {
@@ -113,5 +114,50 @@ describe('cacheBreakpoint → cache_control in the raw request', () => {
     }
     expect(cachedContent).toContain('MARKER_CACHED');
     expect(cachedContent).toContain('MARKER_BEFORE');
+  });
+});
+
+// Imported/seeded conversations can carry stale request-time cache_control on
+// stored text blocks (Arc exports do). On the NATIVE path those blocks are
+// passed through verbatim, so membrane must COUNT them as message breakpoints
+// and skip its own system/tools fallback — that addition is the part membrane
+// controls. Membrane deliberately does NOT strip excess markers: >4 is a data
+// defect (fix it at ingest), and a loud 400 beats silently dropping someone's
+// cache breakpoints. First seen live: Sill 2026-07-25, 3 markers + 2 stale
+// = 5 -> 400 on every inference; root cause fixed in the ingest converter.
+// Ported from the legacy test/ addition in PR #41, which predated this suite.
+describe('block-level cache_control passthrough (native path)', () => {
+  it('preserves passthroughs verbatim and counts them, suppressing the system fallback', () => {
+    const staleCache = { type: 'ephemeral', ttl: '1h' };
+    const formatter = new NativeFormatter();
+    const built = formatter.buildMessages(
+      [
+        { participant: 'User', content: [{ type: 'text', text: 'stale one', cache_control: staleCache } as any] },
+        createMessage('Claude', 'reply'),
+        { participant: 'User', content: [{ type: 'text', text: 'stale two', cache_control: staleCache } as any] },
+        createMessage('Claude', 'reply'),
+      ],
+      {
+        assistantParticipant: 'Claude',
+        participantMode: 'multiuser',
+        systemPrompt: 'You are helpful.',
+        promptCaching: true,
+      } as any,
+    );
+
+    let messageBlockCount = 0;
+    for (const msg of built.messages as any[]) {
+      if (Array.isArray(msg.content)) {
+        messageBlockCount += msg.content.filter((b: any) => b.cache_control).length;
+      }
+    }
+    const systemCount = Array.isArray(built.system)
+      ? (built.system as any[]).filter((b: any) => b.cache_control).length
+      : 0;
+
+    // Passthroughs are preserved verbatim — membrane never strips them.
+    expect(messageBlockCount).toBe(2);
+    // ...and they count, so membrane adds no redundant system/tools breakpoint.
+    expect(systemCount).toBe(0);
   });
 });
