@@ -156,8 +156,13 @@ export class Membrane {
         // schedule — both are transient by definition, and the default
         // maxRetries of 0 would otherwise turn a capacity blip into a dead
         // turn. Other retryable errors only retry when maxRetries > 0.
+        // overloaded.maxRetries: 0 disables the dedicated policy entirely;
+        // the 529 then follows the base config like any retryable server
+        // error (exactly the pre-policy behavior), rather than being
+        // silently re-promoted to the long schedule by a positive base limit.
         const isRateLimit = errorInfo.type === 'rate_limit';
-        const isOverloaded = isOverloadedError(errorInfo);
+        const isOverloaded =
+          isOverloadedError(errorInfo) && this.retryConfig.overloaded.maxRetries > 0;
         const effectiveMax = isRateLimit
           ? Math.max(this.retryConfig.maxRetries, 5)
           : isOverloaded
@@ -260,14 +265,25 @@ export class Membrane {
           : await this.streamWithXmlTools(request, tracked);
       } catch (error) {
         const errorInfo = classifyError(error);
-        // Same attempt-bound semantics as complete(): maxRetries bounds
-        // total attempts, and the overloaded floor applies regardless of
-        // the base config.
+        // Same semantics as complete(): maxRetries bounds total attempts,
+        // the overloaded floor applies over the base config, and
+        // overloaded.maxRetries: 0 opts out of stream retries entirely
+        // (streaming had no retry before this policy existed).
+        const overloadedEnabled = this.retryConfig.overloaded.maxRetries > 0;
         const maxOverloaded = Math.max(
           this.retryConfig.maxRetries,
           this.retryConfig.overloaded.maxRetries
         );
-        if (!emitted && isOverloadedError(errorInfo) && attempts < maxOverloaded) {
+        if (!emitted && overloadedEnabled && isOverloadedError(errorInfo) && attempts < maxOverloaded) {
+          // Honor the same pre-retry hook contract as complete(): hosts use
+          // onError for circuit-breaking, and its 'abort' decision must work
+          // on the streaming path too.
+          if (this.config.hooks?.onError) {
+            const decision = await this.config.hooks.onError(errorInfo, attempts);
+            if (decision === 'abort') {
+              throw error;
+            }
+          }
           await this.sleep(this.calculateRetryDelay(attempts, true), options.signal);
           continue;
         }

@@ -30,8 +30,12 @@ export interface RetryConfig {
    * overloaded_error). Capacity storms last minutes, not seconds — the
    * standard schedule's 30s ceiling turns one into a dead turn. Overloaded
    * retries are always attempted (mirroring the forced 429 retries), with
-   * jitter so a fleet backing off doesn't re-create the stampede in sync;
-   * set maxRetries: 0 here to opt out.
+   * jitter so a fleet backing off doesn't re-create the stampede in sync.
+   *
+   * maxRetries: 0 here disables this dedicated policy entirely: 529s then
+   * follow the base retry config like any other retryable server error
+   * (no forced retries, base schedule, no stream-path retry) — the exact
+   * pre-policy behavior.
    */
   overloaded: OverloadedRetryConfig;
 }

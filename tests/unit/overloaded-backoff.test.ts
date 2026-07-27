@@ -118,6 +118,35 @@ describe('complete() overloaded retries', () => {
     await expect(membrane.complete(REQUEST)).rejects.toThrow('Overloaded');
     expect(adapter.completeCalls).toBe(1);
   });
+
+  it('opt-out with positive base retries falls back to base policy, not the long schedule', async () => {
+    const adapter = new FlakyAdapter(Infinity, overloaded529);
+    const membrane = new Membrane(adapter, {
+      retry: { maxRetries: 2, retryDelayMs: 1, maxRetryDelayMs: 2, overloaded: { maxRetries: 0 } },
+    });
+    await expect(membrane.complete(REQUEST)).rejects.toThrow('Overloaded');
+    // With the dedicated policy disabled, the 529 is still a retryable
+    // server error under the BASE config (pre-policy behavior), so the
+    // base bound of 2 attempts applies — neither zero nor the 529 floor.
+    expect(adapter.completeCalls).toBe(2);
+  });
+
+  it('runs the onError hook before each overloaded retry and honors abort', async () => {
+    const adapter = new FlakyAdapter(Infinity, overloaded529);
+    const hookAttempts: number[] = [];
+    const membrane = new Membrane(adapter, {
+      retry: { overloaded: { retryDelayMs: 1, maxRetryDelayMs: 2 } },
+      hooks: {
+        onError: (_info, attempt) => {
+          hookAttempts.push(attempt);
+          return attempt >= 2 ? 'abort' : 'retry';
+        },
+      },
+    });
+    await expect(membrane.complete(REQUEST)).rejects.toThrow('Overloaded');
+    expect(hookAttempts).toEqual([1, 2]);
+    expect(adapter.completeCalls).toBe(2); // stopped by the hook, not the bound
+  });
 });
 
 describe('stream() overloaded retries', () => {
@@ -149,5 +178,33 @@ describe('stream() overloaded retries', () => {
     const membrane = new Membrane(adapter, FAST_OVERLOADED);
     await expect(membrane.stream(REQUEST, {})).rejects.toThrow('Internal server error');
     expect(adapter.streamCalls).toBe(1);
+  });
+
+  it('opt-out disables stream retries even with positive base retries', async () => {
+    const adapter = new FlakyAdapter(Infinity, overloaded529);
+    const membrane = new Membrane(adapter, {
+      retry: { maxRetries: 3, retryDelayMs: 1, maxRetryDelayMs: 2, overloaded: { maxRetries: 0 } },
+    });
+    await expect(membrane.stream(REQUEST, {})).rejects.toThrow('Overloaded');
+    // Streaming had no retry before this policy; disabling the policy
+    // restores exactly that, whatever the base config says.
+    expect(adapter.streamCalls).toBe(1);
+  });
+
+  it('consults the onError hook before each stream retry and honors abort', async () => {
+    const adapter = new FlakyAdapter(Infinity, overloaded529);
+    const hookAttempts: number[] = [];
+    const membrane = new Membrane(adapter, {
+      retry: { overloaded: { retryDelayMs: 1, maxRetryDelayMs: 2 } },
+      hooks: {
+        onError: (_info, attempt) => {
+          hookAttempts.push(attempt);
+          return attempt >= 2 ? 'abort' : 'retry';
+        },
+      },
+    });
+    await expect(membrane.stream(REQUEST, {})).rejects.toThrow('Overloaded');
+    expect(hookAttempts).toEqual([1, 2]);
+    expect(adapter.streamCalls).toBe(2); // stopped by the hook, not the bound
   });
 });
