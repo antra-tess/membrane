@@ -7,7 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { MockAdapter } from '../../src/providers/mock.js';
-import { classifyError, isOverloadedError, serverError, rateLimitError } from '../../src/types/errors.js';
+import { classifyError, isOverloadedError, serverError, rateLimitError, networkError } from '../../src/types/errors.js';
 import type { NormalizedRequest } from '../../src/types/index.js';
 import type { ProviderRequest, ProviderRequestOptions, ProviderResponse } from '../../src/types/provider.js';
 import type { StreamCallbacks } from '../../src/types/streaming.js';
@@ -73,6 +73,17 @@ describe('isOverloadedError', () => {
   it('does not match rate limits or plain server errors', () => {
     expect(isOverloadedError(classifyError(rateLimitError('too many requests')))).toBe(false);
     expect(isOverloadedError(classifyError(serverError('Internal server error', 500)))).toBe(false);
+  });
+
+  it('does not match bare "overloaded" prose — only the exact token or status', () => {
+    // A retryable error whose message merely contains the word must not be
+    // promoted onto the ~10-minute schedule (same narrowness as classifyError:
+    // status / '529' / exact 'overloaded_error').
+    expect(isOverloadedError(classifyError(serverError('worker pool overloaded', 503)))).toBe(false);
+    expect(isOverloadedError(classifyError(networkError('connection dropped: peer overloaded')))).toBe(false);
+    // The provider handlers' bare-'overloaded' safety nets attach status 529,
+    // which is what routes them here.
+    expect(isOverloadedError(classifyError(serverError('Overloaded', 529)))).toBe(true);
   });
 });
 
@@ -160,6 +171,19 @@ describe('stream() overloaded retries', () => {
     expect('content' in result && result.content[0]).toMatchObject({ type: 'text', text: 'recovered' });
     // Output was delivered exactly once — the failed attempts emitted nothing.
     expect(chunks.join('')).toBe('recovered');
+    // Truthful telemetry: a success after two retries must not look like a
+    // first-attempt success in durable logs.
+    expect('details' in result && result.details.timing.attempts).toBe(3);
+    expect('details' in result && result.details.timing.retryDelaysMs).toHaveLength(2);
+  });
+
+  it('reports attempts: 1 untouched on a first-attempt success', async () => {
+    const adapter = new FlakyAdapter(0, overloaded529);
+    adapter.queueResponse('clean');
+    const membrane = new Membrane(adapter, FAST_OVERLOADED);
+    const result = await membrane.stream(REQUEST, {});
+    expect('details' in result && result.details.timing.attempts).toBe(1);
+    expect('details' in result && result.details.timing.retryDelaysMs).toBeUndefined();
   });
 
   it('does NOT retry once output has been emitted', async () => {

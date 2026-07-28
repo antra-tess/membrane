@@ -242,6 +242,7 @@ export class Membrane {
     // delivered output (tokens, blocks, usage), retrying would replay content
     // the caller already consumed, so mid-stream errors still throw.
     let attempts = 0;
+    const retryDelaysMs: number[] = [];
     while (true) {
       attempts++;
       let emitted = false;
@@ -260,9 +261,18 @@ export class Membrane {
       };
 
       try {
-        return useNative
+        const result = useNative
           ? await this.streamWithNativeTools(request, tracked)
           : await this.streamWithXmlTools(request, tracked);
+        // The inner paths report attempts: 1 — they can't see this wrapper.
+        // A call that succeeded after N overloaded retries must not look like
+        // a first-attempt success in durable logs, so patch the real count
+        // (and the waits) into the response telemetry.
+        if (attempts > 1 && 'details' in result) {
+          result.details.timing.attempts = attempts;
+          result.details.timing.retryDelaysMs = retryDelaysMs;
+        }
+        return result;
       } catch (error) {
         const errorInfo = classifyError(error);
         // Same semantics as complete(): maxRetries bounds total attempts,
@@ -284,7 +294,9 @@ export class Membrane {
               throw error;
             }
           }
-          await this.sleep(this.calculateRetryDelay(attempts, true), options.signal);
+          const delay = this.calculateRetryDelay(attempts, true);
+          retryDelaysMs.push(delay);
+          await this.sleep(delay, options.signal);
           continue;
         }
         throw error;
