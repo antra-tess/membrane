@@ -231,6 +231,15 @@ export interface StreamOptions {
   /** Maximum tool execution depth (default: 10) */
   maxToolDepth?: number;
 
+  /**
+   * Cap on prefill continuation rounds per turn (tool rounds and
+   * false-positive resumptions alike). Distinct from maxToolDepth on
+   * purpose: raising the tool budget for deep chains shouldn't also raise
+   * the number of times a turn may re-send its full context (issue #39).
+   * Default: 24.
+   */
+  maxContinuationRounds?: number;
+
   /** Timeout for each tool execution */
   toolTimeoutMs?: number;
 

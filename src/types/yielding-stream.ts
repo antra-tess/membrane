@@ -238,6 +238,17 @@ export interface YieldingStreamOptions {
   maxToolDepth?: number;
 
   /**
+   * Cap on prefill continuation rounds per turn (tool rounds and
+   * false-positive resumptions alike). Deliberately NOT tied to
+   * maxToolDepth: this path defaults tool depth to unlimited because the
+   * caller budgets its own tool work — but "how many times may this turn
+   * re-send its full context" is membrane's own failure surface, and an
+   * unlimited resumption bound is how the 43-round Ash spin happened
+   * (issue #39). Default: 24. `-1` for unlimited, at your own risk.
+   */
+  maxContinuationRounds?: number;
+
+  /**
    * Whether to emit 'tokens' events.
    * Set to false if you only care about tool calls and final response.
    * Default: true

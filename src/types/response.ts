@@ -15,7 +15,9 @@ export type StopReason =
   | 'stop_sequence'  // Hit stop sequence
   | 'tool_use'       // Stopped for tool use
   | 'refusal'        // Content refused by safety
-  | 'abort';         // Request was aborted
+  | 'abort'          // Request was aborted
+  | 'no_progress';   // Continuation spin guard ended the turn (issue #39):
+                     // rounds were re-sending context without advancing
 
 // ============================================================================
 // Usage Information
