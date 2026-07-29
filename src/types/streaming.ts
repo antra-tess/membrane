@@ -231,6 +231,17 @@ export interface StreamOptions {
   /** Maximum tool execution depth (default: 10) */
   maxToolDepth?: number;
 
+  /**
+   * Cap on AUTOMATIC false-positive stop-sequence resumptions per turn —
+   * membrane's own re-streams, not the caller's work. Tool rounds are
+   * deliberately not counted: they are governed by maxToolDepth and caller
+   * policy. Distinct from maxToolDepth on purpose: raising the tool budget
+   * for deep chains must not also raise how often a turn may re-send its
+   * full context on membrane's own initiative (issue #39). Exceeding it
+   * ends the turn with stopReason 'round_limit'. Default: 24.
+   */
+  maxResumptionRounds?: number;
+
   /** Timeout for each tool execution */
   toolTimeoutMs?: number;
 

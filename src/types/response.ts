@@ -15,7 +15,11 @@ export type StopReason =
   | 'stop_sequence'  // Hit stop sequence
   | 'tool_use'       // Stopped for tool use
   | 'refusal'        // Content refused by safety
-  | 'abort';         // Request was aborted
+  | 'abort'          // Request was aborted
+  | 'no_progress'    // Stall guard ended the turn (issue #39): consecutive
+                     // automatic resumptions re-sent context without advancing
+  | 'round_limit';   // Resumption round cap ended the turn: the turn kept
+                     // resuming (with progress) past maxResumptionRounds
 
 // ============================================================================
 // Usage Information
