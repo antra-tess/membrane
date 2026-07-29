@@ -1,6 +1,6 @@
 /**
  * API Integration Tests
- * Run with: npx tsx test/api-integration.test.ts
+ * Run with: npx tsx tests/manual/api-integration.ts
  *
  * These tests hit the real Anthropic API to verify end-to-end behavior.
  * They specifically test scenarios that unit tests with mocks cannot catch:
@@ -10,10 +10,10 @@
  * - Tool results rendered in previous turns
  */
 
-import { Membrane } from '../src/membrane.js';
-import { AnthropicAdapter } from '../src/providers/anthropic.js';
-import type { NormalizedRequest, NormalizedMessage, ToolCall, ToolResult, ContentBlock } from '../src/types/index.js';
-import { isAbortedResponse } from '../src/types/index.js';
+import { Membrane } from '../../src/membrane.js';
+import { AnthropicAdapter } from '../../src/providers/anthropic.js';
+import type { NormalizedRequest, NormalizedMessage, ToolCall, ToolResult, ContentBlock } from '../../src/types/index.js';
+import { isAbortedResponse } from '../../src/types/index.js';
 
 // ============================================================================
 // Configuration
