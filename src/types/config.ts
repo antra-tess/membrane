@@ -15,16 +15,52 @@ import type { PrefillFormatter } from '../formatters/types.js';
 export interface RetryConfig {
   /** Maximum number of retry attempts (default: 3) */
   maxRetries: number;
-  
+
   /** Initial retry delay in milliseconds (default: 1000) */
   retryDelayMs: number;
-  
+
   /** Backoff multiplier (default: 2) */
   backoffMultiplier: number;
-  
+
   /** Maximum retry delay (default: 30000) */
   maxRetryDelayMs: number;
+
+  /**
+   * Separate, longer schedule for provider capacity errors (529
+   * overloaded_error). Capacity storms last minutes, not seconds — the
+   * standard schedule's 30s ceiling turns one into a dead turn. Overloaded
+   * retries are always attempted (mirroring the forced 429 retries), with
+   * jitter so a fleet backing off doesn't re-create the stampede in sync.
+   *
+   * maxRetries: 0 here disables this dedicated policy entirely: 529s then
+   * follow the base retry config like any other retryable server error
+   * (no forced retries, base schedule, no stream-path retry) — the exact
+   * pre-policy behavior.
+   */
+  overloaded: OverloadedRetryConfig;
 }
+
+export interface OverloadedRetryConfig {
+  /** Attempt bound for overloaded errors, applied even when the base
+   *  maxRetries is 0. Like the base maxRetries (and the forced 429 path),
+   *  this bounds TOTAL attempts, not retries-after-the-first (default: 7) */
+  maxRetries: number;
+
+  /** Initial overloaded retry delay in milliseconds (default: 10000) */
+  retryDelayMs: number;
+
+  /** Backoff multiplier (default: 2) */
+  backoffMultiplier: number;
+
+  /** Maximum overloaded retry delay (default: 300000 — 5 minutes) */
+  maxRetryDelayMs: number;
+}
+
+/** Shape accepted by MembraneConfig.retry — every field optional, including
+ *  inside the nested overloaded schedule. */
+export type RetryConfigInput = Partial<Omit<RetryConfig, 'overloaded'>> & {
+  overloaded?: Partial<OverloadedRetryConfig>;
+};
 
 // ============================================================================
 // Media Processing Config
@@ -152,7 +188,7 @@ export interface MembraneConfig {
   formatter?: PrefillFormatter;
 
   /** Retry configuration */
-  retry?: Partial<RetryConfig>;
+  retry?: RetryConfigInput;
 
   /** Media processing configuration */
   media?: Partial<MediaConfig>;
@@ -176,6 +212,14 @@ export const DEFAULT_RETRY_CONFIG: RetryConfig = {
   retryDelayMs: 1000,
   backoffMultiplier: 2,
   maxRetryDelayMs: 30000,
+  // 7 attempts = 6 waits: 10s → 20s → 40s → 80s → 160s → 300s, ~10 minutes
+  // of patience in total — the scale capacity storms actually resolve on.
+  overloaded: {
+    maxRetries: 7,
+    retryDelayMs: 10_000,
+    backoffMultiplier: 2,
+    maxRetryDelayMs: 300_000,
+  },
 };
 
 export const DEFAULT_MEDIA_CONFIG: MediaConfig = {

@@ -165,6 +165,7 @@ export {
   safetyError,
   unsupportedError,
   classifyError,
+  isOverloadedError,
 } from './errors.js';
 
 // Config
