@@ -4,3 +4,4 @@ dist
 .claude/settings.local.json
 *.tgz
 .npmrc
+.DS_Store

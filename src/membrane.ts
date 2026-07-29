@@ -330,38 +330,45 @@ export class Membrane {
     // from blocks the model itself opened during generation
     const prefillDepths = parser.getDepths();
 
-    // Continuation spin guards (issue #39). Observed live on Ash 2026-07-26:
-    // each continuation round re-sent ~172k input tokens, streamed ~6 output
-    // tokens, and stopped on the same (dropped) stop sequence — 43 rounds,
-    // ~7M input tokens, zero progress, found only because a human noticed.
-    // toolDepth does bound this loop, but hosts legitimately raise
-    // maxToolDepth for deep tool chains, and that silently raises the spin
-    // bound with it — so resumption patience gets its own accounting. The
-    // core signal: a round that streams almost nothing and stops the same
-    // way as the previous round is spinning, not working.
+    // Resumption spin guards (issue #39). Observed live on Ash 2026-07-26:
+    // each automatic resumption re-sent ~172k input tokens, streamed ~6
+    // output tokens, and stopped on the same (dropped) stop sequence — 43
+    // rounds, ~7M input tokens, zero progress, found only because a human
+    // noticed. Two guards, both scoped to AUTOMATIC false-positive
+    // resumptions — tool rounds are real caller-governed work (maxToolDepth
+    // / the yielding API's uncapped contract) and are never counted here:
+    //   - stall guard: several CONSECUTIVE resumptions that each stream
+    //     almost nothing and stop identically end the turn ('no_progress').
+    //     One short repeated round is low progress, not proof of none — a
+    //     stop sequence inside legitimate tool-argument text can cause a
+    //     couple of short resumptions on the way to completing.
+    //   - round cap: a hard bound on resumptions per turn ('round_limit'),
+    //     the backstop for a spin that keeps technically progressing.
     const MIN_ROUND_PROGRESS_CHARS = 16;
-    const SPIN_WARN_ROUNDS = 5;
-    const maxContinuationRounds = options.maxContinuationRounds ?? 24;
-    let continuationRounds = 0;
+    const MAX_CONSECUTIVE_STALLED_RESUMPTIONS = 3;
+    const RESUMPTION_WARN_ROUNDS = 5;
+    const maxResumptionRounds = options.maxResumptionRounds ?? 24;
+    let resumptionRounds = 0;
+    let consecutiveStalledResumptions = 0;
+    let enteredViaResumption = false;
     let prevRoundStopSequence: string | undefined;
     const warnLog = this.config.logger ?? console;
 
-    /** Count a continuation round (tool round or resumption alike); emits
-     *  the visibility warning at the threshold and returns false when the
-     *  round cap says the turn should end instead of continuing. */
-    const registerContinuationRound = (): boolean => {
-      continuationRounds++;
-      if (continuationRounds === SPIN_WARN_ROUNDS) {
+    /** Count an automatic resumption; emits the visibility warning at the
+     *  threshold and returns false when the cap says the turn should end. */
+    const registerResumptionRound = (): boolean => {
+      resumptionRounds++;
+      if (resumptionRounds === RESUMPTION_WARN_ROUNDS) {
         warnLog.warn(
-          `[membrane] prefill continuation at round ${continuationRounds} ` +
+          `[membrane] automatic resumption at round ${resumptionRounds} ` +
           `(${totalUsage.inputTokens} input tokens so far this turn) — ` +
           `a spin shows up here before it shows up on the bill`
         );
       }
-      if (continuationRounds > maxContinuationRounds) {
+      if (resumptionRounds > maxResumptionRounds) {
         warnLog.warn(
-          `[membrane] prefill continuation round cap (${maxContinuationRounds}) reached — ` +
-          `ending turn with stopReason 'no_progress'. ` +
+          `[membrane] automatic resumption cap (${maxResumptionRounds}) reached — ` +
+          `ending turn with stopReason 'round_limit'. ` +
           `${totalUsage.inputTokens} input tokens spent this turn.`
         );
         return false;
@@ -507,30 +514,37 @@ export class Membrane {
         // Get accumulated text from parser
         const accumulated = parser.getAccumulated();
 
-        // No-progress guard (issue #39): a continuation round that streamed
-        // almost nothing and stopped the same way as the previous round will
-        // do exactly the same thing next round — end the turn with a distinct
-        // stop reason instead of re-sending the full context again. Checked
-        // before the tool gate: any real tool call is longer than the
-        // threshold, and the Ash spin's rounds (~6 tokens of closing tag)
-        // are exactly what this catches.
+        // Stall accounting (issue #39): only rounds ENTERED via automatic
+        // resumption can stall — tool rounds are caller-governed work and a
+        // real tool call is longer than the threshold anyway. A stall is a
+        // resumption that streamed almost nothing and stopped identically to
+        // the previous round; the turn ends only after several IN A ROW
+        // (one short repeated round is low progress, not proof of none —
+        // a stop sequence inside legitimate tool-argument text can cause a
+        // couple of short resumptions on the way to completing).
         const streamedThisRound = accumulated.length - checkFromIndex;
         if (
-          continuationRounds > 0 &&
+          enteredViaResumption &&
           lastStopReason === 'stop_sequence' &&
           streamedThisRound < MIN_ROUND_PROGRESS_CHARS &&
           lastStopSequence === prevRoundStopSequence
         ) {
-          warnLog.warn(
-            `[membrane] prefill continuation made no progress (round ${continuationRounds + 1}, ` +
-            `${streamedThisRound} chars streamed, stop ${JSON.stringify(lastStopSequence ?? null)} twice) — ` +
-            `ending turn with stopReason 'no_progress'. ` +
-            `${totalUsage.inputTokens} input tokens spent this turn.`
-          );
-          lastStopReason = 'no_progress';
-          break;
+          consecutiveStalledResumptions++;
+          if (consecutiveStalledResumptions >= MAX_CONSECUTIVE_STALLED_RESUMPTIONS) {
+            warnLog.warn(
+              `[membrane] ${consecutiveStalledResumptions} consecutive automatic resumptions ` +
+              `made no progress (${streamedThisRound} chars this round, stop ` +
+              `${JSON.stringify(lastStopSequence ?? null)} repeated) — ending turn with ` +
+              `stopReason 'no_progress'. ${totalUsage.inputTokens} input tokens spent this turn.`
+            );
+            lastStopReason = 'no_progress';
+            break;
+          }
+        } else {
+          consecutiveStalledResumptions = 0;
         }
         prevRoundStopSequence = lastStopSequence;
+        enteredViaResumption = false;
 
         // Check for tool calls (if handler provided)
         if (onToolCalls && streamResult.stopSequence === '</function_calls>') {
@@ -722,13 +736,11 @@ export class Membrane {
               );
             }
 
-            // Reset parser state for new streaming iteration
+            // Reset parser state for new streaming iteration. Tool rounds
+            // are the caller's work — they count against maxToolDepth only,
+            // never against the resumption guards (issue #39 review).
             parser.resetForNewIteration();
             toolDepth++;
-            if (!registerContinuationRound()) {
-              lastStopReason = 'no_progress';
-              break;
-            }
             continue;
           }
         }
@@ -763,10 +775,11 @@ export class Membrane {
           if (toolDepth > maxToolDepth) {
             break;
           }
-          if (!registerContinuationRound()) {
-            lastStopReason = 'no_progress';
+          if (!registerResumptionRound()) {
+            lastStopReason = 'round_limit';
             break;
           }
+          enteredViaResumption = true;
           prefillResult.assistantPrefill = parser.getAccumulated();
           providerRequest = this.buildContinuationRequest(
             request,
@@ -2108,21 +2121,26 @@ export class Membrane {
         ? Infinity
         : maxToolDepthOpt;
 
-    // Continuation spin guards (issue #39). This is the path the Ash spin
-    // ran on: tool depth here is unlimited BY DESIGN (the caller budgets its
-    // own tool work), and the false-positive resumption path counted against
-    // that same unlimited bound — 43 rounds × ~172k input tokens of zero
-    // progress. Resumption patience is membrane's own failure surface, so it
-    // gets its own accounting, independent of the tool budget.
+    // Resumption spin guards (issue #39). This is the path the Ash spin ran
+    // on: tool depth here is unlimited BY DESIGN (the caller budgets its own
+    // tool work — that contract stands untouched), and the false-positive
+    // resumption path counted against that same unlimited bound — 43 rounds
+    // × ~172k input tokens of zero progress. Only AUTOMATIC resumptions are
+    // guarded: a stall guard (consecutive no-progress resumptions →
+    // 'no_progress') and a hard resumption cap ('round_limit'). Tool rounds
+    // are never counted. See streamWithXmlTools for the rationale details.
     const MIN_ROUND_PROGRESS_CHARS = 16;
-    const SPIN_WARN_ROUNDS = 5;
-    const maxContinuationRounds =
-      options.maxContinuationRounds === undefined
+    const MAX_CONSECUTIVE_STALLED_RESUMPTIONS = 3;
+    const RESUMPTION_WARN_ROUNDS = 5;
+    const maxResumptionRounds =
+      options.maxResumptionRounds === undefined
         ? 24
-        : options.maxContinuationRounds === -1
+        : options.maxResumptionRounds === -1
           ? Infinity
-          : options.maxContinuationRounds;
-    let continuationRounds = 0;
+          : options.maxResumptionRounds;
+    let resumptionRounds = 0;
+    let consecutiveStalledResumptions = 0;
+    let enteredViaResumption = false;
     let prevRoundStopSequence: string | undefined;
     const warnLog = this.config.logger ?? console;
 
@@ -2171,22 +2189,21 @@ export class Membrane {
     // from blocks the model itself opened during generation
     const prefillDepths = parser.getDepths();
 
-    /** Count a continuation round (tool round or resumption alike); emits
-     *  the visibility warning at the threshold and returns false when the
-     *  round cap says the turn should end instead of continuing. */
-    const registerContinuationRound = (): boolean => {
-      continuationRounds++;
-      if (continuationRounds === SPIN_WARN_ROUNDS) {
+    /** Count an automatic resumption; emits the visibility warning at the
+     *  threshold and returns false when the cap says the turn should end. */
+    const registerResumptionRound = (): boolean => {
+      resumptionRounds++;
+      if (resumptionRounds === RESUMPTION_WARN_ROUNDS) {
         warnLog.warn(
-          `[membrane] prefill continuation at round ${continuationRounds} ` +
+          `[membrane] automatic resumption at round ${resumptionRounds} ` +
           `(${totalUsage.inputTokens} input tokens so far this turn) — ` +
           `a spin shows up here before it shows up on the bill`
         );
       }
-      if (continuationRounds > maxContinuationRounds) {
+      if (resumptionRounds > maxResumptionRounds) {
         warnLog.warn(
-          `[membrane] prefill continuation round cap (${maxContinuationRounds}) reached — ` +
-          `ending turn with stopReason 'no_progress'. ` +
+          `[membrane] automatic resumption cap (${maxResumptionRounds}) reached — ` +
+          `ending turn with stopReason 'round_limit'. ` +
           `${totalUsage.inputTokens} input tokens spent this turn.`
         );
         return false;
@@ -2322,27 +2339,33 @@ export class Membrane {
           }
         }
 
-        // No-progress guard (issue #39): a continuation round that streamed
-        // almost nothing and stopped the same way as the previous round will
-        // do exactly the same thing next round — end the turn with a distinct
-        // stop reason instead of re-sending the full context again.
+        // Stall accounting (issue #39): only rounds ENTERED via automatic
+        // resumption can stall; the turn ends only after several consecutive
+        // stalls. Tool rounds are never counted. Mirrors streamWithXmlTools —
+        // see the detailed rationale there.
         const streamedThisRound = parser.getAccumulated().length - checkFromIndex;
         if (
-          continuationRounds > 0 &&
+          enteredViaResumption &&
           lastStopReason === 'stop_sequence' &&
           streamedThisRound < MIN_ROUND_PROGRESS_CHARS &&
           lastStopSequence === prevRoundStopSequence
         ) {
-          warnLog.warn(
-            `[membrane] prefill continuation made no progress (round ${continuationRounds + 1}, ` +
-            `${streamedThisRound} chars streamed, stop ${JSON.stringify(lastStopSequence ?? null)} twice) — ` +
-            `ending turn with stopReason 'no_progress'. ` +
-            `${totalUsage.inputTokens} input tokens spent this turn.`
-          );
-          lastStopReason = 'no_progress';
-          break;
+          consecutiveStalledResumptions++;
+          if (consecutiveStalledResumptions >= MAX_CONSECUTIVE_STALLED_RESUMPTIONS) {
+            warnLog.warn(
+              `[membrane] ${consecutiveStalledResumptions} consecutive automatic resumptions ` +
+              `made no progress (${streamedThisRound} chars this round, stop ` +
+              `${JSON.stringify(lastStopSequence ?? null)} repeated) — ending turn with ` +
+              `stopReason 'no_progress'. ${totalUsage.inputTokens} input tokens spent this turn.`
+            );
+            lastStopReason = 'no_progress';
+            break;
+          }
+        } else {
+          consecutiveStalledResumptions = 0;
         }
         prevRoundStopSequence = lastStopSequence;
+        enteredViaResumption = false;
 
         // Check for tool calls
         if (streamResult.stopSequence === '</function_calls>') {
@@ -2560,12 +2583,11 @@ export class Membrane {
               );
             }
 
+            // Tool rounds are the caller's work — they count against
+            // maxToolDepth only, never against the resumption guards
+            // (issue #39 review: the uncapped tool-loop contract stands).
             parser.resetForNewIteration();
             toolDepth++;
-            if (!registerContinuationRound()) {
-              lastStopReason = 'no_progress';
-              break;
-            }
             continue;
           }
         }
@@ -2595,10 +2617,11 @@ export class Membrane {
           if (toolDepth > maxToolDepth) {
             break;
           }
-          if (!registerContinuationRound()) {
-            lastStopReason = 'no_progress';
+          if (!registerResumptionRound()) {
+            lastStopReason = 'round_limit';
             break;
           }
+          enteredViaResumption = true;
           prefillResult.assistantPrefill = parser.getAccumulated();
           providerRequest = this.buildContinuationRequest(
             request,

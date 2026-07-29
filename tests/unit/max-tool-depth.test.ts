@@ -53,16 +53,24 @@ function scriptedToolCall(roundIndex: number): string {
 
 /**
  * Drive the stream end-to-end, auto-answering every tool round with a
- * dummy success result. Returns counts and the terminal event.
+ * dummy success result. Returns counts, the terminal event, and the final
+ * response (when the stream completed) so callers can assert the turn
+ * actually FINISHED — a weaker "saw a complete event" check once let a
+ * mislabeled early termination pass (issue #39 review).
  */
 async function driveStream(
   membrane: Membrane,
   request: NormalizedRequest,
   options: { maxToolDepth?: number } = {},
-): Promise<{ toolRounds: number; terminalEvent: StreamEvent['type'] }> {
+): Promise<{
+  toolRounds: number;
+  terminalEvent: StreamEvent['type'];
+  finalResponse?: { stopReason: string; rawAssistantText: string };
+}> {
   const stream = membrane.streamYielding(request, options);
   let toolRounds = 0;
   let terminalEvent: StreamEvent['type'] = 'complete';
+  let finalResponse: { stopReason: string; rawAssistantText: string } | undefined;
 
   for await (const event of stream) {
     if (event.type === 'tool-calls') {
@@ -75,11 +83,15 @@ async function driveStream(
       stream.provideToolResults(results);
     } else if (event.type === 'complete' || event.type === 'aborted' || event.type === 'error') {
       terminalEvent = event.type;
+      if (event.type === 'complete') {
+        const r = (event as { response: { stopReason: string; rawAssistantText: string } }).response;
+        finalResponse = { stopReason: r.stopReason, rawAssistantText: r.rawAssistantText };
+      }
       break;
     }
   }
 
-  return { toolRounds, terminalEvent };
+  return { toolRounds, terminalEvent, finalResponse };
 }
 
 describe('streamYielding maxToolDepth', () => {
@@ -97,10 +109,15 @@ describe('streamYielding maxToolDepth', () => {
     });
     const membrane = new Membrane(adapter);
 
-    const { toolRounds, terminalEvent } = await driveStream(membrane, makeRequest());
+    const { toolRounds, terminalEvent, finalResponse } = await driveStream(membrane, makeRequest());
 
     expect(toolRounds).toBe(SCRIPTED);
     expect(terminalEvent).toBe('complete');
+    // The queued final response must actually stream and the stop must be
+    // natural — the resumption guards may not chop a progressing tool chain
+    // (issue #39 review: an early break here once hid behind this test).
+    expect(finalResponse?.stopReason).toBe('end_turn');
+    expect(finalResponse?.rawAssistantText).toContain('done.');
   });
 
   it('accepts -1 as an explicit "unlimited" sentinel', async () => {

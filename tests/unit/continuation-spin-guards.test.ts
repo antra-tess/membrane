@@ -76,15 +76,16 @@ const ASH_SPIN: ScriptedRound[] = [
   { text: 'x', stopReason: 'stop_sequence' },
 ];
 
-describe('no-progress guard', () => {
+describe('stall guard (consecutive no-progress resumptions)', () => {
   it('ends the spin with stopReason no_progress on stream()', async () => {
     const adapter = new ScriptedAdapter(ASH_SPIN);
     const logger = mockLogger();
     const membrane = new Membrane(adapter, { logger });
     const response = await membrane.stream(REQUEST, {});
     expect('stopReason' in response && response.stopReason).toBe('no_progress');
-    // Round 1 + one continuation that made no progress. Not 43.
-    expect(adapter.streamCalls).toBe(2);
+    // Round 1 + three consecutive stalled resumptions. Not 43. (A single
+    // short repeated round is low progress, not proof of none — hence 3.)
+    expect(adapter.streamCalls).toBe(4);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('no progress'));
   });
 
@@ -100,7 +101,7 @@ describe('no-progress guard', () => {
       }
     }
     expect(finalStopReason).toBe('no_progress');
-    expect(adapter.streamCalls).toBe(2);
+    expect(adapter.streamCalls).toBe(4);
   });
 
   it('does not fire while rounds are making progress', async () => {
@@ -118,49 +119,119 @@ describe('no-progress guard', () => {
     expect('stopReason' in response && response.stopReason).toBe('end_turn');
     expect(adapter.streamCalls).toBe(3);
   });
+
+  it('CONTROL: two short same-stop resumptions that then complete are not truncated', async () => {
+    // The review's counterexample: repeated stop-sequence text inside a
+    // legitimate argument can cause a couple of short resumptions on the
+    // way to finishing. Two stalls stay under the threshold of three.
+    const adapter = new ScriptedAdapter([
+      { text: '<function_calls>\n<invoke name="foo">', stopReason: 'stop_sequence' },
+      { text: 'x', stopReason: 'stop_sequence' },
+      { text: 'y', stopReason: 'stop_sequence' },
+      { text: 'and then the block resolves with a full stretch of real output', stopReason: 'end_turn' },
+    ]);
+    const membrane = new Membrane(adapter, { logger: mockLogger() });
+    const response = await membrane.stream(REQUEST, {});
+    expect('stopReason' in response && response.stopReason).toBe('end_turn');
+    expect(adapter.streamCalls).toBe(4);
+    // The stalled rounds' content survives — nothing was truncated.
+    expect('rawAssistantText' in response && response.rawAssistantText).toContain('xy');
+  });
+
+  it('a progressing round resets the stall count', async () => {
+    // stall, stall, progress, stall, stall, finish — never three in a row.
+    const adapter = new ScriptedAdapter([
+      { text: '<function_calls>\n<invoke name="foo">', stopReason: 'stop_sequence' },
+      { text: 'a', stopReason: 'stop_sequence' },
+      { text: 'b', stopReason: 'stop_sequence' },
+      { text: 'a long progressing stretch that resets the stall counter here', stopReason: 'stop_sequence' },
+      { text: 'c', stopReason: 'stop_sequence' },
+      { text: 'd', stopReason: 'stop_sequence' },
+      { text: 'closing out with another long natural stretch of output now', stopReason: 'end_turn' },
+    ]);
+    const membrane = new Membrane(adapter, { logger: mockLogger() });
+    const response = await membrane.stream(REQUEST, {});
+    expect('stopReason' in response && response.stopReason).toBe('end_turn');
+    expect(adapter.streamCalls).toBe(7);
+  });
 });
 
-describe('continuation round cap', () => {
+describe('resumption round cap', () => {
   // Every round opens ANOTHER block with >16 chars of content: always
   // "progressing", always resuming — only the cap stops it.
   const EVER_DEEPER: ScriptedRound[] = [
     { text: '<function_calls>\n<invoke name="round-content-padding">', stopReason: 'stop_sequence' },
   ];
 
-  it('bounds rounds independently of maxToolDepth', async () => {
+  it('bounds resumptions independently of maxToolDepth, with a truthful reason', async () => {
     const adapter = new ScriptedAdapter(EVER_DEEPER);
     const logger = mockLogger();
     const membrane = new Membrane(adapter, { logger });
-    const response = await membrane.stream(REQUEST, { maxContinuationRounds: 2, maxToolDepth: 50 });
-    expect('stopReason' in response && response.stopReason).toBe('no_progress');
-    // Initial round + 2 permitted continuations; the 3rd registration trips the cap.
+    const response = await membrane.stream(REQUEST, { maxResumptionRounds: 2, maxToolDepth: 50 });
+    // These rounds progressed — 'no_progress' would be a lie; the cap says
+    // what actually happened.
+    expect('stopReason' in response && response.stopReason).toBe('round_limit');
+    // Initial round + 2 permitted resumptions; the 3rd registration trips the cap.
     expect(adapter.streamCalls).toBe(3);
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('round cap'));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('resumption cap'));
   });
 
-  it('bounds the yielding path even though its tool depth is unlimited by design', async () => {
+  it('bounds the yielding path without touching its uncapped tool-loop contract', async () => {
     const adapter = new ScriptedAdapter(EVER_DEEPER);
     const membrane = new Membrane(adapter, { logger: mockLogger() });
-    const stream = membrane.streamYielding(REQUEST, { maxContinuationRounds: 3 });
+    const stream = membrane.streamYielding(REQUEST, { maxResumptionRounds: 3 });
     let finalStopReason: string | undefined;
     for await (const event of stream) {
       if (event.type === 'complete') {
         finalStopReason = (event as { response: { stopReason: string } }).response.stopReason;
       }
     }
-    expect(finalStopReason).toBe('no_progress');
+    expect(finalStopReason).toBe('round_limit');
     expect(adapter.streamCalls).toBe(4);
   });
 });
 
+describe('tool rounds are not resumptions', () => {
+  it('a long legitimate tool chain runs past the resumption cap untouched', async () => {
+    const TOOL_ROUNDS = 30; // well past the default resumption cap of 24
+    const script: ScriptedRound[] = [
+      ...Array.from({ length: TOOL_ROUNDS }, (_, i) => ({
+        text: `<function_calls>\n<invoke name="step"><parameter name="n">${i}</parameter></invoke>\n`,
+        stopReason: 'stop_sequence',
+        stopSequence: '</function_calls>',
+      })),
+      { text: 'done after the full chain of real tool work.', stopReason: 'end_turn' },
+    ];
+    const adapter = new ScriptedAdapter(script);
+    const logger = mockLogger();
+    const membrane = new Membrane(adapter, { logger });
+    let toolRounds = 0;
+    const response = await membrane.stream(REQUEST, {
+      maxToolDepth: 50,
+      onToolCalls: async (calls) => {
+        toolRounds++;
+        return calls.map((c) => ({ toolUseId: c.id, content: 'ok', isError: false }));
+      },
+    });
+    // The final provider round streamed and the turn ended naturally:
+    // no cap, no stall, no mislabeled 'no_progress' on real work.
+    expect('stopReason' in response && response.stopReason).toBe('end_turn');
+    expect('rawAssistantText' in response && response.rawAssistantText).toContain('done after the full chain');
+    expect(toolRounds).toBe(TOOL_ROUNDS);
+    expect(adapter.streamCalls).toBe(TOOL_ROUNDS + 1);
+    // And no spin telemetry fired for it.
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+});
+
 describe('round telemetry', () => {
-  it('warns once when rounds reach the visibility threshold', async () => {
+  it('warns once when resumptions reach the visibility threshold', async () => {
     const adapter = new ScriptedAdapter([
       { text: '<function_calls>\n<invoke name="keeps-on-opening-blocks">', stopReason: 'stop_sequence' },
     ]);
     const logger = mockLogger();
     const membrane = new Membrane(adapter, { logger });
-    await membrane.stream(REQUEST, { maxContinuationRounds: 7 });
+    await membrane.stream(REQUEST, { maxResumptionRounds: 7 });
     const roundWarnings = logger.warn.mock.calls.filter(
       (c) => typeof c[0] === 'string' && c[0].includes('at round 5'),
     );
