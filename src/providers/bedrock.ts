@@ -120,7 +120,23 @@ interface BedrockStreamEvent {
   usage?: {
     input_tokens: number;
     output_tokens: number;
+    cache_creation_input_tokens?: number | null;
+    cache_read_input_tokens?: number | null;
   };
+}
+
+/**
+ * Bedrock accepts `cache_control: { type: 'ephemeral' }` but rejects the
+ * direct-API `ttl` extension ("cache_control.ttl: Extra inputs are not
+ * permitted"). Drop the ttl, keep the marker — the cache still works, at
+ * Bedrock's fixed default TTL.
+ */
+function stripCacheTtl<T extends Record<string, any>>(block: T): T {
+  if (block?.cache_control && typeof block.cache_control === 'object' && 'ttl' in block.cache_control) {
+    const { ttl, ...cacheControl } = block.cache_control;
+    return { ...block, cache_control: cacheControl };
+  }
+  return block;
 }
 
 // ============================================================================
@@ -347,7 +363,14 @@ export class BedrockAdapter implements ProviderAdapter {
 
   private buildRequest(request: ProviderRequest, bedrockModelId?: string): BedrockMessageRequest {
     // Strip provider-specific fields (e.g., sourceUrl for Gemini) from image blocks
-    // before sending to Bedrock/Anthropic, which rejects extra inputs
+    // before sending to Bedrock/Anthropic, which rejects extra inputs.
+    //
+    // Same treatment for cache_control.ttl: Bedrock's prompt cache runs at the
+    // fixed default (5m) TTL — the ttl field is a direct-API extension and
+    // Bedrock rejects it as an extra input. The marker itself is fine and
+    // caching works without the field, so strip just the ttl and keep the
+    // breakpoint. Transport quirks belong to the transport, not to every
+    // caller that sets cacheTtl. (Connectome issue #35.)
     const sanitizedMessages = (request.messages as any[]).map((msg: any) => {
       if (!Array.isArray(msg.content)) return msg;
       return {
@@ -355,9 +378,9 @@ export class BedrockAdapter implements ProviderAdapter {
         content: msg.content.map((block: any) => {
           if (block.type === 'image' && block.sourceUrl !== undefined) {
             const { sourceUrl, ...rest } = block;
-            return rest;
+            return stripCacheTtl(rest);
           }
-          return block;
+          return stripCacheTtl(block);
         }),
       };
     });
@@ -377,6 +400,10 @@ export class BedrockAdapter implements ProviderAdapter {
       if (needsFlatten && Array.isArray(request.system)) {
         const blocks = request.system as Array<{ type: string; text: string }>;
         params.system = blocks.map(b => b.text).join('\n\n');
+      } else if (Array.isArray(request.system)) {
+        params.system = (request.system as Array<Record<string, any>>).map(
+          b => stripCacheTtl(b)
+        ) as BedrockMessageRequest['system'];
       } else {
         params.system = request.system as BedrockMessageRequest['system'];
       }
@@ -400,7 +427,7 @@ export class BedrockAdapter implements ProviderAdapter {
     }
 
     if (request.tools && request.tools.length > 0) {
-      params.tools = request.tools;
+      params.tools = (request.tools as Array<Record<string, any>>).map(t => stripCacheTtl(t));
     }
 
     // Handle extended thinking
@@ -516,6 +543,8 @@ export class BedrockAdapter implements ProviderAdapter {
     let finalMessage: BedrockMessageResponse | undefined;
     let inputTokens = 0;
     let outputTokens = 0;
+    let cacheCreationTokens: number | undefined;
+    let cacheReadTokens: number | undefined;
     let stopReason: string = 'end_turn';
     let stopSequence: string | undefined;
     let fullText = '';
@@ -630,7 +659,19 @@ export class BedrockAdapter implements ProviderAdapter {
                 }
 
                 if (eventData.type === 'message_start' && eventData.message) {
-                  inputTokens = eventData.message.usage?.input_tokens ?? 0;
+                  // Cache metrics ride the same usage objects as on the direct
+                  // API. Dropping them (pre-2026-07-31) made caching look
+                  // permanently inert on Bedrock streams: complete() surfaced
+                  // them, stream() zeroed them, and every ledger/pricing
+                  // consumer downstream saw zeros. (Connectome issue #35.)
+                  const startUsage = eventData.message.usage;
+                  inputTokens = startUsage?.input_tokens ?? 0;
+                  if (startUsage?.cache_creation_input_tokens != null) {
+                    cacheCreationTokens = startUsage.cache_creation_input_tokens;
+                  }
+                  if (startUsage?.cache_read_input_tokens != null) {
+                    cacheReadTokens = startUsage.cache_read_input_tokens;
+                  }
                 } else if (eventData.type === 'content_block_start') {
                   currentBlockIndex = eventData.index ?? 0;
                   contentBlocks[currentBlockIndex] = eventData.content_block as { type: string };
@@ -679,6 +720,15 @@ export class BedrockAdapter implements ProviderAdapter {
                 } else if (eventData.type === 'message_delta') {
                   if (eventData.usage) {
                     outputTokens = eventData.usage.output_tokens;
+                    // message_delta carries cumulative cache metrics — use as
+                    // authoritative when present (same contract as the
+                    // Anthropic adapter).
+                    if (eventData.usage.cache_creation_input_tokens != null) {
+                      cacheCreationTokens = eventData.usage.cache_creation_input_tokens;
+                    }
+                    if (eventData.usage.cache_read_input_tokens != null) {
+                      cacheReadTokens = eventData.usage.cache_read_input_tokens;
+                    }
                   }
                   if (eventData.delta?.stop_reason) {
                     stopReason = eventData.delta.stop_reason;
@@ -751,6 +801,8 @@ export class BedrockAdapter implements ProviderAdapter {
       usage: {
         input_tokens: inputTokens,
         output_tokens: outputTokens,
+        ...(cacheCreationTokens != null ? { cache_creation_input_tokens: cacheCreationTokens } : {}),
+        ...(cacheReadTokens != null ? { cache_read_input_tokens: cacheReadTokens } : {}),
       },
     };
 
