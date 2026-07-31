@@ -288,6 +288,18 @@ export class BedrockAdapter implements ProviderAdapter {
   }
 
   /**
+   * Cross-region inference-profile prefix for this adapter's region.
+   * Claude 4-era models on Bedrock reject on-demand invocation of the
+   * direct id ("Invocation ... with on-demand throughput isn't supported")
+   * and require the profile form — verified live 2026-07-31.
+   */
+  private inferenceProfilePrefix(): string {
+    if (this.region.startsWith('eu-')) return 'eu.';
+    if (this.region.startsWith('ap-')) return 'apac.';
+    return 'us.';
+  }
+
+  /**
    * Convert a standard Claude model ID to Bedrock format if needed
    */
   private toBedrockModelId(modelId: string): string {
@@ -303,7 +315,13 @@ export class BedrockAdapter implements ProviderAdapter {
       return modelId;
     }
 
-    // Map common Claude model IDs to Bedrock format
+    const profile = this.inferenceProfilePrefix();
+
+    // Map common Claude model IDs to Bedrock format. The 3.x entries keep
+    // their historical direct-id form (those models predate inference
+    // profiles; all are EOL on Bedrock as of 2026-07 anyway, so the exact
+    // shape is moot). 4-era entries use the profile form — the direct id
+    // no longer invokes.
     const modelMap: Record<string, string> = {
       'claude-3-5-sonnet-20241022': 'anthropic.claude-3-5-sonnet-20241022-v2:0',
       'claude-3-5-sonnet-latest': 'anthropic.claude-3-5-sonnet-20241022-v2:0',
@@ -312,13 +330,15 @@ export class BedrockAdapter implements ProviderAdapter {
       'claude-3-opus-20240229': 'anthropic.claude-3-opus-20240229-v1:0',
       'claude-3-sonnet-20240229': 'anthropic.claude-3-sonnet-20240229-v1:0',
       'claude-3-haiku-20240307': 'anthropic.claude-3-haiku-20240307-v1:0',
-      'claude-sonnet-4-20250514': 'anthropic.claude-sonnet-4-20250514-v1:0',
-      'claude-opus-4-20250514': 'anthropic.claude-opus-4-20250514-v1:0',
-      // Haiku 4.5 aliases
-      'claude-haiku-4-5-20251001': 'anthropic.claude-3-5-haiku-20241022-v1:0',
+      'claude-sonnet-4-20250514': `${profile}anthropic.claude-sonnet-4-20250514-v1:0`,
+      'claude-opus-4-20250514': `${profile}anthropic.claude-opus-4-20250514-v1:0`,
+      // Haiku 4.5 previously aliased to 3.5 Haiku (a stand-in from before
+      // Haiku 4.5 reached Bedrock). 3.5 Haiku is EOL on Bedrock now, so the
+      // alias routed every plain-id caller to a guaranteed error.
+      'claude-haiku-4-5-20251001': `${profile}anthropic.claude-haiku-4-5-20251001-v1:0`,
     };
 
-    return modelMap[modelId] ?? `anthropic.${modelId}-v1:0`;
+    return modelMap[modelId] ?? `${profile}anthropic.${modelId}-v1:0`;
   }
 
   async complete(
