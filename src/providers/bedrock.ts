@@ -49,6 +49,16 @@ export interface BedrockAdapterConfig {
 
   /** Anthropic API version header (defaults to 2023-06-01) */
   anthropicVersion?: string;
+
+  /**
+   * Endpoint override (no trailing slash), e.g. an inference gateway leg
+   * like `https://gate.animalabs.ai/bedrock/apse1`. Defaults to
+   * `https://bedrock-runtime.{region}.amazonaws.com`. When pointing at a
+   * gateway, set accessKeyId to the gate token — the gateway reads it from
+   * the SigV4 Credential field, discards the client signature, and re-signs
+   * with real AWS creds that never leave the gateway box.
+   */
+  baseURL?: string;
 }
 
 // ============================================================================
@@ -252,6 +262,7 @@ export class BedrockAdapter implements ProviderAdapter {
   private region: string;
   private defaultMaxTokens: number;
   private anthropicVersion: string;
+  private baseURL?: string;
 
   constructor(config: BedrockAdapterConfig = {}) {
     this.accessKeyId = config.accessKeyId ?? process.env.AWS_ACCESS_KEY_ID ?? '';
@@ -260,6 +271,7 @@ export class BedrockAdapter implements ProviderAdapter {
     this.region = config.region ?? process.env.AWS_REGION ?? 'us-west-2';
     this.defaultMaxTokens = config.defaultMaxTokens ?? 4096;
     this.anthropicVersion = config.anthropicVersion ?? 'bedrock-2023-05-31';
+    this.baseURL = config.baseURL?.replace(/\/$/, '');
 
     if (!this.accessKeyId || !this.secretAccessKey) {
       throw new Error('AWS credentials required: accessKeyId and secretAccessKey');
@@ -434,7 +446,7 @@ export class BedrockAdapter implements ProviderAdapter {
     signal?: AbortSignal
   ): Promise<BedrockMessageResponse> {
     const url = new URL(
-      `https://bedrock-runtime.${this.region}.amazonaws.com/model/${encodeURIComponent(modelId)}/invoke`
+      `${this.baseURL ?? `https://bedrock-runtime.${this.region}.amazonaws.com`}/model/${encodeURIComponent(modelId)}/invoke`
     );
 
     const body = JSON.stringify(request);
@@ -477,7 +489,7 @@ export class BedrockAdapter implements ProviderAdapter {
     signal?: AbortSignal
   ): Promise<ProviderResponse> {
     const url = new URL(
-      `https://bedrock-runtime.${this.region}.amazonaws.com/model/${encodeURIComponent(modelId)}/invoke-with-response-stream`
+      `${this.baseURL ?? `https://bedrock-runtime.${this.region}.amazonaws.com`}/model/${encodeURIComponent(modelId)}/invoke-with-response-stream`
     );
 
     const body = JSON.stringify(request);
