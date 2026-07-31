@@ -130,7 +130,23 @@ interface BedrockStreamEvent {
   usage?: {
     input_tokens: number;
     output_tokens: number;
+    cache_creation_input_tokens?: number | null;
+    cache_read_input_tokens?: number | null;
   };
+}
+
+/**
+ * Bedrock accepts `cache_control: { type: 'ephemeral' }` but rejects the
+ * direct-API `ttl` extension ("cache_control.ttl: Extra inputs are not
+ * permitted"). Drop the ttl, keep the marker — the cache still works, at
+ * Bedrock's fixed default TTL.
+ */
+function stripCacheTtl<T extends Record<string, any>>(block: T): T {
+  if (block?.cache_control && typeof block.cache_control === 'object' && 'ttl' in block.cache_control) {
+    const { ttl, ...cacheControl } = block.cache_control;
+    return { ...block, cache_control: cacheControl };
+  }
+  return block;
 }
 
 // ============================================================================
@@ -284,6 +300,18 @@ export class BedrockAdapter implements ProviderAdapter {
   }
 
   /**
+   * Cross-region inference-profile prefix for this adapter's region.
+   * Claude 4-era models on Bedrock reject on-demand invocation of the
+   * direct id ("Invocation ... with on-demand throughput isn't supported")
+   * and require the profile form — verified live 2026-07-31.
+   */
+  private inferenceProfilePrefix(): string {
+    if (this.region.startsWith('eu-')) return 'eu.';
+    if (this.region.startsWith('ap-')) return 'apac.';
+    return 'us.';
+  }
+
+  /**
    * Convert a standard Claude model ID to Bedrock format if needed
    */
   private toBedrockModelId(modelId: string): string {
@@ -299,7 +327,13 @@ export class BedrockAdapter implements ProviderAdapter {
       return modelId;
     }
 
-    // Map common Claude model IDs to Bedrock format
+    const profile = this.inferenceProfilePrefix();
+
+    // Map common Claude model IDs to Bedrock format. The 3.x entries keep
+    // their historical direct-id form (those models predate inference
+    // profiles; all are EOL on Bedrock as of 2026-07 anyway, so the exact
+    // shape is moot). 4-era entries use the profile form — the direct id
+    // no longer invokes.
     const modelMap: Record<string, string> = {
       'claude-3-5-sonnet-20241022': 'anthropic.claude-3-5-sonnet-20241022-v2:0',
       'claude-3-5-sonnet-latest': 'anthropic.claude-3-5-sonnet-20241022-v2:0',
@@ -308,13 +342,15 @@ export class BedrockAdapter implements ProviderAdapter {
       'claude-3-opus-20240229': 'anthropic.claude-3-opus-20240229-v1:0',
       'claude-3-sonnet-20240229': 'anthropic.claude-3-sonnet-20240229-v1:0',
       'claude-3-haiku-20240307': 'anthropic.claude-3-haiku-20240307-v1:0',
-      'claude-sonnet-4-20250514': 'anthropic.claude-sonnet-4-20250514-v1:0',
-      'claude-opus-4-20250514': 'anthropic.claude-opus-4-20250514-v1:0',
-      // Haiku 4.5 aliases
-      'claude-haiku-4-5-20251001': 'anthropic.claude-3-5-haiku-20241022-v1:0',
+      'claude-sonnet-4-20250514': `${profile}anthropic.claude-sonnet-4-20250514-v1:0`,
+      'claude-opus-4-20250514': `${profile}anthropic.claude-opus-4-20250514-v1:0`,
+      // Haiku 4.5 previously aliased to 3.5 Haiku (a stand-in from before
+      // Haiku 4.5 reached Bedrock). 3.5 Haiku is EOL on Bedrock now, so the
+      // alias routed every plain-id caller to a guaranteed error.
+      'claude-haiku-4-5-20251001': `${profile}anthropic.claude-haiku-4-5-20251001-v1:0`,
     };
 
-    return modelMap[modelId] ?? `anthropic.${modelId}-v1:0`;
+    return modelMap[modelId] ?? `${profile}anthropic.${modelId}-v1:0`;
   }
 
   async complete(
@@ -359,7 +395,14 @@ export class BedrockAdapter implements ProviderAdapter {
 
   private buildRequest(request: ProviderRequest, bedrockModelId?: string): BedrockMessageRequest {
     // Strip provider-specific fields (e.g., sourceUrl for Gemini) from image blocks
-    // before sending to Bedrock/Anthropic, which rejects extra inputs
+    // before sending to Bedrock/Anthropic, which rejects extra inputs.
+    //
+    // Same treatment for cache_control.ttl: Bedrock's prompt cache runs at the
+    // fixed default (5m) TTL — the ttl field is a direct-API extension and
+    // Bedrock rejects it as an extra input. The marker itself is fine and
+    // caching works without the field, so strip just the ttl and keep the
+    // breakpoint. Transport quirks belong to the transport, not to every
+    // caller that sets cacheTtl. (Connectome issue #35.)
     const sanitizedMessages = (request.messages as any[]).map((msg: any) => {
       if (!Array.isArray(msg.content)) return msg;
       return {
@@ -367,9 +410,9 @@ export class BedrockAdapter implements ProviderAdapter {
         content: msg.content.map((block: any) => {
           if (block.type === 'image' && block.sourceUrl !== undefined) {
             const { sourceUrl, ...rest } = block;
-            return rest;
+            return stripCacheTtl(rest);
           }
-          return block;
+          return stripCacheTtl(block);
         }),
       };
     });
@@ -389,6 +432,10 @@ export class BedrockAdapter implements ProviderAdapter {
       if (needsFlatten && Array.isArray(request.system)) {
         const blocks = request.system as Array<{ type: string; text: string }>;
         params.system = blocks.map(b => b.text).join('\n\n');
+      } else if (Array.isArray(request.system)) {
+        params.system = (request.system as Array<Record<string, any>>).map(
+          b => stripCacheTtl(b)
+        ) as BedrockMessageRequest['system'];
       } else {
         params.system = request.system as BedrockMessageRequest['system'];
       }
@@ -412,7 +459,7 @@ export class BedrockAdapter implements ProviderAdapter {
     }
 
     if (request.tools && request.tools.length > 0) {
-      params.tools = request.tools;
+      params.tools = (request.tools as Array<Record<string, any>>).map(t => stripCacheTtl(t));
     }
 
     // Handle extended thinking
@@ -528,6 +575,8 @@ export class BedrockAdapter implements ProviderAdapter {
     let finalMessage: BedrockMessageResponse | undefined;
     let inputTokens = 0;
     let outputTokens = 0;
+    let cacheCreationTokens: number | undefined;
+    let cacheReadTokens: number | undefined;
     let stopReason: string = 'end_turn';
     let stopSequence: string | undefined;
     let fullText = '';
@@ -642,7 +691,19 @@ export class BedrockAdapter implements ProviderAdapter {
                 }
 
                 if (eventData.type === 'message_start' && eventData.message) {
-                  inputTokens = eventData.message.usage?.input_tokens ?? 0;
+                  // Cache metrics ride the same usage objects as on the direct
+                  // API. Dropping them (pre-2026-07-31) made caching look
+                  // permanently inert on Bedrock streams: complete() surfaced
+                  // them, stream() zeroed them, and every ledger/pricing
+                  // consumer downstream saw zeros. (Connectome issue #35.)
+                  const startUsage = eventData.message.usage;
+                  inputTokens = startUsage?.input_tokens ?? 0;
+                  if (startUsage?.cache_creation_input_tokens != null) {
+                    cacheCreationTokens = startUsage.cache_creation_input_tokens;
+                  }
+                  if (startUsage?.cache_read_input_tokens != null) {
+                    cacheReadTokens = startUsage.cache_read_input_tokens;
+                  }
                 } else if (eventData.type === 'content_block_start') {
                   currentBlockIndex = eventData.index ?? 0;
                   contentBlocks[currentBlockIndex] = eventData.content_block as { type: string };
@@ -691,6 +752,15 @@ export class BedrockAdapter implements ProviderAdapter {
                 } else if (eventData.type === 'message_delta') {
                   if (eventData.usage) {
                     outputTokens = eventData.usage.output_tokens;
+                    // message_delta carries cumulative cache metrics — use as
+                    // authoritative when present (same contract as the
+                    // Anthropic adapter).
+                    if (eventData.usage.cache_creation_input_tokens != null) {
+                      cacheCreationTokens = eventData.usage.cache_creation_input_tokens;
+                    }
+                    if (eventData.usage.cache_read_input_tokens != null) {
+                      cacheReadTokens = eventData.usage.cache_read_input_tokens;
+                    }
                   }
                   if (eventData.delta?.stop_reason) {
                     stopReason = eventData.delta.stop_reason;
@@ -763,6 +833,8 @@ export class BedrockAdapter implements ProviderAdapter {
       usage: {
         input_tokens: inputTokens,
         output_tokens: outputTokens,
+        ...(cacheCreationTokens != null ? { cache_creation_input_tokens: cacheCreationTokens } : {}),
+        ...(cacheReadTokens != null ? { cache_read_input_tokens: cacheReadTokens } : {}),
       },
     };
 
