@@ -25,6 +25,11 @@ describe('BedrockAdapter model id mapping', () => {
     expect(mapId('anthropic.claude-3-opus-20240229-v1:0')).toBe('anthropic.claude-3-opus-20240229-v1:0');
     expect(mapId('us.anthropic.claude-opus-4-1-20250805-v1:0')).toBe('us.anthropic.claude-opus-4-1-20250805-v1:0');
     expect(mapId('bedrock:us.anthropic.claude-sonnet-4-20250514-v1:0')).toBe('us.anthropic.claude-sonnet-4-20250514-v1:0');
+    // `global` is 6 chars — regression check for the {2,4} prefix regex that
+    // re-prefixed global inference-profile ids (found wiring Princess via
+    // gate apse1, where Sonnet 4.5 exists ONLY as the global. profile).
+    expect(mapId('global.anthropic.claude-sonnet-4-5-20250929-v1:0')).toBe('global.anthropic.claude-sonnet-4-5-20250929-v1:0');
+    expect(mapId('global.anthropic.claude-sonnet-4-5-20250929-v1:0', 'ap-southeast-1')).toBe('global.anthropic.claude-sonnet-4-5-20250929-v1:0');
   });
 
   it('maps 4-era plain ids to inference-profile form', () => {
