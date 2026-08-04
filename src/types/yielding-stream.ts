@@ -70,6 +70,35 @@ export interface ErrorEvent {
 }
 
 /**
+ * Retrying event — the provider ended the attempt with
+ * `stop_reason: 'refusal'` and membrane is re-issuing it (opt-in via
+ * `refusalRetries`).
+ *
+ * **The consumer MUST discard everything this call has emitted so far**:
+ * `tokens`, `block`, and any partially built assistant content belong to an
+ * attempt that no longer exists. A fresh sequence follows. Consumers that
+ * have already shown those tokens to a human (a TUI, a chat surface) must
+ * retract or overwrite them.
+ *
+ * Why this exists: near the classifier threshold a refusal is probabilistic
+ * rather than a property of the payload — the same bytes pass and refuse
+ * minutes apart — so re-asking is the cheapest correct response. Retrying
+ * silently would corrupt any consumer that already rendered the discarded
+ * attempt, which is why it is opt-in and announced rather than invisible.
+ */
+export interface RetryingEvent {
+  type: 'retrying';
+  /** 1-based index of the retry about to be issued. */
+  attempt: number;
+  /** Configured maximum number of retries. */
+  maxAttempts: number;
+  /** Always 'refusal' today; widened only if other retryable stops appear. */
+  reason: 'refusal';
+  /** Provider's refusal category when it supplies one (e.g. 'cyber'). */
+  category?: string;
+}
+
+/**
  * Aborted event - stream was cancelled.
  */
 export interface AbortedEvent {
@@ -87,6 +116,7 @@ export interface AbortedEvent {
 export type StreamEvent =
   | TokensEvent
   | StreamBlockEvent
+  | RetryingEvent
   | ToolCallsEvent
   | UsageEvent
   | CompleteEvent
@@ -224,6 +254,23 @@ export interface YieldingStreamOptions {
 
   /** Request ID for correlation/logging */
   requestId?: string;
+
+  /**
+   * Re-issue an attempt that ends with `stop_reason: 'refusal'`, up to this
+   * many times. Default 0 (off).
+   *
+   * Enabling it means the stream can emit `RetryingEvent` — **consumers MUST
+   * handle it and discard what they have received for the call**, or two
+   * attempts will be concatenated. That is why it is off by default and why
+   * turning it on is a per-call decision by a consumer that has been updated.
+   *
+   * Rationale: near the content-policy threshold a refusal is probabilistic,
+   * not a property of the payload — identical bytes pass and refuse minutes
+   * apart. Re-asking is cheaper and less invasive than rewriting the
+   * conversation, and the replay is cache-warm, so only the discarded output
+   * tokens are real spend.
+   */
+  refusalRetries?: number;
 
   /**
    * Maximum tool execution depth. Default: unlimited.

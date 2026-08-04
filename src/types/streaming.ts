@@ -262,6 +262,21 @@ export interface CompleteOptions {
   /** Abort signal for cancellation */
   signal?: AbortSignal;
 
+  /**
+   * Re-issue the request when it ends with `stop_reason: 'refusal'`, up to
+   * this many times. Default 0 (off).
+   *
+   * Safe and invisible on this path: nothing has been emitted to the caller
+   * yet, so a discarded attempt leaves no trace beyond its output tokens
+   * (the replay is cache-warm on input). The streaming equivalent needs the
+   * caller to handle `RetryingEvent` — see YieldingStreamOptions.
+   *
+   * Near the content-policy threshold a refusal is probabilistic rather than
+   * a property of the payload, so re-asking is the cheapest correct response
+   * — cheaper and far less invasive than rewriting the conversation.
+   */
+  refusalRetries?: number;
+
   /** Request timeout */
   timeoutMs?: number;
 

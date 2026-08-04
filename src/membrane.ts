@@ -105,6 +105,10 @@ export class Membrane {
     const startTime = Date.now();
     let attempts = 0;
     let rawRequest: unknown;
+    // Counted separately from `attempts` (the transport-error budget): a
+    // refusal is a successful HTTP call with an unwanted verdict, and letting
+    // it consume error retries would couple two unrelated budgets.
+    let refusalRetriesUsed = 0;
 
     while (true) {
       attempts++;
@@ -139,6 +143,19 @@ export class Membrane {
           attempts,
           rawRequest
         );
+
+        // Re-issue a content-policy refusal (opt-in, default off). Safe here
+        // in a way the streaming paths are not: nothing has reached the
+        // caller yet, so the abandoned attempt leaves no trace to retract.
+        // Deliberately BEFORE afterResponse — a hook that logs or transforms
+        // should see the attempt that actually stands, not the discarded one.
+        if (
+          response.stopReason === 'refusal' &&
+          refusalRetriesUsed < Math.max(0, options.refusalRetries ?? 0)
+        ) {
+          refusalRetriesUsed++;
+          continue;
+        }
 
         // Call afterResponse hook
         if (this.config.hooks?.afterResponse) {
@@ -1681,6 +1698,23 @@ export class Membrane {
        * separate `streamOnceWithoutHook` so the bypass is intentional.
        */
       normalizedRequest: NormalizedRequest;
+      /**
+       * Re-issue this attempt when the provider ends it with
+       * `stop_reason: 'refusal'` (see RetryingEvent). Default 0 = off, so
+       * every existing caller keeps byte-identical behaviour.
+       */
+      refusalRetries?: number;
+      /**
+       * REQUIRED to enable streaming retries. Called immediately before a
+       * re-issue so the caller can discard the abandoned attempt: reset its
+       * accumulators and tell its own consumer to drop what it emitted.
+       *
+       * Without it a retry would silently concatenate two attempts, so a
+       * caller that does not pass this simply does not get retries — an
+       * unaware consumer can never be corrupted by enabling the option
+       * somewhere upstream.
+       */
+      onRetrying?: (info: { attempt: number; maxAttempts: number; category?: string }) => void;
     }
   ) {
     // Strip `normalizedRequest` before forwarding to the adapter — it's
@@ -1688,9 +1722,21 @@ export class Membrane {
     // compatibility won't catch the excess field (checked only on object
     // literals, not on variables). Leaving it in would silently leak the
     // normalized form into every adapter's options.
-    const { normalizedRequest, ...adapterOptions } = options;
+    const { normalizedRequest, refusalRetries, onRetrying, ...adapterOptions } = options;
     const finalRequest = (await this.applyBeforeRequestHook(normalizedRequest, request)) as typeof request;
-    return await this.adapter.stream(finalRequest, callbacks, adapterOptions);
+
+    // Retries are only safe when the caller can discard the abandoned
+    // attempt, so they require BOTH a budget and an onRetrying hook.
+    const maxAttempts = onRetrying ? Math.max(0, refusalRetries ?? 0) : 0;
+    let retried = 0;
+    while (true) {
+      const result = await this.adapter.stream(finalRequest, callbacks, adapterOptions);
+      if (result.stopReason !== 'refusal' || retried >= maxAttempts) return result;
+      retried++;
+      const category = (result.raw as { response?: { stop_details?: { category?: string } } } | undefined)
+        ?.response?.stop_details?.category;
+      onRetrying!({ attempt: retried, maxAttempts, category });
+    }
   }
 
   private buildContinuationRequest(
@@ -2171,6 +2217,18 @@ export class Membrane {
     options: YieldingStreamOptions = {}
   ): YieldingStream {
     const toolMode = this.resolveToolMode(request);
+
+    // refusalRetries is implemented on the native path only. The XML path
+    // accumulates into a streaming parser carrying prefill context and
+    // resumption depths; rolling that back mid-turn is a separate problem,
+    // and a partial implementation would corrupt the turn instead of
+    // retrying it. Fail LOUD and OFF rather than silently mis-retrying.
+    if (toolMode !== 'native' && (options.refusalRetries ?? 0) > 0) {
+      (this.config.logger ?? console).warn(
+        '[membrane] refusalRetries is ignored in XML tool mode ' +
+        '(native-only for now) — the turn will surface the refusal as before.',
+      );
+    }
 
     // Create the yielding stream with the appropriate inference runner
     const runInference = toolMode === 'native'
@@ -2824,6 +2882,9 @@ export class Membrane {
         // Stream from provider
         let textAccumulated = '';
         let blockIndex = 0;
+        // Where this attempt starts inside the tool-loop-spanning buffer, so
+        // a refusal retry can roll back exactly this attempt's contribution.
+        const allTextBefore = allTextAccumulated.length;
         // Track block-type from the provider's content_block_start signal so
         // every token chunk is tagged with the membrane block it belongs to.
         // Without this, thinking_delta chunks get mislabelled as 'text' and
@@ -2902,6 +2963,25 @@ export class Membrane {
             idleTimeoutMs: options.idleTimeoutMs,
             normalizedRequest: request,
             onRequest: (req: unknown) => { rawRequest = req; },
+            refusalRetries: options.refusalRetries,
+            // Discard the refused attempt: roll the accumulators back to
+            // where this attempt began and tell the consumer to drop what it
+            // already received. `allTextAccumulated` spans the whole tool
+            // loop, so it is truncated rather than cleared.
+            onRetrying: (info) => {
+              allTextAccumulated = allTextAccumulated.slice(0, allTextBefore);
+              textAccumulated = '';
+              blockIndex = 0;
+              currentBlockType = 'text';
+              seenBlockIndices.clear();
+              stream.emit({
+                type: 'retrying',
+                attempt: info.attempt,
+                maxAttempts: info.maxAttempts,
+                reason: 'refusal',
+                ...(info.category ? { category: info.category } : {}),
+              });
+            },
           }
         );
 
