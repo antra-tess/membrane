@@ -780,7 +780,7 @@ function toAnthropicToolResultContent(
  *  can lose or mislabel mediaType (e.g. a PNG tagged image/jpeg), which the
  *  Anthropic API rejects with a 400. Trust the bytes; fall back to the declared
  *  type, then jpeg. */
-function detectImageMediaType(data: string | undefined, fallback?: string): string {
+export function detectImageMediaType(data: string | undefined, fallback?: string): string {
   try {
     const b = Buffer.from((data || "").slice(0, 24), "base64");
     if (b[0]===0x89&&b[1]===0x50&&b[2]===0x4e&&b[3]===0x47) return "image/png";

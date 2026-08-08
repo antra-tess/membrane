@@ -25,6 +25,7 @@ import {
   INTERLEAVED_THINKING_BETA,
   needsInterleavedThinkingBeta,
   thinkingEnabled,
+  detectImageMediaType,
 } from './anthropic.js';
 
 // ============================================================================
@@ -404,6 +405,25 @@ export class BedrockAdapter implements ProviderAdapter {
     // caching works without the field, so strip just the ttl and keep the
     // breakpoint. Transport quirks belong to the transport, not to every
     // caller that sets cacheTtl. (Connectome issue #35.)
+    // Bedrock is strict about the wire shape of image sources: internal blocks
+    // carry camelCase `mediaType`, the API requires snake_case `media_type`.
+    // The Anthropic adapter converts on both paths (toAnthropicContent /
+    // toAnthropicToolResultContent); without the same conversion here a
+    // tool-returned image 400s with "media_type: Field required" mid-turn
+    // (observed on eidoverse snapshot results, 2026-08-08). Applies to
+    // top-level image blocks AND images nested inside tool_result content.
+    const toWireImage = (block: any): any => {
+      const source = block.source;
+      if (!source || source.type !== 'base64') return block;
+      const { mediaType, media_type, ...restSource } = source;
+      return {
+        ...block,
+        source: {
+          ...restSource,
+          media_type: detectImageMediaType(source.data, (media_type ?? mediaType) as string),
+        },
+      };
+    };
     const sanitizedMessages = (request.messages as any[]).map((msg: any) => {
       if (!Array.isArray(msg.content)) return msg;
       return {
@@ -411,7 +431,18 @@ export class BedrockAdapter implements ProviderAdapter {
         content: msg.content.map((block: any) => {
           if (block.type === 'image' && block.sourceUrl !== undefined) {
             const { sourceUrl, ...rest } = block;
-            return stripCacheTtl(rest);
+            return stripCacheTtl(toWireImage(rest));
+          }
+          if (block.type === 'image') {
+            return stripCacheTtl(toWireImage(block));
+          }
+          if (block.type === 'tool_result' && Array.isArray(block.content)) {
+            return stripCacheTtl({
+              ...block,
+              content: block.content.map((inner: any) =>
+                inner?.type === 'image' ? toWireImage(inner) : inner,
+              ),
+            });
           }
           return stripCacheTtl(block);
         }),
