@@ -352,14 +352,33 @@ describe('parseToolCalls', () => {
 });
 
 describe('formatToolResults', () => {
-  it('should format a single result', () => {
-    const results = [{ toolUseId: 'abc', content: 'Success', isError: false }];
+  it('should format a single result in the legacy convention', () => {
+    const results = [{ toolUseId: 'abc', toolName: 'get_data', content: 'Success', isError: false }];
     const xml = formatToolResults(results);
 
     expect(xml).toContain('<function_results>');
     expect(xml).toContain('</function_results>');
-    expect(xml).toContain('tool_use_id="abc"');
+    // Legacy Anthropic shape: no tool_use_id on the wire, tool_name +
+    // stdout elements, raw (unescaped) content.
+    expect(xml).not.toContain('tool_use_id');
+    expect(xml).toContain('<result>');
+    expect(xml).toContain('<tool_name>get_data</tool_name>');
+    expect(xml).toContain('<stdout>');
     expect(xml).toContain('Success');
+  });
+
+  it('leaves ordinary content raw (no entity escaping)', () => {
+    const results = [{ toolUseId: 'q', content: 'said "hi" & left', isError: false }];
+    const xml = formatToolResults(results);
+    expect(xml).toContain('said "hi" & left');
+    expect(xml).not.toContain('&quot;');
+  });
+
+  it('escapes content that contains structural tags', () => {
+    const results = [{ toolUseId: 's', content: 'text with </function_results> inside', isError: false }];
+    const xml = formatToolResults(results);
+    expect(xml).not.toContain('inside\n</function_results>\n</result>');
+    expect(xml).toContain('&lt;/function_results&gt;');
   });
 
   it('should format error results with error tag', () => {
@@ -372,13 +391,29 @@ describe('formatToolResults', () => {
 
   it('should format multiple results', () => {
     const results = [
-      { toolUseId: 'a', content: 'Result A', isError: false },
-      { toolUseId: 'b', content: 'Result B', isError: false },
+      { toolUseId: 'a', toolName: 'first', content: 'Result A', isError: false },
+      { toolUseId: 'b', toolName: 'second', content: 'Result B', isError: false },
     ];
     const xml = formatToolResults(results);
 
-    expect(xml).toContain('tool_use_id="a"');
-    expect(xml).toContain('tool_use_id="b"');
+    expect(xml).toContain('<tool_name>first</tool_name>');
+    expect(xml).toContain('<tool_name>second</tool_name>');
+    expect(xml).toContain('Result A');
+    expect(xml).toContain('Result B');
+    expect((xml.match(/<result>/g) || []).length).toBe(2);
+  });
+
+  it('round-trips: legacy-formatted results parse back with positional ids', () => {
+    const doc =
+      'prose\n<function_calls>\n<invoke name="get_data">\n</invoke>\n</function_calls>\n' +
+      formatToolResults([{ toolUseId: 'ignored', toolName: 'get_data', content: 'payload 42', isError: false }]);
+    const { toolCalls, toolResults } = parseAccumulatedIntoBlocks(doc);
+    expect(toolCalls).toHaveLength(1);
+    expect(toolResults).toHaveLength(1);
+    // Positional pairing: the parsed result claims the preceding call's id.
+    expect(toolResults[0].toolUseId).toBe(toolCalls[0].id);
+    expect(toolResults[0].toolName).toBe('get_data');
+    expect(toolResults[0].content).toBe('payload 42');
   });
 });
 
