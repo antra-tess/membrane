@@ -408,10 +408,16 @@ export class Membrane {
     // Track the initial prefill length so we can extract only NEW content for response
     // Also track what block type we're inside at the end of prefill
     let initialPrefillLength = 0;
+    // Watermark for per-round delta text (ToolContext.roundPreamble): start of
+    // the CURRENT round's model text in parser-accumulated coordinates.
+    // Advanced past each round's injected results push, so injected
+    // <function_results> XML never enters a round's delta.
+    let roundStartLen = 0;
     let initialBlockType: 'thinking' | 'tool_call' | 'tool_result' | null = null;
     if (prefillResult.assistantPrefill) {
       parser.push(prefillResult.assistantPrefill);
       initialPrefillLength = prefillResult.assistantPrefill.length;
+      roundStartLen = initialPrefillLength;
       // Capture what block type we're inside after prefill (if any)
       if (parser.isInsideBlock()) {
         const blockType = parser.getCurrentBlockType();
@@ -699,6 +705,7 @@ export class Membrane {
             const context: ToolContext = {
               rawText: parsed.fullMatch,
               preamble: parsed.beforeText.slice(initialPrefillLength),
+              roundPreamble: parsed.beforeText.slice(roundStartLen),
               depth: toolDepth,
               previousResults: executedToolResults,
               accumulated: parser.getAccumulated().slice(initialPrefillLength),
@@ -831,6 +838,10 @@ export class Membrane {
                 parser.getAccumulated()
               );
             }
+
+            // Next round's model text starts after everything injected this
+            // round (results XML, image-split tags, thinking opener).
+            roundStartLen = parser.getAccumulated().length;
 
             // Reset parser state for new streaming iteration. Tool rounds
             // are the caller's work — they count against maxToolDepth only,
@@ -2314,10 +2325,14 @@ export class Membrane {
 
     // Initialize parser with prefill content
     let initialPrefillLength = 0;
+    // Watermark for per-round delta text (ToolContext.roundPreamble) — see
+    // streamWithXmlTools for rationale. Advanced past each results push.
+    let roundStartLen = 0;
     let initialBlockType: 'thinking' | 'tool_call' | 'tool_result' | null = null;
     if (prefillResult.assistantPrefill) {
       parser.push(prefillResult.assistantPrefill);
       initialPrefillLength = prefillResult.assistantPrefill.length;
+      roundStartLen = initialPrefillLength;
       if (parser.isInsideBlock()) {
         const blockType = parser.getCurrentBlockType();
         if (blockType === 'thinking' || blockType === 'tool_call' || blockType === 'tool_result') {
@@ -2564,6 +2579,7 @@ export class Membrane {
             const context: ToolContext = {
               rawText: parsed.fullMatch,
               preamble: parsed.beforeText.slice(initialPrefillLength),
+              roundPreamble: parsed.beforeText.slice(roundStartLen),
               depth: toolDepth,
               previousResults: executedToolResults,
               accumulated: parser.getAccumulated().slice(initialPrefillLength),
@@ -2724,6 +2740,10 @@ export class Membrane {
                 parser.getAccumulated()
               );
             }
+
+            // Next round's model text starts after everything injected this
+            // round (results XML, image-split tags, thinking opener).
+            roundStartLen = parser.getAccumulated().length;
 
             // Tool rounds are the caller's work — they count against
             // maxToolDepth only, never against the resumption guards

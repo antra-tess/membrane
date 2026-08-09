@@ -63,6 +63,19 @@ export interface ToolContext {
   /** Text before the tool calls (already streamed to user) */
   preamble: string;
 
+  /**
+   * XML mode only: THIS round's model-authored text — the slice of the
+   * turn between the end of the previous round's injected results and this
+   * round's <function_calls> opener. Unlike `preamble` (cumulative: the
+   * whole turn so far, including harness-injected <function_results> XML),
+   * this never repeats earlier rounds and never contains injected results.
+   * Consumers persisting per-round assistant text must prefer this field —
+   * persisting the cumulative `preamble` per round stores each round's text
+   * N times and re-persists injected results as model text (the Evander
+   * 2026-08-08 scaffold-leak pyramid).
+   */
+  roundPreamble?: string;
+
   /** Current depth in tool execution loop */
   depth: number;
 
