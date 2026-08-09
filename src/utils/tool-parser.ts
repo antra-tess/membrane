@@ -188,38 +188,92 @@ export function endsWithPartialToolBlock(text: string): boolean {
 // ============================================================================
 
 /**
- * Format tool results as XML for injection.
- * Handles both string content and structured content blocks (with images).
+ * Structural tags of the XML tool convention. Result content containing any
+ * of these must be escaped or it would desync the document/stream parser;
+ * everything else rides raw (legacy convention — full escapeXml put `&quot;`
+ * entities in front of the model, which Claude-3-era models then reproduce
+ * in their own output).
+ */
+const STRUCTURAL_TAG_RE =
+  /<\/?(?:antml:)?(?:function_calls|function_results|invoke|result|stdout|error|tool_name)\b/;
+
+function renderResultContentString(result: ToolResult): string {
+  if (typeof result.content === 'string') {
+    return result.content;
+  }
+  const parts: string[] = [];
+  for (const block of result.content) {
+    if (block.type === 'text') {
+      parts.push(block.text);
+    } else if (block.type === 'image') {
+      // For XML mode, we can't embed images directly
+      // Add a note about the image for the model
+      const sizeKb = Math.round((block.source.data.length * 0.75) / 1024);
+      parts.push(`[Image: ${block.source.mediaType}, ~${sizeKb}KB]`);
+    }
+  }
+  return parts.join('\n');
+}
+
+/**
+ * Format tool results as XML for injection — the LEGACY Anthropic tool
+ * convention Claude-3-era models were trained on:
+ *
+ *   <function_results>
+ *   <result>
+ *   <tool_name>NAME</tool_name>
+ *   <stdout>
+ *   content
+ *   </stdout>
+ *   </result>
+ *   </function_results>
+ *
+ * Errors render as <error>…</error> inside <function_results>. No
+ * tool_use_id attributes on the wire (a Messages-API concept — the
+ * store keeps the linkage on the blocks); content rides raw unless it
+ * contains structural tags (then escaped, see STRUCTURAL_TAG_RE).
  */
 export function formatToolResults(results: ToolResult[]): string {
   const parts: string[] = ['<function_results>'];
 
   for (const result of results) {
-    const tagName = result.isError ? 'error' : 'result';
-    parts.push(`<${tagName} tool_use_id="${result.toolUseId}">`);
-
-    // Handle both string and array content
-    if (typeof result.content === 'string') {
-      parts.push(escapeXml(result.content));
-    } else if (Array.isArray(result.content)) {
-      // Structured content blocks
-      for (const block of result.content) {
-        if (block.type === 'text') {
-          parts.push(escapeXml(block.text));
-        } else if (block.type === 'image') {
-          // For XML mode, we can't embed images directly
-          // Add a note about the image for the model
-          const sizeKb = Math.round((block.source.data.length * 0.75) / 1024);
-          parts.push(`[Image: ${block.source.mediaType}, ~${sizeKb}KB]`);
-        }
+    if (result.isError) {
+      parts.push('<error>');
+      parts.push(guardResultContent(renderResultContentString(result)));
+      parts.push('</error>');
+    } else {
+      parts.push('<result>');
+      if (result.toolName) {
+        parts.push(`<tool_name>${result.toolName}</tool_name>`);
       }
+      parts.push('<stdout>');
+      parts.push(guardResultContent(renderResultContentString(result)));
+      parts.push('</stdout>');
+      parts.push('</result>');
     }
-
-    parts.push(`</${tagName}>`);
   }
 
   parts.push('</function_results>');
   return parts.join('\n');
+}
+
+/** Escape result content only when it would desync the structural parse. */
+function guardResultContent(s: string): string {
+  return STRUCTURAL_TAG_RE.test(s) ? escapeXml(s) : s;
+}
+
+/** Opening XML of one result, up to where its content begins. */
+function resultOpenXml(result: ToolResult): string {
+  if (result.isError) return '<error>\n';
+  let xml = '<result>\n';
+  if (result.toolName) xml += `<tool_name>${result.toolName}</tool_name>\n`;
+  xml += '<stdout>\n';
+  return xml;
+}
+
+/** Closing XML of one result, after its content. */
+function resultCloseXml(result: ToolResult): string {
+  return result.isError ? '\n</error>\n' : '\n</stdout>\n</result>\n';
 }
 
 /**
@@ -292,6 +346,13 @@ const FUNCTION_RESULTS_BLOCK_REGEX = /<(antml:)?function_results>([\s\S]*?)<\/(a
 const RESULT_REGEX = /<result\s+tool_use_id="([^"]+)">([\s\S]*?)<\/result>/g;
 const ERROR_REGEX = /<error\s+tool_use_id="([^"]+)">([\s\S]*?)<\/error>/g;
 
+// Legacy Anthropic convention — no ids on the wire; results pair
+// positionally with the preceding unmatched tool calls in document order
+// (optionally disambiguated by <tool_name>).
+const LEGACY_RESULT_REGEX =
+  /<result>\s*(?:<tool_name>([\s\S]*?)<\/tool_name>\s*)?<stdout>\n?([\s\S]*?)\n?<\/stdout>\s*<\/result>/g;
+const LEGACY_ERROR_REGEX = /<error>\n?([\s\S]*?)\n?<\/error>/g;
+
 /**
  * Parse accumulated assistant text into structured ContentBlock[].
  * Extracts thinking blocks, tool calls, tool results, and plain text.
@@ -330,6 +391,21 @@ export function parseAccumulatedIntoBlocks(
     block: ContentBlock | ContentBlock[];
   };
   const positions: BlockPosition[] = [];
+
+  // Call sites in document order, for pairing legacy-shaped results
+  // (no tool_use_id on the wire) with the calls they answer.
+  const callSites: Array<{ id: string; name: string; pos: number }> = [];
+  const pairedCallIds = new Set<string>();
+  const claimCall = (beforePos: number, name?: string): string => {
+    for (const site of callSites) {
+      if (site.pos >= beforePos) break;
+      if (pairedCallIds.has(site.id)) continue;
+      if (name && site.name !== name) continue;
+      pairedCallIds.add(site.id);
+      return site.id;
+    }
+    return generateToolId();
+  };
 
   // Find all thinking blocks
   THINKING_BLOCK_REGEX.lastIndex = 0;
@@ -377,6 +453,7 @@ export function parseAccumulatedIntoBlocks(
       const id = generateToolId();
       const toolCall: ToolCall = { id, name: toolName, input };
       toolCalls.push(toolCall);
+      callSites.push({ id, name: toolName, pos: funcMatch.index });
       blockToolCalls.push({
         type: 'tool_use',
         id,
@@ -394,6 +471,7 @@ export function parseAccumulatedIntoBlocks(
       const id = generateToolId();
       const toolCall: ToolCall = { id, name: toolName, input: {} };
       toolCalls.push(toolCall);
+      callSites.push({ id, name: toolName, pos: funcMatch.index });
       blockToolCalls.push({
         type: 'tool_use',
         id,
@@ -428,6 +506,7 @@ export function parseAccumulatedIntoBlocks(
     while ((resultMatch = RESULT_REGEX.exec(innerContent)) !== null) {
       const toolUseId = resultMatch[1] ?? '';
       const content = unescapeXml(resultMatch[2] ?? '');
+      pairedCallIds.add(toolUseId);
       const result: ToolResult = { toolUseId, content, isError: false };
       toolResults.push(result);
       blockResults.push({
@@ -445,8 +524,42 @@ export function parseAccumulatedIntoBlocks(
     while ((errorMatch = ERROR_REGEX.exec(innerContent)) !== null) {
       const toolUseId = errorMatch[1] ?? '';
       const content = unescapeXml(errorMatch[2] ?? '');
+      pairedCallIds.add(toolUseId);
       const result: ToolResult = { toolUseId, content, isError: true };
       toolResults.push(result);
+      blockResults.push({
+        type: 'tool_result',
+        toolUseId,
+        content,
+        isError: true,
+        rawXml,
+      });
+    }
+
+    // Legacy-shaped results/errors (no ids on the wire): pair positionally
+    // with the preceding unclaimed calls, disambiguated by <tool_name>.
+    LEGACY_RESULT_REGEX.lastIndex = 0;
+    let legacyResultMatch: RegExpExecArray | null;
+    while ((legacyResultMatch = LEGACY_RESULT_REGEX.exec(innerContent)) !== null) {
+      const toolName = legacyResultMatch[1]?.trim() || undefined;
+      const content = unescapeXml(legacyResultMatch[2] ?? '');
+      const toolUseId = claimCall(resultsMatch.index, toolName);
+      toolResults.push({ toolUseId, toolName, content, isError: false });
+      blockResults.push({
+        type: 'tool_result',
+        toolUseId,
+        toolName,
+        content,
+        isError: false,
+        rawXml,
+      });
+    }
+    LEGACY_ERROR_REGEX.lastIndex = 0;
+    let legacyErrorMatch: RegExpExecArray | null;
+    while ((legacyErrorMatch = LEGACY_ERROR_REGEX.exec(innerContent)) !== null) {
+      const content = unescapeXml(legacyErrorMatch[1] ?? '');
+      const toolUseId = claimCall(resultsMatch.index);
+      toolResults.push({ toolUseId, content, isError: true });
       blockResults.push({
         type: 'tool_result',
         toolUseId,
@@ -628,7 +741,6 @@ export function formatToolResultsForSplitTurn(results: ToolResult[]): SplitTurnC
 
   for (let i = 0; i < results.length; i++) {
     const result = results[i]!;
-    const tagName = result.isError ? 'error' : 'result';
 
     // Check if this result has images
     let resultHasImages = false;
@@ -636,14 +748,14 @@ export function formatToolResultsForSplitTurn(results: ToolResult[]): SplitTurnC
     let resultImages: ProviderImageBlock[] = [];
 
     if (typeof result.content === 'string') {
-      textParts.push(escapeXml(result.content));
+      textParts.push(guardResultContent(result.content));
     } else if (Array.isArray(result.content)) {
       for (const block of result.content) {
         if (block.type === 'text') {
-          textParts.push(escapeXml(block.text));
+          textParts.push(guardResultContent(block.text));
         } else if (block.type === 'image') {
           if (!isAcceptedImageMediaType(block.source.mediaType)) {
-            textParts.push(escapeXml(strippedImagePlaceholder(block.source.mediaType).text));
+            textParts.push(strippedImagePlaceholder(block.source.mediaType).text);
           } else {
             resultHasImages = true;
             resultImages.push({
@@ -664,15 +776,15 @@ export function formatToolResultsForSplitTurn(results: ToolResult[]): SplitTurnC
       imageInsertionPoint = i;
       images.push(...resultImages);
 
-      // Add opening tag and text content (no closing tag yet)
-      beforeImageXml += `<${tagName} tool_use_id="${result.toolUseId}">\n`;
+      // Add opening tags and text content (no closing tags yet)
+      beforeImageXml += resultOpenXml(result);
       if (textParts.length > 0) {
         beforeImageXml += textParts.join('\n');
       }
-      // Note: Intentionally NOT adding closing tag - split happens here
+      // Note: Intentionally NOT adding closing tags - split happens here
 
       // After image, we need to close this result and add remaining results
-      afterImageXml = `</${tagName}>\n`;
+      afterImageXml = resultCloseXml(result);
 
       // Process remaining results into afterImageXml
       for (let j = i + 1; j < results.length; j++) {
@@ -685,9 +797,9 @@ export function formatToolResultsForSplitTurn(results: ToolResult[]): SplitTurnC
       break;
     } else if (imageInsertionPoint === -1) {
       // No images yet - add full result to beforeImageXml
-      beforeImageXml += `<${tagName} tool_use_id="${result.toolUseId}">\n`;
+      beforeImageXml += resultOpenXml(result);
       beforeImageXml += textParts.join('\n');
-      beforeImageXml += `\n</${tagName}>\n`;
+      beforeImageXml += resultCloseXml(result);
     }
   }
 
@@ -714,15 +826,14 @@ export function formatToolResultsForSplitTurn(results: ToolResult[]): SplitTurnC
  * Format a single tool result as complete XML
  */
 function formatSingleResultXml(result: ToolResult): string {
-  const tagName = result.isError ? 'error' : 'result';
-  let xml = `<${tagName} tool_use_id="${result.toolUseId}">\n`;
+  let xml = resultOpenXml(result);
 
   if (typeof result.content === 'string') {
-    xml += escapeXml(result.content);
+    xml += guardResultContent(result.content);
   } else if (Array.isArray(result.content)) {
     for (const block of result.content) {
       if (block.type === 'text') {
-        xml += escapeXml(block.text);
+        xml += guardResultContent(block.text);
       } else if (block.type === 'image') {
         // For remaining results after split, images become text placeholders
         const sizeKb = Math.round((block.source.data.length * 0.75) / 1024);
@@ -731,7 +842,7 @@ function formatSingleResultXml(result: ToolResult): string {
     }
   }
 
-  xml += `\n</${tagName}>\n`;
+  xml += resultCloseXml(result);
   return xml;
 }
 

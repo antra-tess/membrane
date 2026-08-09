@@ -128,6 +128,11 @@ export interface ToolUseContent {
 export interface ToolResultContent {
   type: 'tool_result';
   toolUseId: string;
+  /**
+   * Tool name, persisted so XML replay can reconstruct the legacy
+   * `<tool_name>` element byte-identically to the live injection.
+   */
+  toolName?: string;
   content: string | ContentBlock[];
   isError?: boolean;
   /**

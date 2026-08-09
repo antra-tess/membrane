@@ -38,6 +38,13 @@ export interface ToolCall {
 export interface ToolResult {
   toolUseId: string;
   /**
+   * Tool name, for the legacy XML result rendering
+   * (`<result><tool_name>…</tool_name><stdout>…</stdout></result>`).
+   * Optional: XML paths backfill it from the round's parsed calls when the
+   * executor didn't supply it.
+   */
+  toolName?: string;
+  /**
    * Result content - can be string or structured content blocks (for images).
    * For XML mode, images are noted in text. For native mode, passed as content blocks.
    */

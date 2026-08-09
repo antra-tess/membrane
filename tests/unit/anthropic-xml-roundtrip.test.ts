@@ -185,9 +185,11 @@ describe('legacy blocks (stored without rawXml)', () => {
     expect(parsed!.calls[0].input.channelId).toBe('1234567890123456789');
     expect(parsed!.calls[0].input.options).toEqual({ mode: 'live' });
 
-    // Result renders as canonical function_results
+    // Result renders as canonical function_results in the legacy
+    // convention: no ids on the wire, stdout element, raw content.
     expect(rendered).toContain('<function_results>');
-    expect(rendered).toContain('tool_use_id="tool_legacy_1"');
+    expect(rendered).not.toContain('tool_use_id=');
+    expect(rendered).toContain('<stdout>');
     expect(rendered).toContain('opened');
   });
 
@@ -204,5 +206,59 @@ describe('legacy blocks (stored without rawXml)', () => {
     const parsed = parseToolCalls(rendered.slice(start, end));
     expect(parsed!.calls.map(c => c.name)).toEqual(['alpha', 'beta']);
     expect(parsed!.calls[1].input.b).toBe('two');
+  });
+});
+
+describe('tool-result replay attribution (D2, Evander 2026-08-08)', () => {
+  function renderConversation(messages: NormalizedMessage[]): string {
+    const formatter = new AnthropicXmlFormatter();
+    const result = formatter.buildMessages(messages, { assistantParticipant: 'Rhys' });
+    return result.messages
+      .map(m => (typeof m.content === 'string'
+        ? m.content
+        : (m.content as Array<{ text?: string }>).map(b => b.text ?? '').join('')))
+      .join('\n');
+  }
+
+  const toolRoundMessages: NormalizedMessage[] = [
+    { participant: 'antra', content: [{ type: 'text', text: 'please check the mode' }] },
+    {
+      participant: 'Rhys',
+      content: [
+        { type: 'text', text: 'Checking now.' },
+        {
+          type: 'tool_use', id: 'tool_d2_1', name: 'gate_status', input: {},
+          rawXml: '<function_calls>\n<invoke name="gate_status">\n</invoke>\n</function_calls>',
+        } as ContentBlock,
+      ],
+    },
+    {
+      participant: 'user',
+      content: [
+        { type: 'tool_result', toolUseId: 'tool_d2_1', toolName: 'gate_status', content: 'mode: debounced', isError: false } as ContentBlock,
+      ],
+    },
+    { participant: 'Rhys', content: [{ type: 'text', text: 'The mode is debounced.' }] },
+    { participant: 'antra', content: [{ type: 'text', text: 'thanks' }] },
+    { participant: 'Rhys', content: [] }, // completion target
+  ];
+
+  it('replays results unlabeled inside the assistant flow (no user: attribution)', () => {
+    const doc = renderConversation(toolRoundMessages);
+    expect(doc).toContain('<function_results>');
+    expect(doc).not.toContain('user: <function_results>');
+    expect(doc).toContain('<tool_name>gate_status</tool_name>');
+    expect(doc).toContain('mode: debounced');
+  });
+
+  it('continues the same assistant turn after results without a fresh label', () => {
+    const doc = renderConversation(toolRoundMessages);
+    // The post-result prose belongs to the same turn: no "Rhys: " prefix
+    // between the results block and the continuation.
+    const afterResults = doc.slice(doc.indexOf('</function_results>'));
+    expect(afterResults).not.toContain('Rhys: The mode is debounced.');
+    expect(afterResults).toContain('The mode is debounced.');
+    // The next real speaker after the turn is labeled normally.
+    expect(doc).toContain('antra: thanks');
   });
 });

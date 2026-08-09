@@ -104,6 +104,7 @@ function toToolResult(block: ToolResultContent): ToolResult {
   }
   return {
     toolUseId: block.toolUseId,
+    toolName: block.toolName,
     content,
     isError: block.isError ?? false,
   };
@@ -160,6 +161,9 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     // Track conversation state
     let currentConversation: string[] = [];
     let lastNonEmptyParticipant: string | null = null;
+    // True right after an unlabeled tool-results glue — the next assistant
+    // message continues the same turn, so it must not get a fresh label.
+    let lastWasToolResults = false;
 
     // Track cache markers applied
     let cacheMarkersApplied = 0;
@@ -298,15 +302,39 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
       const isBotMessage = message.participant === assistantParticipant;
       const isContinuation = isBotMessage && lastNonEmptyParticipant === assistantParticipant && !hasToolResult;
 
+      const isPureToolResults =
+        hasToolResult && message.content.every((c) => c.type === 'tool_result');
+
       if (isContinuation && isLastMessage) {
         // Bot continuation - don't add prefix
         continue;
       } else if (isLastMessage && isEmpty) {
         // Completion target - prefix added below
       } else if (text) {
-        currentConversation.push(`${message.participant}: ${text}${this.config.messageDelimiter}`);
-        if (!hasToolResult) {
+        if (isPureToolResults) {
+          // Tool results are not speech: replay them exactly as they were
+          // injected live — inside the assistant flow, unlabeled (legacy
+          // convention). A participant prefix here re-attributes the
+          // harness's injection as someone's utterance, and the model then
+          // reads the same result in two attributions across compiles
+          // (D2 of the Evander 2026-08-08 scaffold-leak analysis).
+          currentConversation.push(`${text}${this.config.messageDelimiter}`);
+          lastWasToolResults = true;
+        } else if (isBotMessage && lastWasToolResults) {
+          // The round after injected results continues the same assistant
+          // turn — no fresh label mid-turn, matching what the model lived.
+          // (If a turn ended exactly on a results injection, the next
+          // assistant turn glues here unlabeled — a minor cost the message
+          // model can't distinguish; a turn id would be needed.)
+          currentConversation.push(`${text}${this.config.messageDelimiter}`);
+          lastWasToolResults = false;
           lastNonEmptyParticipant = message.participant;
+        } else {
+          currentConversation.push(`${message.participant}: ${text}${this.config.messageDelimiter}`);
+          lastWasToolResults = false;
+          if (!hasToolResult) {
+            lastNonEmptyParticipant = message.participant;
+          }
         }
       }
 

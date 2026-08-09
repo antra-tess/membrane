@@ -19,7 +19,7 @@ const sampleImageData =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==';
 
 function createTextResult(toolUseId: string, text: string): ToolResult {
-  return { toolUseId, content: text };
+  return { toolUseId, toolName: `name_${toolUseId}`, content: text };
 }
 
 function createImageResult(toolUseId: string, text: string): ToolResult {
@@ -27,7 +27,7 @@ function createImageResult(toolUseId: string, text: string): ToolResult {
     { type: 'text', text },
     { type: 'image', source: { type: 'base64', data: sampleImageData, mediaType: 'image/png' } },
   ];
-  return { toolUseId, content };
+  return { toolUseId, toolName: `name_${toolUseId}`, content };
 }
 
 function createMultiImageResult(toolUseId: string, text: string, imageCount: number): ToolResult {
@@ -38,7 +38,7 @@ function createMultiImageResult(toolUseId: string, text: string, imageCount: num
       source: { type: 'base64', data: sampleImageData, mediaType: 'image/png' },
     });
   }
-  return { toolUseId, content };
+  return { toolUseId, toolName: `name_${toolUseId}`, content };
 }
 
 describe('hasImageInToolResults', () => {
@@ -81,10 +81,12 @@ describe('formatToolResultsForSplitTurn', () => {
     expect(split.images).toHaveLength(1);
     // Before: opening tags + text, held open at the image point.
     expect(split.beforeImageXml).toContain('<function_results>');
-    expect(split.beforeImageXml).toContain('tool_use_id="tool_1"');
+    expect(split.beforeImageXml).toContain('<tool_name>name_tool_1</tool_name>');
     expect(split.beforeImageXml).toContain('Screenshot taken');
     expect(split.beforeImageXml).not.toContain('</result>');
+    expect(split.beforeImageXml).not.toContain('</stdout>');
     // After: the closers.
+    expect(split.afterImageXml).toContain('</stdout>');
     expect(split.afterImageXml).toContain('</result>');
     expect(split.afterImageXml).toContain('</function_results>');
     // Image block in API shape.
@@ -101,11 +103,11 @@ describe('formatToolResultsForSplitTurn', () => {
     ]);
     expect(split.hasImages).toBe(true);
     expect(split.images).toHaveLength(1);
-    expect(split.beforeImageXml).toContain('tool_use_id="tool_1"');
+    expect(split.beforeImageXml).toContain('<tool_name>name_tool_1</tool_name>');
     expect(split.beforeImageXml).toContain('First result with image');
     // The full second result lands after the image.
     expect(split.afterImageXml).toContain('</result>');
-    expect(split.afterImageXml).toContain('tool_use_id="tool_2"');
+    expect(split.afterImageXml).toContain('<tool_name>name_tool_2</tool_name>');
     expect(split.afterImageXml).toContain('Second result text only');
     expect(split.afterImageXml).toContain('</function_results>');
   });
@@ -118,10 +120,10 @@ describe('formatToolResultsForSplitTurn', () => {
     expect(split.hasImages).toBe(true);
     expect(split.images).toHaveLength(1);
     // The complete first result + second result's text ride before the image.
-    expect(split.beforeImageXml).toContain('tool_use_id="tool_1"');
+    expect(split.beforeImageXml).toContain('<tool_name>name_tool_1</tool_name>');
     expect(split.beforeImageXml).toContain('First result text only');
     expect(split.beforeImageXml).toContain('</result>');
-    expect(split.beforeImageXml).toContain('tool_use_id="tool_2"');
+    expect(split.beforeImageXml).toContain('<tool_name>name_tool_2</tool_name>');
     expect(split.beforeImageXml).toContain('Second result with image');
     expect(split.afterImageXml).toContain('</result>');
     expect(split.afterImageXml).toContain('</function_results>');
@@ -159,7 +161,7 @@ describe('formatToolResultsForSplitTurn', () => {
     const fullXml = split.beforeImageXml + '[IMAGE]' + split.afterImageXml;
     expect(fullXml.match(/<function_results>/g)).toHaveLength(1);
     expect(fullXml.match(/<\/function_results>/g)).toHaveLength(1);
-    expect((fullXml.match(/<result /g) || []).length).toBe(
+    expect((fullXml.match(/<result>/g) || []).length).toBe(
       (fullXml.match(/<\/result>/g) || []).length,
     );
   });

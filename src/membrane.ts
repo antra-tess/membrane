@@ -718,6 +718,14 @@ export class Membrane {
               );
             }
 
+            // Backfill tool names for the legacy XML result rendering
+            // (<result><tool_name>…</tool_name><stdout>…) when the executor
+            // didn't supply them.
+            const callNames = new Map(parsed.calls.map((c) => [c.id, c.name]));
+            for (const r of results) {
+              if (!r.toolName) r.toolName = callNames.get(r.toolUseId);
+            }
+
             // Track the tool results
             executedToolResults.push(...results);
 
@@ -2593,6 +2601,14 @@ export class Membrane {
             };
 
             const { results, injectedMessages } = await stream.requestToolExecution(toolCallsEvent);
+
+            // Backfill tool names for the legacy XML result rendering
+            // (<result><tool_name>…</tool_name><stdout>…) when the executor
+            // didn't supply them.
+            const yieldCallNames = new Map(parsed.calls.map((c) => [c.id, c.name]));
+            for (const r of results) {
+              if (!r.toolName) r.toolName = yieldCallNames.get(r.toolUseId);
+            }
 
             // Mid-turn injected messages are not supported on the XML prefill
             // path: the continuation is an assistant prefill over an XML

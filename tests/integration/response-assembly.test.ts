@@ -531,7 +531,8 @@ describe('Multi-request logging', () => {
     // Even empty results should be wrapped in function_results
     expect(assistantContent).toContain('<function_results>');
     expect(assistantContent).toContain('</function_results>');
-    expect(assistantContent).toContain('<result tool_use_id=');
+    expect(assistantContent).toContain('<result>');
+    expect(assistantContent).toContain('<stdout>');
   });
 
   it('should handle onToolCalls returning empty array', async () => {
