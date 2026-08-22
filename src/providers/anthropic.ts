@@ -22,6 +22,7 @@ import {
   abortError,
 } from '../types/index.js';
 import { flattenRootSchemaUnion } from './anthropic-tool-schema.js';
+import { CacheKeepalive, type CacheKeepaliveConfig } from '../cache-keepalive.js';
 
 // ============================================================================
 // Model capability gates
@@ -146,6 +147,15 @@ export interface AnthropicAdapterConfig {
   
   /** Default max tokens */
   defaultMaxTokens?: number;
+
+  /**
+   * Prompt-cache keepalive: hold this agent's cached prefix warm across idle
+   * gaps by replaying the last request with `max_tokens: 0`, which refreshes
+   * the entry's TTL at cache-READ price instead of letting it expire into a
+   * 2x cache write on the next wake. See `../cache-keepalive.ts`.
+   * Pass `{ enabled: false }` to turn off.
+   */
+  cacheKeepalive?: CacheKeepaliveConfig;
 }
 
 // ============================================================================
@@ -161,6 +171,8 @@ export class AnthropicAdapter implements ProviderAdapter {
    *  the SDK rather than merging, so when we add a per-request beta we must
    *  re-carry this one alongside it or auth breaks. */
   private defaultBeta: string | undefined;
+  /** Holds idle agents' cached prefixes warm; undefined when disabled. */
+  readonly cacheKeepalive: CacheKeepalive | undefined;
 
   constructor(config: AnthropicAdapterConfig = {}) {
     const clientOptions: ClientOptions = {
@@ -178,6 +190,19 @@ export class AnthropicAdapter implements ProviderAdapter {
 
     this.client = new Anthropic(clientOptions);
     this.defaultMaxTokens = config.defaultMaxTokens ?? 4096;
+
+    this.cacheKeepalive = config.cacheKeepalive?.enabled === false
+      ? undefined
+      : new CacheKeepalive(
+          // Replay path. Deliberately bypasses buildRequest(): the payload is
+          // the already-built wire request from a real call, and rebuilding it
+          // risks a byte diff that silently converts a 0.1x read into a 2x write.
+          async (wire, headers) => await this.client.messages.create(
+            wire as unknown as Anthropic.MessageCreateParamsNonStreaming,
+            headers ? { headers } : undefined,
+          ),
+          config.cacheKeepalive ?? {},
+        );
   }
 
   supportsModel(modelId: string): boolean {
@@ -192,10 +217,15 @@ export class AnthropicAdapter implements ProviderAdapter {
     const fullRequest = { ...anthropicRequest, stream: false as const };
     options?.onRequest?.(fullRequest);
 
+    const headers = this.betaHeaders(request);
+    this.cacheKeepalive?.record(
+      fullRequest as unknown as Record<string, unknown>, headers, 'complete',
+    );
+
     try {
       const response = await this.client.messages.create(fullRequest, {
         signal: options?.signal,
-        headers: this.betaHeaders(request),
+        headers,
       });
 
       return this.parseResponse(response, fullRequest);
@@ -213,6 +243,14 @@ export class AnthropicAdapter implements ProviderAdapter {
     // Note: stream is implicitly true when using .stream()
     const fullRequest = { ...anthropicRequest, stream: true };
     options?.onRequest?.(fullRequest);
+
+    // Snapshot the primary lane's prefix so it can be held warm across idle
+    // gaps. `stream: true` is dropped at replay time (transport, not cache key).
+    this.cacheKeepalive?.record(
+      fullRequest as unknown as Record<string, unknown>,
+      this.betaHeaders(request),
+      'stream',
+    );
 
     // Idle timeout: abort if no SSE event arrives within the deadline.
     // The SDK's timeout only covers the initial HTTP response headers;
