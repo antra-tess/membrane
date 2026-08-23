@@ -115,6 +115,54 @@ describe('classifyError generic fallback', () => {
   });
 });
 
+describe('Anthropic handleError: context-length heuristic gated on HTTP 400 (issue #17)', () => {
+  // Context-length is a client-side request-shape problem — it only ever
+  // arrives as a 400. Before the guard, any error whose message contained
+  // "context" or "too long" (including transient 5xx bodies) became
+  // non-retryable context_length, silently suppressing retries.
+  it('keeps a 500 whose message mentions "context" a retryable server error', () => {
+    const err = handleError(new Anthropic.APIError(
+      500 as never,
+      { type: 'error', error: { type: 'api_error', message: 'Internal error: context processing failed' } },
+      'Internal error: context processing failed',
+      undefined as never,
+    ));
+    expect(err.type).toBe('server');
+    expect(err.retryable).toBe(true);
+  });
+
+  it('keeps a 529 whose message mentions "too long" a retryable server error', () => {
+    const err = handleError(new Anthropic.APIError(
+      529 as never,
+      { type: 'error', error: { type: 'overloaded_error', message: 'Backend took too long to respond' } },
+      'Backend took too long to respond',
+      undefined as never,
+    ));
+    expect(err.type).toBe('server');
+    expect(err.retryable).toBe(true);
+  });
+
+  it('still classifies a real 400 prompt-too-long as context_length', () => {
+    const err = handleError(new Anthropic.APIError(
+      400 as never,
+      { type: 'error', error: { type: 'invalid_request_error', message: 'prompt is too long: 250000 tokens > 200000 maximum' } },
+      'prompt is too long: 250000 tokens > 200000 maximum',
+      undefined as never,
+    ));
+    expect(err.type).toBe('context_length');
+    expect(err.retryable).toBe(false);
+  });
+
+  it('classifies a mid-stream invalid_request_error mentioning "too long" as context_length (status recovered from body type)', () => {
+    const err = handleError(sseApiError({
+      type: 'error',
+      error: { type: 'invalid_request_error', message: 'prompt is too long: 250000 tokens > 200000 maximum' },
+    }));
+    expect(err.type).toBe('context_length');
+    expect(err.retryable).toBe(false);
+  });
+});
+
 describe('Anthropic handleError: abort classification (fleet incident 2026-07-20)', () => {
   // The SSE idle watchdog aborts a stalled stream via AbortController; the
   // SDK surfaces that as APIUserAbortError ("Request was aborted."), whose

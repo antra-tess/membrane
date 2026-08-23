@@ -702,7 +702,12 @@ export class AnthropicAdapter implements ProviderAdapter {
         return authError(message, error, rawRequest);
       }
 
-      if (message.includes('context') || message.includes('too long')) {
+      // Context-length is a client-side request-shape problem — it only ever
+      // arrives as a 400 (invalid_request_error). Without the status guard, a
+      // transient 5xx whose body happens to contain "context" or "too long"
+      // (e.g. "Internal error: context processing failed") was misclassified
+      // as non-retryable context_length, silently suppressing retries.
+      if (status === 400 && (message.includes('context') || message.includes('too long'))) {
         return contextLengthError(message, error, rawRequest);
       }
 
