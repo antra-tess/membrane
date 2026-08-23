@@ -10,6 +10,45 @@ Releases up to and including 0.5.75 predate this file; for their contents see
 
 ## Unreleased
 
+### Added
+
+- **Prompt-cache keepalive for the Anthropic 1h cache** (`AnthropicAdapterConfig.cacheKeepalive`,
+  on by default; `{ enabled: false }` to opt out). An idle agent's cached prefix
+  expires on its TTL and the next wake pays a 2x cache **write** over the whole
+  context — but reading an entry restarts its clock, so replaying the last
+  request with `max_tokens: 0` refreshes it at cache-**read** price (0.1x).
+  - **Idle-gated, not a blind interval.** A poke fires only when the entry is
+    actually near expiry, so an agent whose own traffic keeps the cache warm
+    never fires one, and cost scales with real idleness rather than with the
+    keepalive window. Measured on mythos llm-calls over 36h: 563 of 637 gaps
+    were under 5 minutes and only 5 exceeded 1h — a blind timer there would be
+    near-pure waste.
+  - **The replay is byte-identical above the last breakpoint.** Only
+    `max_tokens` (not part of the cache key) and `stream` (transport) differ.
+    Request shapes that cannot tolerate `max_tokens: 0` — legacy
+    `thinking.budget_tokens`, forced `tool_choice`, structured output, no 1h
+    breakpoint — are **skipped**, never rewritten to fit: "normalizing" the
+    request moves the invalidation boundary and silently converts a 0.1x read
+    into a 2x write.
+  - **Every poke is checked.** A refresh that reports `cache_creation > 0` or
+    `cache_read == 0` has kept nothing alive; the lineage is dropped rather
+    than repeatedly paying 2x. Consecutive send failures hard-disable the
+    keepalive instead of becoming a retry loop.
+  - Scope is the primary (`stream`) lane. The aux/compression lane emits no
+    `cache_control` at all today, so it has no entry to keep alive.
+  - Verified against the live Anthropic API (2026-08-22, `claude-opus-5`):
+    a 5m entry poked every 4 min was still a pure read at t+12m (2.4x its
+    nominal TTL, every poke `create=0`); `max_tokens: 0` replay returned
+    `create=0 / read=7220` with zero output tokens; a non-streaming replay
+    read a stream-written entry. The `thinking:{type:'disabled'}` mis-replay
+    was confirmed to cost a full rewrite (`create=5081 / read=0`).
+  - **Not verified:** only the direct Anthropic API was exercised, on
+    `claude-opus-5` — not Bedrock (no 1h cache there; `cacheTtl` is stripped),
+    not Vertex/Foundry, and not `claude-fable-5` or any other model. TTL
+    sliding was demonstrated on the **5m** cache as a 12-minute proxy; the 1h
+    cache was not held open for a multi-hour test. The unit tests use fake
+    timers and a mocked send.
+
 ## 0.5.78 — 2026-08-06
 
 ### Added
