@@ -181,6 +181,12 @@ export interface MembraneConfig {
   defaultPromptCaching?: boolean;
 
   /**
+   * Default for request.floatingCacheMarker when the request doesn't set it.
+   * Default: true. See NormalizedRequest.floatingCacheMarker.
+   */
+  defaultFloatingCacheMarker?: boolean;
+
+  /**
    * Prefill formatter for message serialization and response parsing.
    * Controls how messages are formatted for the API and how responses are parsed.
    * Default: AnthropicXmlFormatter

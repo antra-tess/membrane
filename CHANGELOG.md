@@ -12,6 +12,39 @@ Releases up to and including 0.5.75 predate this file; for their contents see
 
 ### Added
 
+- **Floating cache marker: incremental prompt caching inside the native tool
+  loop** (`NormalizedRequest.floatingCacheMarker` /
+  `MembraneConfig.defaultFloatingCacheMarker`, on by default). Context
+  strategies place cache breakpoints once per turn at compile time, but the
+  native tool loop rebuilds the request on every tool round with that round's
+  messages appended — so the deepest upstream marker stayed glued to the
+  turn-start snapshot and every rebuild re-paid the whole growing suffix at
+  full input price. A 30-round tool turn re-sent a suffix growing to ~118k
+  tokens on every round (field incident 2026-08-20: ~5.3M uncached input
+  tokens in 18 minutes across two agents whose single marker sat on message 2
+  of 61). The tool loop only appends, so on each rebuild membrane now floats a
+  `cache_control` marker onto the last cacheable block of the newest message:
+  each round writes only its delta and cache-reads everything before it.
+  - **Residual-budget only — upstream markers are never displaced or
+    stripped.** Anthropic allows 4 `cache_control` slots; the float spends
+    only what upstream markers (message breakpoints, stale block-level
+    passthroughs, the tools/system fallback) left free, and is withheld with
+    a one-time warning when they fill all 4. With 2+ free slots the previous
+    round's endpoint stays marked too, so a wide parallel-tool round
+    (appending more blocks than the provider's ~20-block backward search)
+    can't orphan the previous round's cache entry.
+  - Applies only to tool-loop rebuilds — the turn's first request remains
+    byte-for-byte the context strategy's artifact. Skipped for a round whose
+    request contains a synthesized `[pending]` tool_result (those bytes are
+    rewritten when the real result lands, and caching past them poisons the
+    prefix — same rationale as the normalizer's cache suppression).
+  - Set `floatingCacheMarker: false` for context strategies whose request
+    prefix churns between rounds, where a trailing marker is pure
+    cache-write cost.
+  - Complements the cache keepalive below: the keepalive addresses idle-gap
+    expiry of the last written entry; this addresses the mid-session churn
+    its sizing analysis explicitly left out.
+
 - **Prompt-cache keepalive for the Anthropic 1h cache** (`AnthropicAdapterConfig.cacheKeepalive`,
   on by default; `{ enabled: false }` to opt out). An idle agent's cached prefix
   expires on its TTL and the next wake pays a 2x cache **write** over the whole
