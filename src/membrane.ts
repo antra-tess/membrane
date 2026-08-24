@@ -1005,7 +1005,7 @@ export class Membrane {
       // Tool execution loop
       while (toolDepth <= maxToolDepth) {
         // Build provider request with native tools
-        const providerRequest = this.buildNativeToolRequest(request, messages);
+        const providerRequest = this.buildNativeToolRequest(request, messages, toolDepth > 0);
 
         // Stream from provider
         let textAccumulated = '';
@@ -1197,12 +1197,20 @@ export class Membrane {
     }
   }
 
+  /** See the floating-cache-marker block in buildNativeToolRequest. */
+  private floatBudgetWarned = false;
+
   /**
-   * Build a provider request with native tool support
+   * Build a provider request with native tool support.
+   *
+   * `toolLoopRebuild` is true when this build is a tool-loop continuation
+   * (toolDepth > 0) rather than the turn's first request — the only case
+   * where the floating cache marker applies.
    */
   private buildNativeToolRequest(
     request: NormalizedRequest,
-    messages: typeof request.messages
+    messages: typeof request.messages,
+    toolLoopRebuild = false
   ): any {
     // Provider-native formatters own their complete input-item shape. The
     // legacy implementation below is intentionally Anthropic-specific; using
@@ -1354,7 +1362,17 @@ export class Membrane {
     // tool_results to `messages`. Any unmatched tool_use that reaches
     // this splice is upstream stranding (the bug class this fix exists
     // to catch) — `[pending]` is exactly the right synthesis.
-    const normalized = normalizeToolPairs(providerMessages);
+    // A synthesized [pending] tool_result's bytes are rewritten when the
+    // real result lands — the floating-marker block below must not cache
+    // past one. `synthetic_pending_result` (not the downstream
+    // cache_suppressed_for_synthetic, which only fires when a marker was
+    // actually stripped) is the root condition.
+    let pendingResultSynthesized = false;
+    const normalized = normalizeToolPairs(providerMessages, {
+      onEvent: (e) => {
+        if (e.kind === 'synthetic_pending_result') pendingResultSynthesized = true;
+      },
+    });
     const mergedMessages = mergeConsecutiveRoles(normalized.messages);
 
     // Convert tools to provider format.
@@ -1385,6 +1403,90 @@ export class Membrane {
       system = blocks.map((block, idx) =>
         idx === blocks.length - 1 ? { ...block, cache_control: cacheControl } : block
       );
+    }
+
+    // ------------------------------------------------------------------
+    // Floating cache marker: incremental prompt caching inside the native
+    // tool loop. Message breakpoints are placed by the context strategy at
+    // compile time — once per turn — but this builder re-runs on every
+    // tool round with that round's messages appended, so the deepest
+    // upstream marker stays glued to the turn-start snapshot and each
+    // rebuild re-pays the entire appended suffix at full input price
+    // (qa-ops incident, 2026-08-20: two subagents re-sent a suffix growing
+    // to ~118k tokens ~30 times each — ~5.3M uncached tokens in 18 min —
+    // with their one marker sitting on message 2 of 61).
+    //
+    // The tool loop only ever appends, so a marker riding the newest
+    // message yields the intended incremental pattern: each round writes
+    // its delta and cache-reads everything before it.
+    //
+    // Authority contract: the float spends only the RESIDUAL breakpoint
+    // budget (Anthropic allows 4 cache_control including tools/system).
+    // Upstream markers are never displaced or stripped — if they fill all
+    // 4 slots the float is withheld (with a warning) and behavior is
+    // exactly pre-float. With 2+ slots free, the previous round's
+    // endpoint is marked too: a wide parallel-tool round can append more
+    // blocks than the provider's ~20-block backward search covers, which
+    // would orphan the previous round's cache entry behind an unmarked
+    // boundary.
+    //
+    // Skipped when the normalizer synthesized a [pending] tool_result:
+    // those bytes are rewritten when the real result lands, and caching
+    // past them poisons the prefix — the same rationale as the
+    // normalizer's phase 5.5 cache suppression.
+    // ------------------------------------------------------------------
+    const floatingEnabled =
+      request.floatingCacheMarker ?? this.config.defaultFloatingCacheMarker ?? true;
+    if (toolLoopRebuild && floatingEnabled && cacheControl && !pendingResultSynthesized) {
+      // Residuum from a RECOUNT of the constructed wire artifacts, not the
+      // running messageBreakpoints tally — the tally diverges from the wire
+      // in both directions (mirrors NativeFormatter's recount, same bug
+      // class as the Sill 2026-07-25 wedge): a message-level breakpoint
+      // landing on a block already carrying stale cache_control is one
+      // physical marker counted twice, and a pre-marked system block is a
+      // real wire marker the tally never sees. Counted post-fallback and
+      // post-normalize, so fallback spend and phase-5.5 suppression are
+      // both reflected.
+      let wireMarkers = 0;
+      for (const m of mergedMessages) {
+        if (!Array.isArray(m.content)) continue;
+        for (const b of m.content as Array<Record<string, unknown>>) {
+          if (b.cache_control) wireMarkers++;
+        }
+      }
+      if (tools) for (const t of tools) { if (t.cache_control) wireMarkers++; }
+      if (Array.isArray(system)) {
+        for (const b of system as Array<Record<string, unknown>>) {
+          if (b.cache_control) wireMarkers++;
+        }
+      }
+      let residuum = 4 - wireMarkers;
+      if (residuum <= 0) {
+        if (!this.floatBudgetWarned) {
+          this.floatBudgetWarned = true;
+          console.warn(
+            `[membrane] floating cache marker withheld: upstream markers already ` +
+            `occupy all 4 cache_control slots (${wireMarkers} on the wire). ` +
+            `Tool-round suffixes will not cache incrementally.`
+          );
+        }
+      } else {
+        // Newest message first; then the previous round's endpoint (two
+        // wire messages back: [..., prevResults, assistant, results]).
+        const targets = [mergedMessages.length - 1, mergedMessages.length - 3];
+        for (const mi of targets) {
+          if (residuum <= 0 || mi < 0) continue;
+          const content = mergedMessages[mi]?.content;
+          if (!Array.isArray(content) || content.length === 0) continue;
+          const bpIdx = lastCacheableBlockIndex(content as Array<Record<string, unknown>>);
+          if (bpIdx < 0) continue;
+          // Already a breakpoint here (e.g. the strategy's own end marker
+          // on the turn's first rebuild) — nothing to add.
+          if ((content[bpIdx] as Record<string, unknown>).cache_control) continue;
+          (content[bpIdx] as Record<string, unknown>).cache_control = cacheControl;
+          residuum--;
+        }
+      }
     }
 
     // Build thinking config for native extended thinking (budget clamped to max_tokens)
@@ -2913,7 +3015,7 @@ export class Membrane {
         }
 
         // Build provider request with native tools
-        const providerRequest = this.buildNativeToolRequest(request, messages);
+        const providerRequest = this.buildNativeToolRequest(request, messages, toolDepth > 0);
 
         // Stream from provider
         let textAccumulated = '';

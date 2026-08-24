@@ -160,6 +160,20 @@ export interface NormalizedRequest {
   cacheTtl?: '5m' | '1h';
 
   /**
+   * Float a trailing cache_control marker onto the newest message when the
+   * native tool loop rebuilds the request between tool-execution rounds, so
+   * the growing tool-round suffix caches incrementally (each round writes
+   * only its delta and cache-reads everything before it). Placed only from
+   * the request's *residual* breakpoint budget — the marker is withheld when
+   * upstream markers already occupy all 4 Anthropic cache_control slots —
+   * so upstream breakpoints are never displaced or stripped.
+   * Defaults to true (when promptCaching is enabled). Set false for context
+   * strategies whose request prefix churns between rounds, where a trailing
+   * marker would be pure cache-write cost.
+   */
+  floatingCacheMarker?: boolean;
+
+  /**
    * Context prefix for simulacrum seeding.
    * Injected as first assistant message (before conversation history).
    * Cached when promptCaching is enabled.
