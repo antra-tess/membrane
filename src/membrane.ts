@@ -1438,17 +1438,35 @@ export class Membrane {
     const floatingEnabled =
       request.floatingCacheMarker ?? this.config.defaultFloatingCacheMarker ?? true;
     if (toolLoopRebuild && floatingEnabled && cacheControl && !pendingResultSynthesized) {
-      const fallbackSpent = messageBreakpoints > 0 ? 0 :
-        (request.tools && request.tools.length > 0 ? 1 : 0) +
-        ((typeof request.system === 'string' && request.system.length > 0) ||
-         (Array.isArray(request.system) && request.system.length > 0) ? 1 : 0);
-      let residuum = 4 - messageBreakpoints - fallbackSpent;
+      // Residuum from a RECOUNT of the constructed wire artifacts, not the
+      // running messageBreakpoints tally — the tally diverges from the wire
+      // in both directions (mirrors NativeFormatter's recount, same bug
+      // class as the Sill 2026-07-25 wedge): a message-level breakpoint
+      // landing on a block already carrying stale cache_control is one
+      // physical marker counted twice, and a pre-marked system block is a
+      // real wire marker the tally never sees. Counted post-fallback and
+      // post-normalize, so fallback spend and phase-5.5 suppression are
+      // both reflected.
+      let wireMarkers = 0;
+      for (const m of mergedMessages) {
+        if (!Array.isArray(m.content)) continue;
+        for (const b of m.content as Array<Record<string, unknown>>) {
+          if (b.cache_control) wireMarkers++;
+        }
+      }
+      if (tools) for (const t of tools) { if (t.cache_control) wireMarkers++; }
+      if (Array.isArray(system)) {
+        for (const b of system as Array<Record<string, unknown>>) {
+          if (b.cache_control) wireMarkers++;
+        }
+      }
+      let residuum = 4 - wireMarkers;
       if (residuum <= 0) {
         if (!this.floatBudgetWarned) {
           this.floatBudgetWarned = true;
           console.warn(
             `[membrane] floating cache marker withheld: upstream markers already ` +
-            `occupy all 4 cache_control slots (${messageBreakpoints} message-level). ` +
+            `occupy all 4 cache_control slots (${wireMarkers} on the wire). ` +
             `Tool-round suffixes will not cache incrementally.`
           );
         }

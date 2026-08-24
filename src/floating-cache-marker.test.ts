@@ -66,6 +66,16 @@ function build(request: NormalizedRequest, messages: NormalizedMessage[], rebuil
   return (m as any).buildNativeToolRequest(request, messages, rebuild);
 }
 
+/** Total cache_control instances across the whole wire request. */
+function totalMarkers(pr: any): number {
+  let n = 0;
+  pr.messages.forEach((m: any) =>
+    (Array.isArray(m.content) ? m.content : []).forEach((b: any) => { if (b.cache_control) n++; }));
+  if (Array.isArray(pr.tools)) pr.tools.forEach((t: any) => { if (t.cache_control) n++; });
+  if (Array.isArray(pr.system)) pr.system.forEach((b: any) => { if (b.cache_control) n++; });
+  return n;
+}
+
 /** [messageIndex, blockIndex] of every message-level cache_control, plus tools/system markers. */
 function markers(pr: any): { messages: Array<[number, number]>; onTools: boolean; onSystem: boolean } {
   const msgs: Array<[number, number]> = [];
@@ -185,6 +195,62 @@ describe('floating cache marker', () => {
     expect(m.messages).toEqual([]);
     expect(m.onTools).toBe(false);
     expect(m.onSystem).toBe(false);
+  });
+
+  it('counts pre-marked system blocks against the residual budget (never exceeds 4 on the wire)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // System is a block array with one block already carrying cache_control —
+    // invisible to the running message tally, but a real wire marker.
+    const premarkedSystem = [
+      { type: 'text', text: 'You are a test agent.', cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: 'Addendum.' },
+    ] as any;
+    // 3 message markers + pre-marked system = 4 on the wire: no room to float.
+    const full = turn(2);
+    for (const msg of full) {
+      if ((msg.content[0] as any).type === 'tool_result') (msg as any).cacheBreakpoint = true;
+    }
+    const prFull = build(makeRequest({ system: premarkedSystem }), full, true);
+    expect(totalMarkers(prFull)).toBe(4);
+    expect(warn).toHaveBeenCalledTimes(1);
+    // 2 message markers + pre-marked system = 3: exactly one slot left — the
+    // float takes the newest message and stops.
+    const partial = turn(2);
+    (partial[2] as any).cacheBreakpoint = true; // first round's results envelope
+    const prPartial = build(makeRequest({ system: premarkedSystem }), partial, true);
+    expect(totalMarkers(prPartial)).toBe(4);
+    expect(markers(prPartial).messages).toContainEqual([last(prPartial), 0]);
+  });
+
+  it('counts an overlapping block-level + message-level marker once (one physical marker)', () => {
+    // A stale block-level cache_control on the very block the message's
+    // cacheBreakpoint lands on is ONE wire marker, not two. Two such
+    // messages must leave residuum 2, not 0.
+    const staleMarked = (t: string): NormalizedMessage => ({
+      participant: 'User',
+      content: [{ type: 'text', text: t, cache_control: { type: 'ephemeral' } } as any],
+      cacheBreakpoint: true,
+    });
+    // Results envelope whose message-level breakpoint lands on a text block
+    // that already carries stale cache_control — tool pairing stays intact.
+    const overlapResults = (id: string): NormalizedMessage => ({
+      participant: 'User',
+      content: [
+        { type: 'tool_result' as const, toolUseId: id, content: 'ok' },
+        { type: 'text', text: 'operator note', cache_control: { type: 'ephemeral' } } as any,
+      ],
+      cacheBreakpoint: true,
+    });
+    const messages = [staleMarked('do the thing'),
+      assistantToolCall('t1'), overlapResults('t1'),
+      assistantToolCall('t2'), toolResults('t2')];
+    // 2 physical wire markers (the old tally saw 4 and withheld everything).
+    const pr = build(makeRequest(), messages, true);
+    const m = markers(pr);
+    // Float not withheld: newest message marked; previous endpoint already
+    // carries its own marker (dedupe, no slot spent).
+    expect(m.messages).toContainEqual([last(pr), 0]);
+    expect(totalMarkers(pr)).toBeLessThanOrEqual(4);
   });
 
   it('floated markers carry the request cacheTtl', () => {
