@@ -51,7 +51,7 @@ plus, when applicable, **Not verified**, **Out of scope**, and
 - **Tests accompany behavior changes.** Review scrutinizes test substance,
   not mere presence — a test that can't fail on the unfixed code will be
   called out.
-- **Changelog entry** under `## Unreleased` for anything behavior-affecting
+- **Changelog fragment** in `changelog.d/` for anything behavior-affecting
   (see below).
 
 Conventional-commit-style titles (`feat(providers): …`, `fix(streaming): …`)
@@ -89,39 +89,63 @@ that don't fail on unfixed code, or with claims the branch itself disproves.
 
 ## Changelog
 
-`CHANGELOG.md` keeps a standing `## Unreleased` section with
-`### Breaking` / `### Added` / `### Changed` / `### Fixed` subsections
-(loosely [Keep a Changelog](https://keepachangelog.com/)).
+Changelog entries land as **fragment files** in
+[`changelog.d/`](changelog.d/) — one file per change — and are folded into
+`CHANGELOG.md` (loosely [Keep a Changelog](https://keepachangelog.com/)) at
+release time. One file per change is what keeps concurrent work from
+conflicting: when every PR edited the same `## Unreleased` section, any PR
+that outlived another merge hit a conflict in `CHANGELOG.md`; distinct files
+never do.
 
-- **The entry lands with the change** — same commit, or at least the same
+- **Format:** `changelog.d/<slug>.<breaking|added|changed|fixed>.md`, a flat
+  file directly in `changelog.d/`, containing one or more markdown bullets
+  (`- …`) written exactly as they should appear in `CHANGELOG.md`:
+  continuation lines indent two spaces, nested bullets are fine, headings
+  and horizontal rules are refused (even indented — a heading inside a
+  fragment would corrupt the section structure). The slug just has to be
+  unique among pending fragments and filesystem-safe — the PR number works,
+  and so does the branch name with `/` replaced by `-`
+  (`48-context-length-guard.fixed.md`, `fix-retry-backoff.fixed.md`). The release
+  script scans the directory fail-closed: a subdirectory, an unrecognized
+  category suffix, or any other stray file aborts the release rather than
+  silently stranding an entry.
+
+- **The fragment lands with the change** — same commit, or at least the same
   PR. This binds direct pushes to `main` just as much as PRs. On PRs, CI
-  enforces it softly: touching `src/` without touching `CHANGELOG.md` fails
-  the `changelog` check unless the `no-changelog` label is applied.
+  enforces it softly: touching `src/` without adding a fragment (or editing
+  `CHANGELOG.md`) fails the `changelog` check unless the `no-changelog`
+  label is applied.
 - **What needs an entry:** anything a caller would notice — request/response
   shape, streaming and tool-call behavior, transforms, provider adapters and
   the models they accept, cache-control and breakpoint handling, usage
   accounting, public exports, defaults. Internal refactors, test-only, and
   docs-only changes don't.
-- **Breaking entries are audience-scoped.** Name the audience in the heading
-  (`### Breaking (provider adapters only)`) and cover: **who needs to act**,
-  **migration**, and **unchanged** (what readers might fear broke but
+- **Breaking entries are audience-scoped.** Open the bullet by naming who
+  needs to act (`- **Provider adapters:** …`) and cover: **who needs to
+  act**, **migration**, and **unchanged** (what readers might fear broke but
   didn't). This package is pinned by range from three siblings, so a
   breaking change here surfaces in their next install — say which minimum
   sibling versions cope with it.
-- **Keep one `## Unreleased` heading.** Add entries under the existing one;
-  don't open a second. Only the first is cut at release time, so entries
-  filed under a later heading are silently never released — the release
-  script refuses to run if it finds more than one.
+- **Editing `## Unreleased` in `CHANGELOG.md` directly still works** and is
+  merged with the fragments at release time — it remains the right place to
+  restructure pending entries, and the escape hatch for anything the
+  fragment format can't express (e.g. an audience-qualified
+  `### Breaking (provider adapters only)` heading, which `breaking`
+  fragments will then join). Keep one `## Unreleased` heading — the release
+  script refuses more than one, since only the first is ever cut.
 - **Releases** (maintainers): `npm version <patch|minor|major>` does the
-  whole cut — the `version` hook retitles `Unreleased` to
-  `## X.Y.Z — YYYY-MM-DD` (keeping a fresh `Unreleased` above it, and
-  refusing to release when there are no entries), then npm commits and tags.
-  `git push --follow-tags` triggers CI, which refuses a tag with no matching
-  changelog section, publishes `@animalabs/membrane` to npm, and creates the
-  GitHub release with that section as its notes. The two release jobs are
-  independent: some consumers run github-clone checkouts, so release notes
-  must exist even when npm publish fails. Version bumps are a maintainer
-  release-time action, not part of feature PRs.
+  whole cut — the `version` hook folds the pending fragments plus any
+  entries filed directly under `Unreleased` into `## X.Y.Z — YYYY-MM-DD`
+  (subsections emitted in `### Breaking` / `### Added` / `### Changed` /
+  `### Fixed` order), deletes the consumed fragments, keeps a fresh empty
+  `Unreleased` above, and refuses to release when there is nothing to
+  release; npm then commits and tags. `git push --follow-tags` triggers CI,
+  which refuses a tag with no matching changelog section, publishes
+  `@animalabs/membrane` to npm, and creates the GitHub release with that
+  section as its notes. The two release jobs are independent: some
+  consumers run github-clone checkouts, so release notes must exist even
+  when npm publish fails. Version bumps are a maintainer release-time
+  action, not part of feature PRs.
 
 ## Building and testing
 

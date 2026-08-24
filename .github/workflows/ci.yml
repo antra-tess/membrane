@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build-and-test:
-    name: Build & Test (${{ matrix.os }})
+    name: Build & Test (${{ matrix.os }}, node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -19,8 +19,11 @@ jobs:
       # node_modules tree records only that machine's native binaries, so a
       # lock made on macOS breaks Linux installs and vice versa. Each runner
       # catches the lock the other's platform produced. Tests run on ubuntu.
+      # Node: the engines floor and current LTS — stdio flushing semantics
+      # around process exit differ between versions and platforms.
       matrix:
         os: [ubuntu-latest, macos-latest]
+        node: [20, 24]
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -30,7 +33,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 20
+          node-version: ${{ matrix.node }}
 
       # npm ci installs the lock verbatim: npm >= 11 'npm install' silently
       # re-resolves platform packages missing from the lock, so only npm ci
@@ -44,6 +47,7 @@ jobs:
       - name: Build
         run: npm run build
 
+      # Tests run on both platforms: process/stdio behaviour differs (pipes
+      # are asynchronous on macOS), and ubuntu-only runs have missed that.
       - name: Test
-        if: matrix.os == 'ubuntu-latest'
         run: npm test
