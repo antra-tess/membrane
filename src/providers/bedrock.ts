@@ -273,6 +273,15 @@ async function signRequest(
 export class BedrockAdapter implements ProviderAdapter {
   readonly name = 'bedrock';
 
+  /**
+   * Bedrock serves Anthropic models over the Anthropic Messages payload shape
+   * and this adapter reads Anthropic's own field names
+   * (`cache_read_input_tokens` / `cache_creation_input_tokens`), so it inherits
+   * the convention verified live against api.anthropic.com on 2026-08-25.
+   * Derived from the wire contract, not measured against Bedrock directly.
+   */
+  readonly usageCacheConvention = 'cache-excluded' as const;
+
   private accessKeyId: string;
   private secretAccessKey: string;
   private sessionToken?: string;

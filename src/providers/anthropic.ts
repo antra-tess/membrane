@@ -164,6 +164,14 @@ export interface AnthropicAdapterConfig {
 
 export class AnthropicAdapter implements ProviderAdapter {
   readonly name = 'anthropic';
+
+  /**
+   * Verified live 2026-08-25 (claude-haiku-4-5, 4,650-token cached system
+   * prompt): call 1 returned input_tokens 8 / cache_creation_input_tokens 4650,
+   * call 2 input_tokens 8 / cache_read_input_tokens 4650. `input_tokens` never
+   * counts the cached span.
+   */
+  readonly usageCacheConvention = 'cache-excluded' as const;
   private client: Anthropic;
   private defaultMaxTokens: number;
   /** Any anthropic-beta value from defaultHeaders (e.g. the oauth beta for

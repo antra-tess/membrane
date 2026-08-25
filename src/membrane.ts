@@ -10,6 +10,7 @@ import type {
   AbortedResponse,
   ContentBlock,
   ProviderAdapter,
+  ProviderResponse,
   ModelRegistry,
   MembraneConfig,
   StreamOptions,
@@ -57,6 +58,7 @@ import { AnthropicXmlFormatter } from './formatters/anthropic-xml.js';
 import { normalizeToolPairs, mergeConsecutiveRoles } from './formatters/normalize-tool-pairs.js';
 import { YieldingStreamImpl } from './yielding-stream.js';
 import { calculateCost } from './utils/cost.js';
+import { calculateCacheHitRatio, normalizeUsageToCacheExcluded } from './utils/usage.js';
 import {
   isAcceptedImageMediaType,
   strippedImagePlaceholder,
@@ -123,7 +125,7 @@ export class Membrane {
         // `unknown` deliberately, and we acknowledge the cast at the boundary.
         const finalRequest = (await this.applyBeforeRequestHook(request, providerRequest)) as typeof providerRequest;
 
-        const providerResponse = await this.adapter.complete(finalRequest, {
+        const rawProviderResponse = await this.adapter.complete(finalRequest, {
           signal: options.signal,
           timeoutMs: options.timeoutMs,
           onRequest: (req) => {
@@ -131,6 +133,15 @@ export class Membrane {
             options.onRequest?.(req);
           },
         });
+        // Restate usage in the one convention before any ratio or price sees it.
+        const providerResponse: ProviderResponse = {
+          ...rawProviderResponse,
+          usage: normalizeUsageToCacheExcluded(
+            rawProviderResponse.usage,
+            this.adapter.name,
+            this.adapter.usageCacheConvention,
+          ),
+        };
 
         // Call onResponse callback with raw response from API
         options.onResponse?.(providerResponse.raw);
@@ -1851,7 +1862,13 @@ export class Membrane {
     const maxAttempts = onRetrying ? Math.max(0, refusalRetries ?? 0) : 0;
     let retried = 0;
     while (true) {
-      const result = await this.adapter.stream(finalRequest, callbacks, adapterOptions);
+      const rawResult = await this.adapter.stream(finalRequest, callbacks, adapterOptions);
+      // Restate usage in the one convention before any accumulator, ratio or
+      // price sees it — this is the only door streamed usage enters through.
+      const result: ProviderResponse = {
+        ...rawResult,
+        usage: normalizeUsageToCacheExcluded(rawResult.usage, this.adapter.name, this.adapter.usageCacheConvention),
+      };
       if (result.stopReason !== 'refusal' || retried >= maxAttempts) return result;
       retried++;
       const category = (result.raw as { response?: { stop_details?: { category?: string } } } | undefined)
@@ -2060,9 +2077,17 @@ export class Membrane {
 
     const stopReason = this.mapStopReason(providerResponse.stopReason);
     const durationMs = Date.now() - startTime;
-    const usage = {
+    // `NormalizedResponse.usage` is typed DetailedUsage and the streaming paths
+    // already return the whole thing; complete() used to narrow it to
+    // input/output here, so a caller reading `response.usage.cacheReadTokens`
+    // saw undefined on one path and a number on the other.
+    const usage: DetailedUsage = {
       inputTokens: providerResponse.usage.inputTokens,
       outputTokens: providerResponse.usage.outputTokens,
+      cacheCreationTokens: providerResponse.usage.cacheCreationTokens,
+      cacheReadTokens: providerResponse.usage.cacheReadTokens,
+      reasoningTokens: providerResponse.usage.reasoningTokens,
+      estimatedCost: this.estimateCost(providerResponse.usage, request.config.model),
     };
 
     return {
@@ -2078,13 +2103,7 @@ export class Membrane {
           triggeredSequence: providerResponse.stopSequence,
           wasTruncated: stopReason === 'max_tokens',
         },
-        usage: {
-          inputTokens: providerResponse.usage.inputTokens,
-          outputTokens: providerResponse.usage.outputTokens,
-          cacheCreationTokens: providerResponse.usage.cacheCreationTokens,
-          cacheReadTokens: providerResponse.usage.cacheReadTokens,
-          estimatedCost: this.estimateCost(providerResponse.usage, request.config.model),
-        },
+        usage,
         timing: {
           totalDurationMs: durationMs,
           attempts,
@@ -2211,10 +2230,7 @@ export class Membrane {
   }
 
   private calculateCacheHitRatio(usage: Pick<DetailedUsage, 'inputTokens' | 'cacheReadTokens'>): number {
-    const cacheRead = usage.cacheReadTokens ?? 0;
-    const total = usage.inputTokens ?? 0;
-    if (total === 0) return 0;
-    return cacheRead / total;
+    return calculateCacheHitRatio(usage);
   }
 
   private resolvePricing(model: string): import('./types/provider.js').ModelPricing | undefined {

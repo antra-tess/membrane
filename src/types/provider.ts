@@ -82,6 +82,21 @@ export interface ProviderCapabilities {
 // Model Pricing
 // ============================================================================
 
+/**
+ * Whether a provider's prompt-token count INCLUDES the span served from cache.
+ *
+ * Measured live 2026-08-25 — Anthropic (`cache-excluded`): a 4,650-token cached
+ * system prompt returned `input_tokens: 8` with `cache_read_input_tokens: 4650`.
+ * OpenAI (`cache-inclusive`): `prompt_tokens` stayed at 1732 across a cache hit
+ * that reported `cached_tokens: 1664`, so cached is a SUBSET of the prompt.
+ *
+ * `unknown` is a real epistemic state, not a default to lean on: it means no
+ * one has established this adapter's convention, and membrane will pass the
+ * counts through unchanged and warn the first time a cache read makes the
+ * ambiguity bite.
+ */
+export type UsageCacheConvention = 'cache-excluded' | 'cache-inclusive' | 'unknown';
+
 export interface ModelPricing {
   /** Cost per million input tokens */
   inputPerMillion: number;
@@ -169,6 +184,15 @@ export interface ProviderAdapter {
   /** Provider name */
   readonly name: string;
   
+  /**
+   * Which convention this adapter's `usage.inputTokens` carries. Required so a
+   * new adapter cannot inherit a silent default: membrane normalizes every
+   * response onto `cache-excluded` before any ratio or cost is computed, and it
+   * can only do that if the adapter says what it is reporting. Declare
+   * `'unknown'` when the convention has genuinely not been established.
+   */
+  usageCacheConvention: UsageCacheConvention;
+
   /** Check if this adapter handles a model */
   supportsModel(modelId: string): boolean;
   
@@ -272,6 +296,22 @@ export interface ProviderResponse {
     outputTokens: number;
     cacheCreationTokens?: number;
     cacheReadTokens?: number;
+
+    /**
+     * Reasoning tokens reported separately from the visible-output count and
+     * already folded INTO `outputTokens`. See {@link DetailedUsage.reasoningTokens}.
+     */
+    reasoningTokens?: number;
+
+    /**
+     * Overrides {@link ProviderAdapter.usageCacheConvention} for THIS response.
+     * Needed where one adapter fronts several upstream conventions: OpenRouter
+     * reads `cache_read_input_tokens` (Anthropic, cache-excluded) OR
+     * `prompt_tokens_details.cached_tokens` (OpenAI, cache-inclusive) depending
+     * on which provider it routed to, so the convention is a per-response fact
+     * there rather than a per-adapter one.
+     */
+    cacheConvention?: UsageCacheConvention;
   };
   
   /** Model that actually ran */

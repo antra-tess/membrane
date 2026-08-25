@@ -150,6 +150,18 @@ export interface GeminiAdapterConfig {
 
 export class GeminiAdapter implements ProviderAdapter {
   readonly name = 'gemini';
+
+  /**
+   * NOT ESTABLISHED. Google documents `cachedContentTokenCount` but the probes
+   * available on 2026-08-25 could not produce a cache hit to measure against:
+   * three identical 10,893-token calls to gemini-3.5-flash-lite never reported
+   * the field (implicit caching did not trigger), and explicit `cachedContents`
+   * is refused on the free tier (429,
+   * TotalCachedContentStorageTokensPerModelFreeTier limit=0). Declared honestly
+   * rather than guessed — membrane passes the counts through and warns once if
+   * a cache read ever arrives.
+   */
+  readonly usageCacheConvention = 'unknown' as const;
   private apiKey: string;
   private baseURL: string;
   private defaultMaxTokens: number;

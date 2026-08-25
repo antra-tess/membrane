@@ -118,6 +118,12 @@ export interface OpenAICompletionsAdapterConfig {
 
 export class OpenAICompletionsAdapter implements ProviderAdapter {
   readonly name: string;
+
+  /**
+   * NOT ESTABLISHED: legacy /v1/completions against arbitrary vendors. Moot
+   * today — the adapter never populates `cacheReadTokens`.
+   */
+  readonly usageCacheConvention = 'unknown' as const;
   private baseURL: string;
   private apiKey: string;
   private defaultMaxTokens: number;

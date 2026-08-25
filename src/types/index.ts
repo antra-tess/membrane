@@ -101,6 +101,7 @@ export type {
   ProviderRequestOptions,
   ProviderResponse,
   StreamCallbacks,
+  UsageCacheConvention,
 } from './provider.js';
 
 // Streaming
