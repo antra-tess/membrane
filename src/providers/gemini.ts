@@ -79,6 +79,7 @@ interface GeminiResponse {
     cachedContentTokenCount?: number;
   };
   modelVersion?: string;
+  promptFeedback?: { blockReason?: string; safetyRatings?: unknown[] };
   error?: { code: number; message: string; status: string };
 }
 
@@ -564,9 +565,16 @@ export class GeminiAdapter implements ProviderAdapter {
       }
     }
 
+    // A prompt blocked BEFORE generation comes back as a 200 with
+    // promptFeedback.blockReason and no candidates at all — no data.error, no
+    // finishReason — so it used to parse as an empty, clean end_turn.
+    const promptBlockReason = candidate === undefined ? response.promptFeedback?.blockReason : undefined;
+
     return {
       content: this.buildContentBlocks(text, toolCalls, images),
-      stopReason: this.mapFinishReason(candidate?.finishReason),
+      stopReason: promptBlockReason !== undefined
+        ? this.mapFinishReason(promptBlockReason)
+        : this.mapFinishReason(candidate?.finishReason),
       stopSequence: undefined,
       usage: {
         inputTokens: response.usageMetadata?.promptTokenCount ?? 0,
@@ -618,15 +626,26 @@ export class GeminiAdapter implements ProviderAdapter {
         return 'end_turn';
       case 'MAX_TOKENS':
         return 'max_tokens';
+      // Every generation-blocking safety enum, not just the two that were
+      // mapped: the rest reported as a clean end_turn with empty content.
       case 'SAFETY':
-        return 'refusal';
       case 'RECITATION':
+      case 'PROHIBITED_CONTENT':
+      case 'BLOCKLIST':
+      case 'SPII':
+      case 'IMAGE_SAFETY':
         return 'refusal';
       case 'TOOL_CALLS':
       case 'FUNCTION_CALL':
         return 'tool_use';
-      default:
+      case undefined:
         return 'end_turn';
+      // MALFORMED_FUNCTION_CALL, LANGUAGE, OTHER and anything Google adds
+      // next have no membrane member; they travel as the provider's own
+      // token, which membrane discloses on details.stop.providerReason and
+      // logs, instead of vanishing into end_turn.
+      default:
+        return reason;
     }
   }
 

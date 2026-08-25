@@ -14,6 +14,8 @@ export type StopReason =
   | 'max_tokens'     // Hit token limit
   | 'stop_sequence'  // Hit stop sequence
   | 'tool_use'       // Stopped for tool use
+  | 'pause_turn'     // Provider paused a long-running turn; the caller is
+                     // expected to resume it (Anthropic pause_turn)
   | 'refusal'        // Content refused by safety
   | 'abort'          // Request was aborted
   | 'no_progress'    // Stall guard ended the turn (issue #39): consecutive
@@ -65,6 +67,14 @@ export interface StopInfo {
   
   /** Whether output was truncated */
   wasTruncated: boolean;
+  
+  /**
+   * The provider's own stop token, verbatim. Populated whenever the adapter
+   * reported one — including reasons membrane has no member for, which
+   * normalize to `end_turn` and would otherwise be indistinguishable from a
+   * clean completion.
+   */
+  providerReason?: string;
 }
 
 // ============================================================================

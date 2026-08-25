@@ -17,6 +17,7 @@ import type {
   BasicUsage,
   DetailedUsage,
   StopReason,
+  StopInfo,
   TimingInfo,
   CacheInfo,
   ToolCall,
@@ -378,6 +379,7 @@ export class Membrane {
     const pricing = this.resolvePricing(request.config.model);
     const contentBlocks: ContentBlock[] = [];
     let lastStopReason: StopReason = 'end_turn';
+    let lastProviderStopReason: string | undefined;
     let lastStopSequence: string | undefined;
     let rawRequest: unknown;
     let rawResponse: unknown;
@@ -587,6 +589,7 @@ export class Membrane {
         onResponse?.(rawResponse);
 
         lastStopReason = this.mapStopReason(streamResult.stopReason);
+        lastProviderStopReason = streamResult.stopReason;
         lastStopSequence = streamResult.stopSequence ?? undefined;
 
         // Accumulate usage (including cache metrics)
@@ -925,7 +928,8 @@ export class Membrane {
         executedToolCalls,
         executedToolResults,
         initialBlockType,
-        lastStopSequence
+        lastStopSequence,
+        lastProviderStopReason
       );
 
       // Append non-text content blocks (e.g., generated_image) that the XML parser can't handle
@@ -982,6 +986,7 @@ export class Membrane {
     let totalUsage: DetailedUsage = { inputTokens: 0, outputTokens: 0 };
     const pricing = this.resolvePricing(request.config.model);
     let lastStopReason: StopReason = 'end_turn';
+    let lastProviderStopReason: string | undefined;
     let lastStopSequence: string | undefined;
     let rawRequest: unknown;
     let rawResponse: unknown;
@@ -1041,6 +1046,7 @@ export class Membrane {
         onResponse?.(rawResponse);
 
         lastStopReason = this.mapStopReason(streamResult.stopReason);
+        lastProviderStopReason = streamResult.stopReason;
         lastStopSequence = streamResult.stopSequence ?? undefined;
 
         // Accumulate usage (including cache metrics)
@@ -1150,11 +1156,7 @@ export class Membrane {
         stopReason: lastStopReason,
         usage: totalUsage,
         details: {
-          stop: {
-            reason: lastStopReason,
-            triggeredSequence: lastStopSequence,
-            wasTruncated: lastStopReason === 'max_tokens',
-          },
+          stop: this.buildStopInfo(lastStopReason, lastProviderStopReason, lastStopSequence),
           usage: { ...totalUsage },
           timing: {
             totalDurationMs: durationMs,
@@ -2069,11 +2071,7 @@ export class Membrane {
       stopReason,
       usage,
       details: {
-        stop: {
-          reason: stopReason,
-          triggeredSequence: providerResponse.stopSequence,
-          wasTruncated: stopReason === 'max_tokens',
-        },
+        stop: this.buildStopInfo(stopReason, providerResponse.stopReason, providerResponse.stopSequence),
         usage: {
           inputTokens: providerResponse.usage.inputTokens,
           outputTokens: providerResponse.usage.outputTokens,
@@ -2120,7 +2118,8 @@ export class Membrane {
     executedToolCalls: ToolCall[] = [],
     executedToolResults: ToolResult[] = [],
     startInsideBlock: 'thinking' | 'tool_call' | 'tool_result' | null = null,
-    triggeredSequence?: string
+    triggeredSequence?: string,
+    providerStopReason?: string
   ): NormalizedResponse {
     // Parse accumulated text into structured content blocks
     // This extracts thinking, tool_use, tool_result, and text blocks
@@ -2154,11 +2153,7 @@ export class Membrane {
       stopReason,
       usage,
       details: {
-        stop: {
-          reason: stopReason,
-          triggeredSequence,
-          wasTruncated: stopReason === 'max_tokens',
-        },
+        stop: this.buildStopInfo(stopReason, providerStopReason, triggeredSequence),
         usage: {
           ...usage,
           estimatedCost: usage.estimatedCost ?? this.estimateCost(usage, request.config.model),
@@ -2186,6 +2181,19 @@ export class Membrane {
     };
   }
 
+  private buildStopInfo(
+    reason: StopReason,
+    providerReason: string | undefined,
+    triggeredSequence: string | undefined
+  ): StopInfo {
+    return {
+      reason,
+      triggeredSequence,
+      wasTruncated: reason === 'max_tokens',
+      ...(providerReason !== undefined ? { providerReason } : {}),
+    };
+  }
+
   private mapStopReason(providerReason: string): StopReason {
     switch (providerReason) {
       case 'end_turn':
@@ -2196,12 +2204,25 @@ export class Membrane {
         return 'stop_sequence';
       case 'tool_use':
         return 'tool_use';
+      case 'pause_turn':
+        // A long-running turn the provider paused and the caller is expected
+        // to resume. Reported as end_turn, it looked finished.
+        return 'pause_turn';
       case 'refusal':
         // Safety refusal (e.g., Fable 5 reasoning_extraction). Must survive
         // mapping — downstream consumers react to refusals (chapterx adds a
         // Discord reaction). Defaulting this to end_turn silently hid them.
         return 'refusal';
       default:
+        // Unknown reasons still normalize to end_turn — callers switch on a
+        // closed union — but never silently: the raw token is disclosed as
+        // details.stop.providerReason and the mapping is logged. Provider
+        // enums grow, and the last time this default swallowed a member it
+        // hid safety refusals in production.
+        console.warn(
+          `[membrane] Unmapped provider stop reason '${providerReason}' normalized to end_turn ` +
+            '(see details.stop.providerReason)'
+        );
         return 'end_turn';
     }
   }
@@ -2449,6 +2470,7 @@ export class Membrane {
     const pricing = this.resolvePricing(request.config.model);
     const contentBlocks: ContentBlock[] = [];
     let lastStopReason: StopReason = 'end_turn';
+    let lastProviderStopReason: string | undefined;
     let lastStopSequence: string | undefined;
     let rawRequest: unknown;
     let rawResponse: unknown;
@@ -2614,6 +2636,7 @@ export class Membrane {
 
         rawResponse = streamResult.raw;
         lastStopReason = this.mapStopReason(streamResult.stopReason);
+        lastProviderStopReason = streamResult.stopReason;
         lastStopSequence = streamResult.stopSequence ?? undefined;
 
         // Accumulate usage (including cache metrics)
@@ -2966,7 +2989,8 @@ export class Membrane {
         executedToolCalls,
         executedToolResults,
         initialBlockType,
-        lastStopSequence
+        lastStopSequence,
+        lastProviderStopReason
       );
 
       // Merge provider thinking signatures into parser-derived thinking blocks
@@ -3020,6 +3044,7 @@ export class Membrane {
     let totalUsage: DetailedUsage = { inputTokens: 0, outputTokens: 0 };
     const pricing = this.resolvePricing(request.config.model);
     let lastStopReason: StopReason = 'end_turn';
+    let lastProviderStopReason: string | undefined;
     let lastStopSequence: string | undefined;
     let rawRequest: unknown;
     let rawResponse: unknown;
@@ -3157,6 +3182,7 @@ export class Membrane {
 
         rawResponse = streamResult.raw;
         lastStopReason = this.mapStopReason(streamResult.stopReason);
+        lastProviderStopReason = streamResult.stopReason;
         lastStopSequence = streamResult.stopSequence ?? undefined;
 
         // Accumulate usage (including cache metrics)
@@ -3282,11 +3308,7 @@ export class Membrane {
         stopReason: lastStopReason,
         usage: totalUsage,
         details: {
-          stop: {
-            reason: lastStopReason,
-            triggeredSequence: lastStopSequence,
-            wasTruncated: lastStopReason === 'max_tokens',
-          },
+          stop: this.buildStopInfo(lastStopReason, lastProviderStopReason, lastStopSequence),
           usage: { ...totalUsage },
           timing: {
             totalDurationMs: durationMs,
