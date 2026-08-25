@@ -50,6 +50,14 @@ describe('F8 · invoke tag spelling tolerance', () => {
     expect(parsed?.calls[0]?.input).toEqual({});
   });
 
+  it('refuses a nameless invoke rather than dispatching an empty tool name', () => {
+    const text = toolBlock(`<invoke name=""/>`);
+
+    const parsed = parseToolCalls(text);
+
+    expect(parsed?.calls).toEqual([]);
+  });
+
   it('keeps an apostrophe inside a double-quoted invoke name', () => {
     const text = toolBlock(`<invoke name="zz_it's_fake"/>`);
 

@@ -70,8 +70,12 @@ const FUNCTION_CALLS_REGEX = /<(antml:)?function_calls>([\s\S]*?)<\/(antml:)?fun
 // The name may be single- or double-quoted and whitespace may precede the
 // closing angle bracket; the quote character is backreferenced so the opposite
 // quote stays legal inside the name.
+// The name is at least one character and cannot contain its own quote, so a
+// nameless invoke and a stray second attribute both fail to match rather than
+// yielding a garbage tool name — a block that parses to no invokes is reported.
 // Groups: 1 = antml prefix, 2 = quote char, 3 = name, 4 = body (full form only).
-const INVOKE_REGEX = /<(antml:)?invoke\s+name=(["'])(.*?)\2\s*(?:\/>|>([\s\S]*?)<\/(antml:)?invoke>)/g;
+const INVOKE_REGEX =
+  /<(antml:)?invoke\s+name=(["'])((?:(?!\2).)+)\2\s*(?:\/>|>([\s\S]*?)<\/(antml:)?invoke>)/g;
 
 const INVOKE_NAME_GROUP = 3;
 const INVOKE_BODY_GROUP = 4;
