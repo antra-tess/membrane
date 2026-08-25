@@ -230,7 +230,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
           return; // Ignore parse errors (partial/keep-alive lines)
         }
 
-        throwOnStreamErrorFrame(parsed, this.name);
+        throwOnStreamErrorFrame(parsed, this.name, openAIRequest);
 
         try {
           const delta = parsed.choices?.[0]?.delta;

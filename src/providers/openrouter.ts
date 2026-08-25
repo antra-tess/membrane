@@ -249,7 +249,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
         // SSE data line with an `error` payload. Silently ignoring it would
         // yield a fake-successful empty completion — surface it instead so
         // retry logic can handle it. Shared with every other SSE adapter.
-        throwOnStreamErrorFrame(parsed, 'OpenRouter');
+        throwOnStreamErrorFrame(parsed, 'OpenRouter', openRouterRequest);
 
         try {
           const delta = parsed.choices?.[0]?.delta;

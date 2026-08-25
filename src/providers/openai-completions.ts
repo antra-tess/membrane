@@ -237,7 +237,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
           return; // Ignore parse errors (partial/keep-alive lines)
         }
 
-        throwOnStreamErrorFrame(parsed, this.name);
+        throwOnStreamErrorFrame(parsed, this.name, completionsRequest);
 
         try {
           const text = parsed.choices?.[0]?.text;

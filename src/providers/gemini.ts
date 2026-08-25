@@ -205,7 +205,7 @@ export class GeminiAdapter implements ProviderAdapter {
           return; // Ignore parse errors in stream chunks
         }
 
-        throwOnStreamErrorFrame(parsed, 'Gemini');
+        throwOnStreamErrorFrame(parsed, 'Gemini', geminiRequest);
 
         const candidate = parsed.candidates?.[0];
 
