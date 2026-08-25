@@ -56,6 +56,29 @@ export function findSpanningProviderRun(
 }
 
 /**
+ * Drop the extended-thinking config from a prefill-shaped provider request —
+ * from BOTH channels the `thinkingEnabled` resolver reads.
+ *
+ * The API rejects thinking combined with an assistant prefill, and the guard
+ * that only deleted the top-level field left `extra.thinking` (spread from
+ * `providerParams`) riding the adapter's `Object.assign(params, rest)` onto
+ * the wire — reproducing both the 400 and the interleaved-thinking beta
+ * header, since the resolver correctly saw the smuggled config. Mutates and
+ * returns the request; callers must own `extra` (never alias the caller's
+ * `providerParams`).
+ */
+export function stripThinkingForPrefill<T extends { thinking?: unknown; extra?: unknown }>(
+  providerRequest: T
+): T {
+  delete providerRequest.thinking;
+  const extra = providerRequest.extra;
+  if (extra && typeof extra === 'object') {
+    delete (extra as Record<string, unknown>).thinking;
+  }
+  return providerRequest;
+}
+
+/**
  * De-duplication key for a thinking / redacted_thinking carrier: two carriers
  * are the same carrier when their payload and signature match. Any other block
  * type gets a unique key so it can never collide.

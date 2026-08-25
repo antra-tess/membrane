@@ -31,6 +31,7 @@ import {
   sameThinkingText,
   findSpanningProviderRun,
   thinkingCarrierKey,
+  stripThinkingForPrefill,
 } from './utils/thinking-carriers.js';
 import {
   DEFAULT_RETRY_CONFIG,
@@ -1869,8 +1870,8 @@ export class Membrane {
     // literal `<thinking>` text prefix instead of the API feature — drop the
     // API param when the built request actually ends in an assistant prefill.
     // Chat-style builds (no prefill) keep it.
-    if (buildResult.assistantPrefill && providerRequest.thinking) {
-      delete providerRequest.thinking;
+    if (buildResult.assistantPrefill) {
+      stripThinkingForPrefill(providerRequest);
     }
 
     return { providerRequest, prefillResult: buildResult };
@@ -1962,7 +1963,7 @@ export class Membrane {
       messages.push({ role: 'assistant', content: trimmedAccumulated });
     }
     
-    return {
+    return stripThinkingForPrefill({
       ...this.getBaseProviderParams(originalRequest.config),
       // Continuations always end in an assistant prefill — the API rejects
       // extended thinking combined with prefill, so never send the param here
@@ -1979,7 +1980,7 @@ export class Membrane {
         // Pre-serialized prompt for completions adapters — skip re-serialization
         prompt: trimmedAccumulated,
       },
-    };
+    });
   }
 
   /**
@@ -2035,7 +2036,7 @@ export class Membrane {
       messages.push(...splitTurnMessages);
     }
 
-    return {
+    return stripThinkingForPrefill({
       ...this.getBaseProviderParams(originalRequest.config),
       // Continuations always end in an assistant prefill — the API rejects
       // extended thinking combined with prefill, so never send the param here
@@ -2047,8 +2048,11 @@ export class Membrane {
           : prefillResult.systemContent)
         : undefined,
       stopSequences: prefillResult.stopSequences,
-      extra: originalRequest.providerParams,
-    };
+      // Copied, not aliased: the guard below deletes the smuggled thinking
+      // config, and mutating the caller's own providerParams object would
+      // silently disable thinking on their NEXT (non-prefill) request.
+      extra: { ...originalRequest.providerParams },
+    });
   }
 
   private transformResponse(
