@@ -17,7 +17,19 @@ import {
   createInitialState,
   defaultTokenEstimator,
   DEFAULT_CONTEXT_CONFIG,
+  MembraneContextIdentityError,
 } from './types.js';
+
+/**
+ * Ceiling on markers this module places, regardless of `cache.points`.
+ *
+ * Anthropic accepts at most 4 `cache_control` blocks per request, and the
+ * request builders spend from that same budget (a system/tools fallback
+ * block, the floating tool-loop marker). Nothing reconciles those spends
+ * against `cache.points`, so the module keeps one slot free rather than
+ * risk a 400 on the default XML path, which always marks the system block.
+ */
+const MAX_MODULE_CACHE_POINTS = 3;
 
 // ============================================================================
 // Main Entry Point
@@ -47,6 +59,10 @@ export async function processContext(
   // Merge config with defaults
   const contextConfig = mergeConfig(input.context);
   const tokenEstimator = contextConfig.tokenEstimator ?? defaultTokenEstimator;
+  
+  // Stable identity is a precondition, not a nicety: without it every call
+  // looks like a new conversation and rolling/caching silently stop working.
+  assertStableMessageIds(input.messages);
   
   // Initialize or continue state
   let currentState = state ?? createInitialState();
@@ -87,12 +103,16 @@ export async function processContext(
       messageTokens,
       rollDecision.targetTokens,
       rollDecision.targetMessages,
-      contextConfig
+      contextConfig,
+      rollDecision.targetCharacters
     );
     
     keptMessages = truncateResult.kept.map(m => m.message);
     messagesDropped = truncateResult.dropped;
-    didRoll = true;
+    // A roll that dropped nothing is not a roll: reporting it as one both
+    // lies to the caller and resets the roll counters every call, which is
+    // exactly when threshold rolling is needed most.
+    didRoll = messagesDropped > 0;
     hardLimitHit = rollDecision.reason === 'hard_limit';
   }
   
@@ -103,6 +123,15 @@ export async function processContext(
     id: getMessageId(m),
   }));
   const keptTotalTokens = keptTokens.reduce((sum, m) => sum + m.tokens, 0);
+  
+  // Re-assert the hard limits against the truncated window. The window is
+  // floored at one message, so a single oversize message survives every
+  // truncation - the caller is told rather than handed an empty array.
+  const residualOverflow = measureResidualOverflow(
+    keptMessages,
+    keptTotalTokens,
+    contextConfig
+  );
   
   // Place cache markers
   const cacheMarkers = placeCacheMarkers(
@@ -168,6 +197,7 @@ export async function processContext(
     totalTokens: keptTotalTokens,
     hardLimitHit,
     cachedStartMessageId,
+    ...(residualOverflow ? { residualOverflow } : {}),
   };
   
   return { response, state: newState, info };
@@ -197,6 +227,61 @@ function mergeConfig(config: ContextConfig): ContextConfig {
 
 function getMessageId(message: NormalizedMessage): string {
   return message.metadata?.sourceId ?? `msg-${Math.random().toString(36).slice(2)}`;
+}
+
+function assertStableMessageIds(messages: NormalizedMessage[]): void {
+  const messageIndicesWithoutSourceId: number[] = [];
+  
+  messages.forEach((message, index) => {
+    const sourceId = message.metadata?.sourceId;
+    if (typeof sourceId !== 'string' || sourceId.length === 0) {
+      messageIndicesWithoutSourceId.push(index);
+    }
+  });
+  
+  if (messageIndicesWithoutSourceId.length === 0) {
+    return;
+  }
+  
+  const shown = messageIndicesWithoutSourceId.slice(0, 10).join(', ');
+  const ellipsis = messageIndicesWithoutSourceId.length > 10 ? ', ...' : '';
+  throw new MembraneContextIdentityError(
+    `processContext requires stable message identity: ` +
+    `${messageIndicesWithoutSourceId.length} of ${messages.length} messages carry no ` +
+    `metadata.sourceId (indices ${shown}${ellipsis}). Without it every call is detected ` +
+    `as a new conversation, so the roll threshold never accumulates, cache markers never ` +
+    `stay stable, and cachedStartMessageId is meaningless. Populate metadata.sourceId ` +
+    `with the originating system's message id.`,
+    messageIndicesWithoutSourceId
+  );
+}
+
+function measureResidualOverflow(
+  keptMessages: NormalizedMessage[],
+  keptTotalTokens: number,
+  config: ContextConfig
+): ContextInfo['residualOverflow'] {
+  const limits = config.limits;
+  if (!limits) {
+    return undefined;
+  }
+  
+  if (limits.maxCharacters) {
+    const keptCharacters = calculateCharacters(keptMessages);
+    if (keptCharacters > limits.maxCharacters) {
+      return { unit: 'characters', limit: limits.maxCharacters, actual: keptCharacters };
+    }
+  }
+  
+  if (limits.maxTokens && keptTotalTokens > limits.maxTokens) {
+    return { unit: 'tokens', limit: limits.maxTokens, actual: keptTotalTokens };
+  }
+  
+  if (limits.maxMessages && keptMessages.length > limits.maxMessages) {
+    return { unit: 'messages', limit: limits.maxMessages, actual: keptMessages.length };
+  }
+  
+  return undefined;
 }
 
 function detectDiscontinuity(
@@ -237,6 +322,8 @@ export interface RollDecision {
   reason?: 'threshold' | 'grace_exceeded' | 'hard_limit';
   targetTokens?: number;
   targetMessages?: number;
+  /** Character budget the kept window must fit (set by the maxCharacters limit). */
+  targetCharacters?: number;
   enteredGrace: boolean;
 }
 
@@ -261,6 +348,7 @@ export function shouldRoll(
       reason: 'hard_limit',
       targetTokens: limits.maxTokens,
       targetMessages: limits.maxMessages,
+      targetCharacters: limits.maxCharacters,
       enteredGrace: false,
     };
   }
@@ -271,6 +359,7 @@ export function shouldRoll(
       reason: 'hard_limit',
       targetTokens: limits.maxTokens,
       targetMessages: limits.maxMessages,
+      targetCharacters: limits.maxCharacters,
       enteredGrace: false,
     };
   }
@@ -281,12 +370,16 @@ export function shouldRoll(
       reason: 'hard_limit',
       targetTokens: limits.maxTokens,
       targetMessages: limits.maxMessages,
+      targetCharacters: limits.maxCharacters,
       enteredGrace: false,
     };
   }
   
-  // Check rolling threshold
-  const current = unit === 'messages' ? state.messagesSinceRoll : state.tokensSinceRoll;
+  // Check rolling threshold against the MEASURED window. state.messagesSinceRoll
+  // counts calls (not messages) and state.tokensSinceRoll re-adds the whole
+  // window every call, so both cross any threshold as a function of call count
+  // alone; they stay as telemetry and no longer decide the roll.
+  const current = unit === 'messages' ? messageCount : totalTokens;
   
   if (current >= maxThreshold) {
     // Exceeded grace, must roll
@@ -323,54 +416,129 @@ export function truncateMessages(
   messages: MessageWithTokens[],
   targetTokens?: number,
   targetMessages?: number,
-  config?: ContextConfig
+  config?: ContextConfig,
+  targetCharacters?: number
 ): { kept: MessageWithTokens[]; dropped: number } {
-  // Truncate from the beginning, keeping most recent
+  // Truncate from the beginning, keeping most recent.
+  // Every supplied target contributes a candidate start index; the window has
+  // to satisfy all of them, so the deepest cut wins.
   
-  if (targetMessages && messages.length > targetMessages) {
-    const startIdx = messages.length - targetMessages;
-    return {
-      kept: messages.slice(startIdx),
-      dropped: startIdx,
-    };
+  if (messages.length === 0) {
+    return { kept: messages, dropped: 0 };
   }
   
-  if (targetTokens) {
-    let tokenSum = 0;
-    let startIdx = messages.length;
+  const candidateStartIndices: number[] = [];
+  
+  if (targetMessages !== undefined && messages.length > targetMessages) {
+    candidateStartIndices.push(messages.length - targetMessages);
+  }
+  
+  if (targetTokens !== undefined) {
+    candidateStartIndices.push(
+      startIndexForBudget(messages, targetTokens, m => m.tokens)
+    );
+  }
+  
+  if (targetCharacters !== undefined) {
+    candidateStartIndices.push(
+      startIndexForBudget(messages, targetCharacters, m => calculateCharacters([m.message]))
+    );
+  }
+  
+  if (candidateStartIndices.length === 0) {
+    // Default: use buffer from config
+    const buffer = config?.rolling.buffer ?? 20;
+    const unit = config?.rolling.unit ?? 'messages';
     
-    // Count from end backwards
-    for (let i = messages.length - 1; i >= 0; i--) {
-      tokenSum += messages[i]!.tokens;
-      if (tokenSum > targetTokens) {
-        startIdx = i + 1;
-        break;
+    if (unit === 'messages') {
+      const targetCount = Math.max(buffer * 2, messages.length - buffer);
+      if (messages.length > targetCount) {
+        candidateStartIndices.push(messages.length - targetCount);
       }
-      startIdx = i;
-    }
-    
-    return {
-      kept: messages.slice(startIdx),
-      dropped: startIdx,
-    };
-  }
-  
-  // Default: use buffer from config
-  const buffer = config?.rolling.buffer ?? 20;
-  const unit = config?.rolling.unit ?? 'messages';
-  
-  if (unit === 'messages') {
-    const targetCount = Math.max(buffer * 2, messages.length - buffer);
-    if (messages.length > targetCount) {
-      const startIdx = messages.length - targetCount;
-      return {
-        kept: messages.slice(startIdx),
-        dropped: startIdx,
-      };
     }
   }
   
-  return { kept: messages, dropped: 0 };
+  if (candidateStartIndices.length === 0) {
+    return { kept: messages, dropped: 0 };
+  }
+  
+  let startIdx = Math.max(0, ...candidateStartIndices);
+  
+  // Never open the window on a tool_result whose tool_use was just dropped:
+  // the wire-level normalizer only covers two of the four request builders,
+  // and the default (XML prefill) path ships the orphan verbatim.
+  startIdx = snapStartIndexToCycleBoundary(messages, startIdx);
+  
+  // Floor the kept window at one message. An empty messages[] is rejected by
+  // every provider; residual overflow is reported through ContextInfo instead.
+  startIdx = Math.min(startIdx, messages.length - 1);
+  
+  return {
+    kept: messages.slice(startIdx),
+    dropped: startIdx,
+  };
+}
+
+/**
+ * Walk backwards from the newest message, accumulating cost, and return the
+ * first index whose window fits the budget. Mirrors the original token walk:
+ * the message that tips the sum past the budget is excluded.
+ */
+function startIndexForBudget(
+  messages: MessageWithTokens[],
+  budget: number,
+  costOf: (message: MessageWithTokens) => number
+): number {
+  let sum = 0;
+  let startIdx = messages.length;
+  
+  for (let i = messages.length - 1; i >= 0; i--) {
+    sum += costOf(messages[i]!);
+    if (sum > budget) {
+      return i + 1;
+    }
+    startIdx = i;
+  }
+  
+  return startIdx;
+}
+
+/**
+ * Advance a truncation start index past any message that would open the kept
+ * window with an unmatched tool_result, so the cut lands on a clean
+ * tool-cycle boundary. Only the head can be orphaned by a front cut, so the
+ * scan stops at the first message that references no unseen tool_use.
+ */
+function snapStartIndexToCycleBoundary(
+  messages: MessageWithTokens[],
+  startIdx: number
+): number {
+  if (startIdx <= 0 || startIdx >= messages.length) {
+    return startIdx;
+  }
+  
+  let idx = startIdx;
+  
+  while (idx < messages.length && opensWithOrphanToolResult(messages[idx]!.message)) {
+    idx++;
+  }
+  
+  return idx;
+}
+
+function opensWithOrphanToolResult(message: NormalizedMessage): boolean {
+  const toolUseIdsSeenInMessage = new Set<string>();
+  
+  for (const block of message.content) {
+    if (block.type === 'tool_use') {
+      toolUseIdsSeenInMessage.add(block.id);
+    }
+    if (block.type === 'tool_result' && !toolUseIdsSeenInMessage.has(block.toolUseId)) {
+      return true;
+    }
+  }
+  
+  return false;
 }
 
 export function placeCacheMarkers(
@@ -386,7 +554,7 @@ export function placeCacheMarkers(
     return [];
   }
   
-  const numPoints = cacheConfig.points ?? 1;
+  const numPoints = Math.min(cacheConfig.points ?? 1, MAX_MODULE_CACHE_POINTS);
   const minTokens = cacheConfig.minTokens ?? 1024;
   const preferUser = cacheConfig.preferUserMessages ?? true;
   
@@ -455,7 +623,12 @@ export function placeCacheMarkers(
     
     // Adjust to user message if preferred
     if (preferUser) {
-      const adjusted = findNearestUserMessage(messages, markerIdx, messageTokens);
+      const adjusted = findNearestUserMessage(
+        messages,
+        markerIdx,
+        messageTokens,
+        config.assistantParticipant
+      );
       if (adjusted) {
         markerIdx = adjusted.index;
         markerTokens = adjusted.tokens;
@@ -482,21 +655,35 @@ export function placeCacheMarkers(
   return markers;
 }
 
+/** Assistant names assumed when the deployment configures none. */
+const LEGACY_ASSISTANT_PARTICIPANTS = ['claude', 'assistant', 'bot', 'ai'];
+
 function findNearestUserMessage(
   messages: NormalizedMessage[],
   startIdx: number,
-  messageTokens: MessageWithTokens[]
+  messageTokens: MessageWithTokens[],
+  assistantParticipant?: string
 ): { index: number; tokens: number } | null {
   // Search backwards for a user message (non-assistant participant)
   const maxSearch = 5;
+  
+  // A deployment whose assistant is named anything else (Sol, a persona name)
+  // had every assistant turn classified as a user turn by the legacy list.
+  const assistantNames = assistantParticipant
+    ? [assistantParticipant.toLowerCase()]
+    : LEGACY_ASSISTANT_PARTICIPANTS;
   
   let tokens = messageTokens.slice(0, startIdx + 1).reduce((sum, m) => sum + m.tokens, 0);
   
   for (let i = startIdx; i >= Math.max(0, startIdx - maxSearch); i--) {
     const msg = messages[i]!;
-    // Heuristic: if participant isn't a common assistant name, it's probably a user
-    const participant = msg.participant.toLowerCase();
-    const isUser = !['claude', 'assistant', 'bot', 'ai'].includes(participant);
+    // Heuristic: if participant isn't a known assistant name, it's probably a
+    // user. A message with no participant at all (role-shaped producers) falls
+    // through the same way rather than crashing the whole call.
+    const participant = typeof msg.participant === 'string'
+      ? msg.participant.toLowerCase()
+      : '';
+    const isUser = !assistantNames.includes(participant);
     
     if (isUser) {
       return { index: i, tokens };
@@ -522,6 +709,10 @@ export function applyCacheMarkers(
     if (markerIndices.has(idx)) {
       return {
         ...msg,
+        // cacheBreakpoint is the field every request builder reads; the
+        // metadata.cacheControl write has no reader inside membrane and is
+        // kept only for external consumers that may already read it.
+        cacheBreakpoint: true,
         metadata: {
           ...msg.metadata,
           cacheControl: { type: 'ephemeral' as const },
