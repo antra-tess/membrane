@@ -224,6 +224,29 @@ describe('final clamp at the last exit before the adapter', () => {
   });
 });
 
+describe('the clamp never reaches back into the caller request', () => {
+  it('leaves a caller-owned system array intact when the wire clamp drops markers', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { adapter, captured } = captureAdapter();
+    const membrane = new Membrane(adapter as any);
+    // A caller that reuses one marked system array across turns: an
+    // in-place strip here would silently delete its breakpoints forever.
+    const callerSystem = [1, 2, 3, 4, 5].map((n) => ({
+      type: 'text',
+      text: `zz caller system ${n}`,
+      cache_control: marked,
+    }));
+
+    const providerRequest = build(makeRequest({ system: callerSystem as any }), [user('zz go')]);
+    await (membrane as any).streamOnce(providerRequest, { onChunk: () => {} }, {
+      normalizedRequest: makeRequest(),
+    });
+
+    expect(countWireCacheMarkers(captured[0])).toBe(MAX_CACHE_BREAKPOINTS);
+    expect(callerSystem.filter((b) => b.cache_control)).toHaveLength(5);
+  });
+});
+
 describe('float stand-down covers every prefix-rewriting normalizer repair', () => {
   it('stands down when a [pending] tool_result was synthesized', () => {
     const providerRequest = build(makeRequest(), [user('zz go', true), assistantToolCall('zz-t1')], true);

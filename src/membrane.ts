@@ -36,6 +36,7 @@ import {
 import {
   countWireCacheMarkers,
   clampCacheMarkers,
+  ownSystemBlocks,
   MAX_CACHE_BREAKPOINTS,
 } from './utils/cache-marker-budget.js';
 import {
@@ -1468,7 +1469,7 @@ export class Membrane {
     // Wrap system prompt with cache_control only as a fallback (no message
     // breakpoint marked); otherwise a message breakpoint already caches
     // tools+system as part of its prefix.
-    let system: unknown = request.system;
+    let system: unknown = ownSystemBlocks(request.system);
     if (cacheControl && upstreamWireMarkers === 0 && typeof system === 'string' && system.length > 0) {
       system = [{ type: 'text', text: system, cache_control: cacheControl }];
     } else if (cacheControl && upstreamWireMarkers === 0 && Array.isArray(system) && system.length > 0) {
@@ -1897,7 +1898,9 @@ export class Membrane {
     const providerRequest = {
       ...this.getBaseProviderParams(request.config),
       messages: buildResult.messages,
-      system: buildResult.systemContent,
+      // Owned, not aliased: the wire clamp strips markers in place, and a
+      // formatter may pass the caller's own system array straight through.
+      system: ownSystemBlocks(buildResult.systemContent),
       stopSequences: buildResult.stopSequences,
       tools: buildResult.nativeTools,
       extra: {
@@ -2016,11 +2019,7 @@ export class Membrane {
       // extended thinking combined with prefill, so never send the param here
       thinking: undefined,
       messages,
-      system: prefillResult.systemContent
-        ? (Array.isArray(prefillResult.systemContent) && prefillResult.systemContent.length > 0
-          ? prefillResult.systemContent
-          : prefillResult.systemContent)
-        : undefined,
+      system: ownSystemBlocks(prefillResult.systemContent) ?? undefined,
       stopSequences: prefillResult.stopSequences,
       extra: {
         ...originalRequest.providerParams,
@@ -2089,11 +2088,7 @@ export class Membrane {
       // extended thinking combined with prefill, so never send the param here
       thinking: undefined,
       messages,
-      system: prefillResult.systemContent
-        ? (Array.isArray(prefillResult.systemContent) && prefillResult.systemContent.length > 0
-          ? prefillResult.systemContent
-          : prefillResult.systemContent)
-        : undefined,
+      system: ownSystemBlocks(prefillResult.systemContent) ?? undefined,
       stopSequences: prefillResult.stopSequences,
       // Copied, not aliased: the guard below deletes the smuggled thinking
       // config, and mutating the caller's own providerParams object would

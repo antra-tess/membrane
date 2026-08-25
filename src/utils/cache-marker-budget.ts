@@ -54,6 +54,24 @@ function collectMarkedBlocks(surfaces: WireCacheSurfaces): Array<Record<string, 
   return marked;
 }
 
+/**
+ * Take ownership of a system surface before it can reach the clamp.
+ *
+ * `request.system` accepts caller-marked blocks, and the builders pass that
+ * array through by reference when they add no marker of their own. The clamp
+ * strips markers IN PLACE at the wire boundary — correct for blocks membrane
+ * built, catastrophic for the caller's own array, which a long-lived caller
+ * reuses turn after turn: one over-budget request would silently delete the
+ * caller's breakpoints for the life of that object. Shallow-copying the array
+ * and its blocks at build time keeps the clamp's mutations inside the request.
+ */
+export function ownSystemBlocks(system: unknown): unknown {
+  if (!Array.isArray(system)) return system;
+  return system.map((block) =>
+    block && typeof block === 'object' ? { ...(block as Record<string, unknown>) } : block
+  );
+}
+
 /** How many cache_control markers this request would actually put on the wire. */
 export function countWireCacheMarkers(surfaces: WireCacheSurfaces): number {
   return collectMarkedBlocks(surfaces).length;
