@@ -33,6 +33,7 @@ import {
   MembraneError,
   classifyError,
   isOverloadedError,
+  isTimeoutAbortError,
   isTextContent,
   isAbortedResponse,
   unsupportedError,
@@ -2453,6 +2454,10 @@ export class Membrane {
    * Check if an error is an abort error
    */
   private isAbortError(error: unknown): boolean {
+    // An adapter's own deadline: a timeout by classification, still an abort
+    // by provenance, so the streaming paths hand back the partial content
+    // they collected instead of throwing.
+    if (isTimeoutAbortError(error)) return true;
     if (error instanceof Error) {
       // Standard AbortError
       if (error.name === 'AbortError') return true;
@@ -2469,8 +2474,9 @@ export class Membrane {
   /**
    * Why a caught abort happened. The caller's own signal is authoritative:
    * if it fired, the cancellation is theirs whatever the error text says.
-   * Otherwise an adapter-side deadline (createCombinedSignal's timeoutMs
-   * raises `AbortError: Request timed out`) classifies as a timeout, and
+   * Otherwise an adapter-side deadline classifies as a timeout — the adapters
+   * mark the abort createCombinedSignal's timeoutMs raises and map it to a
+   * TimeoutAbortError, so the identity survives their error handling — and
    * anything else that reached the abort catch is a failure, not a person.
    */
   private abortReason(error: unknown, signal?: AbortSignal): 'user' | 'timeout' | 'error' {

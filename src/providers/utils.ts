@@ -1,3 +1,5 @@
+import { TimeoutAbortError } from '../types/errors.js';
+
 /**
  * Safely parse a JSON string, returning an empty object on failure.
  * Used for tool call arguments which may be malformed from streaming.
@@ -12,14 +14,61 @@ export function safeParseJson(str: string | undefined): Record<string, unknown> 
 }
 
 /**
+ * Marks the abort reason raised by an adapter's own `timeoutMs` deadline, so
+ * the error that comes back out of `fetch` can be told apart from a caller's
+ * cancellation by PROVENANCE rather than by matching its message text.
+ *
+ * `fetch` rejects with the signal's own `reason` object — identity and extra
+ * properties intact, on both the pre-headers and the body-read paths — so the
+ * mark survives the round trip through the platform. When some layer does
+ * replace the error, `isDeadlineAbort` simply reports false and the abort
+ * classifies as it did before: a missing mark degrades to the old answer, it
+ * never invents a timeout.
+ */
+const DEADLINE_ABORT = Symbol.for('membrane.deadlineAbort');
+
+function deadlineAbortReason(): DOMException {
+  const reason = new DOMException('Request timed out', 'AbortError');
+  Object.defineProperty(reason, DEADLINE_ABORT, { value: true, enumerable: false });
+  return reason;
+}
+
+/**
+ * True when this error is the abort raised by an adapter's own deadline.
+ *
+ * A caller's cancellation never carries the mark (the combined controller is
+ * aborted with the caller's own reason), and if both race, whichever fired
+ * first is the reason the platform rejects with — so the mark answers "was
+ * this OUR deadline?" without a separate tie-break.
+ */
+export function isDeadlineAbort(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as Record<symbol, unknown>)[DEADLINE_ABORT] === true
+  );
+}
+
+/**
+ * The typed error a deadline abort should become: a timeout by classification,
+ * an abort by provenance. Adapters return this from `handleError` instead of a
+ * bare `abortError()`, which used to erase the distinction before Membrane's
+ * caller-signal > timeout > error ladder could read it.
+ */
+export function deadlineTimeoutError(error: unknown, rawRequest?: unknown): TimeoutAbortError {
+  return new TimeoutAbortError('Request timed out', error, rawRequest);
+}
+
+/**
  * Create a combined AbortSignal that fires on either the caller's signal
  * or a timeout (whichever comes first).
  *
  * The returned `cleanup` function MUST be called in a `finally` block to
  * clear the timeout and remove the event listener, preventing leaks.
  *
- * Timeout aborts with `DOMException('Request timed out', 'AbortError')`
- * so it classifies identically to user-initiated aborts.
+ * Timeout aborts with a marked `DOMException('Request timed out',
+ * 'AbortError')`: abort-shaped like any cancellation, and identifiable as the
+ * deadline's doing via `isDeadlineAbort`.
  */
 export function createCombinedSignal(
   signal?: AbortSignal,
@@ -32,10 +81,7 @@ export function createCombinedSignal(
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
   if (timeoutMs) {
-    timeoutId = setTimeout(
-      () => controller.abort(new DOMException('Request timed out', 'AbortError')),
-      timeoutMs
-    );
+    timeoutId = setTimeout(() => controller.abort(deadlineAbortReason()), timeoutMs);
   }
 
   const onAbort = () => controller.abort(signal!.reason);

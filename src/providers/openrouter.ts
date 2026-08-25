@@ -22,7 +22,7 @@ import {
   abortError,
   networkError,
 } from '../types/index.js';
-import { safeParseJson, createCombinedSignal, SSELineParser } from './utils.js';
+import { safeParseJson, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError } from './utils.js';
 
 // ============================================================================
 // Types
@@ -696,6 +696,10 @@ export class OpenRouterAdapter implements ProviderAdapter {
   }
 
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
+    // A deadline abort is a timeout and stays one. Collapsing it into a bare
+    // abortError() here is what erased the identity before Membrane's
+    // caller-signal > timeout > error ladder could read it.
+    if (isDeadlineAbort(error)) return deadlineTimeoutError(error, rawRequest);
     if (error instanceof Error) {
       const message = error.message;
 

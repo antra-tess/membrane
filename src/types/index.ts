@@ -163,6 +163,8 @@ export {
   networkError,
   timeoutError,
   abortError,
+  TimeoutAbortError,
+  isTimeoutAbortError,
   safetyError,
   unsupportedError,
   classifyError,

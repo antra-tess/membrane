@@ -215,6 +215,34 @@ export function abortError(message: string = 'Request was aborted', rawRequest?:
   });
 }
 
+/**
+ * A request cancelled by the adapter's OWN deadline (`timeoutMs`), as opposed
+ * to a caller's signal or a stray abort.
+ *
+ * It is both facts at once, and callers need both: a timeout by `type` (so
+ * `classifyError` and the abort-reason ladder report `'timeout'`), and an
+ * abort by provenance (so the streaming paths still hand back an
+ * `AbortedResponse` with whatever partial content arrived, rather than
+ * throwing). Non-retryable: the deadline that fired belongs to this call, and
+ * retrying inside it would only spend the caller's budget again.
+ */
+export class TimeoutAbortError extends MembraneError {
+  constructor(message: string = 'Request timed out', raw?: unknown, rawRequest?: unknown) {
+    super({
+      type: 'timeout',
+      message,
+      retryable: false,
+      rawError: raw,
+      rawRequest,
+    });
+    this.name = 'TimeoutAbortError';
+  }
+}
+
+export function isTimeoutAbortError(error: unknown): error is TimeoutAbortError {
+  return error instanceof TimeoutAbortError;
+}
+
 export function safetyError(message: string, raw?: unknown, rawRequest?: unknown): MembraneError {
   return new MembraneError({
     type: 'safety',
