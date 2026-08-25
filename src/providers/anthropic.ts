@@ -674,14 +674,15 @@ export class AnthropicAdapter implements ProviderAdapter {
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
     if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
 
-    // APIUserAbortError is the SDK's own typed abort; the message equality is
-    // the belt-and-braces for a plain Error carrying the SDK's abort text
-    // (the SSE idle watchdog path, fleet incident 2026-07-20).
-    if (
-      error instanceof Anthropic.APIUserAbortError ||
-      isTypedAbortError(error) ||
-      (error instanceof Error && error.message === 'Request was aborted.')
-    ) {
+    // A cancellation is a type, never a phrase — not even the SDK's own exact
+    // phrase, which any caller can produce. The instanceof arm is what
+    // actually catches the SDK abort: APIUserAbortError inherits `name ===
+    // 'Error'` (measured against @anthropic-ai/sdk 0.52), so isTypedAbortError
+    // does NOT match it; isTypedAbortError covers the other typed shapes —
+    // DOMException AbortError, name === 'AbortError', and a membrane abort.
+    // The idle watchdog that motivated the old message arm never reaches here:
+    // the stream catch throws its typed timeout before calling handleError.
+    if (error instanceof Anthropic.APIUserAbortError || isTypedAbortError(error)) {
       return abortError(undefined, rawRequest);
     }
 
