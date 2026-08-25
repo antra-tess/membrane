@@ -20,8 +20,9 @@
  * where inputTokens/cacheReadTokens/cacheCreationTokens are disjoint and each
  * is priced at its own rate.
  */
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
+import { resetUndeclaredConventionWarnings } from '../../src/utils/usage.js';
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -51,11 +52,11 @@ const zzRegistry = {
 
 function adapterReporting(
   usage: ProviderResponse['usage'],
-  usageCacheConvention: UsageCacheConvention,
+  usageCacheConvention?: UsageCacheConvention,
 ): ProviderAdapter {
   return {
     name: 'zz-adapter',
-    usageCacheConvention,
+    ...(usageCacheConvention ? { usageCacheConvention } : {}),
     supportsModel: () => true,
     async complete(request: ProviderRequest): Promise<ProviderResponse> {
       return {
@@ -86,6 +87,9 @@ const ZZ_REQUEST = {
   messages: [{ role: 'user', content: [{ type: 'text', text: 'zz-prompt' }] }],
 } as unknown as NormalizedRequest;
 
+// The undeclared-convention warning latches per adapter NAME, process-wide,
+// and these cases all use the same one.
+beforeEach(() => { resetUndeclaredConventionWarnings(); });
 afterEach(() => { vi.restoreAllMocks(); });
 
 describe('cache-excluded adapters (Anthropic convention)', () => {
@@ -181,6 +185,24 @@ describe('undeclared conventions', () => {
     expect(first.usage.inputTokens).toBe(1732);
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0]?.[0])).toContain('usageCacheConvention');
+  });
+
+  it('treats an adapter that declares NOTHING the same as one declaring "unknown"', async () => {
+    // `usageCacheConvention` is optional on the interface so external custom
+    // adapters keep compiling. Silence is not a licence to guess: an
+    // undeclared adapter gets `unknown`'s exact behaviour — counts through
+    // untouched, one warning when a cache read makes the ambiguity bite.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
+    const membrane = new Membrane(
+      adapterReporting({ inputTokens: 1732, outputTokens: 2, cacheReadTokens: 1664 }),
+      { registry: zzRegistry },
+    );
+
+    const response = await membrane.complete(ZZ_REQUEST);
+
+    expect(response.usage.inputTokens).toBe(1732);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toContain('"unknown"');
   });
 
   it('stays silent when no cache read is reported', async () => {

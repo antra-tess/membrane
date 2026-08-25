@@ -193,13 +193,19 @@ export interface ProviderAdapter {
   readonly name: string;
   
   /**
-   * Which convention this adapter's `usage.inputTokens` carries. Required so a
-   * new adapter cannot inherit a silent default: membrane normalizes every
-   * response onto `cache-excluded` before any ratio or cost is computed, and it
-   * can only do that if the adapter says what it is reporting. Declare
-   * `'unknown'` when the convention has genuinely not been established.
+   * Which convention this adapter's `usage.inputTokens` carries. Membrane
+   * normalizes every response onto `cache-excluded` before any ratio or cost is
+   * computed, and it can only do that if the adapter says what it is reporting.
+   *
+   * OPTIONAL, defaulting to `'unknown'`: an adapter that declares nothing is in
+   * exactly the state `'unknown'` names, and treating it that way — pass the
+   * counts through untouched, warn once when a cache read makes the ambiguity
+   * bite — is the honest reading of silence. Requiring it would also stop every
+   * external custom adapter compiling for a fact membrane can already say it
+   * does not know. Declare it: `'unknown'` is a real epistemic state, not a
+   * resting place.
    */
-  usageCacheConvention: UsageCacheConvention;
+  usageCacheConvention?: UsageCacheConvention;
 
   /** Check if this adapter handles a model */
   supportsModel(modelId: string): boolean;

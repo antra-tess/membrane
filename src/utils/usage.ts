@@ -19,12 +19,10 @@ const warnedUndeclaredAdapters = new Set<string>();
 export function normalizeUsageToCacheExcluded(
   usage: ProviderResponse['usage'],
   adapterName: string,
-  adapterConvention: UsageCacheConvention,
+  adapterConvention: UsageCacheConvention | undefined,
 ): ProviderResponse['usage'] {
-  // An adapter that declares nothing is in exactly the state `unknown` names.
-  // The interface requires the field, but tsc only covers `src/`, so a
-  // hand-rolled adapter can still arrive without one — treat it the same way
-  // rather than letting an undeclared convention slip through quietly.
+  // An adapter that declares nothing is in exactly the state `unknown` names,
+  // which is why the interface field is optional and lands here.
   const convention = usage.cacheConvention ?? adapterConvention ?? 'unknown';
   const cacheReadTokens = usage.cacheReadTokens ?? 0;
 
