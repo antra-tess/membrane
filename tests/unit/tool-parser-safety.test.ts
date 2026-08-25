@@ -320,6 +320,88 @@ describe('F13 · executed-block detection', () => {
   });
 });
 
+describe('greptile#52-2 · a call span that crosses out of its container', () => {
+  // The quoted opener sits INSIDE the thinking block and its closer sits after
+  // `</thinking>`, so the call span starts inside a retained container and ends
+  // past it. Retention that tested only `end` kept both spans: the quoted call
+  // dispatched, and the source text from the quoted opener to `</thinking>`
+  // was emitted twice — once as thinking content, once as a tool_use.
+  const crossingTurn =
+    `<thinking>zz musing: I could write ${FUNCTION_CALLS_OPEN}\n` +
+    `<invoke name="zz_quoted_tool"><parameter name="fld1">v1</parameter></invoke>\n` +
+    `but I will not.\n</thinking>\nzz_bot: no.\n${FUNCTION_CALLS_CLOSE}`;
+
+  function countOccurrences(haystack: string, needle: string): number {
+    return haystack.split(needle).length - 1;
+  }
+
+  it('does not dispatch a call that opened inside a closed thinking block', () => {
+    expect(parseToolCalls(crossingTurn)).toBeNull();
+  });
+
+  it('emits no tool_use for the crossing span', () => {
+    const { blocks, toolCalls } = parseAccumulatedIntoBlocks(crossingTurn);
+
+    expect(toolCalls).toEqual([]);
+    expect(blocks.filter((b) => b.type === 'tool_use')).toHaveLength(0);
+  });
+
+  it('renders the overlapping source text exactly once', () => {
+    const { blocks } = parseAccumulatedIntoBlocks(crossingTurn);
+
+    expect(countOccurrences(JSON.stringify(blocks), 'zz_quoted_tool')).toBe(1);
+    expect(blocks.map((b) => b.type)).toEqual(['thinking', 'text']);
+    expect((blocks[0] as { thinking: string }).thinking).toContain('zz_quoted_tool');
+  });
+
+  it('leaves the dangling closer as ordinary text', () => {
+    const { blocks } = parseAccumulatedIntoBlocks(crossingTurn);
+
+    const visibleText = blocks
+      .filter((b) => b.type === 'text')
+      .map((b) => (b as { text: string }).text)
+      .join('\n');
+
+    expect(visibleText).toContain('zz_bot: no.');
+    expect(visibleText).toContain(FUNCTION_CALLS_CLOSE);
+  });
+
+  it('reports no structural defect for an unpaired closer', () => {
+    // Measured, not assumed: hasUnclosedToolBlock compares opener COUNT to
+    // closer count, so a closer with no opener left outside every span is
+    // invisible to every structural diagnostic and simply reads as text.
+    const parsed = parseAccumulatedIntoBlocks(crossingTurn);
+
+    expect(parsed.unclosedToolBlock).toBe(false);
+    expect(parsed.emptyToolBlocks).toBe(0);
+    expect(parsed.splicedToolBlocks).toBe(0);
+  });
+
+  it('applies the same rule to a call opening inside a tool result', () => {
+    const crossingResult =
+      `zz_bot: reading\n${FUNCTION_RESULTS_OPEN}\n<result>\n<stdout>zz-result quoting ` +
+      `${FUNCTION_CALLS_OPEN}\n<invoke name="zz_echoed_tool"/>\n</stdout>\n</result>\n` +
+      `${FUNCTION_RESULTS_CLOSE}\nzz_bot: done.\n${FUNCTION_CALLS_CLOSE}`;
+
+    const { blocks, toolCalls } = parseAccumulatedIntoBlocks(crossingResult);
+
+    expect(parseToolCalls(crossingResult)).toBeNull();
+    expect(toolCalls).toEqual([]);
+    expect(blocks.filter((b) => b.type === 'tool_use')).toHaveLength(0);
+  });
+
+  it('still retains a span that merely abuts the previous one', () => {
+    const abutting =
+      `<thinking>zz musing: calling it now.\n</thinking>` +
+      toolBlock(`<invoke name="zz_live_tool"/>`);
+
+    const { blocks, toolCalls } = parseAccumulatedIntoBlocks(abutting);
+
+    expect(toolCalls.map((c) => c.name)).toEqual(['zz_live_tool']);
+    expect(blocks.map((b) => b.type)).toEqual(['thinking', 'tool_use']);
+  });
+});
+
 describe('greptile#52-1 · an unclosed invoke head absorbs the next call', () => {
   // The block-splice disease one level down: INVOKE_REGEX's full-form
   // alternative is lazy, so an invoke left open pairs with the NEXT invoke's

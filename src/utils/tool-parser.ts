@@ -482,21 +482,31 @@ type CandidateSpan =
   | { kind: 'results'; start: number; end: number; innerContent: string; rawXml: string };
 
 /**
- * Keep the outermost spans, in document order.
+ * Keep the outermost spans, in document order. RETAINED SPANS NEVER OVERLAP:
+ * a span whose START lies inside one already kept is refused, whether it ends
+ * inside that container or crosses out past it.
  *
- * Sorted by start with the outermost first on a tie, a span ending no later
- * than one already kept is fully inside it: content of that container, not a
- * sibling of it. Emitting both would render the same source text twice — once
- * as thinking content, once as a real tool_use — and walk the text cursor past
- * the inner span, so the gap logic would print the container's own closing tag
- * as visible model text.
+ * Sorted by start with the outermost first on a tie, a span that begins before
+ * the furthest retained end begins INSIDE a container, and everything a
+ * container encloses is its content — the model wrote it, it did not call it.
+ * Testing only `end` let a crossing span through: a call opening inside a
+ * thinking block or a tool result and closing after it was retained alongside
+ * its container, so the quoted call dispatched and the overlapping source text
+ * was emitted twice — once as thinking content, once as a real tool_use — while
+ * the text cursor walked past the inner span, printing the container's own
+ * closing tag as visible model text. A dangling closer left downstream by such
+ * a refusal is what it looks like: ordinary text.
+ *
+ * The bound is unchanged: only a CLOSED container is visible here, so the
+ * streaming stop-sequence path, where the text is cut at `</function_calls>`
+ * before the enclosing `<thinking>` closes, is still outside this rule.
  */
 function retainOutermostSpans(spans: CandidateSpan[]): CandidateSpan[] {
   const sorted = [...spans].sort((a, b) => a.start - b.start || b.end - a.end);
   const retained: CandidateSpan[] = [];
   let furthestRetainedEnd = -1;
   for (const span of sorted) {
-    if (span.end <= furthestRetainedEnd) continue;
+    if (span.start < furthestRetainedEnd) continue;
     retained.push(span);
     furthestRetainedEnd = span.end;
   }
@@ -706,9 +716,11 @@ export function parseAccumulatedIntoBlocks(
 
   // ── Pass 2: containment ──────────────────────────────────────────────────
   //
-  // Sorted by start, outermost span first on a tie: a span that ends no later
-  // than one already kept is INSIDE it, so it is content of that container,
-  // not a sibling of it. Zero-invoke and zero-result spans take part as
+  // Sorted by start, outermost span first on a tie: a span that BEGINS before
+  // the furthest retained end begins inside a container, so it is content of
+  // that container, not a sibling of it — retained spans never overlap, and a
+  // span that crosses out past its container is refused with the rest of the
+  // container's content. Zero-invoke and zero-result spans take part as
   // containers even though they contribute no block of their own — whether a
   // span holds anything parseable says nothing about whether it encloses the
   // text beneath it.
