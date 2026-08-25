@@ -79,8 +79,30 @@ const INVOKE_BODY_GROUP = 4;
 // Parameter tags
 const PARAMETER_REGEX = /<(antml:)?parameter\s+name="([^"]+)">([\s\S]*?)<\/(antml:)?parameter>/g;
 
-// Check for function_results following a block
-const FUNCTION_RESULTS_START = /<(antml:)?function_results>/;
+// Openers that mark a block as already executed, when one is the very next
+// token after it
+const FUNCTION_RESULTS_START_ANCHORED = /^<(antml:)?function_results>/;
+
+// Longest opener the anchored test can match, so the slice it reads is bounded
+const FUNCTION_RESULTS_OPENER_MAX_LENGTH = '<function_results>'.length + 'antml:'.length;
+
+const SINGLE_WHITESPACE_REGEX = /\s/;
+
+/**
+ * Has this block already been executed? True only when the next NON-WHITESPACE
+ * token after it is a function_results opener. The previous test — "a
+ * function_results opener appears anywhere in the next 100 characters" — was
+ * wrong in both directions: padding past 100 characters re-selected a block
+ * that had already run, and a results block belonging to some later exchange
+ * marked a live call as spent.
+ */
+function isFollowedByResults(text: string, afterPos: number): boolean {
+  let scan = afterPos;
+  while (scan < text.length && SINGLE_WHITESPACE_REGEX.test(text[scan]!)) scan++;
+  return FUNCTION_RESULTS_START_ANCHORED.test(
+    text.slice(scan, scan + FUNCTION_RESULTS_OPENER_MAX_LENGTH)
+  );
+}
 
 /**
  * Parse tool calls from text containing XML function_calls blocks
@@ -97,11 +119,9 @@ export function parseToolCalls(text: string): ParsedToolCalls | null {
   let lastUnexecutedMatch: RegExpExecArray | null = null;
 
   while ((blockMatch = FUNCTION_CALLS_REGEX.exec(text)) !== null) {
-    // Check if this block already has results after it
     const afterPos = blockMatch.index + blockMatch[0].length;
-    const textAfter = text.slice(afterPos, afterPos + 100); // Check next 100 chars
 
-    if (!FUNCTION_RESULTS_START.test(textAfter.trimStart())) {
+    if (!isFollowedByResults(text, afterPos)) {
       // This block hasn't been executed yet - store it
       // Need to capture all properties since exec returns are reused
       lastUnexecutedMatch = {

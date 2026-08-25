@@ -59,6 +59,28 @@ describe('F8 · invoke tag spelling tolerance', () => {
   });
 });
 
+describe('F13 · executed-block detection', () => {
+  it('treats a block as executed when only whitespace separates it from its results', () => {
+    const text =
+      toolBlock(`<invoke name="zz_padded"/>`) +
+      ' '.repeat(120) +
+      resultsBlock(`<result tool_use_id="ite1"><stdout>ok</stdout></result>`);
+
+    expect(parseToolCalls(text)).toBeNull();
+  });
+
+  it('does not treat a block as executed when model text intervenes before the results', () => {
+    const text =
+      toolBlock(`<invoke name="zz_unexecuted"/>`) +
+      '\nzz_bot: standing by\n' +
+      resultsBlock(`<result tool_use_id="ite1"><stdout>ok</stdout></result>`);
+
+    const parsed = parseToolCalls(text);
+
+    expect(parsed?.calls.map((c) => c.name)).toEqual(['zz_unexecuted']);
+  });
+});
+
 describe('F11 · document order across invoke forms', () => {
   const mixedFormsBlock = toolBlock(
     `<invoke name="zz_first"/>\n` +
