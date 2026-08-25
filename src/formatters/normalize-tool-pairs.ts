@@ -414,8 +414,12 @@ function rebuildEnvelopes(
       // from message N — signature and all — inside message N-1's turn,
       // AFTER its tool_use: content attributed to the wrong turn, and
       // signed reasoning claiming to belong to a cycle it did not produce.
-      // (Measured 2026-08-25 against sonnet-4-6: the API accepts the welded
-      // shape, so this is a content-correctness repair, not 400-prevention.)
+      // This is a content-correctness repair, NOT 400-prevention: measured
+      // live on 2026-08-25 (claude-haiku-4-5, and sonnet-4-6 independently),
+      // replaying a genuinely signed thinking block positioned after its
+      // tool_use returns 200, exactly as the correctly-ordered control does.
+      // types/tools.ts:100 still asserts this shape "fails API validation" —
+      // that claim is stale.
       // Phase 3 guarantees a user envelope after any tool_use-bearing
       // assistant envelope, so the fresh envelope opened here cannot be
       // concatenated back by the mergeConsecutiveRoles that follows.

@@ -6,5 +6,9 @@
   which the following `mergeConsecutiveRoles` cannot re-weld because phase 3
   guarantees a user envelope after any `tool_use`. This is a
   content-correctness fix (signed reasoning attributed to the wrong turn), not
-  400-prevention: measured against `claude-sonnet-4-6` on 2026-08-25, the live
-  API accepts the welded shape.
+  400-prevention. Live verification, 2026-08-25: replaying a real signed
+  `thinking` block from `claude-haiku-4-5-20251001` with the block placed after
+  its `tool_use` returned 200, as did the correctly-ordered control, so the
+  API accepts the welded shape; the same was observed for
+  `claude-sonnet-4-6`. The tests covering this change are mock-only — no test
+  in the suite makes a provider call.
