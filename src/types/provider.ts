@@ -312,10 +312,11 @@ export interface ProviderResponse {
     cacheReadTokens?: number;
 
     /**
-     * Reasoning tokens reported separately from the visible-output count and
-     * already folded INTO `outputTokens`. See {@link DetailedUsage.reasoningTokens}.
+     * Thinking/reasoning tokens reported separately from the visible-output
+     * count and already folded INTO `outputTokens`.
+     * See {@link DetailedUsage.thinkingTokens}.
      */
-    reasoningTokens?: number;
+    thinkingTokens?: number;
 
     /**
      * Overrides {@link ProviderAdapter.usageCacheConvention} for THIS response.

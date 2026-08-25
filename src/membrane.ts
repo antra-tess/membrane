@@ -2100,7 +2100,7 @@ export class Membrane {
       outputTokens: providerResponse.usage.outputTokens,
       cacheCreationTokens: providerResponse.usage.cacheCreationTokens,
       cacheReadTokens: providerResponse.usage.cacheReadTokens,
-      reasoningTokens: providerResponse.usage.reasoningTokens,
+      thinkingTokens: providerResponse.usage.thinkingTokens,
       estimatedCost: this.estimateCost(providerResponse.usage, request.config.model, providerResponse.model),
     };
 

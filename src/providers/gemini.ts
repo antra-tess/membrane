@@ -122,7 +122,7 @@ function geminiUsageToProviderUsage(
   return {
     inputTokens: promptTokens,
     outputTokens: candidatesTokens + (thoughtsTokens ?? 0),
-    ...(thoughtsTokens != null ? { reasoningTokens: thoughtsTokens } : {}),
+    ...(thoughtsTokens != null ? { thinkingTokens: thoughtsTokens } : {}),
     cacheReadTokens: usageMetadata?.cachedContentTokenCount
       ? usageMetadata.cachedContentTokenCount
       : undefined,

@@ -127,6 +127,11 @@ export class TurnUsageAccumulator {
     if (usage.cacheReadTokens) {
       this.tokens.cacheReadTokens = (this.tokens.cacheReadTokens ?? 0) + usage.cacheReadTokens;
     }
+    // Already inside outputTokens (billed at the output rate) — summed for
+    // attribution, never added to the output total.
+    if (usage.thinkingTokens) {
+      this.tokens.thinkingTokens = (this.tokens.thinkingTokens ?? 0) + usage.thinkingTokens;
+    }
 
     const roundModel = servedModel || this.requestedModel;
     const roundPricing = this.resolveRoundPricing(servedModel);
@@ -140,6 +145,7 @@ export class TurnUsageAccumulator {
         outputTokens: usage.outputTokens,
         ...(usage.cacheCreationTokens != null ? { cacheCreationTokens: usage.cacheCreationTokens } : {}),
         ...(usage.cacheReadTokens != null ? { cacheReadTokens: usage.cacheReadTokens } : {}),
+        ...(usage.thinkingTokens != null ? { thinkingTokens: usage.thinkingTokens } : {}),
         ...(roundCost ? { estimatedCost: roundCost } : {}),
       },
     });

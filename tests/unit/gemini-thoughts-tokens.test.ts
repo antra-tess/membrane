@@ -12,6 +12,8 @@
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { GeminiAdapter } from '../../src/providers/gemini.js';
+import { Membrane } from '../../src/membrane.js';
+import type { NormalizedRequest, NormalizedResponse } from '../../src/types/index.js';
 
 const LIVE_RECEIPT_USAGE = {
   promptTokenCount: 35,
@@ -63,7 +65,7 @@ describe('GeminiAdapter thoughtsTokenCount accounting', () => {
 
     expect(response.usage.inputTokens).toBe(35);
     expect(response.usage.outputTokens).toBe(230);
-    expect(response.usage.reasoningTokens).toBe(228);
+    expect(response.usage.thinkingTokens).toBe(228);
   });
 
   it('folds thoughts into outputTokens on stream()', async () => {
@@ -73,16 +75,16 @@ describe('GeminiAdapter thoughtsTokenCount accounting', () => {
 
     expect(response.usage.inputTokens).toBe(35);
     expect(response.usage.outputTokens).toBe(230);
-    expect(response.usage.reasoningTokens).toBe(228);
+    expect(response.usage.thinkingTokens).toBe(228);
   });
 
-  it('leaves reasoningTokens unset when the provider reports no thoughts', async () => {
+  it('leaves thinkingTokens unset when the provider reports no thoughts', async () => {
     stubCompleteResponse({ promptTokenCount: 10893, candidatesTokenCount: 1, totalTokenCount: 10894 });
     const adapter = new GeminiAdapter({ apiKey: 'zz-key-not-used' });
     const response = await adapter.complete(REQUEST);
 
     expect(response.usage.outputTokens).toBe(1);
-    expect(response.usage.reasoningTokens).toBeUndefined();
+    expect(response.usage.thinkingTokens).toBeUndefined();
   });
 
   it('warns when prompt + candidates + thoughts does not reconcile with total', async () => {
@@ -102,5 +104,52 @@ describe('GeminiAdapter thoughtsTokenCount accounting', () => {
     await adapter.complete(REQUEST);
 
     expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The adapter emitting the count is only half the path. Membrane's four
+ * streaming accumulators summed inputTokens / outputTokens / cache tokens and
+ * dropped thinking tokens on the floor, so a real-adapter probe through
+ * membrane saw outputTokens 230 with no thinking count at all — the number the
+ * adapter had just measured never reached a caller on any streaming path.
+ *
+ * The field is `DetailedUsage.thinkingTokens`, which predates this work;
+ * `reasoningTokens` was a second name for the same quantity and is gone.
+ */
+const MEMBRANE_REQUEST = {
+  config: { model: 'gemini-3.5-flash-lite', maxTokens: 64 },
+  messages: [{ role: 'user', content: [{ type: 'text', text: 'zz-prompt' }] }],
+} as unknown as NormalizedRequest;
+
+describe('thinking tokens through Membrane', () => {
+  it('carries thinkingTokens out of complete()', async () => {
+    stubCompleteResponse(LIVE_RECEIPT_USAGE);
+    const membrane = new Membrane(new GeminiAdapter({ apiKey: 'zz-key-not-used' }));
+    const response = await membrane.complete(MEMBRANE_REQUEST);
+
+    expect(response.usage.outputTokens).toBe(230);
+    expect(response.usage.thinkingTokens).toBe(228);
+    expect(response.details.usage.thinkingTokens).toBe(228);
+  });
+
+  it('carries thinkingTokens through the streaming accumulator', async () => {
+    stubStreamResponse(LIVE_RECEIPT_USAGE);
+    const membrane = new Membrane(new GeminiAdapter({ apiKey: 'zz-key-not-used' }));
+    const response = await membrane.stream(MEMBRANE_REQUEST) as NormalizedResponse;
+
+    expect(response.usage.outputTokens).toBe(230);
+    expect(response.usage.thinkingTokens).toBe(228);
+    expect(response.details.usage.thinkingTokens).toBe(228);
+    expect(response.details.model.perRound?.[0]?.usage.thinkingTokens).toBe(228);
+  });
+
+  it('leaves thinkingTokens unset on a turn with no thinking', async () => {
+    stubStreamResponse({ promptTokenCount: 10893, candidatesTokenCount: 1, totalTokenCount: 10894 });
+    const membrane = new Membrane(new GeminiAdapter({ apiKey: 'zz-key-not-used' }));
+    const response = await membrane.stream(MEMBRANE_REQUEST) as NormalizedResponse;
+
+    expect(response.usage.outputTokens).toBe(1);
+    expect(response.usage.thinkingTokens).toBeUndefined();
   });
 });
