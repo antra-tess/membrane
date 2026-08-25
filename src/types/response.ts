@@ -53,6 +53,20 @@ export interface DetailedUsage extends BasicUsage {
   estimatedCost?: CostBreakdown;
 }
 
+/**
+ * One provider round of a turn: the model that served it and what that round
+ * alone used and cost. `usage.estimatedCost` here is priced at THIS round's
+ * model, which is why the rounds can be summed into a turn total that a
+ * multi-model turn's bill actually matches.
+ */
+export interface TurnRoundUsage {
+  /** Model the provider named as having served this round; the requested id when it named none. */
+  model: string;
+
+  /** This round's own tokens and its own cost. */
+  usage: DetailedUsage;
+}
+
 export interface CostBreakdown {
   input: number;
   output: number;
@@ -91,11 +105,26 @@ export interface ModelInfo {
   /** Model ID that was requested */
   requested: string;
   
-  /** Model ID that actually ran (may differ due to routing/fallback) */
+  /** Model ID that actually ran (may differ due to routing/fallback). On a
+   *  multi-round turn this is the model that served the LAST round; see
+   *  {@link perRound} for the whole roster. */
   actual: string;
   
   /** Provider that served the request */
   provider: string;
+
+  /**
+   * Every provider round of this turn in order, each naming the model that
+   * served it and what that round alone used and cost — the audit trail behind
+   * `usage.estimatedCost`, which is their sum. A routed turn can change models
+   * mid-turn (OpenRouter re-picks a provider per call), so `actual` alone
+   * cannot say what was billed at which rate.
+   *
+   * Set on the streaming/tool-loop paths, which are the ones that sum. Unset
+   * on `complete()`, which makes exactly one call: `actual` is the whole story
+   * there.
+   */
+  perRound?: TurnRoundUsage[];
 }
 
 // ============================================================================
