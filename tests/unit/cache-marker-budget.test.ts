@@ -17,7 +17,9 @@ import { Membrane } from '../../src/membrane.js';
 import {
   countWireCacheMarkers,
   clampCacheMarkers,
+  ownSystemBlocks,
   MAX_CACHE_BREAKPOINTS,
+  MAX_NESTED_CONTENT_DEPTH,
 } from '../../src/utils/cache-marker-budget.js';
 import type { NormalizedMessage, NormalizedRequest } from '../../src/types/index.js';
 
@@ -76,6 +78,39 @@ function captureAdapter() {
   return { adapter, captured };
 }
 
+/**
+ * Count `cache_control` on the wire WITHOUT asking the module under test —
+ * the module's own blindness is the bug, so a test that counted with it could
+ * not fail on the unfixed tip.
+ */
+const wireMarkerCensus = (wire: unknown): number =>
+  JSON.stringify(wire).split('"cache_control"').length - 1;
+
+/**
+ * Five real wire markers in document order: tools, system, two message text
+ * blocks, and a fifth riding a block inside `tool_result.content`. The
+ * top-level walk sees only four of them.
+ */
+const nestedOverBudgetWire = () => ({
+  model: 'claude-haiku-4-5-20251001',
+  tools: [{ name: 'zz_shell', cache_control: marked }],
+  system: [{ type: 'text', text: 'zz s1', cache_control: marked }],
+  messages: [
+    { role: 'user', content: [{ type: 'text', text: 'zz m1', cache_control: marked }] },
+    { role: 'user', content: [{ type: 'text', text: 'zz m2', cache_control: marked }] },
+    {
+      role: 'user',
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: 'zz-t1',
+          content: [{ type: 'text', text: 'zz nested result', cache_control: marked }],
+        },
+      ],
+    },
+  ],
+});
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -96,6 +131,30 @@ describe('countWireCacheMarkers', () => {
 
   it('is zero for an unmarked request', () => {
     expect(countWireCacheMarkers({ system: 'zz plain system', messages: [{ role: 'user', content: 'zz hi' }] })).toBe(0);
+  });
+
+  it('sees a marker nested inside tool_result.content, not just top-level blocks', () => {
+    // `ToolResultContent.content` is typed `string | ContentBlock[]` and the
+    // native builder passes it through verbatim, so a nested marker is a real
+    // wire marker. Four top-level plus one nested is five on the wire.
+    expect(countWireCacheMarkers(nestedOverBudgetWire())).toBe(5);
+  });
+
+  it('stops descending at the nested-content depth cap', () => {
+    // The cap is what makes the walk total on caller-built structures
+    // (including cyclic ones); a marker below it is out of the belt's reach
+    // and this test is the honest record of where that line sits.
+    let deepest: Record<string, unknown> = { type: 'text', text: 'zz too deep', cache_control: marked };
+    for (let level = 0; level < MAX_NESTED_CONTENT_DEPTH + 1; level++) {
+      deepest = { type: 'tool_result', tool_use_id: `zz-t${level}`, content: [deepest] };
+    }
+    expect(countWireCacheMarkers({ messages: [{ role: 'user', content: [deepest] }] })).toBe(0);
+
+    let atCap: Record<string, unknown> = { type: 'text', text: 'zz at the cap', cache_control: marked };
+    for (let level = 0; level < MAX_NESTED_CONTENT_DEPTH; level++) {
+      atCap = { type: 'tool_result', tool_use_id: `zz-t${level}`, content: [atCap] };
+    }
+    expect(countWireCacheMarkers({ messages: [{ role: 'user', content: [atCap] }] })).toBe(1);
   });
 });
 
@@ -224,7 +283,84 @@ describe('final clamp at the last exit before the adapter', () => {
   });
 });
 
+describe('nested markers are clamped exactly like top-level ones', () => {
+  it('drops the shallowest and keeps the nested marker when it is deepest', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const wire = nestedOverBudgetWire();
+    const result = clampCacheMarkers(wire, 'zz-test-site');
+
+    // Document order governs wherever the marker sits: the tools marker is
+    // shallowest and loses; the nested one is deepest and survives.
+    expect(result).toEqual({ total: MAX_CACHE_BREAKPOINTS, dropped: 1, strippedFromThinking: 0 });
+    expect(wireMarkerCensus(wire)).toBe(MAX_CACHE_BREAKPOINTS);
+    expect((wire.tools[0] as any).cache_control).toBeUndefined();
+    expect((wire.messages[2]!.content[0] as any).content[0].cache_control).toBeDefined();
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('clamps the nested marker before the adapter sees it, and tallies the truth', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { adapter, captured } = captureAdapter();
+    const membrane = new Membrane(adapter as any);
+    const tallies: number[] = [];
+
+    await (membrane as any).streamOnce(nestedOverBudgetWire(), { onChunk: () => {} }, {
+      normalizedRequest: makeRequest(),
+      onWireCacheMarkers: (n: number) => tallies.push(n),
+    });
+
+    // Unfixed, five markers ride to the wire while the tally reports four.
+    expect(wireMarkerCensus(captured[0])).toBe(MAX_CACHE_BREAKPOINTS);
+    expect(tallies).toEqual([MAX_CACHE_BREAKPOINTS]);
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it('leaves a request with only top-level markers byte-unchanged', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const wire = {
+      tools: [{ name: 'zz_shell', cache_control: marked }],
+      system: [{ type: 'text', text: 'zz s1', cache_control: marked }],
+      messages: [1, 2].map((n) => ({
+        role: 'user',
+        content: [{ type: 'text', text: `zz m${n}`, cache_control: marked }],
+      })),
+    };
+    const before = JSON.stringify(wire);
+
+    expect(clampCacheMarkers(wire, 'zz-test-site'))
+      .toEqual({ total: MAX_CACHE_BREAKPOINTS, dropped: 0, strippedFromThinking: 0 });
+    expect(JSON.stringify(wire)).toBe(before);
+    expect(warn).not.toHaveBeenCalled();
+  });
+});
+
 describe('the clamp never reaches back into the caller request', () => {
+  it('owns caller system blocks down to the nested grain the clamp now reaches', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // A caller system block whose own `content` array carries the marker: the
+    // clamp can now see that marker, so ownership has to cover it too, or an
+    // over-budget turn deletes the caller's breakpoint permanently.
+    const callerSystem = [
+      {
+        type: 'text',
+        text: 'zz caller system',
+        content: [{ type: 'text', text: 'zz caller nested', cache_control: marked }],
+      },
+    ];
+    const owned = ownSystemBlocks(callerSystem) as any[];
+
+    const wire = {
+      system: owned,
+      messages: [1, 2, 3, 4].map((n) => ({
+        role: 'user',
+        content: [{ type: 'text', text: `zz m${n}`, cache_control: marked }],
+      })),
+    };
+    expect(clampCacheMarkers(wire, 'zz-test-site').dropped).toBe(1);
+    expect(callerSystem[0]!.content[0]!.cache_control).toBeDefined();
+  });
+
+
   it('leaves a caller-owned system array intact when the wire clamp drops markers', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const { adapter, captured } = captureAdapter();

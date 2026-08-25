@@ -16,6 +16,16 @@
   - the same clamp is the runtime assertion that no `cache_control` ever rides
     a `thinking` / `redacted_thinking` block, which the API rejects. The rule
     previously lived only in each builder's `lastCacheableBlockIndex` call.
+  - that recount now finds markers NESTED inside a block's own content array,
+    not only top-level blocks. `tool_result.content` is typed
+    `string | ContentBlock[]` and reaches the wire verbatim, so four top-level
+    markers plus one inside a tool_result counted as four and shipped as five
+    — rejected outright with the belt's blessing. Discovery recurses into any
+    array-valued `content`, capped at 4 levels (the cap is also what makes the
+    walk total on a caller-built structure that points back at itself), and
+    the strip walks the same traversal, so a marker the count can see is
+    always one the clamp can drop. Document order still governs which markers
+    survive, wherever they sit.
 - The floating cache marker now stands down for EVERY normalizer repair that
   rewrites prefix bytes, not only the synthetic `[pending]` tool_result: a
   textified orphan `tool_result` is rewritten the same way when its pairing
