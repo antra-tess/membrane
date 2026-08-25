@@ -236,6 +236,283 @@ export function unsupportedError(message: string, rawRequest?: unknown): Membran
 }
 
 // ============================================================================
+// HTTP Boundary Classification
+// ============================================================================
+
+/**
+ * The part of a `Response` this module needs. Structural so a stubbed
+ * response in a test is as good as a real one.
+ */
+export interface HttpErrorResponseLike {
+  status: number;
+  headers?: { get(name: string): string | null } | undefined;
+}
+
+interface ProviderErrorFields {
+  message?: string;
+  code?: string;
+  param?: string;
+  retryAfterMs?: number;
+}
+
+/**
+ * Provider error codes/types that carry an implied HTTP status. Used only
+ * when no status is in hand — an in-band error object inside a 200, or an
+ * SDK error whose status is undefined (Anthropic rethrows mid-stream SSE
+ * `error` events exactly that way).
+ */
+const PROVIDER_ERROR_CODE_STATUS: Record<string, number> = {
+  invalid_request_error: 400,
+  invalid_argument: 400,
+  failed_precondition: 400,
+  context_length_exceeded: 400,
+  authentication_error: 401,
+  invalid_api_key: 401,
+  unauthenticated: 401,
+  permission_error: 403,
+  permission_denied: 403,
+  not_found_error: 404,
+  not_found: 404,
+  request_too_large: 413,
+  rate_limit_error: 429,
+  rate_limit_exceeded: 429,
+  insufficient_quota: 429,
+  resource_exhausted: 429,
+  api_error: 500,
+  server_error: 500,
+  internal: 500,
+  unavailable: 503,
+  overloaded_error: 529,
+};
+
+/**
+ * 429s that will never succeed on retry: the account, not the request rate,
+ * is the problem. Distinguishable only because the boundary now carries the
+ * provider's own error code.
+ */
+const NON_RETRYABLE_RATE_LIMIT_CODES = new Set([
+  'insufficient_quota',
+  'billing_hard_limit_reached',
+  'billing_not_active',
+  'account_deactivated',
+  'quota_exceeded',
+  'insufficient_credits',
+]);
+
+const CONTEXT_LENGTH_PATTERN =
+  /context[ _-]?length|context window|maximum context|too many tokens|token limit|prompt is too long|too long/i;
+
+const RATE_LIMIT_PATTERN = /\b429\b|rate[ _-]?limit|too many requests/i;
+
+const SERVER_STATUS_PATTERN = /\b(500|502|503|504|529)\b/;
+
+const OVERLOADED_PATTERN = /\b529\b|overloaded_error/i;
+
+function firstString(...candidates: unknown[]): string | undefined {
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim() !== '') return candidate;
+  }
+  return undefined;
+}
+
+/** `retry-after` is either delta-seconds or an HTTP-date (RFC 9110). */
+function parseRetryAfterHeader(value: string | null | undefined): number | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (/^\d+(\.\d+)?$/.test(trimmed)) return Math.round(parseFloat(trimmed) * 1000);
+  const parsedDate = Date.parse(trimmed);
+  if (!Number.isNaN(parsedDate)) return Math.max(0, parsedDate - Date.now());
+  return undefined;
+}
+
+/** Body-carried retry hints: google's `retryDelay: '21s'`, or bare seconds. */
+function parseRetryDelayValue(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return Math.round(value * 1000);
+  if (typeof value !== 'string') return undefined;
+  const seconds = value.trim().match(/^(\d+(?:\.\d+)?)s?$/);
+  return seconds?.[1] ? Math.round(parseFloat(seconds[1]) * 1000) : undefined;
+}
+
+function retryAfterFromBody(root: Record<string, unknown>, errorNode: Record<string, unknown>): number | undefined {
+  const details = errorNode.details ?? root.details;
+  if (Array.isArray(details)) {
+    for (const detail of details) {
+      if (detail && typeof detail === 'object') {
+        const delay = parseRetryDelayValue((detail as Record<string, unknown>).retryDelay);
+        if (delay !== undefined) return delay;
+      }
+    }
+  }
+  const millis = errorNode.retry_after_ms ?? root.retry_after_ms;
+  if (typeof millis === 'number' && Number.isFinite(millis)) return Math.round(millis);
+  return parseRetryDelayValue(errorNode.retry_after ?? root.retry_after ?? errorNode.retryAfter ?? root.retryAfter);
+}
+
+/**
+ * Pull the fields providers actually put on an error body. Accepts either a
+ * parsed body or the raw text as received — a non-JSON body still yields its
+ * text as the message rather than being discarded.
+ */
+export function extractProviderErrorFields(body: unknown): ProviderErrorFields {
+  if (body === undefined || body === null) return {};
+
+  if (typeof body === 'string') {
+    const text = body.trim();
+    if (text === '') return {};
+    if (!text.startsWith('{') && !text.startsWith('[')) return { message: body };
+    try {
+      return extractProviderErrorFields(JSON.parse(text));
+    } catch {
+      return { message: body };
+    }
+  }
+
+  if (typeof body !== 'object') return { message: String(body) };
+
+  const root = body as Record<string, unknown>;
+  const nested = root.error;
+  const errorNode =
+    nested !== null && typeof nested === 'object' ? (nested as Record<string, unknown>) : root;
+
+  return {
+    message: firstString(errorNode.message, errorNode.Message, root.message, root.Message, errorNode.detail),
+    code: firstString(errorNode.code, errorNode.status, errorNode.type, root.__type, root.code),
+    param: firstString(errorNode.param),
+    retryAfterMs: retryAfterFromBody(root, errorNode),
+  };
+}
+
+function classifyByStatus(
+  status: number,
+  code: string | undefined,
+  message: string,
+): { type: MembraneErrorType; retryable: boolean } {
+  const normalizedCode = code?.toLowerCase() ?? '';
+
+  if (status === 429) {
+    return { type: 'rate_limit', retryable: !NON_RETRYABLE_RATE_LIMIT_CODES.has(normalizedCode) };
+  }
+  if (status === 408) return { type: 'timeout', retryable: true };
+  if (status === 401 || status === 402 || status === 403) return { type: 'auth', retryable: false };
+  if (status === 413) return { type: 'context_length', retryable: false };
+  if (status === 404) return { type: 'invalid_request', retryable: false };
+  // Context-length is a request-shape problem and only ever arrives as a 4xx.
+  // Checking the message BEFORE the status would let a transient 5xx whose
+  // body happens to say "context" or "too long" become a non-retryable
+  // context_length, silently suppressing retries.
+  if (status === 400 || status === 422) {
+    const looksLikeContextOverflow =
+      normalizedCode === 'context_length_exceeded' || CONTEXT_LENGTH_PATTERN.test(message);
+    return {
+      type: looksLikeContextOverflow ? 'context_length' : 'invalid_request',
+      retryable: false,
+    };
+  }
+  if (status >= 500) return { type: 'server', retryable: true };
+  if (status >= 400) return { type: 'invalid_request', retryable: false };
+  return { type: 'unknown', retryable: false };
+}
+
+/**
+ * Build a MembraneError from a provider failure whose status may have to be
+ * recovered from the error code (in-band error object, or an SDK error that
+ * carries no status).
+ */
+export function errorFromProviderStatus(params: {
+  provider: string;
+  status?: number | undefined;
+  body?: unknown;
+  message?: string;
+  retryAfterMs?: number | undefined;
+  rawError?: unknown;
+  rawRequest?: unknown;
+}): MembraneError {
+  const fields = extractProviderErrorFields(params.body);
+  const code = fields.code;
+  const status = params.status ?? PROVIDER_ERROR_CODE_STATUS[code?.toLowerCase() ?? ''];
+  const detail = firstString(params.message, fields.message) ?? renderBody(params.body);
+  const message =
+    params.message ??
+    `${params.provider} API error ${status ?? code ?? 'failure'}: ${detail}${
+      fields.param ? ` (param: ${fields.param})` : ''
+    }`;
+  const retryAfterMs = params.retryAfterMs ?? fields.retryAfterMs;
+
+  const classification =
+    status !== undefined
+      ? { ...classifyByStatus(status, code, detail), httpStatus: status }
+      : classifyMessage(message);
+
+  return new MembraneError({
+    type: classification.type,
+    message,
+    retryable: classification.retryable,
+    retryAfterMs,
+    httpStatus: classification.httpStatus,
+    providerErrorCode: code,
+    rawError: params.rawError ?? params.body,
+    rawRequest: params.rawRequest,
+  });
+}
+
+/**
+ * The fetch boundary: the one place where status, headers and body are all
+ * still live. Everything downstream reads the classification off the error
+ * instead of re-deriving one by substring over a rendered string.
+ */
+export function errorFromHttpResponse(
+  provider: string,
+  response: HttpErrorResponseLike,
+  parsedBody: unknown,
+  rawRequest?: unknown
+): MembraneError {
+  return errorFromProviderStatus({
+    provider,
+    status: response.status,
+    body: parsedBody,
+    retryAfterMs: parseRetryAfterHeader(response.headers?.get('retry-after')),
+    rawRequest,
+  });
+}
+
+/**
+ * Attach the raw request to an error that was already classified at the
+ * boundary, without re-deriving anything.
+ */
+export function withRawRequest(error: MembraneError, rawRequest: unknown): MembraneError {
+  if (rawRequest === undefined || error.rawRequest !== undefined) return error;
+  return new MembraneError({ ...error.toErrorInfo(), rawRequest });
+}
+
+/**
+ * A cancellation is a TYPE, never a phrase. Matching 'abort' anywhere in a
+ * message turned any error whose text merely contained it — a host tool
+ * throwing "zz-tool policy aborted the run" — into a well-formed
+ * "the user cancelled" response, destroying the real error.
+ */
+export function isTypedAbortError(error: unknown): boolean {
+  if (error instanceof MembraneError) return error.type === 'abort';
+  if (typeof DOMException !== 'undefined' && error instanceof DOMException) {
+    return error.name === 'AbortError';
+  }
+  if (error instanceof Error) {
+    // APIUserAbortError: the Anthropic SDK's own typed abort.
+    return error.name === 'AbortError' || error.name === 'APIUserAbortError';
+  }
+  return false;
+}
+
+function renderBody(body: unknown): string {
+  if (body === undefined || body === null) return '';
+  if (typeof body === 'string') return body;
+  try {
+    return JSON.stringify(body);
+  } catch {
+    return String(body);
+  }
+}
+
+// ============================================================================
 // Error Classification
 // ============================================================================
 
@@ -247,14 +524,63 @@ export function unsupportedError(message: string, rawRequest?: unknown): Membran
  * Matches the same deliberately narrow tokens as classifyError's fallback
  * (status/`529`/exact `overloaded_error`) — a bare 'overloaded' in prose
  * (e.g. "worker pool overloaded") must not put an unrelated error onto the
- * ~10-minute schedule. The provider handlers' own bare-'overloaded' safety
- * nets attach httpStatus 529, so those still land here via the status check.
+ * ~10-minute schedule. The 529 arm is word-boundary anchored because an
+ * unanchored one promoted ordinary retryable errors whose text merely
+ * contained the digits ("timeout after 5290 ms", "req-98529abc"). The
+ * provider handlers' own bare-'overloaded' safety nets attach httpStatus
+ * 529, so those still land here via the status check.
  */
 export function isOverloadedError(info: ErrorInfo): boolean {
   if (!info.retryable) return false;
   if (info.httpStatus === 529) return true;
-  const m = info.message.toLowerCase();
-  return m.includes('529') || m.includes('overloaded_error');
+  return OVERLOADED_PATTERN.test(info.message);
+}
+
+/**
+ * Last-resort classification for throwables that never carried an HTTP
+ * response: SDK errors, socket failures, internal bugs. HTTP failures are
+ * classified at the boundary (`errorFromHttpResponse`) where the status is
+ * still in hand, so this table no longer has to guess at one.
+ *
+ * The patterns are deliberately narrow. Bare `rate` promoted anything
+ * containing "generated"/"moderate"/"accurate" to a retryable 429, and bare
+ * `maximum` turned an internal TypeError ("...reading 'maximum'") into a
+ * provider context_length. Status digits are word-boundary anchored, and the
+ * server-status arm is tested BEFORE context-length so a transient 5xx whose
+ * body mentions "context" stays retryable.
+ */
+function classifyMessage(rawMessage: string): {
+  type: MembraneErrorType;
+  retryable: boolean;
+  httpStatus?: number;
+} {
+  const message = rawMessage.toLowerCase();
+
+  if (RATE_LIMIT_PATTERN.test(message)) {
+    return { type: 'rate_limit', retryable: true, httpStatus: 429 };
+  }
+
+  if (/\b401\b|\bapi key\b|unauthorized|authentication|authorization/.test(message)) {
+    return { type: 'auth', retryable: false, httpStatus: 401 };
+  }
+
+  if (/network|econnreset|econnrefused|socket/.test(message)) {
+    return { type: 'network', retryable: true };
+  }
+
+  if (/timeout|timed out/.test(message)) {
+    return { type: 'timeout', retryable: true };
+  }
+
+  if (SERVER_STATUS_PATTERN.test(message) || /overloaded_error/.test(message)) {
+    return { type: 'server', retryable: true };
+  }
+
+  if (CONTEXT_LENGTH_PATTERN.test(message)) {
+    return { type: 'context_length', retryable: false };
+  }
+
+  return { type: 'unknown', retryable: false };
 }
 
 export function classifyError(error: unknown): ErrorInfo {
@@ -266,62 +592,9 @@ export function classifyError(error: unknown): ErrorInfo {
   const serializedError = serializeError(error);
 
   if (error instanceof Error) {
-    const message = error.message.toLowerCase();
-    
-    // Rate limit
-    if (message.includes('rate') || message.includes('429') || message.includes('too many')) {
-      return {
-        type: 'rate_limit',
-        message: error.message,
-        retryable: true,
-        httpStatus: 429,
-        rawError: serializedError,
-      };
-    }
-    
-    // Context length
-    if (message.includes('context') || message.includes('too long') || message.includes('maximum')) {
-      return {
-        type: 'context_length',
-        message: error.message,
-        retryable: false,
-        rawError: serializedError,
-      };
-    }
-    
-    // Auth
-    if (message.includes('auth') || message.includes('401') || message.includes('api key')) {
-      return {
-        type: 'auth',
-        message: error.message,
-        retryable: false,
-        httpStatus: 401,
-        rawError: serializedError,
-      };
-    }
-    
-    // Network
-    if (message.includes('network') || message.includes('econnreset') || message.includes('socket')) {
-      return {
-        type: 'network',
-        message: error.message,
-        retryable: true,
-        rawError: serializedError,
-      };
-    }
-    
-    // Timeout
-    if (message.includes('timeout') || message.includes('timed out')) {
-      return {
-        type: 'timeout',
-        message: error.message,
-        retryable: true,
-        rawError: serializedError,
-      };
-    }
-    
-    // Abort
-    if (message.includes('abort') || error.name === 'AbortError') {
+    // Abort is decided by type, never by prose: a tool or provider message
+    // that merely contains "abort" is not a user cancellation.
+    if (error.name === 'AbortError') {
       return {
         type: 'abort',
         message: error.message,
@@ -329,18 +602,14 @@ export function classifyError(error: unknown): ErrorInfo {
         rawError: serializedError,
       };
     }
-    
-    // Server error (529/overloaded_error: Anthropic capacity errors —
-    // transient, always worth retrying). This is the provider-agnostic
-    // fallback path (handled Anthropic errors short-circuit above as
-    // MembraneError), so match the exact `overloaded_error` type token
-    // rather than a bare 'overloaded' that would also promote unrelated
-    // messages like "worker pool overloaded" to retryable.
-    if (message.includes('500') || message.includes('502') || message.includes('503') || message.includes('504') || message.includes('529') || message.includes('overloaded_error')) {
+
+    const classification = classifyMessage(error.message);
+    if (classification.type !== 'unknown') {
       return {
-        type: 'server',
+        type: classification.type,
         message: error.message,
-        retryable: true,
+        retryable: classification.retryable,
+        httpStatus: classification.httpStatus,
         rawError: serializedError,
       };
     }

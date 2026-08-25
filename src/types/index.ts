@@ -149,6 +149,7 @@ export {
 export type {
   MembraneErrorType,
   ErrorInfo,
+  HttpErrorResponseLike,
 } from './errors.js';
 
 export {
@@ -166,6 +167,11 @@ export {
   unsupportedError,
   classifyError,
   isOverloadedError,
+  isTypedAbortError,
+  errorFromHttpResponse,
+  errorFromProviderStatus,
+  extractProviderErrorFields,
+  withRawRequest,
 } from './errors.js';
 
 // Config

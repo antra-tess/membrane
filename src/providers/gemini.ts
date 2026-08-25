@@ -21,12 +21,12 @@ import type {
 } from '../types/index.js';
 import {
   MembraneError,
-  rateLimitError,
-  contextLengthError,
-  authError,
-  serverError,
   abortError,
-  networkError,
+  classifyError,
+  errorFromHttpResponse,
+  errorFromProviderStatus,
+  isTypedAbortError,
+  withRawRequest,
 } from '../types/index.js';
 import { createCombinedSignal } from './utils.js';
 
@@ -139,14 +139,20 @@ export class GeminiAdapter implements ProviderAdapter {
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Gemini API error: ${response.status} ${errorText}`);
+        throw errorFromHttpResponse(this.name, response, await response.text(), geminiRequest);
       }
 
       const data = await response.json() as GeminiResponse;
 
       if (data.error) {
-        throw new Error(`Gemini API error: ${data.error.code} ${data.error.message}`);
+        // An error object inside an HTTP 200: classify off its own code/status
+        // instead of a rendered string.
+        throw errorFromProviderStatus({
+          provider: this.name,
+          status: typeof data.error.code === 'number' ? data.error.code : undefined,
+          body: data,
+          rawRequest: geminiRequest,
+        });
       }
 
       return this.parseResponse(data, request.model, geminiRequest);
@@ -176,8 +182,7 @@ export class GeminiAdapter implements ProviderAdapter {
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Gemini API error: ${response.status} ${errorText}`);
+        throw errorFromHttpResponse(this.name, response, await response.text(), geminiRequest);
       }
 
       const reader = response.body?.getReader();
@@ -630,45 +635,12 @@ export class GeminiAdapter implements ProviderAdapter {
   // --------------------------------------------------------------------------
 
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
-    if (error instanceof MembraneError) return error;
+    if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
+    if (isTypedAbortError(error)) return abortError(undefined, rawRequest);
 
-    if (error instanceof Error) {
-      const message = error.message;
-
-      if (message.includes('401') || message.includes('403') || message.includes('API_KEY_INVALID') || message.includes('PERMISSION_DENIED')) {
-        return authError(message, error, rawRequest);
-      }
-
-      if (message.includes('429') || message.includes('RESOURCE_EXHAUSTED')) {
-        const retryMatch = message.match(/retry.after[:\s]*(\d+)/i);
-        const retryAfter = retryMatch?.[1] ? parseInt(retryMatch[1], 10) * 1000 : undefined;
-        return rateLimitError(message, retryAfter, error, rawRequest);
-      }
-
-      if (message.includes('context') || message.includes('too long') || message.includes('token limit')) {
-        return contextLengthError(message, error, rawRequest);
-      }
-
-      if (message.includes('500') || message.includes('502') || message.includes('503') || message.includes('INTERNAL')) {
-        return serverError(message, undefined, error, rawRequest);
-      }
-
-      if (error.name === 'AbortError') {
-        return abortError(undefined, rawRequest);
-      }
-
-      if (message.includes('network') || message.includes('fetch') || message.includes('ECONNREFUSED')) {
-        return networkError(message, error, rawRequest);
-      }
-    }
-
-    return new MembraneError({
-      type: 'unknown',
-      message: error instanceof Error ? error.message : String(error),
-      retryable: false,
-      rawError: error,
-      rawRequest,
-    });
+    const info = classifyError(error);
+    info.rawRequest = rawRequest;
+    return new MembraneError(info);
   }
 }
 

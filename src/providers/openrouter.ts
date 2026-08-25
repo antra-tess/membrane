@@ -15,12 +15,12 @@ import type {
 } from '../types/index.js';
 import {
   MembraneError,
-  rateLimitError,
-  contextLengthError,
-  authError,
-  serverError,
   abortError,
-  networkError,
+  classifyError,
+  errorFromHttpResponse,
+  errorFromProviderStatus,
+  isTypedAbortError,
+  withRawRequest,
 } from '../types/index.js';
 import { safeParseJson, createCombinedSignal, SSELineParser } from './utils.js';
 
@@ -205,8 +205,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`OpenRouter error: ${response.status} ${errorText}`);
+        throw errorFromHttpResponse(this.name, response, await response.text(), openRouterRequest);
       }
 
       const reader = response.body?.getReader();
@@ -246,9 +245,21 @@ export class OpenRouterAdapter implements ProviderAdapter {
           // retry logic can handle it.
           if (typeof parsed === 'object' && parsed !== null && parsed.error) {
             const err = parsed.error as { code?: number | string; message?: string };
-            throw new Error(
-              `OpenRouter stream error${err.code !== undefined ? ` (${err.code})` : ''}: ${err.message ?? JSON.stringify(err)}`
-            );
+            // The event carries the upstream status in `code`; classify off it
+            // rather than off the rendered message.
+            const upstreamStatus =
+              typeof err.code === 'number'
+                ? err.code
+                : typeof err.code === 'string' && /^\d{3}$/.test(err.code)
+                  ? Number(err.code)
+                  : undefined;
+            throw errorFromProviderStatus({
+              provider: this.name,
+              status: upstreamStatus,
+              body: parsed,
+              message: `OpenRouter stream error${err.code !== undefined ? ` (${err.code})` : ''}: ${err.message ?? JSON.stringify(err)}`,
+              rawRequest: openRouterRequest,
+            });
           }
 
           try {
@@ -584,8 +595,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`OpenRouter error: ${response.status} ${errorText}`);
+        throw errorFromHttpResponse(this.name, response, await response.text(), request);
       }
 
       return await response.json() as OpenRouterResponse;
@@ -695,42 +705,18 @@ export class OpenRouterAdapter implements ProviderAdapter {
     }
   }
 
+  /**
+   * HTTP failures are classified at the fetch boundary, where status,
+   * headers and body are still live; this handles what is left — typed
+   * aborts and non-HTTP throwables — through the shared last-resort table.
+   */
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
-    if (error instanceof Error) {
-      const message = error.message;
+    if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
+    if (isTypedAbortError(error)) return abortError(undefined, rawRequest);
 
-      if (message.includes('429') || message.includes('rate')) {
-        return rateLimitError(message, undefined, error, rawRequest);
-      }
-
-      if (message.includes('401') || message.includes('auth')) {
-        return authError(message, error, rawRequest);
-      }
-
-      if (message.includes('context') || message.includes('too long')) {
-        return contextLengthError(message, error, rawRequest);
-      }
-
-      if (message.includes('500') || message.includes('502') || message.includes('503')) {
-        return serverError(message, undefined, error, rawRequest);
-      }
-
-      if (error.name === 'AbortError') {
-        return abortError(undefined, rawRequest);
-      }
-
-      if (message.includes('network') || message.includes('fetch')) {
-        return networkError(message, error, rawRequest);
-      }
-    }
-
-    return new MembraneError({
-      type: 'unknown',
-      message: error instanceof Error ? error.message : String(error),
-      retryable: false,
-      rawError: error,
-      rawRequest,
-    });
+    const info = classifyError(error);
+    info.rawRequest = rawRequest;
+    return new MembraneError(info);
   }
 }
 
