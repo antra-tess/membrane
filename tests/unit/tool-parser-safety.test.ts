@@ -157,6 +157,107 @@ describe('F9 · overlapping block spans', () => {
   });
 });
 
+describe('F9 · a contained call is filtered before legacy results are paired', () => {
+  const shadowedCall = toolBlock(`<invoke name="zz_shadow_tool"/>`);
+  const liveCall = toolBlock(`<invoke name="zz_live_tool"/>`);
+  const legacyResult = resultsBlock(`<result>\n<stdout>zz-result</stdout>\n</result>`);
+
+  // The quoted call sits earlier in the document than the live one, so a
+  // callSites entry built before containment filtering is the FIRST unclaimed
+  // site the legacy pairing walks — it claims the phantom and leaves the real
+  // call answerless.
+  const shadowedTurn =
+    `<thinking>zz musing: I could call ${shadowedCall} but I will not.\n</thinking>\n` +
+    `zz_bot: calling the real one\n${liveCall}\n${legacyResult}`;
+
+  it('pairs the legacy result with the surviving call, not the quoted one', () => {
+    const { blocks, toolResults } = parseAccumulatedIntoBlocks(shadowedTurn);
+
+    const emittedCalls = blocks.filter((b) => b.type === 'tool_use') as Array<{ id: string; name: string }>;
+    expect(emittedCalls.map((c) => c.name)).toEqual(['zz_live_tool']);
+    expect(toolResults).toHaveLength(1);
+    expect(toolResults[0]?.toolUseId).toBe(emittedCalls[0]?.id);
+  });
+
+  it('emits no tool_result addressed to a call that is not in the blocks', () => {
+    const { blocks, toolResults } = parseAccumulatedIntoBlocks(shadowedTurn);
+
+    const emittedCallIds = new Set(
+      blocks.filter((b) => b.type === 'tool_use').map((b) => (b as { id: string }).id)
+    );
+    for (const result of toolResults) {
+      expect(emittedCallIds.has(result.toolUseId)).toBe(true);
+    }
+  });
+
+  it('pairs by tool_name against surviving calls only', () => {
+    // The quoted call wears the SAME name as the live one, so the tool_name
+    // disambiguator cannot rescue the pairing — only containment order can.
+    const quotedTwin = toolBlock(`<invoke name="zz_live_tool"/>`);
+    const namedResult = resultsBlock(
+      `<result>\n<tool_name>zz_live_tool</tool_name>\n<stdout>zz-result</stdout>\n</result>`
+    );
+    const turn =
+      `<thinking>zz musing: I could call ${quotedTwin} but I will not.\n</thinking>\n` +
+      `zz_bot: calling the real one\n${liveCall}\n${namedResult}`;
+
+    const { blocks, toolResults } = parseAccumulatedIntoBlocks(turn);
+
+    const emittedCalls = blocks.filter((b) => b.type === 'tool_use') as Array<{ id: string }>;
+    expect(emittedCalls).toHaveLength(1);
+    expect(toolResults[0]?.toolUseId).toBe(emittedCalls[0]?.id);
+  });
+});
+
+describe('F9 · diagnostics count only the spans that survive containment', () => {
+  it('does not count a quoted zero-invoke block as an empty tool block', () => {
+    const quotedEmptyBlock = toolBlock('zz musing: no invokes in here');
+    const text = `<thinking>zz musing: a block like ${quotedEmptyBlock} would do nothing.\n</thinking>\nzz_bot: no.`;
+
+    expect(parseAccumulatedIntoBlocks(text).emptyToolBlocks).toBe(0);
+  });
+
+  it('still counts a zero-invoke block that stands on its own', () => {
+    const text = `zz_bot: here goes\n${toolBlock('zz musing: no invokes in here')}`;
+
+    expect(parseAccumulatedIntoBlocks(text).emptyToolBlocks).toBe(1);
+  });
+
+  it('does not count a quoted spliced block as a repaired one', () => {
+    const quotedSplice = `${FUNCTION_CALLS_OPEN}\n<invoke name="zz_stale_tool">\n${toolBlock(
+      `<invoke name="zz_quoted_tool"/>`
+    )}`;
+    const text = `<thinking>zz musing: a truncation looks like ${quotedSplice}\n</thinking>\nzz_bot: no.`;
+
+    expect(parseAccumulatedIntoBlocks(text).splicedToolBlocks).toBe(0);
+  });
+
+  it('does not flag an unclosed opener quoted inside a thinking block', () => {
+    const text =
+      `<thinking>zz musing: if I wrote ${FUNCTION_CALLS_OPEN} it would open a block.\n</thinking>\n` +
+      'zz_bot: done.';
+
+    expect(parseAccumulatedIntoBlocks(text).unclosedToolBlock).toBe(false);
+  });
+
+  it('does not flag an unclosed opener quoted inside a tool result', () => {
+    const text =
+      `zz_bot: reading\n` +
+      resultsBlock(`<result>\n<stdout>zz-result mentioning ${FUNCTION_CALLS_OPEN} verbatim</stdout>\n</result>`) +
+      '\nzz_bot: done.';
+
+    expect(parseAccumulatedIntoBlocks(text).unclosedToolBlock).toBe(false);
+  });
+
+  it('still flags a genuinely unclosed block outside every span', () => {
+    const text =
+      `<thinking>zz musing: time to call it.\n</thinking>\n` +
+      `${FUNCTION_CALLS_OPEN}\n<invoke name="zz_truncated_tool">\n<parameter name="fld1">partia`;
+
+    expect(parseAccumulatedIntoBlocks(text).unclosedToolBlock).toBe(true);
+  });
+});
+
 describe('F13 · executed-block detection', () => {
   it('treats a block as executed when only whitespace separates it from its results', () => {
     const text =
