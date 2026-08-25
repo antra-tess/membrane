@@ -112,9 +112,21 @@ export interface TimingInfo {
   /** Tokens per second (streaming only) */
   tokensPerSecond?: number;
   
-  /** Number of retry attempts */
+  /**
+   * Provider calls this turn actually cost: retries plus, on the streaming
+   * paths, every continuation round and refusal re-issue. A stitched
+   * multi-call turn used to report 1 here, indistinguishable in durable
+   * logs from a single-shot one.
+   */
   attempts: number;
-  
+
+  /**
+   * Continuation rounds that made up the turn — tool rounds and automatic
+   * resumptions. 1 for a single-round turn; lower than `attempts` whenever a
+   * round was re-issued. Streaming paths only.
+   */
+  rounds?: number;
+
   /** Delay between retries */
   retryDelaysMs?: number[];
 }

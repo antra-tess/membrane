@@ -320,12 +320,14 @@ export class Membrane {
         const result = useNative
           ? await this.streamWithNativeTools(request, tracked)
           : await this.streamWithXmlTools(request, tracked);
-        // The inner paths report attempts: 1 — they can't see this wrapper.
-        // A call that succeeded after N overloaded retries must not look like
-        // a first-attempt success in durable logs, so patch the real count
-        // (and the waits) into the response telemetry.
+        // The inner paths count their own provider calls but cannot see this
+        // wrapper's discarded attempts. Each failed attempt here died before
+        // emitting anything (that is the precondition for retrying), so it
+        // cost at least the one call it failed on — ADD those to the inner
+        // count rather than overwriting it, or a turn that retried twice and
+        // then ran three tool rounds would report 2 calls instead of 5.
         if (attempts > 1 && 'details' in result) {
-          result.details.timing.attempts = attempts;
+          result.details.timing.attempts += attempts - 1;
           result.details.timing.retryDelaysMs = retryDelaysMs;
         }
         return result;
@@ -438,6 +440,10 @@ export class Membrane {
     // Initialize parser from formatter for format-specific tracking
     const parser = formatter.createStreamParser();
     let toolDepth = 0;
+    // Honest turn telemetry: provider calls actually made (including refusal
+    // re-issues inside streamOnce) and continuation rounds.
+    let providerCalls = 0;
+    let rounds = 0;
     let totalUsage: DetailedUsage = { inputTokens: 0, outputTokens: 0 };
     const pricing = this.resolvePricing(request.config.model);
     const contentBlocks: ContentBlock[] = [];
@@ -620,6 +626,9 @@ export class Membrane {
             },
           }
         );
+
+        rounds++;
+        providerCalls += streamResult.providerCalls;
 
         // If we detected stop sequence manually, fix up the parser and result
         if (detectedStopSequence && truncatedAccumulated !== null) {
@@ -985,7 +994,7 @@ export class Membrane {
         request,
         prefillResult,
         startTime,
-        1, // attempts
+        providerCalls,
         rawRequest,
         rawResponse,
         executedToolCalls,
@@ -1001,6 +1010,8 @@ export class Membrane {
 
       // Merge provider thinking signatures into parser-derived thinking blocks
       this.mergeProviderThinkingBlocks(response.content, providerThinkingBlocks);
+
+      response.details.timing.rounds = rounds;
 
       return response;
     } catch (error) {
@@ -1047,6 +1058,10 @@ export class Membrane {
     } = options;
 
     let toolDepth = 0;
+    // Honest turn telemetry: provider calls actually made (including refusal
+    // re-issues inside streamOnce) and continuation rounds.
+    let providerCalls = 0;
+    let rounds = 0;
     let totalUsage: DetailedUsage = { inputTokens: 0, outputTokens: 0 };
     const pricing = this.resolvePricing(request.config.model);
     let lastStopReason: StopReason = 'end_turn';
@@ -1104,6 +1119,9 @@ export class Membrane {
             },
           }
         );
+
+        rounds++;
+        providerCalls += streamResult.providerCalls;
 
         rawResponse = streamResult.raw;
 
@@ -1228,7 +1246,8 @@ export class Membrane {
           usage: { ...totalUsage },
           timing: {
             totalDurationMs: durationMs,
-            attempts: 1,
+            attempts: providerCalls,
+            rounds,
           },
           model: {
             requested: request.config.model,
@@ -1904,7 +1923,11 @@ export class Membrane {
       onRetrying?: (info: { attempt: number; maxAttempts: number; category?: string }) => void;
     }
   ): Promise<
-    import('./types/provider.js').ProviderResponse & { discardedUsage?: DiscardedAttemptsUsage }
+    import('./types/provider.js').ProviderResponse & {
+      discardedUsage?: DiscardedAttemptsUsage;
+      /** Provider calls this helper made, including refusal re-issues. */
+      providerCalls: number;
+    }
   > {
     // Strip `normalizedRequest` before forwarding to the adapter — it's
     // not part of `ProviderRequestOptions` and TypeScript's structural
@@ -1922,10 +1945,16 @@ export class Membrane {
     // caller's usage accumulator only ever sees the surviving result, so the
     // abandoned spend rides back out on the result itself.
     let discardedUsage: DiscardedAttemptsUsage | undefined;
+    let providerCalls = 0;
     while (true) {
+      providerCalls++;
       const result = await this.adapter.stream(finalRequest, callbacks, adapterOptions);
       if (result.stopReason !== 'refusal' || retried >= maxAttempts) {
-        return discardedUsage ? { ...result, discardedUsage } : result;
+        return {
+          ...result,
+          providerCalls,
+          ...(discardedUsage ? { discardedUsage } : {}),
+        };
       }
       retried++;
       discardedUsage = this.mergeDiscardedAttempts(
@@ -2586,6 +2615,10 @@ export class Membrane {
     const formatter = this.formatter;
     const parser = formatter.createStreamParser();
     let toolDepth = 0;
+    // Honest turn telemetry: provider calls actually made (including refusal
+    // re-issues inside streamOnce) and continuation rounds.
+    let providerCalls = 0;
+    let rounds = 0;
     // Once-per-stream latch for the injectedMessages-unsupported warning.
     let warnedInjectionUnsupported = false;
     let totalUsage: DetailedUsage = { inputTokens: 0, outputTokens: 0 };
@@ -2741,6 +2774,9 @@ export class Membrane {
             onRequest: (req: unknown) => { rawRequest = req; },
           }
         );
+
+        rounds++;
+        providerCalls += streamResult.providerCalls;
 
         // If we detected stop sequence manually, fix up the parser and result
         if (detectedStopSequence && truncatedAccumulated !== null) {
@@ -3103,7 +3139,7 @@ export class Membrane {
         request,
         prefillResult,
         startTime,
-        1,
+        providerCalls,
         rawRequest,
         rawResponse,
         executedToolCalls,
@@ -3114,6 +3150,8 @@ export class Membrane {
 
       // Merge provider thinking signatures into parser-derived thinking blocks
       this.mergeProviderThinkingBlocks(response.content, providerThinkingBlocks);
+
+      response.details.timing.rounds = rounds;
 
       stream.emit({ type: 'complete', response });
     } catch (error) {
@@ -3160,6 +3198,10 @@ export class Membrane {
         : maxToolDepthOpt;
 
     let toolDepth = 0;
+    // Honest turn telemetry: provider calls actually made (including refusal
+    // re-issues inside streamOnce) and continuation rounds.
+    let providerCalls = 0;
+    let rounds = 0;
     let totalUsage: DetailedUsage = { inputTokens: 0, outputTokens: 0 };
     const pricing = this.resolvePricing(request.config.model);
     let lastStopReason: StopReason = 'end_turn';
@@ -3299,6 +3341,9 @@ export class Membrane {
             },
           }
         );
+
+        rounds++;
+        providerCalls += streamResult.providerCalls;
 
         rawResponse = streamResult.raw;
         lastStopReason = this.mapStopReason(streamResult.stopReason);
@@ -3444,7 +3489,8 @@ export class Membrane {
           },
           timing: {
             totalDurationMs: durationMs,
-            attempts: 1,
+            attempts: providerCalls,
+            rounds,
           },
           model: {
             requested: request.config.model,
