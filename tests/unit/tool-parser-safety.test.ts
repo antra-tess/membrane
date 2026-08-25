@@ -91,6 +91,14 @@ describe('F3 · a truncated block spliced with a later round closer', () => {
     expect(blocks.filter((b) => b.type === 'tool_use')).toHaveLength(1);
   });
 
+  it('reports the repair rather than making it silently', () => {
+    const clean = parseAccumulatedIntoBlocks(realCall);
+    const spliced = parseAccumulatedIntoBlocks(splicedTurn);
+
+    expect(clean.splicedToolBlocks).toBe(0);
+    expect(spliced.splicedToolBlocks).toBe(1);
+  });
+
   it('composes with executed-block detection: an earlier spent block stays spent', () => {
     const text =
       toolBlock(`<invoke name="zz_executed_tool"/>`) +

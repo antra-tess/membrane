@@ -2124,7 +2124,11 @@ export class Membrane {
    * called a tool that never ran.
    */
   private reportToolParseDiagnostics(
-    diagnostics: { unclosedToolBlock: boolean; emptyToolBlocks: number },
+    diagnostics: {
+      unclosedToolBlock: boolean;
+      emptyToolBlocks: number;
+      splicedToolBlocks?: number;
+    },
     stopReason: StopReason
   ): void {
     const warnLog = this.config.logger ?? console;
@@ -2143,6 +2147,14 @@ export class Membrane {
         `[membrane] ${diagnostics.emptyToolBlocks} function_calls block(s) parsed to ` +
         `zero tool calls — always a defect, never a normal ending. The call was ` +
         `returned as assistant text and nothing executed.`
+      );
+    }
+
+    if (diagnostics.splicedToolBlocks) {
+      warnLog.warn(
+        `[membrane] ${diagnostics.splicedToolBlocks} tool block(s) spanned a second ` +
+        `<function_calls> opener and were re-anchored to the innermost one — an ` +
+        `earlier truncated block is present in this conversation's assistant text.`
       );
     }
   }

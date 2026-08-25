@@ -442,6 +442,12 @@ export function parseAccumulatedIntoBlocks(
    * never how a well-formed block ends.
    */
   emptyToolBlocks: number;
+  /**
+   * Block matches that spanned another opener and were re-anchored to the
+   * innermost one. Each is a truncated block that was persisted bare and is
+   * being repaired at read time.
+   */
+  splicedToolBlocks: number;
 } {
   // If we're starting inside a block from prefill, prepend a synthetic opening tag
   // so the regex can match the closing tag properly
@@ -457,6 +463,7 @@ export function parseAccumulatedIntoBlocks(
   const toolCalls: ToolCall[] = [];
   const toolResults: ToolResult[] = [];
   let emptyToolBlocks = 0;
+  let splicedToolBlocks = 0;
 
   // Track positions of all special blocks to extract plain text between them
   type BlockPosition = {
@@ -505,6 +512,7 @@ export function parseAccumulatedIntoBlocks(
     // rejected as a block and re-anchored to its innermost opener; see
     // resolveToolBlock.
     const resolvedBlock = resolveToolBlock(processedText, funcMatch);
+    if (resolvedBlock.wasSpliced) splicedToolBlocks++;
     const innerContent = resolvedBlock.innerContent;
     // Verbatim document text of the whole block — carried on each parsed
     // tool_use so prefill replay reproduces the generation exactly instead
@@ -693,6 +701,7 @@ export function parseAccumulatedIntoBlocks(
     toolResults,
     unclosedToolBlock: endsWithPartialToolBlock(processedText),
     emptyToolBlocks,
+    splicedToolBlocks,
   };
 }
 
