@@ -34,3 +34,9 @@
   a substring the adapter's `handleError` matches — `overloaded_error`,
   `too_many_requests`, `permission_denied` — normalized to unknown and
   non-retryable. The token lists now have a single source of truth.
+- A Responses API terminal response carrying a structured `error` object on an
+  HTTP 200 is classified the same way, from both paths that reach it: the
+  stream's terminal frame (`response.completed`/`response.incomplete`) and a
+  non-streaming response body. A 200 carrying an error object never reaches an
+  HTTP-status classifier, so these had no other route to a category. The
+  non-streaming failure is no longer described as a stream error.

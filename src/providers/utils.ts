@@ -104,11 +104,18 @@ function frameTokensMatch(tokens: string[], needles: string[]): boolean {
  *     provider-specific fallbacks still get their swing at it
  * The provider's message text is never dropped, and the raw frame plus the
  * request ride along on the classified error.
+ *
+ * `errorNoun` names what carried the payload. It defaults to the SSE case, and
+ * exists because the same `{ error: { code, message } }` object also arrives on
+ * a non-streaming 200 body, where calling the failure a stream error would be
+ * false. Classification reads the payload's own fields either way — the
+ * transport was never part of the rule.
  */
 export function throwOnStreamErrorFrame(
   parsed: unknown,
   providerLabel: string,
-  rawRequest?: unknown
+  rawRequest?: unknown,
+  errorNoun: string = 'stream error'
 ): void {
   if (typeof parsed !== 'object' || parsed === null) return;
   const streamError = (parsed as { error?: unknown }).error;
@@ -124,7 +131,7 @@ export function throwOnStreamErrorFrame(
       : JSON.stringify(streamError);
 
   const description =
-    `${providerLabel} stream error` +
+    `${providerLabel} ${errorNoun}` +
     `${httpStatus !== undefined ? ` (${httpStatus})` : ''}` +
     `${tokens.length > 0 ? ` [${tokens.join(' ')}]` : ''}: ${providerMessage}`;
 

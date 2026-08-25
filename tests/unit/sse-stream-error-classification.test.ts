@@ -333,3 +333,94 @@ describe('OpenAI Responses API error frames keep their classification', () => {
     expect(result.stopReason).toBe('end_turn');
   });
 });
+
+/**
+ * The Responses API's terminal-response check throws the same structured
+ * payload from two reachable paths: the streaming one, where the terminal
+ * frame (`response.completed`/`response.incomplete`) carries an `error`
+ * object, and the non-streaming one, where a 200 body does. A 200 carrying an
+ * error object never reaches an HTTP-status boundary classifier, so this
+ * helper is the only lawful home for that classification.
+ */
+function jsonResponseStub(payload: unknown): void {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    ),
+  );
+}
+
+describe('OpenAI Responses API terminal-response errors keep their classification', () => {
+  it('classifies an error on the terminal stream frame (response.incomplete)', async () => {
+    stubFetchWithSseLines([
+      JSON.stringify({
+        type: 'response.incomplete',
+        response: {
+          id: 'resp_zz4',
+          model: 'zz-model-1',
+          status: 'incomplete',
+          output: [],
+          error: { code: 'overloaded_error', message: 'zz terminal capacity gone' },
+        },
+      }),
+    ]);
+    const adapter = new OpenAIResponsesAPIAdapter({ apiKey: 'zz-key' });
+
+    const thrown = await rejectionFrom(adapter.stream(zzResponsesRequest as any, { onChunk: () => {} } as any));
+
+    const normalized = classifyError(thrown);
+    expect(normalized.type).toBe('server');
+    expect(normalized.retryable).toBe(true);
+    expect(normalized.message).toContain('zz terminal capacity gone');
+  });
+
+  it('classifies an error on a non-streaming 200 body', async () => {
+    jsonResponseStub({
+      id: 'resp_zz5',
+      model: 'zz-model-1',
+      status: 'failed',
+      output: [],
+      error: { code: 'too_many_requests', message: 'zz completion throttled' },
+    });
+    const adapter = new OpenAIResponsesAPIAdapter({ apiKey: 'zz-key' });
+
+    const thrown = await rejectionFrom(adapter.complete(zzResponsesRequest as any));
+
+    const normalized = classifyError(thrown);
+    expect(normalized.type).toBe('rate_limit');
+    expect(normalized.retryable).toBe(true);
+    expect(normalized.message).toContain('zz completion throttled');
+  });
+
+  it('does not call a non-streaming failure a stream error', async () => {
+    jsonResponseStub({
+      id: 'resp_zz6',
+      model: 'zz-model-1',
+      status: 'failed',
+      output: [],
+      error: { code: 'too_many_requests', message: 'zz completion throttled' },
+    });
+    const adapter = new OpenAIResponsesAPIAdapter({ apiKey: 'zz-key' });
+
+    const thrown = await rejectionFrom(adapter.complete(zzResponsesRequest as any));
+
+    expect((thrown as Error).message).toContain('OpenAI Responses API response error');
+    expect((thrown as Error).message).not.toContain('stream error');
+  });
+
+  it('leaves a clean non-streaming response untouched (pinned)', async () => {
+    jsonResponseStub({
+      id: 'resp_zz7',
+      model: 'zz-model-1',
+      status: 'completed',
+      output: [{ type: 'message', id: 'msg_zz7', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'zz hello' }] }],
+      usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 },
+    });
+    const adapter = new OpenAIResponsesAPIAdapter({ apiKey: 'zz-key' });
+
+    const result: any = await adapter.complete(zzResponsesRequest as any);
+
+    expect(result.content[0].text).toBe('zz hello');
+  });
+});

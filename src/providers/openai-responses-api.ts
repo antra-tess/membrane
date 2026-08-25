@@ -175,7 +175,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
 
       await this.assertSuccessfulHTTPResponse(response);
       const data = (await response.json()) as OpenAIResponsesAPIResponse;
-      this.assertSuccessfulAPIResponse(data);
+      this.assertSuccessfulAPIResponse(data, responsesRequest, 'response error');
       return this.parseResponse(data, request.model, responsesRequest);
     } catch (error) {
       throw this.handleError(error, responsesRequest);
@@ -288,7 +288,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
         );
       }
 
-      this.assertSuccessfulAPIResponse(terminalResponse);
+      this.assertSuccessfulAPIResponse(terminalResponse, responsesRequest);
 
       const parsed = this.parseResponse(terminalResponse, request.model, responsesRequest);
       parsed.content.forEach((block, index) => callbacks.onContentBlock?.(index, block));
@@ -601,12 +601,20 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
     throw new Error(`OpenAI Responses API error: ${response.status} ${errorText}`);
   }
 
-  private assertSuccessfulAPIResponse(response: OpenAIResponsesAPIResponse): void {
+  /**
+   * A terminal response can carry a structured `error` object on a 200, from
+   * the stream's terminal frame or from a non-streaming body. That payload
+   * never reaches an HTTP-status boundary classifier — the status was 200 —
+   * so it is classified here, by the same helper and the same token lists as
+   * every other provider error payload.
+   */
+  private assertSuccessfulAPIResponse(
+    response: OpenAIResponsesAPIResponse,
+    rawRequest?: unknown,
+    errorNoun?: string
+  ): void {
     if (!response.error) return;
-    throw new Error(
-      `OpenAI Responses API error: ${response.error.code ?? 'api_error'} ` +
-        `${response.error.message ?? 'Unknown error'}`
-    );
+    throwOnStreamErrorFrame(response, 'OpenAI Responses API', rawRequest, errorNoun);
   }
 
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
