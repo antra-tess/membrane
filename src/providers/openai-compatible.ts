@@ -213,75 +213,87 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       let toolCalls: OpenAIToolCall[] = [];
       let streamUsage: OpenAIResponse['usage'] | undefined;
 
+      // One frame handler for both the streamed lines and the EOF flush — the
+      // trailing buffer carries real terminal frames, not leftovers.
+      const processDataLine = (data: string): void => {
+        if (data === '[DONE]') {
+          sawTerminalEvent = true;
+          return;
+        }
+
+        // Parse first; only JSON noise is ignorable. Everything after the
+        // parse must NOT be swallowed by the catch below.
+        let parsed: Record<string, any>;
+        try {
+          parsed = JSON.parse(data);
+        } catch {
+          return; // Ignore parse errors (partial/keep-alive lines)
+        }
+
+        throwOnStreamErrorFrame(parsed, this.name);
+
+        try {
+          const delta = parsed.choices?.[0]?.delta;
+
+          if (delta?.content) {
+            accumulated += delta.content;
+            callbacks.onChunk(delta.content);
+          }
+
+          // Reasoning-model trace arrives on its own channel (not `content`).
+          if (typeof delta?.reasoning === 'string') {
+            reasoning += delta.reasoning;
+          }
+
+          // Handle streaming tool calls
+          if (delta?.tool_calls) {
+            for (const tc of delta.tool_calls) {
+              const index = tc.index ?? 0;
+              if (!toolCalls[index]) {
+                toolCalls[index] = {
+                  id: tc.id ?? '',
+                  type: 'function',
+                  function: { name: '', arguments: '' },
+                };
+              }
+              if (tc.id) toolCalls[index].id = tc.id;
+              if (tc.function?.name) toolCalls[index].function.name = tc.function.name;
+              if (tc.function?.arguments) {
+                toolCalls[index].function.arguments += tc.function.arguments;
+              }
+            }
+          }
+
+          if (parsed.choices?.[0]?.finish_reason) {
+            finishReason = parsed.choices[0].finish_reason;
+            sawTerminalEvent = true;
+          }
+
+          // Usage rides the final chunk when stream_options.include_usage is set
+          if (parsed.usage) {
+            streamUsage = parsed.usage;
+          }
+        } catch {
+          // Ignore parse errors in stream
+        }
+      };
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
         const chunk = decoder.decode(value, { stream: true });
-        const dataLines = sseParser.feed(chunk);
-
-        for (const data of dataLines) {
-          if (data === '[DONE]') {
-            sawTerminalEvent = true;
-            continue;
-          }
-
-          // Parse first; only JSON noise is ignorable. Everything after the
-          // parse must NOT be swallowed by the catch below.
-          let parsed: Record<string, any>;
-          try {
-            parsed = JSON.parse(data);
-          } catch {
-            continue; // Ignore parse errors (partial/keep-alive lines)
-          }
-
-          throwOnStreamErrorFrame(parsed, this.name);
-
-          try {
-            const delta = parsed.choices?.[0]?.delta;
-
-            if (delta?.content) {
-              accumulated += delta.content;
-              callbacks.onChunk(delta.content);
-            }
-
-            // Reasoning-model trace arrives on its own channel (not `content`).
-            if (typeof delta?.reasoning === 'string') {
-              reasoning += delta.reasoning;
-            }
-
-            // Handle streaming tool calls
-            if (delta?.tool_calls) {
-              for (const tc of delta.tool_calls) {
-                const index = tc.index ?? 0;
-                if (!toolCalls[index]) {
-                  toolCalls[index] = {
-                    id: tc.id ?? '',
-                    type: 'function',
-                    function: { name: '', arguments: '' },
-                  };
-                }
-                if (tc.id) toolCalls[index].id = tc.id;
-                if (tc.function?.name) toolCalls[index].function.name = tc.function.name;
-                if (tc.function?.arguments) {
-                  toolCalls[index].function.arguments += tc.function.arguments;
-                }
-              }
-            }
-
-            if (parsed.choices?.[0]?.finish_reason) {
-              finishReason = parsed.choices[0].finish_reason;
-              sawTerminalEvent = true;
-            }
-
-            // Usage rides the final chunk when stream_options.include_usage is set
-            if (parsed.usage) {
-              streamUsage = parsed.usage;
-            }
-          } catch {
-            // Ignore parse errors in stream
-          }
+        for (const data of sseParser.feed(chunk)) {
+          processDataLine(data);
         }
+      }
+
+      // A final `data:` line that arrived without its trailing newline is still
+      // buffered here. Servers and proxies do close right after writing the
+      // last event, so dropping it would report a finished turn as a dropped
+      // connection at the guard below.
+      for (const data of sseParser.flush()) {
+        processDataLine(data);
       }
 
       assertTerminalEventObserved(sawTerminalEvent, this.name, openAIRequest);

@@ -218,75 +218,94 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
       let emittedLen = 0;
       let eotFound = false;
 
-      streamLoop:
+      // One frame handler for both the streamed lines and the EOF flush — the
+      // trailing buffer carries real terminal frames, not leftovers. `eotFound`
+      // is the stop signal each caller checks; it replaces the labelled break
+      // this body used while it was inline.
+      const processDataLine = (data: string): void => {
+        if (data === '[DONE]') {
+          sawTerminalEvent = true;
+          return;
+        }
+
+        // Parse first; only JSON noise is ignorable. Everything after the
+        // parse must NOT be swallowed by the catch below.
+        let parsed: Record<string, any>;
+        try {
+          parsed = JSON.parse(data);
+        } catch {
+          return; // Ignore parse errors (partial/keep-alive lines)
+        }
+
+        throwOnStreamErrorFrame(parsed, this.name);
+
+        try {
+          const text = parsed.choices?.[0]?.text;
+
+          if (text) {
+            accumulated += text;
+            if (eot) {
+              const idx = accumulated.indexOf(eot);
+              if (idx !== -1) {
+                // Truncate at the token, flush the un-emitted prefix, stop
+                accumulated = accumulated.slice(0, idx);
+                if (accumulated.length > emittedLen) {
+                  callbacks.onChunk(accumulated.slice(emittedLen));
+                }
+                emittedLen = accumulated.length;
+                eotFound = true;
+                // The adapter's own end-of-turn token IS a terminal
+                // observation: the turn ended where this layer said it ends.
+                sawTerminalEvent = true;
+                finishReason = 'stop';
+                return;
+              }
+              // Emit all but a held-back tail that could be a partial token
+              const safeLen = Math.max(emittedLen, accumulated.length - (eot.length - 1));
+              if (safeLen > emittedLen) {
+                callbacks.onChunk(accumulated.slice(emittedLen, safeLen));
+                emittedLen = safeLen;
+              }
+            } else {
+              callbacks.onChunk(text);
+            }
+          }
+
+          if (parsed.choices?.[0]?.finish_reason) {
+            finishReason = parsed.choices[0].finish_reason;
+            sawTerminalEvent = true;
+          }
+
+          // Usage rides the final chunk when stream_options.include_usage is set
+          if (parsed.usage) {
+            streamUsage = parsed.usage;
+          }
+        } catch {
+          // Ignore parse errors in stream
+        }
+      };
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
         const chunk = decoder.decode(value, { stream: true });
-        const dataLines = sseParser.feed(chunk);
+        for (const data of sseParser.feed(chunk)) {
+          processDataLine(data);
+          if (eotFound) break;
+        }
+        if (eotFound) break;
+      }
 
-        for (const data of dataLines) {
-          if (data === '[DONE]') {
-            sawTerminalEvent = true;
-            continue;
-          }
-
-          // Parse first; only JSON noise is ignorable. Everything after the
-          // parse must NOT be swallowed by the catch below.
-          let parsed: Record<string, any>;
-          try {
-            parsed = JSON.parse(data);
-          } catch {
-            continue; // Ignore parse errors (partial/keep-alive lines)
-          }
-
-          throwOnStreamErrorFrame(parsed, this.name);
-
-          try {
-            const text = parsed.choices?.[0]?.text;
-
-            if (text) {
-              accumulated += text;
-              if (eot) {
-                const idx = accumulated.indexOf(eot);
-                if (idx !== -1) {
-                  // Truncate at the token, flush the un-emitted prefix, stop
-                  accumulated = accumulated.slice(0, idx);
-                  if (accumulated.length > emittedLen) {
-                    callbacks.onChunk(accumulated.slice(emittedLen));
-                  }
-                  emittedLen = accumulated.length;
-                  eotFound = true;
-                  // The adapter's own end-of-turn token IS a terminal
-                  // observation: the turn ended where this layer said it ends.
-                  sawTerminalEvent = true;
-                  finishReason = 'stop';
-                  break streamLoop;
-                }
-                // Emit all but a held-back tail that could be a partial token
-                const safeLen = Math.max(emittedLen, accumulated.length - (eot.length - 1));
-                if (safeLen > emittedLen) {
-                  callbacks.onChunk(accumulated.slice(emittedLen, safeLen));
-                  emittedLen = safeLen;
-                }
-              } else {
-                callbacks.onChunk(text);
-              }
-            }
-
-            if (parsed.choices?.[0]?.finish_reason) {
-              finishReason = parsed.choices[0].finish_reason;
-              sawTerminalEvent = true;
-            }
-
-            // Usage rides the final chunk when stream_options.include_usage is set
-            if (parsed.usage) {
-              streamUsage = parsed.usage;
-            }
-          } catch {
-            // Ignore parse errors in stream
-          }
+      // A final `data:` line that arrived without its trailing newline is still
+      // buffered here. Servers and proxies do close right after writing the
+      // last event, so dropping it would report a finished turn as a dropped
+      // connection at the guard below. A stream already ended by the eotToken
+      // has nothing left to read.
+      if (!eotFound) {
+        for (const data of sseParser.flush()) {
+          processDataLine(data);
+          if (eotFound) break;
         }
       }
 

@@ -9,6 +9,10 @@
   `raw.finish_reason: 'stop'` on the OpenAI family that never came off the
   wire. `openai-responses-api` already refused this; Bedrock's guard caught
   only the fully-empty case, so a stream truncated after any content passed.
+  A final event that arrives with no trailing newline still counts as
+  observed: every OpenAI-family loop drains its SSE line parser's buffer at
+  EOF through the same frame handler, as `gemini` and `openai-responses-api`
+  already did.
 - Adapter `handleError` now returns an already-classified `MembraneError`
   unchanged (`openai`, `openai-compatible`, `openai-completions`,
   `openrouter`, `anthropic`, `bedrock`; `gemini` and `openai-responses-api`
