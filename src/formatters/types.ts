@@ -164,6 +164,18 @@ export interface BuildResult {
   cacheMarkersApplied?: number;
 
   /**
+   * Offset into the turn's accumulated assistant text at which the CURRENT
+   * last message of `messages` begins. Zero (or absent) for an ordinary
+   * build: the whole accumulated document is the trailing assistant prefill.
+   *
+   * A split-turn image injection persists its three messages here and moves
+   * this watermark to the image seam, so later continuations replace only
+   * the trailing assistant message and never re-flatten the pre-image text
+   * over the user turn that carries the image.
+   */
+  accumulatedBaseOffset?: number;
+
+  /**
    * `false` only when the tool-pair normalizer detected a trailing
    * unmatched tool_use whose id is in `pendingToolCallIds` — i.e. the
    * caller (yielding stream) is mid-cycle and the request should not be

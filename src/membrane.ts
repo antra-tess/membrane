@@ -1867,7 +1867,14 @@ export class Membrane {
   ): any {
     // Anthropic quirk: assistant content cannot end with trailing whitespace
     const trimmedAccumulated = accumulated.trimEnd();
-    
+
+    // Everything before the watermark already rides EARLIER messages (a
+    // persisted split turn), so only the suffix belongs in the trailing
+    // assistant prefill — replacing it with the whole document would
+    // duplicate the pre-seam text and flatten the image user-turn away.
+    const baseOffset = prefillResult.accumulatedBaseOffset ?? 0;
+    const trailingContent = accumulated.slice(baseOffset).trimEnd();
+
     // Build continuation messages: keep all messages up to last assistant,
     // then replace/add the accumulated content
     const messages = [...prefillResult.messages];
@@ -1876,14 +1883,14 @@ export class Membrane {
     let foundAssistant = false;
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i]?.role === 'assistant') {
-        messages[i] = { role: 'assistant', content: trimmedAccumulated };
+        messages[i] = { role: 'assistant', content: trailingContent };
         foundAssistant = true;
         break;
       }
     }
     
     if (!foundAssistant) {
-      messages.push({ role: 'assistant', content: trimmedAccumulated });
+      messages.push({ role: 'assistant', content: trailingContent });
     }
     
     return {
@@ -1900,6 +1907,10 @@ export class Membrane {
       stopSequences: prefillResult.stopSequences,
       extra: {
         ...originalRequest.providerParams,
+        // Same contract transformRequest sends: adapters that reason about
+        // the normalized shape (or fall back to serializing it) must not see
+        // a continuation as a request with no normalized form at all.
+        normalizedMessages: originalRequest.messages,
         // Pre-serialized prompt for completions adapters — skip re-serialization
         prompt: trimmedAccumulated,
       },
@@ -1933,6 +1944,12 @@ export class Membrane {
     // Anthropic quirk: assistant content cannot end with trailing whitespace
     const trimmedAccumulated = accumulated.trimEnd();
 
+    // The split replaces only the CURRENT trailing assistant message, which
+    // covers the accumulated text from the previous seam onward (0 on the
+    // first split, the previous image seam on a later one).
+    const baseOffset = prefillResult.accumulatedBaseOffset ?? 0;
+    const trailingContent = accumulated.slice(baseOffset).trimEnd();
+
     // Build messages: copy all, then replace only the last assistant with split-turn
     const messages: any[] = prefillResult.messages.map(msg => ({ ...msg }));
 
@@ -1948,7 +1965,7 @@ export class Membrane {
     // Anthropic quirk: assistant content cannot end with trailing whitespace
     const trimmedAfterXml = afterImageXml.trimEnd();
     const splitTurnMessages = [
-      { role: 'assistant', content: trimmedAccumulated },
+      { role: 'assistant', content: trailingContent },
       { role: 'user', content: images },
       { role: 'assistant', content: trimmedAfterXml },
     ];
@@ -1958,6 +1975,18 @@ export class Membrane {
     } else {
       messages.push(...splitTurnMessages);
     }
+
+    // PERSIST the split. Later rounds rebuild from prefillResult.messages;
+    // without this the image user-turn exists on exactly one request and the
+    // next continuation flattens the accumulated document back over it —
+    // leaving <function_results> XML asserting a screenshot the model can no
+    // longer see. Reassign (never mutate in place): the previous array is
+    // still referenced by the request already on the wire. The watermark
+    // moves to the seam — the point in `accumulated` where afterImageXml is
+    // about to be appended — so the next builder replaces only the closing
+    // assistant turn.
+    prefillResult.messages = messages;
+    prefillResult.accumulatedBaseOffset = accumulated.length;
 
     return {
       ...this.getBaseProviderParams(originalRequest.config),
@@ -1971,7 +2000,16 @@ export class Membrane {
           : prefillResult.systemContent)
         : undefined,
       stopSequences: prefillResult.stopSequences,
-      extra: originalRequest.providerParams,
+      extra: {
+        ...originalRequest.providerParams,
+        // Same contract as transformRequest and the plain continuation
+        // builder. Without these a completions-style adapter fell through to
+        // serializing PROVIDER-shaped messages as if they were normalized
+        // ones, re-adding participant stop sequences the continuation
+        // deliberately suppresses.
+        normalizedMessages: originalRequest.messages,
+        prompt: trimmedAccumulated,
+      },
     };
   }
 
