@@ -19,6 +19,7 @@ import { throwOnStreamErrorFrame } from '../../src/providers/utils.js';
 import { MembraneError, classifyError, isOverloadedError } from '../../src/types/errors.js';
 import { OpenRouterAdapter } from '../../src/providers/openrouter.js';
 import { OpenAIAdapter } from '../../src/providers/openai.js';
+import { OpenAIResponsesAPIAdapter } from '../../src/providers/openai-responses-api.js';
 import { stubFetchWithSseLines } from '../helpers/sse-fixtures.js';
 
 afterEach(() => vi.unstubAllGlobals());
@@ -240,5 +241,95 @@ describe('classified stream errors reaching an adapter caller', () => {
     await adapter.stream(zzRequest as any, { onChunk: (chunk: string) => chunks.push(chunk) } as any);
 
     expect(chunks).toEqual(['zz hello']);
+  });
+});
+
+/**
+ * The Responses API adapter does not use the SSE line loop the other adapters
+ * share: it dispatches on `event.type` and carries its own two error-frame
+ * throw sites. Those threw structureless `Error`s for the same reason the
+ * shared helper did, so a `response.failed` or an `error` event whose code did
+ * not happen to contain a substring `handleError` matches — `overloaded_error`,
+ * `too_many_requests`, `permission_denied` — normalized to unknown and
+ * non-retryable. Both sites now route through the one classification, so the
+ * token lists have a single source of truth.
+ */
+const zzResponsesRequest = {
+  model: 'zz-model-1',
+  maxTokens: 64,
+  messages: [{ type: 'message', role: 'user', content: 'zz prompt' }],
+};
+
+function responsesFailedFrame(errorPayload: unknown): string {
+  return JSON.stringify({
+    type: 'response.failed',
+    response: { id: 'resp_zz1', status: 'failed', output: [], error: errorPayload },
+  });
+}
+
+async function responsesStreamCategory(dataLines: string[]): Promise<{ type: string; retryable: boolean; message: string }> {
+  stubFetchWithSseLines(dataLines);
+  const adapter = new OpenAIResponsesAPIAdapter({ apiKey: 'zz-key' });
+  const thrown = await rejectionFrom(adapter.stream(zzResponsesRequest as any, { onChunk: () => {} } as any));
+  const normalized = classifyError(thrown);
+  return { type: normalized.type, retryable: normalized.retryable, message: normalized.message };
+}
+
+describe('OpenAI Responses API error frames keep their classification', () => {
+  it('classifies an overloaded-shaped response.failed as retryable server-class', async () => {
+    const normalized = await responsesStreamCategory([
+      responsesFailedFrame({ code: 'overloaded_error', message: 'zz responses capacity gone' }),
+    ]);
+
+    expect(normalized.type).toBe('server');
+    expect(normalized.retryable).toBe(true);
+    expect(normalized.message).toContain('zz responses capacity gone');
+  });
+
+  it('classifies a permission-shaped response.failed as non-retryable auth', async () => {
+    const normalized = await responsesStreamCategory([
+      responsesFailedFrame({ code: 'permission_denied', message: 'zz responses key forbidden' }),
+    ]);
+
+    expect(normalized.type).toBe('auth');
+    expect(normalized.retryable).toBe(false);
+    expect(normalized.message).toContain('zz responses key forbidden');
+  });
+
+  it('classifies a throttle-shaped error event as a retryable rate limit', async () => {
+    const normalized = await responsesStreamCategory([
+      JSON.stringify({ type: 'error', code: 'too_many_requests', message: 'zz responses stream throttled' }),
+    ]);
+
+    expect(normalized.type).toBe('rate_limit');
+    expect(normalized.retryable).toBe(true);
+    expect(normalized.message).toContain('zz responses stream throttled');
+  });
+
+  it('still fails loudly on a response.failed carrying no error payload (pinned)', async () => {
+    stubFetchWithSseLines([
+      JSON.stringify({ type: 'response.failed', response: { id: 'resp_zz2', status: 'failed', output: [] } }),
+    ]);
+    const adapter = new OpenAIResponsesAPIAdapter({ apiKey: 'zz-key' });
+
+    const thrown = await rejectionFrom(adapter.stream(zzResponsesRequest as any, { onChunk: () => {} } as any));
+
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toContain('OpenAI Responses API');
+  });
+
+  it('leaves a normal Responses stream untouched (pinned)', async () => {
+    stubFetchWithSseLines([
+      JSON.stringify({ type: 'response.output_item.added', output_index: 0, item: { type: 'message', id: 'msg_zz1', role: 'assistant', status: 'in_progress', content: [] } }),
+      JSON.stringify({ type: 'response.output_text.delta', output_index: 0, content_index: 0, item_id: 'msg_zz1', delta: 'zz hello' }),
+      JSON.stringify({ type: 'response.completed', response: { id: 'resp_zz3', model: 'zz-model-1', status: 'completed', output: [{ type: 'message', id: 'msg_zz1', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'zz hello' }] }], usage: { input_tokens: 3, output_tokens: 2, total_tokens: 5 } } }),
+    ]);
+    const adapter = new OpenAIResponsesAPIAdapter({ apiKey: 'zz-key' });
+    const chunks: string[] = [];
+
+    const result: any = await adapter.stream(zzResponsesRequest as any, { onChunk: (chunk: string) => chunks.push(chunk) } as any);
+
+    expect(chunks).toEqual(['zz hello']);
+    expect(result.stopReason).toBe('end_turn');
   });
 });

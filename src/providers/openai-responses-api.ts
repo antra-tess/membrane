@@ -26,7 +26,7 @@ import {
   rateLimitError,
   serverError,
 } from '../types/index.js';
-import { createCombinedSignal, SSELineParser, safeParseJson } from './utils.js';
+import { createCombinedSignal, SSELineParser, safeParseJson, throwOnStreamErrorFrame } from './utils.js';
 
 // ============================================================================
 // Provider-native Responses API types
@@ -242,15 +242,23 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
         ) {
           terminalResponse = event.response;
         } else if (event.type === 'response.failed') {
+          // This adapter dispatches on event.type rather than running the
+          // shared SSE line loop, but its error frames are the same class of
+          // payload: a structured code the caller's retry policy needs. Route
+          // both throw sites through the one classifier so the token lists
+          // have a single source of truth. A response.failed carrying no error
+          // object at all falls through to the loud generic below.
           const failed = event.response as OpenAIResponsesAPIResponse | undefined;
-          throw new Error(
-            `OpenAI Responses API error: ${failed?.error?.code ?? 'response_failed'} ` +
-              `${failed?.error?.message ?? 'Response failed'}`
-          );
+          throwOnStreamErrorFrame(failed, 'OpenAI Responses API', responsesRequest);
+          throw new Error('OpenAI Responses API stream error (response_failed): Response failed');
         } else if (event.type === 'error') {
-          throw new Error(
-            `OpenAI Responses API error: ${event.code ?? 'stream_error'} ` +
-              `${event.message ?? 'Streaming request failed'}`
+          // The event's own `type` is the SSE event name ('error'), not a
+          // provider classification, so only code and message are handed over.
+          // The payload object is always present, so this always throws.
+          throwOnStreamErrorFrame(
+            { error: { code: event.code, message: event.message ?? 'Streaming request failed' } },
+            'OpenAI Responses API',
+            responsesRequest
           );
         }
       };

@@ -27,3 +27,10 @@
   `Error`, now with `code` and `type` preserved in the message. The provider's
   own message text is never dropped, and the raw frame and request ride along
   on the classified error.
+- The Responses API adapter's own two error-frame throw sites (`response.failed`
+  and the `error` event) route through that same classification. They dispatch
+  on `event.type` rather than running the shared SSE line loop, so they had
+  their own structureless throws: a frame whose code did not happen to contain
+  a substring the adapter's `handleError` matches — `overloaded_error`,
+  `too_many_requests`, `permission_denied` — normalized to unknown and
+  non-retryable. The token lists now have a single source of truth.
