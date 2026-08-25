@@ -429,7 +429,25 @@ function rebuildEnvelopes(
         });
       }
 
-      if (current === null || current.role !== targetRole) {
+      // A re-roled reasoning block must not join a turn that has already
+      // called a tool. Opening on role change alone put a thinking block
+      // from message N — signature and all — inside message N-1's turn,
+      // AFTER its tool_use: content attributed to the wrong turn, and
+      // signed reasoning claiming to belong to a cycle it did not produce.
+      // (Measured 2026-08-25 against sonnet-4-6: the API accepts the welded
+      // shape, so this is a content-correctness repair, not 400-prevention.)
+      // Phase 3 guarantees a user envelope after any tool_use-bearing
+      // assistant envelope, so the fresh envelope opened here cannot be
+      // concatenated back by the mergeConsecutiveRoles that follows.
+      const wouldWeldReasoningPastToolUse =
+        req === 'assistant' &&
+        req !== msg.role &&
+        block.type.startsWith('thinking') &&
+        current !== null &&
+        current.role === 'assistant' &&
+        current.content.some((held) => held.type === 'tool_use');
+
+      if (current === null || current.role !== targetRole || wouldWeldReasoningPastToolUse) {
         if (current) out.push(current);
         current = { role: targetRole, content: [] };
       }

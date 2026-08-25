@@ -14,6 +14,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   normalizeToolPairs,
+  mergeConsecutiveRoles,
   MembraneNormalizerError,
   type ProviderBlock,
 } from '../../src/formatters/normalize-tool-pairs.js';
@@ -649,6 +650,76 @@ describe('normalizeToolPairs', () => {
       expect(synth).not.toHaveProperty('toolUseId');
       expect(synth.content).toBe('[pending]');
       expect(synth.is_error).toBe(false);
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // A re-roled thinking block must never be welded into an assistant envelope
+  // that already holds a tool_use (F7). rebuildEnvelopes opened a new envelope
+  // on ROLE change only, so a thinking block under a user message landed in
+  // the PREVIOUS assistant turn — signature and all — after its tool_use.
+  // --------------------------------------------------------------------------
+
+  describe('re-roled thinking is never welded after a tool_use (F7)', () => {
+    const signedThinking = (signature: string): ProviderBlock => ({
+      type: 'thinking',
+      thinking: 'zz-reasoning',
+      signature,
+    });
+
+    /** Assistant envelopes holding a thinking block positioned after a tool_use. */
+    function weldedEnvelopes(messages: ProviderMessage[]): number[] {
+      const welded: number[] = [];
+      for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i]!;
+        if (msg.role !== 'assistant') continue;
+        const types = blockTypes(msg);
+        const firstUse = types.indexOf('tool_use');
+        if (firstUse < 0) continue;
+        if (types.slice(firstUse).some((type) => type.startsWith('thinking'))) welded.push(i);
+      }
+      return welded;
+    }
+
+    it('opens a fresh envelope rather than appending past the previous turn tool_use', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(signedThinking('zz-sig-1'), u('ite1')),
+        user(signedThinking('zz-sig-2'), r('ite1')),
+      ];
+      const out = normalize(input);
+
+      expect(weldedEnvelopes(out.messages)).toEqual([]);
+
+      // The second signature must not have moved into the first turn.
+      const firstToolTurn = out.messages.find(
+        (m) => m.role === 'assistant' && useIds(m.content).includes('ite1'),
+      )!;
+      const signatures = firstToolTurn.content.map(
+        (b) => (b as ProviderBlock & { signature?: string }).signature,
+      );
+      expect(signatures).not.toContain('zz-sig-2');
+
+      // ...and must not be lost either.
+      const allSignatures = out.messages
+        .flatMap((m) => m.content)
+        .map((b) => (b as ProviderBlock & { signature?: string }).signature)
+        .filter(Boolean);
+      expect(allSignatures).toContain('zz-sig-2');
+    });
+
+    it('survives mergeConsecutiveRoles, which every callsite runs next', () => {
+      // A fresh envelope is only a repair if the merge that follows
+      // normalization at every wire boundary does not concatenate it straight
+      // back onto the tool_use turn.
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(signedThinking('zz-sig-1'), u('ite1')),
+        user(signedThinking('zz-sig-2'), r('ite1')),
+      ];
+      const merged = mergeConsecutiveRoles(normalize(input).messages) as ProviderMessage[];
+
+      expect(weldedEnvelopes(merged)).toEqual([]);
     });
   });
 
