@@ -79,6 +79,9 @@ function request(): NormalizedRequest {
   return {
     messages: [{ participant: 'User', content: [{ type: 'text', text: 'hi' }] }],
     config: { model: 'test-model', maxTokens: 1000, thinking: { enabled: true, budgetTokens: 1024 } },
+    // runXmlToolsYielding is the subject here; native is the default tool
+    // mode now, so the XML path is an explicit opt-in.
+    toolMode: 'xml',
   };
 }
 

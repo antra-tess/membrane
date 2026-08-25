@@ -1,6 +1,31 @@
 /**
  * OpenAI Images API provider adapter
  *
+ * ⚠ DO NOT CONFUSE WITH THE RESPONSES API. Despite the filename and the class
+ * name `OpenAIResponsesAdapter`, nothing in this file talks to OpenAI's
+ * Responses API. The real Responses-API surfaces are:
+ *
+ *   - `src/formatters/openai-responses.ts` — the Responses input-item
+ *     formatter (`function_call` / `function_call_output` items, item ids,
+ *     encrypted reasoning), and
+ *   - `src/providers/openai-responses-api.ts` — the Responses transport
+ *     adapter (`readonly name = 'openai-responses-api'`).
+ *
+ * This file is the IMAGES adapter, and reviews or edits aimed at Responses
+ * behaviour belong in those two. The names collide by history, not design.
+ *
+ * The rename is deferred, not forgotten. The cost lands outside this repo:
+ * the original note here records consumer vendor configs matching an
+ * `openairesponses-*` prefix — a consumer-side fact this repo cannot check,
+ * carried forward as the reason of record. In-repo, `'openai-responses'` as
+ * an adapter name is only telemetry (`details.model.provider`); the sole
+ * behavioural read of an adapter name is `membrane.ts` matching
+ * `'openai-responses-api'`, i.e. the OTHER adapter. Note also that
+ * `'openai-responses'` is simultaneously the FORMATTER name, which
+ * `Membrane.buildNativeToolRequest` and `Membrane.transformRequest` do
+ * branch on — so check which of the two a name refers to before touching
+ * either.
+ *
  * Adapter for OpenAI's Images API endpoints, used for image generation
  * models like `gpt-image-1`:
  *
@@ -16,10 +41,6 @@
  * - Return base64-encoded images in `data[].b64_json`
  * - No streaming support (returns complete image)
  * - Support `size`, `quality`, `n`, `background`, `output_format`
- *
- * Note: File retains the name openai-responses.ts and class name
- * OpenAIResponsesAdapter for compatibility with existing factory
- * routing and vendor configs (`openairesponses-*` prefix).
  */
 
 import type {

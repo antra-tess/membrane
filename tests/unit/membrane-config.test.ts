@@ -252,7 +252,11 @@ describe('Membrane: resolveToolMode', () => {
     expect(lastRequest.tools[0].name).toBe('calculate');
   });
 
-  it('uses XML tool mode with default AnthropicXmlFormatter', async () => {
+  // NB: complete() never consults resolveToolMode — it always builds through
+  // formatter.buildMessages, and AnthropicXmlFormatter's own constructor-time
+  // `toolMode` (default 'xml') decides there. The native-by-default rule this
+  // wave introduced governs stream()/streamYielding, which do route by mode.
+  it('complete() with the default AnthropicXmlFormatter injects tools as XML', async () => {
     const adapter = new MockAdapter();
     const membrane = new Membrane(adapter);
 

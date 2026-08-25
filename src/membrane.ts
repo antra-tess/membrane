@@ -34,6 +34,7 @@ import {
   isOverloadedError,
   isTextContent,
   isAbortedResponse,
+  unsupportedError,
 } from './types/index.js';
 import type { BuildResult } from './formatters/types.js';
 import {
@@ -63,6 +64,7 @@ import {
   shedImagesToFitByteBudget, assertWithinByteBudget,
 } from './utils/image-media.js';
 import { getDefaultPricing } from './registry/default-pricing.js';
+import { supportsAssistantPrefill } from './registry/model-capabilities.js';
 
 // ============================================================================
 // Membrane Class
@@ -322,28 +324,65 @@ export class Membrane {
   }
 
   /**
-   * Determine the effective tool mode
+   * Determine the effective tool mode.
+   *
+   * Native is the default wherever the formatter can carry native tools.
+   * XML tools ride in an assistant prefill, and current Anthropic models
+   * (4.6+ and the 5-series) refuse assistant prefill outright — so defaulting
+   * to XML aimed the library's out-of-the-box path at a provider 400 on the
+   * models most callers reach for. XML is now an explicit opt-in, or the
+   * fallback for a formatter with no tool channel at all (text completions).
+   *
+   * When XML/prefill IS selected against a model that refuses prefill, fail
+   * here with a typed error naming the incompatibility rather than building a
+   * request whose only outcome is an opaque provider 400.
+   *
+   * The gate is `buildsAssistantMessagePrefill`, NOT `usesPrefill`. The
+   * measured refusal is an Anthropic MESSAGES-API fact: that API rejects a
+   * conversation ending in an assistant-role message. `usesPrefill` is a
+   * broader claim — CompletionsFormatter sets it while targeting a
+   * text-completions surface where no Messages conversation exists, so
+   * gating on it refused `claude-sonnet-4-6` through a formatter that never
+   * builds an assistant turn at all.
    */
   private resolveToolMode(request: NormalizedRequest): ToolMode {
+    const mode = this.resolveToolModeUnchecked(request);
+    if (mode === 'xml' && this.formatter.buildsAssistantMessagePrefill) {
+      this.assertPrefillSupported(
+        request.config.model,
+        `xml tool mode (formatter "${this.formatter.name}")`,
+      );
+    }
+    return mode;
+  }
+
+  private resolveToolModeUnchecked(request: NormalizedRequest): ToolMode {
     // Explicit mode takes precedence
     if (request.toolMode && request.toolMode !== 'auto') {
       return request.toolMode;
     }
 
-    // Auto mode: choose based on formatter
-    // NativeFormatter → native tools via API
-    // AnthropicXmlFormatter (default) → XML tools in prefill
-    if (this.formatter.name === 'native' || this.formatter.name === 'openai-responses') {
-      return 'native';
-    }
+    // Auto mode: the formatter owns the wire shape of a tool definition, so
+    // its own declared capability decides. Adapter-level special cases used
+    // to live here (openrouter) and are now subsumed: native is the default.
+    return this.formatter.supportsNativeTools ? 'native' : 'xml';
+  }
 
-    // Also handle known native-tool providers regardless of formatter
-    if (this.adapter.name === 'openrouter') {
-      return 'native';
-    }
-
-    // Default to XML for prefill compatibility
-    return 'xml';
+  /**
+   * Refuse a prefill-shaped request aimed at a model that rejects assistant
+   * prefill, before the round-trip. See registry/model-capabilities.ts for
+   * the measured table.
+   */
+  private assertPrefillSupported(model: string, site: string): void {
+    if (supportsAssistantPrefill(model)) return;
+    throw unsupportedError(
+      `Model "${model}" does not support assistant prefill, and ${site} ` +
+      `builds one: the conversation would end in an assistant turn, ` +
+      `which this model rejects with HTTP 400. ` +
+      `Use a native path instead — NativeFormatter, or toolMode: 'native' with ` +
+      `the XML formatter — or target a prefill-capable model ` +
+      `(Claude 4.5 and earlier, including claude-haiku-4-5).`,
+    );
   }
 
   /**
@@ -1765,6 +1804,22 @@ export class Membrane {
       prefillUserMessage: request.prefillUserMessage,
     });
 
+    // Prefill-capability policy point: this is the one place membrane
+    // MANUFACTURES an assistant prefill, and a model that refuses prefill
+    // answers it with an opaque 400. Refuse here, typed and named, before
+    // the round-trip. Covers the no-tools path as well as xml tool mode.
+    //
+    // Both conditions are load-bearing. `assistantPrefill` alone is too
+    // broad: CompletionsFormatter returns its entire text-completions prompt
+    // in that field, and refusing on it aimed the fast-fail at a surface
+    // where no assistant-role Messages turn is ever built. The formatter's
+    // own declaration says whether the built request has the Messages shape
+    // the measured refusal is about; the field says whether this particular
+    // build actually ended in one.
+    if (buildResult.assistantPrefill && activeFormatter.buildsAssistantMessagePrefill) {
+      this.assertPrefillSupported(request.config.model, `formatter "${activeFormatter.name}"`);
+    }
+
     // Byte-wall policy point (2026-07-12): transformRequest serves BOTH
     // complete() and the streaming path through EVERY adapter. Oversize
     // requests FAIL LOUDLY here, before the API round-trip, unless the
@@ -1788,11 +1843,17 @@ export class Membrane {
       },
     };
 
-    // The API rejects extended thinking combined with an assistant prefill.
     // Prefill-style builds (XML formatter) use the thinking config for the
-    // literal `<thinking>` text prefix instead of the API feature — drop the
-    // API param when the built request actually ends in an assistant prefill.
-    // Chat-style builds (no prefill) keep it.
+    // literal `<thinking>` text prefix instead of the API feature, so the API
+    // param would buy a second, redundant reasoning channel — drop it when
+    // the built request actually ends in an assistant prefill. Chat-style
+    // builds (no prefill) keep it.
+    //
+    // Whether a provider REFUSES the combination is model-dependent, not API
+    // law: measured live 2026-08-25, claude-haiku-4-5 accepted
+    // `thinking: {type:'enabled'}` on a prefill-terminated conversation
+    // (HTTP 200). Refusing models exist, so the drop stays; it just is not
+    // the reason.
     if (buildResult.assistantPrefill && providerRequest.thinking) {
       delete providerRequest.thinking;
     }
@@ -1888,8 +1949,11 @@ export class Membrane {
     
     return {
       ...this.getBaseProviderParams(originalRequest.config),
-      // Continuations always end in an assistant prefill — the API rejects
-      // extended thinking combined with prefill, so never send the param here
+      // Continuations always end in an assistant prefill, and prefill builds
+      // carry thinking as literal `<thinking>` text rather than the API
+      // feature — so never send the param here. (Not a validation rule:
+      // haiku-4-5 accepted thinking+prefill live 2026-08-25. See
+      // transformRequest.)
       thinking: undefined,
       messages,
       system: prefillResult.systemContent
@@ -1961,8 +2025,11 @@ export class Membrane {
 
     return {
       ...this.getBaseProviderParams(originalRequest.config),
-      // Continuations always end in an assistant prefill — the API rejects
-      // extended thinking combined with prefill, so never send the param here
+      // Continuations always end in an assistant prefill, and prefill builds
+      // carry thinking as literal `<thinking>` text rather than the API
+      // feature — so never send the param here. (Not a validation rule:
+      // haiku-4-5 accepted thinking+prefill live 2026-08-25. See
+      // transformRequest.)
       thinking: undefined,
       messages,
       system: prefillResult.systemContent
@@ -3169,8 +3236,10 @@ export class Membrane {
             previousResults: executedToolResults,
             accumulated: allTextAccumulated,
             // Full normalized blocks for this round, in provider order —
-            // lets consumers persist the assistant turn verbatim (signed
-            // thinking must precede tool_use in the same turn).
+            // lets consumers persist the assistant turn verbatim. Order is a
+            // content-correctness rule, not current API law: sonnet-4-6
+            // accepted a signed thinking block replayed after its tool_use
+            // (measured 2026-08-25). See ToolContext.roundContent.
             roundContent: responseBlocks,
           };
 
