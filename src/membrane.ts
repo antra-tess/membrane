@@ -336,10 +336,18 @@ export class Membrane {
    * When XML/prefill IS selected against a model that refuses prefill, fail
    * here with a typed error naming the incompatibility rather than building a
    * request whose only outcome is an opaque provider 400.
+   *
+   * The gate is `buildsAssistantMessagePrefill`, NOT `usesPrefill`. The
+   * measured refusal is an Anthropic MESSAGES-API fact: that API rejects a
+   * conversation ending in an assistant-role message. `usesPrefill` is a
+   * broader claim — CompletionsFormatter sets it while targeting a
+   * text-completions surface where no Messages conversation exists, so
+   * gating on it refused `claude-sonnet-4-6` through a formatter that never
+   * builds an assistant turn at all.
    */
   private resolveToolMode(request: NormalizedRequest): ToolMode {
     const mode = this.resolveToolModeUnchecked(request);
-    if (mode === 'xml' && this.formatter.usesPrefill) {
+    if (mode === 'xml' && this.formatter.buildsAssistantMessagePrefill) {
       this.assertPrefillSupported(
         request.config.model,
         `xml tool mode (formatter "${this.formatter.name}")`,
@@ -1800,7 +1808,15 @@ export class Membrane {
     // MANUFACTURES an assistant prefill, and a model that refuses prefill
     // answers it with an opaque 400. Refuse here, typed and named, before
     // the round-trip. Covers the no-tools path as well as xml tool mode.
-    if (buildResult.assistantPrefill) {
+    //
+    // Both conditions are load-bearing. `assistantPrefill` alone is too
+    // broad: CompletionsFormatter returns its entire text-completions prompt
+    // in that field, and refusing on it aimed the fast-fail at a surface
+    // where no assistant-role Messages turn is ever built. The formatter's
+    // own declaration says whether the built request has the Messages shape
+    // the measured refusal is about; the field says whether this particular
+    // build actually ended in one.
+    if (buildResult.assistantPrefill && activeFormatter.buildsAssistantMessagePrefill) {
       this.assertPrefillSupported(request.config.model, `formatter "${activeFormatter.name}"`);
     }
 

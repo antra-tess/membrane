@@ -162,6 +162,8 @@ export class NativeFormatter implements PrefillFormatter {
   readonly name = 'native';
   readonly usesPrefill = false;
   readonly supportsNativeTools = true;
+  /** Pass-through: the built conversation ends where the caller's does. */
+  readonly buildsAssistantMessagePrefill = false;
 
   private config: Required<NativeFormatterConfig>;
 

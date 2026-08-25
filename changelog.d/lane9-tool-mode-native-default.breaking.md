@@ -15,7 +15,7 @@
   custom formatter must declare it — the in-tree formatters set it to `true`
   except `CompletionsFormatter`, whose text-completion wire shape has no tool
   channel.
-- A prefill-shaped request aimed at a model that refuses assistant prefill now
+- An assistant-message prefill aimed at a model that refuses one now
   fails fast with a typed `MembraneError` (`type: 'unsupported'`) naming the
   model, the formatter and the remedy, instead of surfacing the raw provider
   400. The measured model table lives in `src/registry/model-capabilities.ts`,

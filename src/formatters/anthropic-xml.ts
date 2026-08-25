@@ -118,6 +118,8 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
   readonly name = 'anthropic-xml';
   readonly usesPrefill = true;
   readonly supportsNativeTools = true;
+  /** Builds an Anthropic Messages array whose last entry is an assistant turn. */
+  readonly buildsAssistantMessagePrefill = true;
 
   private config: Required<AnthropicXmlFormatterConfig>;
 

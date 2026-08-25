@@ -110,6 +110,65 @@ describe('resolveToolMode default', () => {
   });
 });
 
+describe('assistant-MESSAGE prefill is what the fast-fail gates on', () => {
+  it('declares the Messages-shaped prefill only for the formatter that builds one', () => {
+    expect(new AnthropicXmlFormatter().buildsAssistantMessagePrefill).toBe(true);
+    expect(new CompletionsFormatter().buildsAssistantMessagePrefill).toBe(false);
+    expect(new NativeFormatter().buildsAssistantMessagePrefill).toBe(false);
+    // usesPrefill does NOT discriminate: both prefill formatters set it.
+    expect(new AnthropicXmlFormatter().usesPrefill).toBe(true);
+    expect(new CompletionsFormatter().usesPrefill).toBe(true);
+  });
+
+  it('lets CompletionsFormatter reach a prefill-refusing model id with xml tools', async () => {
+    const adapter = new MockAdapter();
+    const membrane = new Membrane(adapter, { formatter: new CompletionsFormatter() });
+
+    const request: NormalizedRequest = {
+      messages: [textMessage('User', 'Hello')],
+      tools: [zzTool1],
+      config: { model: 'claude-sonnet-4-6', maxTokens: 100 },
+    };
+
+    // supportsNativeTools is false here, so auto resolves to xml — but the
+    // text-completions surface never builds an assistant-role Messages turn,
+    // so the model's Messages-API prefill refusal does not apply.
+    await expect(membrane.complete(request)).resolves.toBeDefined();
+    const lastRequest = adapter.getLastRequest()!;
+    expect(lastRequest.messages.length).toBe(1);
+    expect(lastRequest.messages[0].role).toBe('assistant');
+    expect(typeof lastRequest.messages[0].content).toBe('string');
+  });
+
+  it('lets CompletionsFormatter reach a prefill-refusing model id with no tools', async () => {
+    const adapter = new MockAdapter();
+    const membrane = new Membrane(adapter, { formatter: new CompletionsFormatter() });
+
+    const request: NormalizedRequest = {
+      messages: [textMessage('User', 'Hello')],
+      config: { model: 'claude-opus-4-8', maxTokens: 100 },
+    };
+
+    await expect(membrane.complete(request)).resolves.toBeDefined();
+    expect(adapter.getLastRequest()).toBeDefined();
+  });
+
+  it('lets a per-request CompletionsFormatter override through the same gate', async () => {
+    const adapter = new MockAdapter();
+    const membrane = new Membrane(adapter);
+
+    const request: NormalizedRequest = {
+      messages: [textMessage('User', 'Hello')],
+      config: { model: 'claude-sonnet-5', maxTokens: 100 },
+    };
+
+    await expect(
+      membrane.complete(request, { formatter: new CompletionsFormatter() }),
+    ).resolves.toBeDefined();
+    expect(adapter.getLastRequest()).toBeDefined();
+  });
+});
+
 describe('prefill-incompatibility fails fast', () => {
   it('refuses explicit XML tool mode against a prefill-refusing model', async () => {
     const adapter = new MockAdapter();
