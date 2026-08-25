@@ -1,5 +1,4 @@
 - Unmapped provider stop reasons no longer collapse silently into `end_turn`: the provider's own token is disclosed as `details.stop.providerReason` on every path, and an unrecognized reason is logged rather than passed off as a clean completion.
-- `pause_turn` is a first-class `StopReason`, so a long-running turn the provider paused (and expects the caller to resume) is no longer reported as finished.
 - `openai-completions` maps `content_filter` to `refusal`, matching its three sibling OpenAI-family adapters.
 - Gemini maps the safety enums it previously dropped (`PROHIBITED_CONTENT`, `BLOCKLIST`, `SPII`, `IMAGE_SAFETY`) to `refusal`, passes reasons with no membrane equivalent (`MALFORMED_FUNCTION_CALL`, `LANGUAGE`, `OTHER`) through as the provider token, and surfaces a prompt blocked before generation (`promptFeedback.blockReason` with no candidates) as a refusal instead of an empty clean finish.
 - Verified against mock provider responses only, plus one live `max_tokens` stop per provider (Anthropic `claude-haiku-4-5-20251001`, OpenAI `gpt-4o-mini`, Google `gemini-3.5-flash-lite`); the safety and blocked-prompt paths are mock-only.
