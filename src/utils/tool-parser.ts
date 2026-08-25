@@ -79,6 +79,65 @@ const INVOKE_BODY_GROUP = 4;
 // Parameter tags
 const PARAMETER_REGEX = /<(antml:)?parameter\s+name="([^"]+)">([\s\S]*?)<\/(antml:)?parameter>/g;
 
+const FUNCTION_CALLS_OPEN_REGEX = /<(antml:)?function_calls>/g;
+
+/**
+ * One <function_calls> block, resolved to the span its calls may be read from.
+ *
+ * The block regexes are flat: first opener to first closer, with no nesting
+ * check. When a max_tokens truncation leaves an unclosed block in the persisted
+ * turn, the next round's closer splices onto that stale opener and the match
+ * spans two rounds — so the stale invoke pairs with the NEW round's `</invoke>`
+ * and one call is dispatched bearing the stale tool's name and everything
+ * between as its argument, including intervening user text.
+ *
+ * A match whose inner content holds another opener is therefore REJECTED as a
+ * block: no dispatch ever crosses an opener. The span is then re-anchored to
+ * the innermost (last) opener inside it, which is where the live block actually
+ * begins, so the real call still runs and the stale half falls out as ordinary
+ * preceding text. Re-anchoring terminates: the re-anchored inner content holds
+ * no opener by construction.
+ */
+interface ResolvedToolBlock {
+  start: number;
+  end: number;
+  innerContent: string;
+  fullMatch: string;
+  wasSpliced: boolean;
+}
+
+function resolveToolBlock(text: string, blockMatch: RegExpExecArray): ResolvedToolBlock {
+  const end = blockMatch.index + blockMatch[0].length;
+  const innerContent = blockMatch[2] ?? '';
+  const innerStart = blockMatch.index + blockMatch[0].indexOf('>') + 1;
+
+  FUNCTION_CALLS_OPEN_REGEX.lastIndex = 0;
+  let innermostOpener: RegExpExecArray | null = null;
+  let nestedMatch: RegExpExecArray | null;
+  while ((nestedMatch = FUNCTION_CALLS_OPEN_REGEX.exec(innerContent)) !== null) {
+    innermostOpener = nestedMatch;
+  }
+
+  if (!innermostOpener) {
+    return {
+      start: blockMatch.index,
+      end,
+      innerContent,
+      fullMatch: blockMatch[0],
+      wasSpliced: false,
+    };
+  }
+
+  const reanchoredStart = innerStart + innermostOpener.index;
+  return {
+    start: reanchoredStart,
+    end,
+    innerContent: innerContent.slice(innermostOpener.index + innermostOpener[0].length),
+    fullMatch: text.slice(reanchoredStart, end),
+    wasSpliced: true,
+  };
+}
+
 // Openers that mark a block as already executed, when one is the very next
 // token after it
 const FUNCTION_RESULTS_START_ANCHORED = /^<(antml:)?function_results>/;
@@ -116,32 +175,24 @@ export function parseToolCalls(text: string): ParsedToolCalls | null {
 
   // Find all function_calls blocks and pick the last unexecuted one
   let blockMatch: RegExpExecArray | null = null;
-  let lastUnexecutedMatch: RegExpExecArray | null = null;
+  let lastUnexecutedBlock: ResolvedToolBlock | null = null;
 
   while ((blockMatch = FUNCTION_CALLS_REGEX.exec(text)) !== null) {
     const afterPos = blockMatch.index + blockMatch[0].length;
 
     if (!isFollowedByResults(text, afterPos)) {
-      // This block hasn't been executed yet - store it
-      // Need to capture all properties since exec returns are reused
-      lastUnexecutedMatch = {
-        ...blockMatch,
-        index: blockMatch.index,
-        input: blockMatch.input,
-      } as RegExpExecArray;
+      lastUnexecutedBlock = resolveToolBlock(text, blockMatch);
     }
   }
 
-  if (!lastUnexecutedMatch) {
+  if (!lastUnexecutedBlock) {
     return null;
   }
 
-  const fullMatch = lastUnexecutedMatch[0];
-  const innerContent = lastUnexecutedMatch[2] ?? ''; // Group 2 is content between tags
-  const matchIndex = lastUnexecutedMatch.index;
+  const { innerContent, fullMatch } = lastUnexecutedBlock;
 
-  const beforeText = text.slice(0, matchIndex);
-  const afterText = text.slice(matchIndex + fullMatch.length);
+  const beforeText = text.slice(0, lastUnexecutedBlock.start);
+  const afterText = text.slice(lastUnexecutedBlock.end);
 
   const calls: ToolCall[] = [];
 
@@ -435,11 +486,15 @@ export function parseAccumulatedIntoBlocks(
   FUNCTION_BLOCK_WITH_CONTENT_REGEX.lastIndex = 0;
   let funcMatch: RegExpExecArray | null;
   while ((funcMatch = FUNCTION_BLOCK_WITH_CONTENT_REGEX.exec(processedText)) !== null) {
-    const innerContent = funcMatch[2] ?? '';
+    // A spliced match (a stale opener joined to a later round's closer) is
+    // rejected as a block and re-anchored to its innermost opener; see
+    // resolveToolBlock.
+    const resolvedBlock = resolveToolBlock(processedText, funcMatch);
+    const innerContent = resolvedBlock.innerContent;
     // Verbatim document text of the whole block — carried on each parsed
     // tool_use so prefill replay reproduces the generation exactly instead
     // of synthesizing a paraphrase (membrane#36).
-    const rawXml = funcMatch[0];
+    const rawXml = resolvedBlock.fullMatch;
     const blockToolCalls: ContentBlock[] = [];
 
     // Parse invoke tags in this block (both forms, in document order)
@@ -452,7 +507,7 @@ export function parseAccumulatedIntoBlocks(
       const id = generateToolId();
       const toolCall: ToolCall = { id, name: toolName, input };
       toolCalls.push(toolCall);
-      callSites.push({ id, name: toolName, pos: funcMatch.index });
+      callSites.push({ id, name: toolName, pos: resolvedBlock.start });
       blockToolCalls.push({
         type: 'tool_use',
         id,
@@ -464,8 +519,8 @@ export function parseAccumulatedIntoBlocks(
 
     if (blockToolCalls.length > 0) {
       positions.push({
-        start: funcMatch.index,
-        end: funcMatch.index + funcMatch[0].length,
+        start: resolvedBlock.start,
+        end: resolvedBlock.end,
         block: blockToolCalls,
       });
     }

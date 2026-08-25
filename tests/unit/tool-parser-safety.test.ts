@@ -59,6 +59,52 @@ describe('F8 · invoke tag spelling tolerance', () => {
   });
 });
 
+describe('F3 · a truncated block spliced with a later round closer', () => {
+  const truncatedHalf =
+    `${FUNCTION_CALLS_OPEN}\n<invoke name="zz_truncated_tool">\n<parameter name="fld1">partia`;
+  const interveningTurn = '\n\nzz_user: try again\n\nzz_bot: ok\n';
+  const realCall = toolBlock(
+    `<invoke name="zz_real_tool">\n<parameter name="fld2">real value</parameter>\n</invoke>`
+  );
+  const splicedTurn = `zz_bot: calling now\n${truncatedHalf}${interveningTurn}${realCall}`;
+
+  it('never dispatches a call whose span crosses another opener', () => {
+    const parsed = parseToolCalls(splicedTurn);
+
+    const dispatched = JSON.stringify(parsed?.calls ?? []);
+    expect(dispatched).not.toContain('zz_truncated_tool');
+    expect(dispatched).not.toContain('zz_user: try again');
+  });
+
+  it('re-anchors to the innermost opener so the real call still runs', () => {
+    const parsed = parseToolCalls(splicedTurn);
+
+    expect(parsed?.calls.map((c) => c.name)).toEqual(['zz_real_tool']);
+    expect(parsed?.calls[0]?.input).toEqual({ fld2: 'real value' });
+    expect(parsed?.beforeText).toContain('zz_truncated_tool');
+  });
+
+  it('re-anchors on the block-parsing path too', () => {
+    const { blocks, toolCalls } = parseAccumulatedIntoBlocks(splicedTurn);
+
+    expect(toolCalls.map((c) => c.name)).toEqual(['zz_real_tool']);
+    expect(blocks.filter((b) => b.type === 'tool_use')).toHaveLength(1);
+  });
+
+  it('composes with executed-block detection: an earlier spent block stays spent', () => {
+    const text =
+      toolBlock(`<invoke name="zz_executed_tool"/>`) +
+      '\n' +
+      resultsBlock(`<result tool_use_id="ite1"><stdout>ok</stdout></result>`) +
+      '\n' +
+      `${truncatedHalf}${interveningTurn}${realCall}`;
+
+    const parsed = parseToolCalls(text);
+
+    expect(parsed?.calls.map((c) => c.name)).toEqual(['zz_real_tool']);
+  });
+});
+
 describe('F13 · executed-block detection', () => {
   it('treats a block as executed when only whitespace separates it from its results', () => {
     const text =
