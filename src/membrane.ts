@@ -1827,11 +1827,17 @@ export class Membrane {
       },
     };
 
-    // The API rejects extended thinking combined with an assistant prefill.
     // Prefill-style builds (XML formatter) use the thinking config for the
-    // literal `<thinking>` text prefix instead of the API feature — drop the
-    // API param when the built request actually ends in an assistant prefill.
-    // Chat-style builds (no prefill) keep it.
+    // literal `<thinking>` text prefix instead of the API feature, so the API
+    // param would buy a second, redundant reasoning channel — drop it when
+    // the built request actually ends in an assistant prefill. Chat-style
+    // builds (no prefill) keep it.
+    //
+    // Whether a provider REFUSES the combination is model-dependent, not API
+    // law: measured live 2026-08-25, claude-haiku-4-5 accepted
+    // `thinking: {type:'enabled'}` on a prefill-terminated conversation
+    // (HTTP 200). Refusing models exist, so the drop stays; it just is not
+    // the reason.
     if (buildResult.assistantPrefill && providerRequest.thinking) {
       delete providerRequest.thinking;
     }
@@ -1927,8 +1933,11 @@ export class Membrane {
     
     return {
       ...this.getBaseProviderParams(originalRequest.config),
-      // Continuations always end in an assistant prefill — the API rejects
-      // extended thinking combined with prefill, so never send the param here
+      // Continuations always end in an assistant prefill, and prefill builds
+      // carry thinking as literal `<thinking>` text rather than the API
+      // feature — so never send the param here. (Not a validation rule:
+      // haiku-4-5 accepted thinking+prefill live 2026-08-25. See
+      // transformRequest.)
       thinking: undefined,
       messages,
       system: prefillResult.systemContent
@@ -2000,8 +2009,11 @@ export class Membrane {
 
     return {
       ...this.getBaseProviderParams(originalRequest.config),
-      // Continuations always end in an assistant prefill — the API rejects
-      // extended thinking combined with prefill, so never send the param here
+      // Continuations always end in an assistant prefill, and prefill builds
+      // carry thinking as literal `<thinking>` text rather than the API
+      // feature — so never send the param here. (Not a validation rule:
+      // haiku-4-5 accepted thinking+prefill live 2026-08-25. See
+      // transformRequest.)
       thinking: undefined,
       messages,
       system: prefillResult.systemContent
@@ -3208,8 +3220,10 @@ export class Membrane {
             previousResults: executedToolResults,
             accumulated: allTextAccumulated,
             // Full normalized blocks for this round, in provider order —
-            // lets consumers persist the assistant turn verbatim (signed
-            // thinking must precede tool_use in the same turn).
+            // lets consumers persist the assistant turn verbatim. Order is a
+            // content-correctness rule, not current API law: sonnet-4-6
+            // accepted a signed thinking block replayed after its tool_use
+            // (measured 2026-08-25). See ToolContext.roundContent.
             roundContent: responseBlocks,
           };
 
