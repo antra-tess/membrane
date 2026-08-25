@@ -77,13 +77,25 @@ export function findSpanningProviderRun(
  * Drop the extended-thinking config from a prefill-shaped provider request —
  * from BOTH channels the `thinkingEnabled` resolver reads.
  *
- * The API rejects thinking combined with an assistant prefill, and the guard
- * that only deleted the top-level field left `extra.thinking` (spread from
- * `providerParams`) riding the adapter's `Object.assign(params, rest)` onto
- * the wire — reproducing both the 400 and the interleaved-thinking beta
- * header, since the resolver correctly saw the smuggled config. Mutates and
- * returns the request; callers must own `extra` (never alias the caller's
- * `providerParams`).
+ * Whether the API rejects thinking beside an assistant prefill is MODEL
+ * DEPENDENT, not a universal law. Measured live 2026-08-25 against the
+ * Anthropic Messages API: `claude-haiku-4-5-20251001` accepts an assistant
+ * prefill together with `thinking: {type: 'enabled'}` (HTTP 200, and the
+ * response carries no thinking block), while `claude-sonnet-4-6` refuses
+ * assistant prefill outright — HTTP 400, "This model does not support
+ * assistant message prefill."
+ *
+ * So the strip is the prefill path's DESIGN wherever prefill works: the XML
+ * formatter uses the thinking config to emit a literal `<thinking>` text
+ * prefix rather than the API feature, and sending both pays for API thinking
+ * the prefill format does not consume. On models that reject the combination
+ * it is additionally the 400 guard it always was. Either way both channels
+ * must agree, and the guard that only deleted the top-level field left
+ * `extra.thinking` (spread from `providerParams`) riding the adapter's
+ * `Object.assign(params, rest)` onto the wire — reproducing both the 400 and
+ * the interleaved-thinking beta header, since the resolver correctly saw the
+ * smuggled config. Mutates and returns the request; callers must own `extra`
+ * (never alias the caller's `providerParams`).
  */
 export function stripThinkingForPrefill<T extends { thinking?: unknown; extra?: unknown }>(
   providerRequest: T
