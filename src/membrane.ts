@@ -213,9 +213,16 @@ export class Membrane {
             }
           }
 
-          // Wait before retry (abort-aware)
+          // Wait before retry (abort-aware). An abort landing inside the
+          // sleep must fail like every other failure of this method — a
+          // MembraneError — rather than escaping the loop as a raw
+          // DOMException whose shape no caller of complete() expects.
           const delay = this.calculateRetryDelay(attempts, isOverloaded);
-          await this.sleep(delay, options.signal);
+          try {
+            await this.sleep(delay, options.signal);
+          } catch (sleepError) {
+            throw this.attachRawRequest(sleepError, rawRequest);
+          }
           continue;
         }
 
@@ -345,7 +352,26 @@ export class Membrane {
           }
           const delay = this.calculateRetryDelay(attempts, true);
           retryDelaysMs.push(delay);
-          await this.sleep(delay, options.signal);
+          // An abort during the backoff window is still a cancellation of
+          // this stream, and stream() documents cancellation as an
+          // AbortedResponse. Letting the sleep's rejection escape made that
+          // contract depend on which millisecond the abort landed in.
+          // Nothing has been emitted on this path (that is the precondition
+          // for retrying at all), so there is no partial content to report.
+          try {
+            await this.sleep(delay, options.signal);
+          } catch (sleepError) {
+            if (this.isAbortError(sleepError)) {
+              return this.buildAbortedResponse(
+                '',
+                { inputTokens: 0, outputTokens: 0 },
+                [],
+                [],
+                this.abortReason(sleepError, options.signal)
+              );
+            }
+            throw sleepError;
+          }
           continue;
         }
         throw error;
@@ -989,7 +1015,7 @@ export class Membrane {
           totalUsage,
           executedToolCalls,
           executedToolResults,
-          'user',
+          this.abortReason(error, signal),
           initialBlockType
         );
       }
@@ -1229,7 +1255,7 @@ export class Membrane {
           totalUsage,
           executedToolCalls,
           executedToolResults,
-          'user'
+          this.abortReason(error, signal)
         );
       }
       // Re-throw with rawRequest attached for logging
@@ -2412,6 +2438,19 @@ export class Membrane {
   }
 
   /**
+   * Why a caught abort happened. The caller's own signal is authoritative:
+   * if it fired, the cancellation is theirs whatever the error text says.
+   * Otherwise an adapter-side deadline (createCombinedSignal's timeoutMs
+   * raises `AbortError: Request timed out`) classifies as a timeout, and
+   * anything else that reached the abort catch is a failure, not a person.
+   */
+  private abortReason(error: unknown, signal?: AbortSignal): 'user' | 'timeout' | 'error' {
+    if (signal?.aborted) return 'user';
+    if (classifyError(error).type === 'timeout') return 'timeout';
+    return 'error';
+  }
+
+  /**
    * Build an AbortedResponse from current execution state
    */
   private buildAbortedResponse(
@@ -3083,7 +3122,7 @@ export class Membrane {
         const newContent = fullAccumulated.slice(initialPrefillLength);
         stream.emit({
           type: 'aborted',
-          reason: 'user',
+          reason: this.abortReason(error, stream.signal),
           partialContent: parseAccumulatedIntoBlocks(newContent).blocks,
           rawAssistantText: newContent,
           toolCalls: executedToolCalls,
@@ -3430,7 +3469,7 @@ export class Membrane {
       if (this.isAbortError(error)) {
         stream.emit({
           type: 'aborted',
-          reason: 'user',
+          reason: this.abortReason(error, stream.signal),
           rawAssistantText: allTextAccumulated,
           toolCalls: executedToolCalls,
           toolResults: executedToolResults,
