@@ -52,7 +52,7 @@
  * signal not-ready when the id is in the caller-supplied pending set),
  * drop empty envelopes, prepend a synthetic `[continuing]` user envelope
  * when the first envelope ended up assistant-role, validate both
- * directions of the pairing rule.
+ * directions of the pairing rule and its one-to-one arity.
  */
 
 import type { ProviderMessage as LooseProviderMessage } from './types.js';
@@ -228,6 +228,29 @@ export function normalizeToolPairs(
   validate(envelopes, input, pending);
 
   return { messages: envelopes.map(toProviderMessage), ready };
+}
+
+/**
+ * Assert that an already-normalized message list satisfies Anthropic's
+ * tool-cycle pairing rules: every tool_use paired by a tool_result in the
+ * very next user envelope (modulo `pendingToolCallIds`), every tool_result
+ * preceded by its own tool_use, and exactly one result per use.
+ *
+ * This is phase 8 of {@link normalizeToolPairs}, reachable on its own. The
+ * validator's contract has to hold independently of the repair phases that
+ * normally establish it — otherwise the only evidence it refuses a shape is
+ * that no earlier phase produced one, which is a claim about the sweep, not
+ * about the validator. Callers holding messages from a path that does NOT
+ * funnel through this module (see the COVERAGE note in the file header) can
+ * use it as a wire-boundary check.
+ */
+export function assertToolPairsValid(
+  messages: ReadonlyArray<LooseProviderMessage>,
+  pendingToolCallIds: ReadonlySet<string> = new Set<string>(),
+): void {
+  assertPendingToolCallIdsIsSetLike(pendingToolCallIds, messages);
+  assertInputWellFormed(messages);
+  validate(messages.map(toEnvelope), messages, pendingToolCallIds);
 }
 
 // ============================================================================
@@ -536,6 +559,13 @@ function hoistMatchingResults(
  * without displacing the real result, so it is textified — content
  * preserved, structure dropped. A result whose id appears nowhere is left
  * alone here; phase 5's orphan pass owns that case.
+ *
+ * Pairing is ONE-TO-ONE, so this scan CONSUMES ids rather than testing
+ * membership: the first result carrying an id its envelope actually pairs
+ * takes that id, and any later copy of it is shape C wearing a different
+ * costume — same cycle, same repair. A membership test (`is this id called
+ * here?`) is blind to the second copy by construction, which is how a
+ * one-call/two-result envelope reached the provider through every phase.
  */
 function repairStrayResults(
   envelopes: Envelope[],
@@ -558,14 +588,24 @@ function repairStrayResults(
     );
 
     const kept: ProviderBlock[] = [];
+    const idsConsumedHere = new Set<string>();
     for (const block of env.content) {
       if (block.type !== 'tool_result') {
         kept.push(block);
         continue;
       }
       const id = getToolUseId(block);
-      if (typeof id !== 'string' || idsPairedHere.has(id)) {
+      if (typeof id !== 'string') {
         kept.push(block);
+        continue;
+      }
+      if (idsPairedHere.has(id)) {
+        if (!idsConsumedHere.has(id)) {
+          idsConsumedHere.add(id);
+          kept.push(block);
+          continue;
+        }
+        kept.push(textifyDuplicateResult(block, id, i, 'duplicate_in_cycle', onEvent));
         continue;
       }
       const useEnvelope = useEnvelopeOfId.get(id);
@@ -603,18 +643,36 @@ function repairStrayResults(
         continue;
       }
 
-      const recovered = renderResultContent(block);
-      onEvent({
-        kind: 'stray_tool_result_textified',
-        toolUseId: id,
-        fromEnvelope: i,
-        recoveredChars: recovered.length,
-      });
-      kept.push({ type: 'text', text: `[duplicate tool_result for ${id}]: ${recovered}` });
+      kept.push(textifyDuplicateResult(block, id, i, 'cycle_closed', onEvent));
     }
     env.content = kept;
   }
   return envelopes;
+}
+
+/**
+ * The one repair both duplicate shapes take: keep the payload as text under a
+ * deterministic provenance line, drop the tool_result structure that has no
+ * open call to attach to. `reason` is the only thing that differs between a
+ * copy stranded outside its (already-answered) cycle and a copy sitting
+ * behind the result that answered its call inside it.
+ */
+function textifyDuplicateResult(
+  block: ProviderBlock,
+  toolUseId: string,
+  fromEnvelope: number,
+  reason: 'cycle_closed' | 'duplicate_in_cycle',
+  onEvent: (e: NormalizeEvent) => void,
+): ProviderBlock {
+  const recovered = renderResultContent(block);
+  onEvent({
+    kind: 'stray_tool_result_textified',
+    toolUseId,
+    fromEnvelope,
+    recoveredChars: recovered.length,
+    reason,
+  });
+  return { type: 'text', text: `[duplicate tool_result for ${toolUseId}]: ${recovered}` };
 }
 
 function evictInterlopers(
@@ -858,6 +916,15 @@ function validate(
   // tool_result (out-of-order append, leading result, duplicate re-append)
   // passed every phase AND this validation on its way to a 400. Phase 3.5
   // repairs all three shapes; this asserts the repair actually held.
+  //
+  // Membership is not the whole rule: the pairing is one-to-one, so results
+  // are COUNTED per id here rather than tested for presence. Counting per
+  // envelope is complete — phase 0 refuses a tool_use id reused anywhere in
+  // the list, so one id has exactly one call site, and any result carrying it
+  // that sits in a different envelope already fails the membership check
+  // above. This assertion stands on its own: it refuses a second result even
+  // if some future phase (or a caller of `assertToolPairsValid`) hands it a
+  // duplicate the sweep never saw.
   for (let i = 0; i < envelopes.length; i++) {
     const env = envelopes[i]!;
     if (env.role !== 'user') continue;
@@ -865,18 +932,33 @@ function validate(
     const availableUseIds = new Set(
       previous?.role === 'assistant' ? collectToolUseIds(previous) : [],
     );
+    const resultsPerId = new Map<string, number>();
     for (const block of env.content) {
       if (block.type !== 'tool_result') continue;
       const resultId = getToolUseId(block);
-      if (typeof resultId === 'string' && availableUseIds.has(resultId)) continue;
-      throw new MembraneNormalizerError(
-        `tool_result for id='${resultId ?? '<missing>'}' in envelope ${i} has no matching ` +
-          `tool_use in envelope ${i - 1}. Anthropic requires each tool_result to follow its ` +
-          `tool_use immediately; this is a bug in the normalizer itself — phase 3.5 should have ` +
-          `relocated or textified any stray result.`,
-        input.map(cloneMsg),
-        envelopes.map(toProviderMessage),
-      );
+      if (typeof resultId !== 'string' || !availableUseIds.has(resultId)) {
+        throw new MembraneNormalizerError(
+          `tool_result for id='${resultId ?? '<missing>'}' in envelope ${i} has no matching ` +
+            `tool_use in envelope ${i - 1}. Anthropic requires each tool_result to follow its ` +
+            `tool_use immediately; this is a bug in the normalizer itself — phase 3.5 should have ` +
+            `relocated or textified any stray result.`,
+          input.map(cloneMsg),
+          envelopes.map(toProviderMessage),
+        );
+      }
+      const copiesSoFar = (resultsPerId.get(resultId) ?? 0) + 1;
+      resultsPerId.set(resultId, copiesSoFar);
+      if (copiesSoFar > 1) {
+        throw new MembraneNormalizerError(
+          `tool_result for id='${resultId}' appears ${copiesSoFar} times in envelope ${i}; a ` +
+            `tool_use takes exactly one tool_result. A one-call/two-result cycle is wire-shaped ` +
+            `enough to reach the provider, which then rejects it or picks a copy by rules ` +
+            `Membrane does not control. Phase 3.5 should have textified every copy after the ` +
+            `first — this is a bug in the normalizer itself.`,
+          input.map(cloneMsg),
+          envelopes.map(toProviderMessage),
+        );
+      }
     }
   }
 }
@@ -997,6 +1079,21 @@ function syntheticToolResult(toolUseId: string): ProviderBlock {
 
 function toProviderMessage(env: Envelope): LooseProviderMessage {
   return { role: env.role, content: env.content };
+}
+
+/**
+ * Envelope view of a message for {@link assertToolPairsValid}. String content
+ * becomes a single text block, exactly as {@link rebuildEnvelopes} treats it;
+ * every other non-array shape has already been refused by
+ * {@link assertInputWellFormed}, so no coercion happens here either.
+ */
+function toEnvelope(msg: LooseProviderMessage): Envelope {
+  return {
+    role: msg.role,
+    content: Array.isArray(msg.content)
+      ? (msg.content as ProviderBlock[])
+      : [{ type: 'text', text: msg.content as string }],
+  };
 }
 
 function cloneMsg(msg: LooseProviderMessage): LooseProviderMessage {

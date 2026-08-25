@@ -15,6 +15,7 @@ import { describe, it, expect } from 'vitest';
 import {
   normalizeToolPairs,
   mergeConsecutiveRoles,
+  assertToolPairsValid,
   MembraneNormalizerError,
   type ProviderBlock,
 } from '../../src/formatters/normalize-tool-pairs.js';
@@ -943,7 +944,13 @@ describe('normalizeToolPairs', () => {
         .map((b) => (b as ProviderBlock & { text?: string }).text ?? '')
         .join('\n');
       expect(allText).toContain('zz-duplicate payload');
-      expect(events.some((e) => e.kind === 'stray_tool_result_textified')).toBe(true);
+      const textified = events.find((e) => e.kind === 'stray_tool_result_textified') as {
+        reason: string;
+      };
+      expect(textified).toBeDefined();
+      // The cycle this result belongs to already holds its answer — distinct
+      // from a second copy arriving inside that same cycle envelope (F19).
+      expect(textified.reason).toBe('cycle_closed');
     });
 
     it('relocates two strays into the cycle in CALL order, not reversed', () => {
@@ -1022,6 +1029,121 @@ describe('normalizeToolPairs', () => {
       ];
       expect(() => normalize(input)).not.toThrow();
       expect(converseViolations(normalize(input).messages)).toEqual([]);
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // Pairing is ONE-TO-ONE, not membership (F19). Every matching site asked
+  // `.has(id)` and never consumed the id, so an envelope holding two results
+  // for one call passed the converse sweep, the interloper pass AND validation
+  // on its way to the provider, which either rejects the request or picks one
+  // of the two results by rules Membrane does not control.
+  // --------------------------------------------------------------------------
+
+  describe('duplicate results for one call (F19)', () => {
+    it('pairs the first result and textifies the second with provenance', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(r('ite1', 'zz-real payload'), r('ite1', 'zz-duplicate payload')),
+      ];
+      const { events, onEvent } = collectEvents();
+      const out = normalize(input, { onEvent });
+
+      const cycle = out.messages[2]!;
+      // Exactly one tool_result survives, and it is the FIRST one — the
+      // duplicate never displaces the result that paired.
+      expect(resultIds(cycle.content)).toEqual(['ite1']);
+      const survivor = cycle.content.find((b) => b.type === 'tool_result') as ProviderBlock & {
+        content?: unknown;
+      };
+      expect(survivor.content).toBe('zz-real payload');
+      // The duplicate's payload survives as text, with provenance naming it.
+      const cycleText = cycle.content
+        .map((b) => (b as ProviderBlock & { text?: string }).text ?? '')
+        .join('\n');
+      expect(cycleText).toContain('[duplicate tool_result for ite1]: zz-duplicate payload');
+      const textified = events.find((e) => e.kind === 'stray_tool_result_textified') as {
+        toolUseId: string;
+        reason: string;
+        recoveredChars: number;
+      };
+      expect(textified.toolUseId).toBe('ite1');
+      expect(textified.reason).toBe('duplicate_in_cycle');
+      expect(textified.recoveredChars).toBe('zz-duplicate payload'.length);
+      // Nothing was synthesized over a result that actually landed.
+      expect(events.some((e) => e.kind === 'synthetic_pending_result')).toBe(false);
+    });
+
+    it('consumes per id: a second envelope-mate for another call is untouched', () => {
+      // Pin. Consumption must key on the id, not on "one result per envelope":
+      // a two-call turn answered by two distinct results is the normal shape.
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1'), u('ite2')),
+        user(r('ite1', 'zz-first payload'), r('ite2', 'zz-second payload')),
+      ];
+      const { events, onEvent } = collectEvents();
+      const out = normalize(input, { onEvent });
+
+      expect(out.messages).toEqual(input);
+      expect(events).toEqual([]);
+    });
+
+    it('textifies every copy after the first when a call is answered three times', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(
+          r('ite1', 'zz-real payload'),
+          r('ite1', 'zz-duplicate payload'),
+          r('ite1', 'zz-third payload'),
+        ),
+      ];
+      const { events, onEvent } = collectEvents();
+      const out = normalize(input, { onEvent });
+
+      const cycle = out.messages[2]!;
+      expect(resultIds(cycle.content)).toEqual(['ite1']);
+      const cycleText = cycle.content
+        .map((b) => (b as ProviderBlock & { text?: string }).text ?? '')
+        .join('\n');
+      expect(cycleText).toContain('zz-duplicate payload');
+      expect(cycleText).toContain('zz-third payload');
+      expect(events.filter((e) => e.kind === 'stray_tool_result_textified')).toHaveLength(2);
+    });
+  });
+
+  describe('validate asserts exactly-one on its own (F19)', () => {
+    it('refuses a hand-built duplicate injected past every repair phase', () => {
+      // The sweep's consumption and the validator's assertion must be
+      // independent: if the only reason validation passes is that no phase
+      // produces a duplicate, the validator's contract is a claim about the
+      // sweep. So the duplicate is built by hand, downstream of normalize.
+      const clean = normalize([
+        user(t('go')),
+        assistant(u('ite1')),
+        user(r('ite1', 'zz-real payload')),
+      ]);
+      expect(() => assertToolPairsValid(clean.messages)).not.toThrow();
+
+      const injected: ProviderMessage[] = clean.messages.map((msg, i) =>
+        i === 2 ? { role: 'user', content: [...msg.content, r('ite1', 'zz-injected duplicate')] } : msg,
+      );
+      expect(() => assertToolPairsValid(injected)).toThrow(MembraneNormalizerError);
+      expect(() => assertToolPairsValid(injected)).toThrow(/appears 2 times in envelope 2/);
+    });
+
+    it('still refuses an unpaired result, and passes a well-formed list', () => {
+      const stray: ProviderMessage[] = [user(t('go')), user(r('ite1', 'zz-unpaired payload'))];
+      expect(() => assertToolPairsValid(stray)).toThrow(MembraneNormalizerError);
+
+      const paired: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1'), u('ite2')),
+        user(r('ite1', 'zz-first payload'), r('ite2', 'zz-second payload')),
+      ];
+      expect(() => assertToolPairsValid(paired)).not.toThrow();
     });
   });
 

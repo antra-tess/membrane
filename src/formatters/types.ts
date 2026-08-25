@@ -129,12 +129,24 @@ export type NormalizeEvent =
    * satisfied (a duplicate re-append after a cancellation or stream restart)
    * was rewritten as a text block. It could not be relocated without
    * displacing the real result, and dropping it would lose content.
+   *
+   * `reason` names which duplicate shape the producer emitted, since the two
+   * point at different producer bugs:
+   *   - `'cycle_closed'`      → the copy arrived in some LATER envelope and
+   *                             its own cycle already holds a result, so it
+   *                             had nowhere to be relocated to.
+   *   - `'duplicate_in_cycle'`→ the copy arrived inside its own cycle's user
+   *                             envelope, behind a result that already
+   *                             answered that call. Pairing is one-to-one, so
+   *                             the first result consumes the id and every
+   *                             later copy of it is textified here.
    */
   | {
       kind: 'stray_tool_result_textified';
       toolUseId: string;
       fromEnvelope: number;
       recoveredChars: number;
+      reason: 'cycle_closed' | 'duplicate_in_cycle';
     }
   | { kind: 'pending_in_flight'; toolUseId: string }
   | {
