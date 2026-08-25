@@ -12,17 +12,47 @@
  *
  * When these are violated, the API returns 400 (e.g. `tool_use blocks can
  * only be in assistant messages`). This module is the wire-boundary safety
- * net: every formatter funnels through `normalizeToolPairs` before its
- * output is shipped, so producer-side bugs cannot leak the same 400 family
- * (compression-bug 5/6/7/8/9, agent-framework #37, 2026-05-22 miner stall).
+ * net for the paths that reach it, so producer-side bugs cannot leak the
+ * same 400 family (compression-bug 5/6/7/8/9, agent-framework #37,
+ * 2026-05-22 miner stall).
  *
- * Algorithm overview (eight phases): reclassify blocks by required role,
- * reflow into role-correct envelopes, hoist matching tool_results across
- * the assistant→user boundary, evict interlopers wedged between use and
- * result, synthesize `[pending]` results for trailing orphans (or signal
- * not-ready when the id is in the caller-supplied pending set), drop
- * empty envelopes, prepend a synthetic `[continuing]` user envelope when
- * the first envelope ended up assistant-role, validate.
+ * COVERAGE — what actually funnels through `normalizeToolPairs`. This
+ * header used to claim "every formatter", which was false, and a false
+ * safety claim is worse than a known gap because it is the thing that
+ * stops anyone from looking. There are four formatters; ONE calls this
+ * module, and the second caller is not a formatter at all:
+ *
+ *   - `NativeFormatter.buildMessages` — COVERED.
+ *   - `Membrane.buildNativeToolRequest` — COVERED (the streaming-native
+ *     tool loop; not a formatter, but it ships Anthropic-shaped blocks).
+ *   - `AnthropicXmlFormatter`, `CompletionsFormatter` — NOT covered, and
+ *     they do not need to be: both emit flattened text documents with no
+ *     structural tool blocks, so tool-cycle placement rules have nothing
+ *     to bind to in their output.
+ *   - `OpenAiResponsesFormatter` — NOT covered, and it DOES carry
+ *     provider-native tool items (`function_call` / `function_call_output`),
+ *     so it genuinely needs pairing discipline. The bypass is deliberate:
+ *     membrane.ts routes this formatter around `buildNativeToolRequest`
+ *     because that Anthropic-specific builder would normalize away item
+ *     ids, encrypted reasoning, assistant phases and compaction items.
+ *     That reasoning is sound, and it applies to this module too — the
+ *     repair is NOT to call `normalizeToolPairs` on Responses items.
+ *     FUTURE WORK: an items-level pairing pass for the Responses shape.
+ *     Until it exists, that formatter's `ready: true` is a hardcoded
+ *     literal, not a checked claim, and the one path carrying
+ *     provider-native tool items has no net by construction.
+ *
+ * Algorithm overview (phases): refuse malformed input at entry (phase 0 —
+ * non-set `pendingToolCallIds`, duplicate tool_use ids, non-array/
+ * non-string content), reclassify blocks by required role, reflow into
+ * role-correct envelopes, hoist matching tool_results across the
+ * assistant→user boundary, sweep the converse direction so every
+ * tool_result sits with its own tool_use, evict interlopers wedged
+ * between use and result, synthesize `[pending]` results for orphans (or
+ * signal not-ready when the id is in the caller-supplied pending set),
+ * drop empty envelopes, prepend a synthetic `[continuing]` user envelope
+ * when the first envelope ended up assistant-role, validate both
+ * directions of the pairing rule.
  */
 
 import type { ProviderMessage as LooseProviderMessage } from './types.js';
