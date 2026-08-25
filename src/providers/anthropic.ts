@@ -14,12 +14,12 @@ import type {
 } from '../types/index.js';
 import {
   MembraneError,
-  rateLimitError,
-  contextLengthError,
-  invalidRequestError,
-  authError,
-  serverError,
   abortError,
+  classifyError,
+  errorFromProviderStatus,
+  isTypedAbortError,
+  serverError,
+  withRawRequest,
 } from '../types/index.js';
 import { flattenRootSchemaUnion } from './anthropic-tool-schema.js';
 import { CacheKeepalive, type CacheKeepaliveConfig } from '../cache-keepalive.js';
@@ -672,102 +672,79 @@ export class AnthropicAdapter implements ProviderAdapter {
   }
 
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
+    if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
+
+    // A cancellation is a type, never a phrase — not even the SDK's own exact
+    // phrase, which any caller can produce. The instanceof arm is what
+    // actually catches the SDK abort: APIUserAbortError inherits `name ===
+    // 'Error'` (measured against @anthropic-ai/sdk 0.52), so isTypedAbortError
+    // does NOT match it; isTypedAbortError covers the other typed shapes —
+    // DOMException AbortError, name === 'AbortError', and a membrane abort.
+    // The idle watchdog that motivated the old message arm never reaches here:
+    // the stream catch throws its typed timeout before calling handleError.
+    if (error instanceof Anthropic.APIUserAbortError || isTypedAbortError(error)) {
+      return abortError(undefined, rawRequest);
+    }
+
     if (error instanceof Anthropic.APIError) {
-      // Mid-stream SSE `error` events are rethrown by the SDK as APIError
-      // with status === undefined (sdk core/streaming.js), so the HTTP
-      // status branches below would never match them — overloaded_error
-      // (529) most commonly arrives exactly this way and used to fall
-      // through to `unknown, retryable: false`. Recover the effective
-      // status from the error body's type instead.
-      const bodyType = (error.error as { error?: { type?: string } } | undefined)?.error?.type;
-      const status = error.status ?? (bodyType !== undefined ? {
-        invalid_request_error: 400,
-        authentication_error: 401,
-        permission_error: 403,
-        not_found_error: 404,
-        request_too_large: 413,
-        rate_limit_error: 429,
-        api_error: 500,
-        overloaded_error: 529,
-      }[bodyType] : undefined);
       const message = error.message;
-
-      if (status === 429) {
-        // Try to parse retry-after
-        const retryAfter = this.parseRetryAfter(error);
-        return rateLimitError(message, retryAfter, error, rawRequest);
-      }
-
-      if (status === 401) {
-        return authError(message, error, rawRequest);
-      }
-
-      // Context-length is a client-side request-shape problem — it only ever
-      // arrives as a 400 (invalid_request_error). Without the status guard, a
-      // transient 5xx whose body happens to contain "context" or "too long"
-      // (e.g. "Internal error: context processing failed") was misclassified
-      // as non-retryable context_length, silently suppressing retries.
-      if (status === 400 && (message.includes('context') || message.includes('too long'))) {
-        return contextLengthError(message, error, rawRequest);
-      }
-
-      // 400 invalid_request_error — malformed payload (e.g. orphan tool_use_id,
-      // unknown model, schema violation). Retrying with the same payload is
-      // guaranteed to produce the same 400, so classify these as non-retryable
-      // here. Previously these fell through to the generic `unknown` branch
-      // below, which left them with `retryable: false` but also with no
-      // structured type — making framework-level error policies unable to
-      // distinguish them from genuinely unknown errors.
-      if (status === 400) {
-        return invalidRequestError(message, error, rawRequest);
-      }
-
-      if (status !== undefined && status >= 500) {
-        return serverError(message, status, error, rawRequest);
-      }
-
-      // Safety net: if the SSE error body wasn't parseable JSON, neither
-      // status nor bodyType resolves — match the message itself rather
-      // than let a transient capacity error become non-retryable.
-      if (message.toLowerCase().includes('overloaded')) {
-        return serverError(message, 529, error, rawRequest);
-      }
 
       // Vercel AI Gateway wraps transient upstream outages (a fallback
       // provider 503, routing churn on a sunsetting model) in non-5xx
       // aggregate errors whose body carries gateway routing metadata. The
       // SAME request frequently succeeds on retry once a live provider is
-      // picked, so classify these as retryable instead of terminal.
+      // picked, so classify these as retryable instead of terminal. Checked
+      // before the status table precisely because the status lies here.
       const gw = message.toLowerCase();
       if (gw.includes("providermetadata") || gw.includes("fallbacksavailable") ||
           gw.includes("modelattempts") || gw.includes("temporarily unavailable") ||
           gw.includes("no_providers_available")) {
-        return serverError(message, status ?? 503, error, rawRequest);
+        return serverError(message, error.status ?? 503, error, rawRequest);
+      }
+
+      // Mid-stream SSE `error` events are rethrown by the SDK as APIError
+      // with status === undefined (sdk core/streaming.js) — overloaded_error
+      // (529) most commonly arrives exactly this way. The shared table
+      // recovers the effective status from the body's error type, so those
+      // no longer fall through to `unknown, retryable: false`.
+      const classified = errorFromProviderStatus({
+        provider: this.name,
+        status: error.status,
+        body: error.error,
+        message,
+        retryAfterMs: this.parseRetryAfter(error),
+        rawError: error,
+        rawRequest,
+      });
+      if (classified.type !== 'unknown') return classified;
+
+      // Safety net: if the SSE error body wasn't parseable JSON, neither
+      // status nor body type resolves — match the message itself rather
+      // than let a transient capacity error become non-retryable.
+      if (gw.includes('overloaded')) {
+        return serverError(message, 529, error, rawRequest);
       }
     }
 
-    if (
-      error instanceof Error &&
-      (error.name === 'AbortError' ||
-        error.name === 'APIUserAbortError' ||
-        error.message === 'Request was aborted.')
-    ) {
-      return abortError(undefined, rawRequest);
-    }
-
-    return new MembraneError({
-      type: 'unknown',
-      message: error instanceof Error ? error.message : String(error),
-      retryable: false,
-      rawError: error,
-      rawRequest,
-    });
+    const info = classifyError(error);
+    info.rawRequest = rawRequest;
+    return new MembraneError(info);
   }
 
-  private parseRetryAfter(error: { message: string }): number | undefined {
-    // Try to extract retry-after from headers or message
-    const message = error.message;
-    const match = message.match(/retry after (\d+)/i);
+  /**
+   * `retry-after` off the response headers first — the authoritative source,
+   * and the one nobody was reading — with the message regex kept only for
+   * errors that carry no headers (mid-stream SSE rethrows).
+   */
+  private parseRetryAfter(error: { message: string; headers?: Headers }): number | undefined {
+    const header = error.headers?.get?.('retry-after');
+    if (header) {
+      const seconds = Number(header.trim());
+      if (Number.isFinite(seconds)) return Math.round(seconds * 1000);
+      const at = Date.parse(header.trim());
+      if (!Number.isNaN(at)) return Math.max(0, at - Date.now());
+    }
+    const match = error.message.match(/retry after (\d+)/i);
     if (match && match[1]) {
       return parseInt(match[1], 10) * 1000;
     }

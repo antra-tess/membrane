@@ -20,12 +20,11 @@ import type {
 } from '../types/index.js';
 import {
   MembraneError,
-  rateLimitError,
-  contextLengthError,
-  authError,
-  serverError,
   abortError,
-  networkError,
+  classifyError,
+  errorFromHttpResponse,
+  isTypedAbortError,
+  withRawRequest,
 } from '../types/index.js';
 import { createCombinedSignal, SSELineParser } from './utils.js';
 
@@ -181,8 +180,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`API error: ${response.status} ${errorText}`);
+        throw errorFromHttpResponse(this.name, response, await response.text(), completionsRequest);
       }
 
       const reader = response.body?.getReader();
@@ -454,8 +452,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`API error: ${response.status} ${errorText}`);
+        throw errorFromHttpResponse(this.name, response, await response.text(), request);
       }
 
       return await response.json() as CompletionsResponse;
@@ -526,46 +523,30 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
         return 'end_turn';
       case 'length':
         return 'max_tokens';
-      default:
+      case 'content_filter':
+        // Matches the three sibling OpenAI-family adapters; this one alone
+        // reported a filtered completion as a clean finish.
+        return 'refusal';
+      case undefined:
         return 'end_turn';
+      default:
+        // Unrecognized reasons travel as the provider's own token so
+        // membrane's mapper can disclose and log them.
+        return reason;
     }
   }
 
+  /**
+   * HTTP failures are classified at the fetch boundary, where status,
+   * headers and body are still live; this handles what is left — typed
+   * aborts and non-HTTP throwables — through the shared last-resort table.
+   */
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
-    if (error instanceof Error) {
-      const message = error.message;
+    if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
+    if (isTypedAbortError(error)) return abortError(undefined, rawRequest);
 
-      if (message.includes('429') || message.includes('rate')) {
-        return rateLimitError(message, undefined, error, rawRequest);
-      }
-
-      if (message.includes('401') || message.includes('auth') || message.includes('Unauthorized')) {
-        return authError(message, error, rawRequest);
-      }
-
-      if (message.includes('context') || message.includes('too long') || message.includes('maximum context')) {
-        return contextLengthError(message, error, rawRequest);
-      }
-
-      if (message.includes('500') || message.includes('502') || message.includes('503')) {
-        return serverError(message, undefined, error, rawRequest);
-      }
-
-      if (error.name === 'AbortError') {
-        return abortError(undefined, rawRequest);
-      }
-
-      if (message.includes('network') || message.includes('fetch') || message.includes('ECONNREFUSED')) {
-        return networkError(message, error, rawRequest);
-      }
-    }
-
-    return new MembraneError({
-      type: 'unknown',
-      message: error instanceof Error ? error.message : String(error),
-      retryable: false,
-      rawError: error,
-      rawRequest,
-    });
+    const info = classifyError(error);
+    info.rawRequest = rawRequest;
+    return new MembraneError(info);
   }
 }

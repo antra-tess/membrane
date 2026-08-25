@@ -175,9 +175,19 @@ describe('Anthropic handleError: abort classification (fleet incident 2026-07-20
     expect(err.type).toBe('abort');
   });
 
-  it('classifies "Request was aborted." message as abort', () => {
+  // The adapter boundary is the last place the laundering could survive, and
+  // it survived at exactly one string: a plain Error whose message equalled
+  // the SDK's abort text was converted into a cancellation even though
+  // nothing about its TYPE said abort. Any caller can produce that string —
+  // a tool, a proxy, a wrapped upstream error — and the turn then resolved as
+  // a user cancellation with the real error destroyed. It must stay an
+  // ordinary unclassified error.
+  it('does NOT classify a plain Error carrying the exact SDK abort text as abort', () => {
     const err = handleError(new Error('Request was aborted.'));
-    expect(err.type).toBe('abort');
+    expect(err.type).not.toBe('abort');
+    expect(err.type).toBe('unknown');
+    expect(err.retryable).toBe(false);
+    expect(err.message).toBe('Request was aborted.');
   });
 
   it('still classifies standard AbortError as abort', () => {

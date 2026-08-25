@@ -14,11 +14,12 @@ import type {
 } from '../types/index.js';
 import {
   MembraneError,
-  rateLimitError,
-  contextLengthError,
-  authError,
-  serverError,
   abortError,
+  classifyError,
+  errorFromHttpResponse,
+  errorFromProviderStatus,
+  isTypedAbortError,
+  withRawRequest,
 } from '../types/index.js';
 import { createCombinedSignal } from './utils.js';
 import {
@@ -554,8 +555,7 @@ export class BedrockAdapter implements ProviderAdapter {
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
-      throw new BedrockError(response.status, errorText);
+      throw errorFromHttpResponse(this.name, response, await response.text(), request);
     }
 
     return response.json() as Promise<BedrockMessageResponse>;
@@ -597,8 +597,7 @@ export class BedrockAdapter implements ProviderAdapter {
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
-      throw new BedrockError(response.status, errorText);
+      throw errorFromHttpResponse(this.name, response, await response.text(), request);
     }
 
     // Parse the binary event stream
@@ -916,39 +915,30 @@ export class BedrockAdapter implements ProviderAdapter {
     };
   }
 
+  /**
+   * HTTP failures are classified at the fetch boundary. What reaches here is
+   * a synthesized stream-event failure (BedrockError, which carries the
+   * status its exception type implies), a typed abort, or a non-HTTP
+   * throwable.
+   */
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
+    if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
+    if (isTypedAbortError(error)) return abortError(undefined, rawRequest);
+
     if (error instanceof BedrockError) {
-      const status = error.status;
-      const message = error.message;
-
-      if (status === 429) {
-        return rateLimitError(message, undefined, error, rawRequest);
-      }
-
-      if (status === 401 || status === 403) {
-        return authError(message, error, rawRequest);
-      }
-
-      if (message.includes('context') || message.includes('too long') || message.includes('token')) {
-        return contextLengthError(message, error, rawRequest);
-      }
-
-      if (status >= 500) {
-        return serverError(message, status, error, rawRequest);
-      }
+      return errorFromProviderStatus({
+        provider: this.name,
+        status: error.status,
+        body: error.message,
+        message: error.message,
+        rawError: error,
+        rawRequest,
+      });
     }
 
-    if (error instanceof Error && error.name === 'AbortError') {
-      return abortError(undefined, rawRequest);
-    }
-
-    return new MembraneError({
-      type: 'unknown',
-      message: error instanceof Error ? error.message : String(error),
-      retryable: false,
-      rawError: error,
-      rawRequest,
-    });
+    const info = classifyError(error);
+    info.rawRequest = rawRequest;
+    return new MembraneError(info);
   }
 }
 

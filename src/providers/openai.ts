@@ -22,12 +22,11 @@ import type {
 } from '../types/index.js';
 import {
   MembraneError,
-  rateLimitError,
-  contextLengthError,
-  authError,
-  serverError,
   abortError,
-  networkError,
+  classifyError,
+  errorFromHttpResponse,
+  isTypedAbortError,
+  withRawRequest,
 } from '../types/index.js';
 import { safeParseJson, createCombinedSignal, SSELineParser } from './utils.js';
 
@@ -250,8 +249,7 @@ export class OpenAIAdapter implements ProviderAdapter {
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`OpenAI API error: ${response.status} ${errorText}`);
+        throw errorFromHttpResponse(this.name, response, await response.text(), openAIRequest);
       }
 
       const reader = response.body?.getReader();
@@ -550,8 +548,7 @@ export class OpenAIAdapter implements ProviderAdapter {
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`OpenAI API error: ${response.status} ${errorText}`);
+        throw errorFromHttpResponse(this.name, response, await response.text(), request);
       }
 
       return await response.json() as OpenAIResponse;
@@ -649,46 +646,18 @@ export class OpenAIAdapter implements ProviderAdapter {
     }
   }
 
+  /**
+   * HTTP failures are classified at the fetch boundary, where status,
+   * headers and body are still live; this handles what is left — typed
+   * aborts and non-HTTP throwables — through the shared last-resort table.
+   */
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
-    if (error instanceof Error) {
-      const message = error.message;
+    if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
+    if (isTypedAbortError(error)) return abortError(undefined, rawRequest);
 
-      // OpenAI specific error patterns
-      if (message.includes('429') || message.includes('rate_limit')) {
-        // Try to extract retry-after
-        const retryMatch = message.match(/retry after (\d+)/i);
-        const retryAfter = retryMatch?.[1] ? parseInt(retryMatch[1], 10) * 1000 : undefined;
-        return rateLimitError(message, retryAfter, error, rawRequest);
-      }
-
-      if (message.includes('401') || message.includes('invalid_api_key') || message.includes('Incorrect API key')) {
-        return authError(message, error, rawRequest);
-      }
-
-      if (message.includes('context_length') || message.includes('maximum context') || message.includes('too long')) {
-        return contextLengthError(message, error, rawRequest);
-      }
-
-      if (message.includes('500') || message.includes('502') || message.includes('503') || message.includes('server_error')) {
-        return serverError(message, undefined, error, rawRequest);
-      }
-
-      if (error.name === 'AbortError') {
-        return abortError(undefined, rawRequest);
-      }
-
-      if (message.includes('network') || message.includes('fetch') || message.includes('ECONNREFUSED')) {
-        return networkError(message, error, rawRequest);
-      }
-    }
-
-    return new MembraneError({
-      type: 'unknown',
-      message: error instanceof Error ? error.message : String(error),
-      retryable: false,
-      rawError: error,
-      rawRequest,
-    });
+    const info = classifyError(error);
+    info.rawRequest = rawRequest;
+    return new MembraneError(info);
   }
 }
 

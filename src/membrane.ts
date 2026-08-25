@@ -17,6 +17,7 @@ import type {
   BasicUsage,
   DetailedUsage,
   StopReason,
+  StopInfo,
   TimingInfo,
   CacheInfo,
   ToolCall,
@@ -25,6 +26,7 @@ import type {
   RetryConfig,
   ToolMode,
   ToolDefinition,
+  ErrorInfo,
 } from './types/index.js';
 import { lastCacheableBlockIndex } from './formatters/native.js';
 import {
@@ -32,6 +34,7 @@ import {
   MembraneError,
   classifyError,
   isOverloadedError,
+  isTypedAbortError,
   isTextContent,
   isAbortedResponse,
 } from './types/index.js';
@@ -177,14 +180,7 @@ export class Membrane {
         // the 529 then follows the base config like any retryable server
         // error (exactly the pre-policy behavior), rather than being
         // silently re-promoted to the long schedule by a positive base limit.
-        const isRateLimit = errorInfo.type === 'rate_limit';
-        const isOverloaded =
-          isOverloadedError(errorInfo) && this.retryConfig.overloaded.maxRetries > 0;
-        const effectiveMax = isRateLimit
-          ? Math.max(this.retryConfig.maxRetries, 5)
-          : isOverloaded
-            ? Math.max(this.retryConfig.maxRetries, this.retryConfig.overloaded.maxRetries)
-            : this.retryConfig.maxRetries;
+        const { isOverloaded, effectiveMax } = this.resolveRetryPolicy(errorInfo);
 
         if (errorInfo.retryable && attempts < effectiveMax) {
           // Check hook for retry decision
@@ -196,7 +192,7 @@ export class Membrane {
           }
 
           // Wait before retry (abort-aware)
-          const delay = this.calculateRetryDelay(attempts, isOverloaded);
+          const delay = this.calculateRetryDelay(attempts, isOverloaded, errorInfo);
           await this.sleep(delay, options.signal);
           continue;
         }
@@ -296,12 +292,14 @@ export class Membrane {
         // the overloaded floor applies over the base config, and
         // overloaded.maxRetries: 0 opts out of stream retries entirely
         // (streaming had no retry before this policy existed).
-        const overloadedEnabled = this.retryConfig.overloaded.maxRetries > 0;
-        const maxOverloaded = Math.max(
-          this.retryConfig.maxRetries,
-          this.retryConfig.overloaded.maxRetries
-        );
-        if (!emitted && overloadedEnabled && isOverloadedError(errorInfo) && attempts < maxOverloaded) {
+        //
+        // A 429 arriving INSTEAD of a stream is exactly as transparent to
+        // retry as a 529 — nothing has reached the caller yet — so it takes
+        // the same pre-emission path, on the base schedule and under the
+        // same five-attempt floor complete() applies. Post-emission errors
+        // still throw: retrying would replay content already consumed.
+        const { isRateLimit, isOverloaded, effectiveMax } = this.resolveRetryPolicy(errorInfo);
+        if (!emitted && (isOverloaded || isRateLimit) && attempts < effectiveMax) {
           // Honor the same pre-retry hook contract as complete(): hosts use
           // onError for circuit-breaking, and its 'abort' decision must work
           // on the streaming path too.
@@ -311,7 +309,7 @@ export class Membrane {
               throw error;
             }
           }
-          const delay = this.calculateRetryDelay(attempts, true);
+          const delay = this.calculateRetryDelay(attempts, isOverloaded, errorInfo);
           retryDelaysMs.push(delay);
           await this.sleep(delay, options.signal);
           continue;
@@ -382,6 +380,7 @@ export class Membrane {
     const pricing = this.resolvePricing(request.config.model);
     const contentBlocks: ContentBlock[] = [];
     let lastStopReason: StopReason = 'end_turn';
+    let lastProviderStopReason: string | undefined;
     let lastStopSequence: string | undefined;
     let rawRequest: unknown;
     let rawResponse: unknown;
@@ -591,6 +590,7 @@ export class Membrane {
         onResponse?.(rawResponse);
 
         lastStopReason = this.mapStopReason(streamResult.stopReason);
+        lastProviderStopReason = streamResult.stopReason;
         lastStopSequence = streamResult.stopSequence ?? undefined;
 
         // Accumulate usage (including cache metrics)
@@ -929,7 +929,8 @@ export class Membrane {
         executedToolCalls,
         executedToolResults,
         initialBlockType,
-        lastStopSequence
+        lastStopSequence,
+        lastProviderStopReason
       );
 
       // Append non-text content blocks (e.g., generated_image) that the XML parser can't handle
@@ -986,6 +987,7 @@ export class Membrane {
     let totalUsage: DetailedUsage = { inputTokens: 0, outputTokens: 0 };
     const pricing = this.resolvePricing(request.config.model);
     let lastStopReason: StopReason = 'end_turn';
+    let lastProviderStopReason: string | undefined;
     let lastStopSequence: string | undefined;
     let rawRequest: unknown;
     let rawResponse: unknown;
@@ -1045,6 +1047,7 @@ export class Membrane {
         onResponse?.(rawResponse);
 
         lastStopReason = this.mapStopReason(streamResult.stopReason);
+        lastProviderStopReason = streamResult.stopReason;
         lastStopSequence = streamResult.stopSequence ?? undefined;
 
         // Accumulate usage (including cache metrics)
@@ -1154,11 +1157,7 @@ export class Membrane {
         stopReason: lastStopReason,
         usage: totalUsage,
         details: {
-          stop: {
-            reason: lastStopReason,
-            triggeredSequence: lastStopSequence,
-            wasTruncated: lastStopReason === 'max_tokens',
-          },
+          stop: this.buildStopInfo(lastStopReason, lastProviderStopReason, lastStopSequence),
           usage: { ...totalUsage },
           timing: {
             totalDurationMs: durationMs,
@@ -2073,11 +2072,7 @@ export class Membrane {
       stopReason,
       usage,
       details: {
-        stop: {
-          reason: stopReason,
-          triggeredSequence: providerResponse.stopSequence,
-          wasTruncated: stopReason === 'max_tokens',
-        },
+        stop: this.buildStopInfo(stopReason, providerResponse.stopReason, providerResponse.stopSequence),
         usage: {
           inputTokens: providerResponse.usage.inputTokens,
           outputTokens: providerResponse.usage.outputTokens,
@@ -2124,7 +2119,8 @@ export class Membrane {
     executedToolCalls: ToolCall[] = [],
     executedToolResults: ToolResult[] = [],
     startInsideBlock: 'thinking' | 'tool_call' | 'tool_result' | null = null,
-    triggeredSequence?: string
+    triggeredSequence?: string,
+    providerStopReason?: string
   ): NormalizedResponse {
     // Parse accumulated text into structured content blocks
     // This extracts thinking, tool_use, tool_result, and text blocks
@@ -2158,11 +2154,7 @@ export class Membrane {
       stopReason,
       usage,
       details: {
-        stop: {
-          reason: stopReason,
-          triggeredSequence,
-          wasTruncated: stopReason === 'max_tokens',
-        },
+        stop: this.buildStopInfo(stopReason, providerStopReason, triggeredSequence),
         usage: {
           ...usage,
           estimatedCost: usage.estimatedCost ?? this.estimateCost(usage, request.config.model),
@@ -2190,6 +2182,19 @@ export class Membrane {
     };
   }
 
+  private buildStopInfo(
+    reason: StopReason,
+    providerReason: string | undefined,
+    triggeredSequence: string | undefined
+  ): StopInfo {
+    return {
+      reason,
+      triggeredSequence,
+      wasTruncated: reason === 'max_tokens',
+      ...(providerReason !== undefined ? { providerReason } : {}),
+    };
+  }
+
   private mapStopReason(providerReason: string): StopReason {
     switch (providerReason) {
       case 'end_turn':
@@ -2200,12 +2205,25 @@ export class Membrane {
         return 'stop_sequence';
       case 'tool_use':
         return 'tool_use';
+      case 'pause_turn':
+        // A long-running turn the provider paused and the caller is expected
+        // to resume. Reported as end_turn, it looked finished.
+        return 'pause_turn';
       case 'refusal':
         // Safety refusal (e.g., Fable 5 reasoning_extraction). Must survive
         // mapping — downstream consumers react to refusals (chapterx adds a
         // Discord reaction). Defaulting this to end_turn silently hid them.
         return 'refusal';
       default:
+        // Unknown reasons still normalize to end_turn — callers switch on a
+        // closed union — but never silently: the raw token is disclosed as
+        // details.stop.providerReason and the mapping is logged. Provider
+        // enums grow, and the last time this default swallowed a member it
+        // hid safety refusals in production.
+        console.warn(
+          `[membrane] Unmapped provider stop reason '${providerReason}' normalized to end_turn ` +
+            '(see details.stop.providerReason)'
+        );
         return 'end_turn';
     }
   }
@@ -2227,7 +2245,14 @@ export class Membrane {
     return pricing ? calculateCost(usage, pricing) : undefined;
   }
 
-  private calculateRetryDelay(attempt: number, overloaded = false): number {
+  /**
+   * The server's own `retry-after` outranks our backoff when it is longer:
+   * retrying inside a window the provider has already told us to wait out
+   * burns the whole attempt budget on guaranteed failures. maxRetryDelayMs
+   * still caps the wait, so a hostile or absurd retry-after cannot park a
+   * turn indefinitely.
+   */
+  private calculateRetryDelay(attempt: number, overloaded = false, errorInfo?: ErrorInfo): number {
     const { retryDelayMs, backoffMultiplier, maxRetryDelayMs } = overloaded
       ? this.retryConfig.overloaded
       : this.retryConfig;
@@ -2235,7 +2260,36 @@ export class Membrane {
     // Equal jitter on the overloaded schedule only: a capacity storm is
     // exactly the case where a fleet retrying in sync re-creates the
     // stampede it's backing off from. [delay/2, delay) keeps the wait long.
-    return overloaded ? Math.floor(delay / 2 + Math.random() * (delay / 2)) : delay;
+    const backoffMs = overloaded ? Math.floor(delay / 2 + Math.random() * (delay / 2)) : delay;
+
+    const retryAfterMs = errorInfo?.retryAfterMs;
+    if (retryAfterMs === undefined) return backoffMs;
+    return Math.min(maxRetryDelayMs, Math.max(backoffMs, retryAfterMs));
+  }
+
+  /**
+   * One retry policy, read the same way by complete() and stream().
+   *
+   * The 429 floor exists because a transient rate limit with the default
+   * maxRetries of 0 would otherwise kill a turn outright — so it applies
+   * only where retrying can work. A 429 whose provider code says the account
+   * is out of quota is not a rate limit in that sense: it is classified
+   * non-retryable at the boundary, and gets no floor.
+   */
+  private resolveRetryPolicy(errorInfo: ErrorInfo): {
+    isRateLimit: boolean;
+    isOverloaded: boolean;
+    effectiveMax: number;
+  } {
+    const isRateLimit = errorInfo.type === 'rate_limit' && errorInfo.retryable;
+    const isOverloaded =
+      isOverloadedError(errorInfo) && this.retryConfig.overloaded.maxRetries > 0;
+    const effectiveMax = isRateLimit
+      ? Math.max(this.retryConfig.maxRetries, 5)
+      : isOverloaded
+        ? Math.max(this.retryConfig.maxRetries, this.retryConfig.overloaded.maxRetries)
+        : this.retryConfig.maxRetries;
+    return { isRateLimit, isOverloaded, effectiveMax };
   }
 
   private attachRawRequest(error: unknown, rawRequest: unknown): Error {
@@ -2259,20 +2313,18 @@ export class Membrane {
   }
 
   /**
-   * Check if an error is an abort error
+   * Check if an error is an abort error.
+   *
+   * Typed only — name === 'AbortError', a DOMException AbortError, or a
+   * MembraneError of type 'abort' (which is what every adapter throws for a
+   * cancelled request). The old substring arms turned any error whose text
+   * merely contained "abort" into a well-formed AbortedResponse{reason:
+   * 'user'}: a host tool failing with "...aborted..." inside the same try
+   * became a phantom user cancellation, and the real error was destroyed.
+   * Everything else now throws through attachRawRequest.
    */
   private isAbortError(error: unknown): boolean {
-    if (error instanceof Error) {
-      // Standard AbortError
-      if (error.name === 'AbortError') return true;
-      // Anthropic SDK abort
-      if (error.message.includes('aborted') || error.message.includes('abort')) return true;
-    }
-    // DOMException for browser environments
-    if (typeof DOMException !== 'undefined' && error instanceof DOMException) {
-      return error.name === 'AbortError';
-    }
-    return false;
+    return isTypedAbortError(error);
   }
 
   /**
@@ -2417,6 +2469,7 @@ export class Membrane {
     const pricing = this.resolvePricing(request.config.model);
     const contentBlocks: ContentBlock[] = [];
     let lastStopReason: StopReason = 'end_turn';
+    let lastProviderStopReason: string | undefined;
     let lastStopSequence: string | undefined;
     let rawRequest: unknown;
     let rawResponse: unknown;
@@ -2582,6 +2635,7 @@ export class Membrane {
 
         rawResponse = streamResult.raw;
         lastStopReason = this.mapStopReason(streamResult.stopReason);
+        lastProviderStopReason = streamResult.stopReason;
         lastStopSequence = streamResult.stopSequence ?? undefined;
 
         // Accumulate usage (including cache metrics)
@@ -2934,7 +2988,8 @@ export class Membrane {
         executedToolCalls,
         executedToolResults,
         initialBlockType,
-        lastStopSequence
+        lastStopSequence,
+        lastProviderStopReason
       );
 
       // Merge provider thinking signatures into parser-derived thinking blocks
@@ -2988,6 +3043,7 @@ export class Membrane {
     let totalUsage: DetailedUsage = { inputTokens: 0, outputTokens: 0 };
     const pricing = this.resolvePricing(request.config.model);
     let lastStopReason: StopReason = 'end_turn';
+    let lastProviderStopReason: string | undefined;
     let lastStopSequence: string | undefined;
     let rawRequest: unknown;
     let rawResponse: unknown;
@@ -3125,6 +3181,7 @@ export class Membrane {
 
         rawResponse = streamResult.raw;
         lastStopReason = this.mapStopReason(streamResult.stopReason);
+        lastProviderStopReason = streamResult.stopReason;
         lastStopSequence = streamResult.stopSequence ?? undefined;
 
         // Accumulate usage (including cache metrics)
@@ -3250,11 +3307,7 @@ export class Membrane {
         stopReason: lastStopReason,
         usage: totalUsage,
         details: {
-          stop: {
-            reason: lastStopReason,
-            triggeredSequence: lastStopSequence,
-            wasTruncated: lastStopReason === 'max_tokens',
-          },
+          stop: this.buildStopInfo(lastStopReason, lastProviderStopReason, lastStopSequence),
           usage: { ...totalUsage },
           timing: {
             totalDurationMs: durationMs,

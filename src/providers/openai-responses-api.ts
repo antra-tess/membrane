@@ -20,11 +20,12 @@ import type {
 import {
   MembraneError,
   abortError,
-  authError,
-  contextLengthError,
+  classifyError,
+  errorFromHttpResponse,
+  errorFromProviderStatus,
+  isTypedAbortError,
   networkError,
-  rateLimitError,
-  serverError,
+  withRawRequest,
 } from '../types/index.js';
 import { createCombinedSignal, SSELineParser, safeParseJson } from './utils.js';
 
@@ -173,9 +174,9 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
         signal,
       });
 
-      await this.assertSuccessfulHTTPResponse(response);
+      await this.assertSuccessfulHTTPResponse(response, responsesRequest);
       const data = (await response.json()) as OpenAIResponsesAPIResponse;
-      this.assertSuccessfulAPIResponse(data);
+      this.assertSuccessfulAPIResponse(data, responsesRequest);
       return this.parseResponse(data, request.model, responsesRequest);
     } catch (error) {
       throw this.handleError(error, responsesRequest);
@@ -202,7 +203,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
         signal,
       });
 
-      await this.assertSuccessfulHTTPResponse(response);
+      await this.assertSuccessfulHTTPResponse(response, responsesRequest);
       const reader = response.body?.getReader();
       if (!reader) throw new Error('OpenAI Responses API returned no response body');
 
@@ -243,15 +244,23 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
           terminalResponse = event.response;
         } else if (event.type === 'response.failed') {
           const failed = event.response as OpenAIResponsesAPIResponse | undefined;
-          throw new Error(
-            `OpenAI Responses API error: ${failed?.error?.code ?? 'response_failed'} ` +
-              `${failed?.error?.message ?? 'Response failed'}`
-          );
+          throw errorFromProviderStatus({
+            provider: this.name,
+            body: failed,
+            message:
+              `OpenAI Responses API error: ${failed?.error?.code ?? 'response_failed'} ` +
+              `${failed?.error?.message ?? 'Response failed'}`,
+            rawRequest: responsesRequest,
+          });
         } else if (event.type === 'error') {
-          throw new Error(
-            `OpenAI Responses API error: ${event.code ?? 'stream_error'} ` +
-              `${event.message ?? 'Streaming request failed'}`
-          );
+          throw errorFromProviderStatus({
+            provider: this.name,
+            body: { error: { code: event.code, message: event.message } },
+            message:
+              `OpenAI Responses API error: ${event.code ?? 'stream_error'} ` +
+              `${event.message ?? 'Streaming request failed'}`,
+            rawRequest: responsesRequest,
+          });
         }
       };
 
@@ -280,7 +289,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
         );
       }
 
-      this.assertSuccessfulAPIResponse(terminalResponse);
+      this.assertSuccessfulAPIResponse(terminalResponse, responsesRequest);
 
       const parsed = this.parseResponse(terminalResponse, request.model, responsesRequest);
       parsed.content.forEach((block, index) => callbacks.onContentBlock?.(index, block));
@@ -587,67 +596,31 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
   // Errors
   // --------------------------------------------------------------------------
 
-  private async assertSuccessfulHTTPResponse(response: Response): Promise<void> {
+  private async assertSuccessfulHTTPResponse(response: Response, rawRequest: unknown): Promise<void> {
     if (response.ok) return;
-    const errorText = await response.text();
-    throw new Error(`OpenAI Responses API error: ${response.status} ${errorText}`);
+    throw errorFromHttpResponse(this.name, response, await response.text(), rawRequest);
   }
 
-  private assertSuccessfulAPIResponse(response: OpenAIResponsesAPIResponse): void {
+  private assertSuccessfulAPIResponse(response: OpenAIResponsesAPIResponse, rawRequest: unknown): void {
     if (!response.error) return;
-    throw new Error(
-      `OpenAI Responses API error: ${response.error.code ?? 'api_error'} ` +
-        `${response.error.message ?? 'Unknown error'}`
-    );
+    // An error object inside an HTTP 200 carries no status of its own; the
+    // shared table recovers one from the provider's error code.
+    throw errorFromProviderStatus({
+      provider: this.name,
+      body: response,
+      message:
+        `OpenAI Responses API error: ${response.error.code ?? 'api_error'} ` +
+        `${response.error.message ?? 'Unknown error'}`,
+      rawRequest,
+    });
   }
 
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
-    if (error instanceof MembraneError) return error;
-    if (error instanceof Error) {
-      const message = error.message;
-      if (message.includes('429') || message.includes('rate_limit')) {
-        const retryMatch = message.match(/retry after (\d+)/i);
-        const retryAfter = retryMatch?.[1] ? Number(retryMatch[1]) * 1000 : undefined;
-        return rateLimitError(message, retryAfter, error, rawRequest);
-      }
-      if (
-        message.includes('401') ||
-        message.includes('invalid_api_key') ||
-        message.includes('Incorrect API key')
-      ) {
-        return authError(message, error, rawRequest);
-      }
-      if (
-        message.includes('context_length') ||
-        message.includes('maximum context') ||
-        message.includes('too long')
-      ) {
-        return contextLengthError(message, error, rawRequest);
-      }
-      if (
-        message.includes('500') ||
-        message.includes('502') ||
-        message.includes('503') ||
-        message.includes('server_error')
-      ) {
-        return serverError(message, undefined, error, rawRequest);
-      }
-      if (error.name === 'AbortError') return abortError(undefined, rawRequest);
-      if (
-        message.includes('network') ||
-        message.includes('fetch') ||
-        message.includes('ECONNREFUSED')
-      ) {
-        return networkError(message, error, rawRequest);
-      }
-    }
+    if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
+    if (isTypedAbortError(error)) return abortError(undefined, rawRequest);
 
-    return new MembraneError({
-      type: 'unknown',
-      message: error instanceof Error ? error.message : String(error),
-      retryable: false,
-      rawError: error,
-      rawRequest,
-    });
+    const info = classifyError(error);
+    info.rawRequest = rawRequest;
+    return new MembraneError(info);
   }
 }
