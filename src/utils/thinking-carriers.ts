@@ -6,16 +6,22 @@
 import type { ContentBlock } from '../types/index.js';
 
 /**
- * Identity for thinking text, insensitive to two artifacts that ride the
- * parser's view of the same reasoning:
+ * Identity for thinking text, insensitive to exactly two artifacts that ride
+ * the parser's view of the same reasoning — and to nothing else:
  *
  *  - stream scaffolding: the XML path prefills `Claude: <thinking>` and asks
  *    the adapter to wrap native thinking deltas, so a parsed block can carry
  *    a literal `<thinking>` / `</thinking>` tag the provider block never had.
- *  - boundary whitespace: the continuation path trims the accumulation at
- *    each round boundary (`buildContinuationRequest` trimEnds before
- *    re-prefilling), so a fragment and the parsed concatenation can differ by
- *    exactly that whitespace.
+ *  - OUTER boundary whitespace: the continuation path trims the accumulation
+ *    at each round boundary (`buildContinuationRequest` trimEnds before
+ *    re-prefilling), so a fragment and the parsed text can differ by leading
+ *    or trailing whitespace.
+ *
+ * INTERNAL whitespace is payload and is compared verbatim. Erasing it (the
+ * first implementation stripped every `\s`) makes distinct signed payloads
+ * collide on nothing but where their spaces fall, and the caller then stamps
+ * one payload's signature onto the other's text — a carrier that fails
+ * Anthropic signature validation when the consumer ships its history back.
  *
  * Comparison only — stored text is never rewritten. Empty text is never
  * identical to anything: signature-only carriers are prepend-only.
@@ -23,8 +29,7 @@ import type { ContentBlock } from '../types/index.js';
 export function sameThinkingText(left: string, right: string): boolean {
   if (left === right) return left !== '';
   if (left === '' || right === '') return false;
-  const normalized = (text: string) =>
-    text.replace(/<\/?(antml:)?thinking>/g, '').replace(/\s+/g, '');
+  const normalized = (text: string) => text.replace(/<\/?(antml:)?thinking>/g, '').trim();
   const normalizedLeft = normalized(left);
   if (normalizedLeft === '') return false;
   return normalizedLeft === normalized(right);
@@ -35,6 +40,13 @@ export function sameThinkingText(left: string, right: string): boolean {
  * thinking reconstructs `parsedText` (an auto-continuation split across a
  * max_tokens boundary). Returns the provider indices in order, or undefined
  * when no run of two or more reconstructs it.
+ *
+ * Two joins are tried, because the round boundary itself is the one place a
+ * fragment's whitespace can legitimately vanish: `buildContinuationRequest`
+ * trimEnds the accumulation before re-prefilling, so the resumed text may
+ * pick up exactly where the trim left off. Modelling that single
+ * transformation keeps internal whitespace comparable everywhere else —
+ * `sameThinkingText` treats it as payload.
  */
 export function findSpanningProviderRun(
   providerThinking: Array<{ thinking?: string; signature?: string }>,
@@ -43,13 +55,19 @@ export function findSpanningProviderRun(
 ): number[] | undefined {
   for (let start = 0; start < providerThinking.length; start++) {
     if (pairedProviderBlocks.has(start)) continue;
-    let concatenated = providerThinking[start]!.thinking ?? '';
+    const firstFragment = providerThinking[start]!.thinking ?? '';
+    let verbatimJoin = firstFragment;
+    let trimmedJoin = firstFragment;
     const run = [start];
     for (let next = start + 1; next < providerThinking.length; next++) {
       if (pairedProviderBlocks.has(next)) break;
-      concatenated += providerThinking[next]!.thinking ?? '';
+      const fragment = providerThinking[next]!.thinking ?? '';
+      verbatimJoin += fragment;
+      trimmedJoin = trimmedJoin.trimEnd() + fragment;
       run.push(next);
-      if (sameThinkingText(concatenated, parsedText)) return [...run];
+      if (sameThinkingText(verbatimJoin, parsedText) || sameThinkingText(trimmedJoin, parsedText)) {
+        return [...run];
+      }
     }
   }
   return undefined;
