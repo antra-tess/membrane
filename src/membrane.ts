@@ -1019,12 +1019,19 @@ export class Membrane {
     // Build messages array that we'll update with tool results
     let messages = [...request.messages];
     let allContentBlocks: ContentBlock[] = [];
+    let markersInLastRequest = 0;
 
     try {
       // Tool execution loop
       while (toolDepth <= maxToolDepth) {
         // Build provider request with native tools
         const providerRequest = this.buildNativeToolRequest(request, messages, toolDepth > 0);
+        // Telemetry reports what this builder actually placed on the wire —
+        // strategy breakpoints, stale passthrough, fallback and float alike.
+        // Both native paths used to hardcode 0, which made the 4-breakpoint
+        // discipline unauditable from the response on exactly the paths that
+        // spend the budget hardest.
+        markersInLastRequest = countWireCacheMarkers(providerRequest);
 
         // Stream from provider
         let textAccumulated = '';
@@ -1189,7 +1196,7 @@ export class Membrane {
             provider: this.adapter.name,
           },
           cache: {
-            markersInRequest: 0,
+            markersInRequest: markersInLastRequest,
             tokensCreated: totalUsage.cacheCreationTokens ?? 0,
             tokensRead: totalUsage.cacheReadTokens ?? 0,
             hitRatio: this.calculateCacheHitRatio(totalUsage),
@@ -3118,6 +3125,7 @@ export class Membrane {
 
     let messages = [...request.messages];
     let allContentBlocks: ContentBlock[] = [];
+    let markersInLastRequest = 0;
 
     try {
       // Tool execution loop
@@ -3136,6 +3144,12 @@ export class Membrane {
 
         // Build provider request with native tools
         const providerRequest = this.buildNativeToolRequest(request, messages, toolDepth > 0);
+        // Telemetry reports what this builder actually placed on the wire —
+        // strategy breakpoints, stale passthrough, fallback and float alike.
+        // Both native paths used to hardcode 0, which made the 4-breakpoint
+        // discipline unauditable from the response on exactly the paths that
+        // spend the budget hardest.
+        markersInLastRequest = countWireCacheMarkers(providerRequest);
 
         // Stream from provider
         let textAccumulated = '';
@@ -3386,7 +3400,7 @@ export class Membrane {
             provider: this.adapter.name,
           },
           cache: {
-            markersInRequest: 0,
+            markersInRequest: markersInLastRequest,
             tokensCreated: totalUsage.cacheCreationTokens ?? 0,
             tokensRead: totalUsage.cacheReadTokens ?? 0,
             hitRatio: this.calculateCacheHitRatio(totalUsage),
