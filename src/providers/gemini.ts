@@ -28,7 +28,7 @@ import {
   abortError,
   networkError,
 } from '../types/index.js';
-import { createCombinedSignal, throwOnStreamErrorFrame } from './utils.js';
+import { createCombinedSignal, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
 
 // ============================================================================
 // Gemini API Types
@@ -188,6 +188,7 @@ export class GeminiAdapter implements ProviderAdapter {
       const decoder = new TextDecoder();
       let accumulated = '';
       let finishReason = 'STOP';
+      let sawTerminalEvent = false;
       let toolCalls: { name: string; args: Record<string, unknown> }[] = [];
       let images: { data: string; mimeType: string }[] = [];
       let lastUsage: GeminiResponse['usageMetadata'] | undefined;
@@ -231,6 +232,7 @@ export class GeminiAdapter implements ProviderAdapter {
 
         if (candidate?.finishReason) {
           finishReason = candidate.finishReason;
+          sawTerminalEvent = true;
         }
 
         if (parsed.usageMetadata) {
@@ -263,6 +265,8 @@ export class GeminiAdapter implements ProviderAdapter {
           processDataLine(dataLine);
         }
       }
+
+      assertTerminalEventObserved(sawTerminalEvent, 'Gemini', geminiRequest);
 
       return {
         content: this.buildContentBlocks(accumulated, toolCalls, images),

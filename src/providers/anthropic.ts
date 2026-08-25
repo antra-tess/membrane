@@ -22,6 +22,7 @@ import {
   abortError,
 } from '../types/index.js';
 import { flattenRootSchemaUnion } from './anthropic-tool-schema.js';
+import { assertTerminalEventObserved } from './utils.js';
 import { CacheKeepalive, type CacheKeepaliveConfig } from '../cache-keepalive.js';
 
 // ============================================================================
@@ -314,6 +315,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       let inferenceGeo: string | undefined;
       let serviceTier: string | undefined;
       let stopReason: string = 'end_turn';
+      let sawTerminalEvent = false;
       let stopSequence: string | undefined;
       let stopDetails: unknown;
 
@@ -414,6 +416,7 @@ export class AnthropicAdapter implements ProviderAdapter {
             stop_details?: unknown;
           };
           stopReason = delta.stop_reason ?? 'end_turn';
+          sawTerminalEvent = true;
           stopSequence = delta.stop_sequence ?? undefined;
           // stop_details carries refusal metadata (e.g., category: 'reasoning_extraction')
           stopDetails = delta.stop_details ?? undefined;
@@ -440,6 +443,11 @@ export class AnthropicAdapter implements ProviderAdapter {
 
       // Force-close the HTTP connection so we don't block on SSE drain
       try { stream.controller.abort(); } catch { /* already closed */ }
+
+      // message_delta is this adapter's terminal event — the loop breaks on
+      // it. Falling out of the for-await without one means the SSE connection
+      // closed mid-turn, and stopReason is still its 'end_turn' initialiser.
+      assertTerminalEventObserved(sawTerminalEvent, 'Anthropic', fullRequest);
 
       return {
         content: contentBlocks,
@@ -672,6 +680,10 @@ export class AnthropicAdapter implements ProviderAdapter {
   }
 
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
+    // Already-classified failures (e.g. the stream-integrity guards) keep
+    // their type and retryability instead of being re-derived from a string.
+    if (error instanceof MembraneError) return error;
+
     if (error instanceof Anthropic.APIError) {
       // Mid-stream SSE `error` events are rethrown by the SDK as APIError
       // with status === undefined (sdk core/streaming.js), so the HTTP

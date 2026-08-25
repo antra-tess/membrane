@@ -30,7 +30,13 @@ import {
   abortError,
   networkError,
 } from '../types/index.js';
-import { safeParseJson, createCombinedSignal, SSELineParser, throwOnStreamErrorFrame } from './utils.js';
+import {
+  safeParseJson,
+  createCombinedSignal,
+  SSELineParser,
+  throwOnStreamErrorFrame,
+  assertTerminalEventObserved,
+} from './utils.js';
 
 // ============================================================================
 // Types
@@ -200,6 +206,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       let accumulated = '';
       let reasoning = '';
       let finishReason = 'stop';
+      let sawTerminalEvent = false;
       let toolCalls: OpenAIToolCall[] = [];
 
       while (true) {
@@ -210,7 +217,10 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         const dataLines = sseParser.feed(chunk);
 
         for (const data of dataLines) {
-          if (data === '[DONE]') continue;
+          if (data === '[DONE]') {
+            sawTerminalEvent = true;
+            continue;
+          }
 
           // Parse first; only JSON noise is ignorable. Everything after the
           // parse must NOT be swallowed by the catch below.
@@ -257,12 +267,15 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
 
             if (parsed.choices?.[0]?.finish_reason) {
               finishReason = parsed.choices[0].finish_reason;
+              sawTerminalEvent = true;
             }
           } catch {
             // Ignore parse errors in stream
           }
         }
       }
+
+      assertTerminalEventObserved(sawTerminalEvent, this.name, openAIRequest);
 
       // Build response with accumulated data
       const message: OpenAIMessage = {
@@ -595,6 +608,10 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   }
 
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
+    // Already-classified failures (e.g. the stream-integrity guards) keep
+    // their type and retryability instead of being re-derived from a string.
+    if (error instanceof MembraneError) return error;
+
     if (error instanceof Error) {
       const message = error.message;
 

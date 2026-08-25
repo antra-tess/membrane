@@ -27,7 +27,12 @@ import {
   abortError,
   networkError,
 } from '../types/index.js';
-import { createCombinedSignal, SSELineParser, throwOnStreamErrorFrame } from './utils.js';
+import {
+  createCombinedSignal,
+  SSELineParser,
+  throwOnStreamErrorFrame,
+  assertTerminalEventObserved,
+} from './utils.js';
 
 // ============================================================================
 // Types
@@ -194,6 +199,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
       const sseParser = new SSELineParser();
       let accumulated = '';
       let finishReason = 'stop';
+      let sawTerminalEvent = false;
 
       // Post-facto truncation of the adapter's own eotToken.
       // The adapter serializes the prompt with this.eotToken and sends it as an
@@ -216,7 +222,10 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
         const dataLines = sseParser.feed(chunk);
 
         for (const data of dataLines) {
-          if (data === '[DONE]') continue;
+          if (data === '[DONE]') {
+            sawTerminalEvent = true;
+            continue;
+          }
 
           // Parse first; only JSON noise is ignorable. Everything after the
           // parse must NOT be swallowed by the catch below.
@@ -244,6 +253,9 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
                   }
                   emittedLen = accumulated.length;
                   eotFound = true;
+                  // The adapter's own end-of-turn token IS a terminal
+                  // observation: the turn ended where this layer said it ends.
+                  sawTerminalEvent = true;
                   finishReason = 'stop';
                   break streamLoop;
                 }
@@ -260,6 +272,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
 
             if (parsed.choices?.[0]?.finish_reason) {
               finishReason = parsed.choices[0].finish_reason;
+              sawTerminalEvent = true;
             }
           } catch {
             // Ignore parse errors in stream
@@ -274,6 +287,8 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
       if (eotFound) {
         try { await reader.cancel(); } catch { /* stream already closed */ }
       }
+
+      assertTerminalEventObserved(sawTerminalEvent, this.name, completionsRequest);
 
       return this.buildStreamedResponse(accumulated, finishReason, request.model, completionsRequest);
 
@@ -542,6 +557,10 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
   }
 
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
+    // Already-classified failures (e.g. the stream-integrity guards) keep
+    // their type and retryability instead of being re-derived from a string.
+    if (error instanceof MembraneError) return error;
+
     if (error instanceof Error) {
       const message = error.message;
 

@@ -29,7 +29,13 @@ import {
   abortError,
   networkError,
 } from '../types/index.js';
-import { safeParseJson, createCombinedSignal, SSELineParser, throwOnStreamErrorFrame } from './utils.js';
+import {
+  safeParseJson,
+  createCombinedSignal,
+  SSELineParser,
+  throwOnStreamErrorFrame,
+  assertTerminalEventObserved,
+} from './utils.js';
 
 // ============================================================================
 // Types
@@ -263,6 +269,7 @@ export class OpenAIAdapter implements ProviderAdapter {
       const sseParser = new SSELineParser();
       let accumulated = '';
       let finishReason = 'stop';
+      let sawTerminalEvent = false;
       let toolCalls: OpenAIToolCall[] = [];
       let streamUsage: OpenAIResponse['usage'] | undefined;
 
@@ -274,7 +281,10 @@ export class OpenAIAdapter implements ProviderAdapter {
         const dataLines = sseParser.feed(chunk);
 
         for (const data of dataLines) {
-          if (data === '[DONE]') continue;
+          if (data === '[DONE]') {
+            sawTerminalEvent = true;
+            continue;
+          }
 
           // Parse first; only JSON noise is ignorable. Everything after the
           // parse must NOT be swallowed by the catch below.
@@ -316,6 +326,7 @@ export class OpenAIAdapter implements ProviderAdapter {
 
             if (parsed.choices?.[0]?.finish_reason) {
               finishReason = parsed.choices[0].finish_reason;
+              sawTerminalEvent = true;
             }
 
             // Capture usage data (comes in final chunk with stream_options.include_usage)
@@ -327,6 +338,8 @@ export class OpenAIAdapter implements ProviderAdapter {
           }
         }
       }
+
+      assertTerminalEventObserved(sawTerminalEvent, 'OpenAI', openAIRequest);
 
       // Build response with accumulated data
       const message: OpenAIMessage = {
@@ -660,6 +673,10 @@ export class OpenAIAdapter implements ProviderAdapter {
   }
 
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
+    // Already-classified failures (e.g. the stream-integrity guards) keep
+    // their type and retryability instead of being re-derived from a string.
+    if (error instanceof MembraneError) return error;
+
     if (error instanceof Error) {
       const message = error.message;
 
