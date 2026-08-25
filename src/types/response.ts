@@ -39,6 +39,15 @@ export interface DetailedUsage extends BasicUsage {
   
   /** Tokens used for thinking/reasoning */
   thinkingTokens?: number;
+
+  /**
+   * Reasoning tokens the provider reported separately from its visible-output
+   * count, already INCLUDED in `outputTokens` (they are billed at the output
+   * rate). Surfaced so a caller can attribute spend to reasoning; summing it
+   * with `outputTokens` would double-count. Gemini's `thoughtsTokenCount` is
+   * the current source.
+   */
+  reasoningTokens?: number;
   
   /** Estimated cost breakdown */
   estimatedCost?: CostBreakdown;

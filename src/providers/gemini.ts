@@ -77,9 +77,56 @@ interface GeminiResponse {
     candidatesTokenCount?: number;
     totalTokenCount?: number;
     cachedContentTokenCount?: number;
+    /**
+     * Reasoning ("thinking") tokens. DISJOINT from candidatesTokenCount and
+     * billed at the output rate, so generated output is candidates + thoughts.
+     * Live receipt 2026-08-25, gemini-3.5-flash-lite, thinkingBudget 512:
+     * prompt 35, candidates 2, thoughts 228, total 265 — 35+2+228 === 265.
+     */
+    thoughtsTokenCount?: number;
   };
   modelVersion?: string;
   error?: { code: number; message: string; status: string };
+}
+
+/**
+ * Map Gemini's `usageMetadata` onto membrane's usage shape.
+ *
+ * `thoughtsTokenCount` is disjoint from `candidatesTokenCount` and billed at
+ * the output rate, so generated output is the SUM of the two; reading only
+ * candidates reported a thinking turn at a fraction of its real size. The
+ * reconciliation check makes the next such omission loud rather than silent:
+ * Google's own total is the independent witness, and a mismatch means a
+ * usageMetadata field membrane does not read is carrying tokens.
+ */
+function geminiUsageToProviderUsage(
+  usageMetadata: GeminiResponse['usageMetadata']
+): ProviderResponse['usage'] {
+  const promptTokens = usageMetadata?.promptTokenCount ?? 0;
+  const candidatesTokens = usageMetadata?.candidatesTokenCount ?? 0;
+  const thoughtsTokens = usageMetadata?.thoughtsTokenCount;
+  const totalTokens = usageMetadata?.totalTokenCount;
+
+  if (usageMetadata && totalTokens != null) {
+    const accountedTokens = promptTokens + candidatesTokens + (thoughtsTokens ?? 0);
+    if (accountedTokens !== totalTokens) {
+      console.warn(
+        `[membrane:gemini] usageMetadata does not reconcile: promptTokenCount(${promptTokens})`
+        + ` + candidatesTokenCount(${candidatesTokens}) + thoughtsTokenCount(${thoughtsTokens ?? 0})`
+        + ` = ${accountedTokens}, but totalTokenCount = ${totalTokens}.`
+        + ' Some billed tokens are in a usageMetadata field membrane does not read.'
+      );
+    }
+  }
+
+  return {
+    inputTokens: promptTokens,
+    outputTokens: candidatesTokens + (thoughtsTokens ?? 0),
+    ...(thoughtsTokens != null ? { reasoningTokens: thoughtsTokens } : {}),
+    cacheReadTokens: usageMetadata?.cachedContentTokenCount
+      ? usageMetadata.cachedContentTokenCount
+      : undefined,
+  };
 }
 
 // ============================================================================
@@ -191,6 +238,9 @@ export class GeminiAdapter implements ProviderAdapter {
       let toolCalls: { name: string; args: Record<string, unknown> }[] = [];
       let images: { data: string; mimeType: string }[] = [];
       let lastUsage: GeminiResponse['usageMetadata'] | undefined;
+      // The resolved model Google actually served, echoed on stream frames.
+      // Reporting the requested id instead hides alias/auto-upgrade routing.
+      let lastModelVersion: string | undefined;
       let buffer = '';
 
       while (true) {
@@ -239,6 +289,9 @@ export class GeminiAdapter implements ProviderAdapter {
             if (parsed.usageMetadata) {
               lastUsage = parsed.usageMetadata;
             }
+            if (parsed.modelVersion) {
+              lastModelVersion = parsed.modelVersion;
+            }
           } catch {
             // Ignore parse errors in stream chunks
           }
@@ -282,6 +335,9 @@ export class GeminiAdapter implements ProviderAdapter {
             if (parsed.usageMetadata) {
               lastUsage = parsed.usageMetadata;
             }
+            if (parsed.modelVersion) {
+              lastModelVersion = parsed.modelVersion;
+            }
           } catch {
             // Final buffer wasn't valid JSON — nothing to do
           }
@@ -292,14 +348,8 @@ export class GeminiAdapter implements ProviderAdapter {
         content: this.buildContentBlocks(accumulated, toolCalls, images),
         stopReason: this.mapFinishReason(finishReason),
         stopSequence: undefined,
-        usage: {
-          inputTokens: lastUsage?.promptTokenCount ?? 0,
-          outputTokens: lastUsage?.candidatesTokenCount ?? 0,
-          cacheReadTokens: lastUsage?.cachedContentTokenCount
-            ? lastUsage.cachedContentTokenCount
-            : undefined,
-        },
-        model: request.model,
+        usage: geminiUsageToProviderUsage(lastUsage),
+        model: lastModelVersion ?? request.model,
         rawRequest: geminiRequest,
         raw: { finishReason, usage: lastUsage },
       };
@@ -563,13 +613,7 @@ export class GeminiAdapter implements ProviderAdapter {
       content: this.buildContentBlocks(text, toolCalls, images),
       stopReason: this.mapFinishReason(candidate?.finishReason),
       stopSequence: undefined,
-      usage: {
-        inputTokens: response.usageMetadata?.promptTokenCount ?? 0,
-        outputTokens: response.usageMetadata?.candidatesTokenCount ?? 0,
-        cacheReadTokens: response.usageMetadata?.cachedContentTokenCount
-          ? response.usageMetadata.cachedContentTokenCount
-          : undefined,
-      },
+      usage: geminiUsageToProviderUsage(response.usageMetadata),
       model: response.modelVersion ?? requestedModel,
       rawRequest,
       raw: response,
