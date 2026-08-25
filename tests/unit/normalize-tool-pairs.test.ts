@@ -983,6 +983,35 @@ describe('normalizeToolPairs', () => {
       expect(events.some((e) => e.kind === 'synthetic_pending_result')).toBe(false);
     });
 
+    it('reports relocation direction on the event: phase 3 pulls back, the converse sweep pushes down', () => {
+      // Both directions in one transcript. Phase 3 hoists ite1 back from a
+      // downstream envelope into its own cycle (fromEnvelope > toEnvelope);
+      // the converse sweep then pushes ite2 down out of the envelope it was
+      // appended to, into its own later cycle (fromEnvelope < toEnvelope).
+      // The event's index pair is the only thing telemetry can read the
+      // direction off, so it is asserted rather than described.
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(r('ite2', 'zz-second payload')),
+        assistant(u('ite2')),
+        user(r('ite1', 'zz-first payload')),
+      ];
+      const { events, onEvent } = collectEvents();
+      normalize(input, { onEvent });
+
+      const hoists = events.filter((e) => e.kind === 'tool_result_hoisted') as Array<{
+        toolUseId: string;
+        fromEnvelope: number;
+        toEnvelope: number;
+      }>;
+      const pullBack = hoists.find((e) => e.toolUseId === 'ite1')!;
+      const pushDown = hoists.find((e) => e.toolUseId === 'ite2')!;
+
+      expect(pullBack.fromEnvelope).toBeGreaterThan(pullBack.toEnvelope);
+      expect(pushDown.fromEnvelope).toBeLessThan(pushDown.toEnvelope);
+    });
+
     it('validate mirrors the assertion: a stray that survived every phase throws', () => {
       // Guards the repair itself. If a future phase reintroduces an unpaired
       // tool_result, validate must fail loudly rather than ship a 400.

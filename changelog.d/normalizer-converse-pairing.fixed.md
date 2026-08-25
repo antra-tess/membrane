@@ -16,5 +16,6 @@
 - `NormalizeEvent`: `orphan_tool_result_textified` carries `recoveredChars`
   so a payload drop can never be silent, and a new
   `stray_tool_result_textified` event reports duplicate results converted to
-  text. `tool_result_hoisted` now also fires for backward relocation
-  (`fromEnvelope > toEnvelope`).
+  text. `tool_result_hoisted` now also fires for a result pushed DOWN into its
+  own later cycle (`fromEnvelope < toEnvelope`) — the mirror of phase 3's
+  existing pull-back from downstream (`fromEnvelope > toEnvelope`).

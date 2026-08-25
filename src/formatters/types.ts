@@ -108,9 +108,10 @@ export type NormalizeEvent =
   | { kind: 'block_re_roled'; blockType: string; from: 'user' | 'assistant'; to: 'user' | 'assistant' }
   /**
    * A tool_result was moved so it sits in the user envelope immediately
-   * following its own tool_use. `fromEnvelope > toEnvelope` means the result
-   * had been appended ahead of its cycle and was moved back (the converse
-   * sweep); `fromEnvelope < toEnvelope` is phase 3's forward hoist.
+   * following its own tool_use. `fromEnvelope > toEnvelope` is phase 3's
+   * hoist: the result lived downstream of its cycle and was pulled back into
+   * it. `fromEnvelope < toEnvelope` is the converse sweep: the result had
+   * been appended ahead of its own cycle and was pushed down into it.
    */
   | { kind: 'tool_result_hoisted'; toolUseId: string; fromEnvelope: number; toEnvelope: number }
   | { kind: 'interloper_deferred'; blockType: string; fromEnvelope: number }
