@@ -159,19 +159,23 @@ describe('per-request formatter override participates in resolution', () => {
     expect(evidence.xmlInjected).toBe(false);
   });
 
-  it('complete() and stream() resolve a per-request override identically', async () => {
-    const completeAdapter = new MockAdapter();
-    await new Membrane(completeAdapter).complete(zzRequest(), {
-      formatter: new AnthropicXmlFormatter({ toolMode: 'native' }),
-    });
+  // The override cell of the symmetry table above: the same override, through
+  // both entry points, for every request mode.
+  for (const requestMode of [undefined, 'auto', 'xml', 'native'] as Array<ToolMode | undefined>) {
+    it(`override formatter configured native + request toolMode ${String(requestMode)} resolves identically on both paths`, async () => {
+      const completeAdapter = new MockAdapter();
+      await new Membrane(completeAdapter).complete(zzRequest(requestMode), {
+        formatter: new AnthropicXmlFormatter({ toolMode: 'native' }),
+      });
 
-    const streamAdapter = new MockAdapter();
-    await new Membrane(streamAdapter).stream(zzRequest(), {
-      formatter: new AnthropicXmlFormatter({ toolMode: 'native' }),
-    });
+      const streamAdapter = new MockAdapter();
+      await new Membrane(streamAdapter).stream(zzRequest(requestMode), {
+        formatter: new AnthropicXmlFormatter({ toolMode: 'native' }),
+      });
 
-    expect(toolModeEvidence(completeAdapter)).toEqual(toolModeEvidence(streamAdapter));
-  });
+      expect(toolModeEvidence(completeAdapter)).toEqual(toolModeEvidence(streamAdapter));
+    });
+  }
 });
 
 describe('resolution drives the stream tool loop, not just the wire', () => {
