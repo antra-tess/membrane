@@ -25,6 +25,7 @@ import type {
   RetryConfig,
   ToolMode,
   ToolDefinition,
+  ErrorInfo,
 } from './types/index.js';
 import { lastCacheableBlockIndex } from './formatters/native.js';
 import {
@@ -177,14 +178,7 @@ export class Membrane {
         // the 529 then follows the base config like any retryable server
         // error (exactly the pre-policy behavior), rather than being
         // silently re-promoted to the long schedule by a positive base limit.
-        const isRateLimit = errorInfo.type === 'rate_limit';
-        const isOverloaded =
-          isOverloadedError(errorInfo) && this.retryConfig.overloaded.maxRetries > 0;
-        const effectiveMax = isRateLimit
-          ? Math.max(this.retryConfig.maxRetries, 5)
-          : isOverloaded
-            ? Math.max(this.retryConfig.maxRetries, this.retryConfig.overloaded.maxRetries)
-            : this.retryConfig.maxRetries;
+        const { isOverloaded, effectiveMax } = this.resolveRetryPolicy(errorInfo);
 
         if (errorInfo.retryable && attempts < effectiveMax) {
           // Check hook for retry decision
@@ -196,7 +190,7 @@ export class Membrane {
           }
 
           // Wait before retry (abort-aware)
-          const delay = this.calculateRetryDelay(attempts, isOverloaded);
+          const delay = this.calculateRetryDelay(attempts, isOverloaded, errorInfo);
           await this.sleep(delay, options.signal);
           continue;
         }
@@ -296,12 +290,14 @@ export class Membrane {
         // the overloaded floor applies over the base config, and
         // overloaded.maxRetries: 0 opts out of stream retries entirely
         // (streaming had no retry before this policy existed).
-        const overloadedEnabled = this.retryConfig.overloaded.maxRetries > 0;
-        const maxOverloaded = Math.max(
-          this.retryConfig.maxRetries,
-          this.retryConfig.overloaded.maxRetries
-        );
-        if (!emitted && overloadedEnabled && isOverloadedError(errorInfo) && attempts < maxOverloaded) {
+        //
+        // A 429 arriving INSTEAD of a stream is exactly as transparent to
+        // retry as a 529 — nothing has reached the caller yet — so it takes
+        // the same pre-emission path, on the base schedule and under the
+        // same five-attempt floor complete() applies. Post-emission errors
+        // still throw: retrying would replay content already consumed.
+        const { isRateLimit, isOverloaded, effectiveMax } = this.resolveRetryPolicy(errorInfo);
+        if (!emitted && (isOverloaded || isRateLimit) && attempts < effectiveMax) {
           // Honor the same pre-retry hook contract as complete(): hosts use
           // onError for circuit-breaking, and its 'abort' decision must work
           // on the streaming path too.
@@ -311,7 +307,7 @@ export class Membrane {
               throw error;
             }
           }
-          const delay = this.calculateRetryDelay(attempts, true);
+          const delay = this.calculateRetryDelay(attempts, isOverloaded, errorInfo);
           retryDelaysMs.push(delay);
           await this.sleep(delay, options.signal);
           continue;
@@ -2227,7 +2223,14 @@ export class Membrane {
     return pricing ? calculateCost(usage, pricing) : undefined;
   }
 
-  private calculateRetryDelay(attempt: number, overloaded = false): number {
+  /**
+   * The server's own `retry-after` outranks our backoff when it is longer:
+   * retrying inside a window the provider has already told us to wait out
+   * burns the whole attempt budget on guaranteed failures. maxRetryDelayMs
+   * still caps the wait, so a hostile or absurd retry-after cannot park a
+   * turn indefinitely.
+   */
+  private calculateRetryDelay(attempt: number, overloaded = false, errorInfo?: ErrorInfo): number {
     const { retryDelayMs, backoffMultiplier, maxRetryDelayMs } = overloaded
       ? this.retryConfig.overloaded
       : this.retryConfig;
@@ -2235,7 +2238,36 @@ export class Membrane {
     // Equal jitter on the overloaded schedule only: a capacity storm is
     // exactly the case where a fleet retrying in sync re-creates the
     // stampede it's backing off from. [delay/2, delay) keeps the wait long.
-    return overloaded ? Math.floor(delay / 2 + Math.random() * (delay / 2)) : delay;
+    const backoffMs = overloaded ? Math.floor(delay / 2 + Math.random() * (delay / 2)) : delay;
+
+    const retryAfterMs = errorInfo?.retryAfterMs;
+    if (retryAfterMs === undefined) return backoffMs;
+    return Math.min(maxRetryDelayMs, Math.max(backoffMs, retryAfterMs));
+  }
+
+  /**
+   * One retry policy, read the same way by complete() and stream().
+   *
+   * The 429 floor exists because a transient rate limit with the default
+   * maxRetries of 0 would otherwise kill a turn outright — so it applies
+   * only where retrying can work. A 429 whose provider code says the account
+   * is out of quota is not a rate limit in that sense: it is classified
+   * non-retryable at the boundary, and gets no floor.
+   */
+  private resolveRetryPolicy(errorInfo: ErrorInfo): {
+    isRateLimit: boolean;
+    isOverloaded: boolean;
+    effectiveMax: number;
+  } {
+    const isRateLimit = errorInfo.type === 'rate_limit' && errorInfo.retryable;
+    const isOverloaded =
+      isOverloadedError(errorInfo) && this.retryConfig.overloaded.maxRetries > 0;
+    const effectiveMax = isRateLimit
+      ? Math.max(this.retryConfig.maxRetries, 5)
+      : isOverloaded
+        ? Math.max(this.retryConfig.maxRetries, this.retryConfig.overloaded.maxRetries)
+        : this.retryConfig.maxRetries;
+    return { isRateLimit, isOverloaded, effectiveMax };
   }
 
   private attachRawRequest(error: unknown, rawRequest: unknown): Error {

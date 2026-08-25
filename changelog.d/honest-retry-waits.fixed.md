@@ -1,0 +1,3 @@
+- Retries now honour the server's `retry-after`: the wait is `min(maxRetryDelayMs, max(backoff, retryAfterMs))` on both the `complete()` and `stream()` retry paths, so a 429 that says "wait 60s" no longer answers with five attempts inside the server's stated window.
+- The five-attempt 429 floor applies only to genuine rate limits. A 429 whose provider code is a quota/billing failure (`insufficient_quota` and friends) is non-retryable and gets no floor.
+- `stream()` now retries a rate limit that arrives before any output reaches the caller, exactly as it already retried a 529 — pre-emission retries stay transparent, and post-emission errors still throw rather than replay consumed content.
