@@ -14,6 +14,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   normalizeToolPairs,
+  MembraneNormalizerError,
   type ProviderBlock,
 } from '../../src/formatters/normalize-tool-pairs.js';
 import type { NormalizeEvent } from '../../src/formatters/types.js';
@@ -648,6 +649,122 @@ describe('normalizeToolPairs', () => {
       expect(synth).not.toHaveProperty('toolUseId');
       expect(synth.content).toBe('[pending]');
       expect(synth.is_error).toBe(false);
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // Entry guards. A producer defect must refuse BEFORE any phase rebuilds
+  // envelopes, so the failure is typed, early, and independent of whether the
+  // input happened to need repair. (Review findings F14, F15a, F16.)
+  // --------------------------------------------------------------------------
+
+  describe('entry guard — pendingToolCallIds must be set-like (F16)', () => {
+    it('refuses an array even when the transcript needs no repair', () => {
+      // The sharp part of the original bug: `.has()` is only reached for an
+      // unmatched tool_use, so an array sailed through every well-formed
+      // transcript and threw mid-pipeline, untyped, the first time the net
+      // was actually load-bearing. This input is well-formed on purpose.
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(r('ite1')),
+      ];
+
+      expect(() =>
+        normalizeToolPairs(input, {
+          // Deliberate contract violation: a Set cannot survive a JSON
+          // round-trip, so config-driven callers reach for an array.
+          pendingToolCallIds: ['ite1'] as unknown as ReadonlySet<string>,
+        }),
+      ).toThrow(MembraneNormalizerError);
+    });
+
+    it('names the option and the received shape in the refusal', () => {
+      const input: ProviderMessage[] = [user(t('go'))];
+      let caught: unknown;
+      try {
+        normalizeToolPairs(input, {
+          pendingToolCallIds: ['ite1', 'ite2'] as unknown as ReadonlySet<string>,
+        });
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(MembraneNormalizerError);
+      expect((caught as Error).message).toContain('pendingToolCallIds');
+      expect((caught as Error).message).toContain('Array(2)');
+    });
+
+    it('accepts a real Set and still refuses no repair-free transcript', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(r('ite1')),
+      ];
+      const out = normalize(input, { pendingToolCallIds: new Set(['ite1']) });
+      expect(out.ready).toBe(true);
+    });
+  });
+
+  describe('entry guard — duplicate tool_use ids (F14)', () => {
+    it('refuses a transcript that reuses one tool_use id across two cycles', () => {
+      // Hoisting takes the FIRST id match with no notion of which cycle it
+      // belongs to, so the real result of cycle 2 gets reattributed to the
+      // tool_use of cycle 1 and cycle 2 gets a [pending]. Wire-valid,
+      // silently wrong: always a producer defect.
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(r('ite1', 'first landed')),
+        assistant(u('ite1')),
+        user(r('ite1', 'second landed')),
+      ];
+
+      expect(() => normalize(input)).toThrow(MembraneNormalizerError);
+    });
+
+    it('names the duplicated id in the refusal', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite7'), u('ite7')),
+      ];
+      let caught: unknown;
+      try {
+        normalize(input);
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(MembraneNormalizerError);
+      expect((caught as Error).message).toContain('ite7');
+    });
+
+    it('leaves distinct ids alone', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(r('ite1')),
+        assistant(u('ite2')),
+        user(r('ite2')),
+      ];
+      expect(normalize(input).ready).toBe(true);
+    });
+  });
+
+  describe('entry guard — message content shape (F15a)', () => {
+    it('refuses object-shaped content instead of writing "[object Object]" to the wire', () => {
+      const input = [
+        { role: 'user', content: { zz_not_a_block_array: true } },
+      ] as unknown as ProviderMessage[];
+
+      expect(() => normalize(input)).toThrow(MembraneNormalizerError);
+    });
+
+    it('still accepts plain-string content as a single text block', () => {
+      const input = [
+        { role: 'user', content: 'plain string turn' },
+      ] as unknown as ProviderMessage[];
+
+      const out = normalize(input);
+      expect(out.messages[0]!.content).toEqual([{ type: 'text', text: 'plain string turn' }]);
     });
   });
 });

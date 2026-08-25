@@ -96,6 +96,14 @@ export function normalizeToolPairs(
   input: ReadonlyArray<LooseProviderMessage>,
   options: NormalizeOptions = {},
 ): NormalizeResult {
+  // ---------------------------------------------------------------------
+  // Phase 0: entry guards. Producer defects refuse HERE — typed, before any
+  // phase has rebuilt an envelope — rather than surfacing later as a silent
+  // mis-repair or an untyped mid-pipeline TypeError.
+  // ---------------------------------------------------------------------
+  assertPendingToolCallIdsIsSetLike(options.pendingToolCallIds, input);
+  assertInputWellFormed(input);
+
   const pending = options.pendingToolCallIds ?? new Set<string>();
   const onEvent = options.onEvent ?? noop;
 
@@ -233,6 +241,103 @@ export function normalizeToolPairs(
 }
 
 // ============================================================================
+// Phase 0: entry guards
+// ============================================================================
+
+/**
+ * Render a runtime value's shape for a refusal message. Constructor names
+ * beat `typeof` here — `object` tells a caller nothing, `Map` tells them
+ * exactly which wrong container they reached for.
+ */
+function describeShape(value: unknown): string {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return `Array(${value.length})`;
+  const primitive = typeof value;
+  if (primitive !== 'object') return primitive;
+  return (value as { constructor?: { name?: string } }).constructor?.name ?? 'object';
+}
+
+/**
+ * `pendingToolCallIds` is typed `ReadonlySet<string>` and consumed solely
+ * through `.has(id)`. Both `.has()` sites are reached ONLY for a tool_use
+ * with no matching result, so a wrong container (an array — the shape a
+ * config round-trip through JSON produces, since a Set cannot survive one)
+ * sails through every well-formed transcript and throws untyped, mid-
+ * pipeline, the first time the safety net actually has repair work to do.
+ *
+ * Refuse at entry, unconditionally. Deliberately NOT `new Set(value)`:
+ * coercing here would launder the caller's type error into behaviour that
+ * happens to work, and the public type stays a membership set rather than
+ * growing a permanent union plus an O(n) scan per unmatched id.
+ */
+function assertPendingToolCallIdsIsSetLike(
+  value: ReadonlySet<string> | undefined,
+  input: ReadonlyArray<LooseProviderMessage>,
+): void {
+  if (value === undefined) return;
+  const membershipTest = (value as { has?: unknown } | null)?.has;
+  if (typeof membershipTest === 'function') return;
+  throw new MembraneNormalizerError(
+    `normalizeToolPairs option 'pendingToolCallIds' must be a ReadonlySet<string> — ` +
+      `the normalizer consults it with .has(id). Received ${describeShape(value)}. ` +
+      `Build one at the call site with new Set(ids); the normalizer will not coerce, ` +
+      `because a silent coercion here would hide the producer-side type error.`,
+    input.map(cloneMsg),
+    [],
+  );
+}
+
+/**
+ * Structural preconditions on the input message list.
+ *
+ * (a) Content must be a block array or a plain string. Anything else used
+ *     to reach `String(msg.content ?? '')`, which puts the literal text
+ *     `[object Object]` in front of the model — a poisoned turn that no
+ *     downstream phase can detect or undo.
+ *
+ * (b) tool_use ids must be unique across the whole list. Phase 3 hoists the
+ *     FIRST id match with no notion of which cycle it belongs to, so a
+ *     reused id reattributes cycle N's real result to cycle 1's tool_use
+ *     and leaves cycle N with a synthetic `[pending]`. The output is
+ *     wire-valid and silently wrong, which is worse than a refusal. A
+ *     duplicate id is always a producer defect: ids are minted per call.
+ */
+function assertInputWellFormed(input: ReadonlyArray<LooseProviderMessage>): void {
+  const seenToolUseIds = new Set<string>();
+  for (let i = 0; i < input.length; i++) {
+    const msg = input[i]!;
+    const content = msg.content;
+    if (!Array.isArray(content)) {
+      if (typeof content === 'string') continue;
+      throw new MembraneNormalizerError(
+        `Message ${i} (role '${msg.role}') has content of type ${describeShape(content)}; ` +
+          `normalizeToolPairs accepts a block array or a plain string. Coercing this with ` +
+          `String() would ship the literal text '[object Object]' to the model.`,
+        input.map(cloneMsg),
+        [],
+      );
+    }
+    for (const block of content as ProviderBlock[]) {
+      if (block?.type !== 'tool_use') continue;
+      const id = (block as { id?: unknown }).id;
+      if (typeof id !== 'string') continue;
+      if (seenToolUseIds.has(id)) {
+        throw new MembraneNormalizerError(
+          `Duplicate tool_use id '${id}' (seen again in message ${i}). Tool-use ids must be ` +
+            `unique across the message list: phase 3 pairs a tool_result to the FIRST tool_use ` +
+            `carrying its id, so a reused id silently reattributes one cycle's real result to ` +
+            `another cycle and leaves the second with a synthetic '[pending]'. Always a ` +
+            `producer defect — mint a fresh id per call.`,
+          input.map(cloneMsg),
+          [],
+        );
+      }
+      seenToolUseIds.add(id);
+    }
+  }
+}
+
+// ============================================================================
 // Phase implementations
 // ============================================================================
 
@@ -288,15 +393,16 @@ function rebuildEnvelopes(
 
   for (const msg of input) {
     if (!Array.isArray(msg.content)) {
-      // Defensive: provider message with non-array content (e.g. a plain
-      // string). Treat it as a single text block under the message's
-      // declared role.
+      // Provider message with plain-string content. Treat it as a single
+      // text block under the message's declared role. The phase-0 guard
+      // (assertInputWellFormed) has already refused every other non-array
+      // shape, so no coercion is needed or wanted here.
       const role = msg.role;
       if (current === null || current.role !== role) {
         if (current) out.push(current);
         current = { role, content: [] };
       }
-      current.content.push({ type: 'text', text: String(msg.content ?? '') });
+      current.content.push({ type: 'text', text: msg.content as string });
       continue;
     }
 
