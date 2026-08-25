@@ -106,12 +106,49 @@ export interface BuildOptions {
  */
 export type NormalizeEvent =
   | { kind: 'block_re_roled'; blockType: string; from: 'user' | 'assistant'; to: 'user' | 'assistant' }
+  /**
+   * A tool_result was moved so it sits in the user envelope immediately
+   * following its own tool_use. `fromEnvelope > toEnvelope` is phase 3's
+   * hoist: the result lived downstream of its cycle and was pulled back into
+   * it. `fromEnvelope < toEnvelope` is the converse sweep: the result had
+   * been appended ahead of its own cycle and was pushed down into it.
+   */
   | { kind: 'tool_result_hoisted'; toolUseId: string; fromEnvelope: number; toEnvelope: number }
   | { kind: 'interloper_deferred'; blockType: string; fromEnvelope: number }
   | { kind: 'synthetic_pending_result'; toolUseId: string; reason: 'trailing' | 'mid_stream' }
-  | { kind: 'orphan_tool_result_textified'; toolUseId: string }
+  /**
+   * A tool_result whose tool_use id appears nowhere in the message list was
+   * rewritten as a text block. `recoveredChars` is the length of the payload
+   * carried across — array-form content is flattened, so a zero here means
+   * the result genuinely had no recoverable text, never that structure was
+   * dropped on the floor.
+   */
+  | { kind: 'orphan_tool_result_textified'; toolUseId: string; recoveredChars: number }
+  /**
+   * A tool_result whose tool_use exists but whose own cycle is already
+   * satisfied (a duplicate re-append after a cancellation or stream restart)
+   * was rewritten as a text block. It could not be relocated without
+   * displacing the real result, and dropping it would lose content.
+   *
+   * `reason` names which duplicate shape the producer emitted, since the two
+   * point at different producer bugs:
+   *   - `'cycle_closed'`      → the copy arrived in some LATER envelope and
+   *                             its own cycle already holds a result, so it
+   *                             had nowhere to be relocated to.
+   *   - `'duplicate_in_cycle'`→ the copy arrived inside its own cycle's user
+   *                             envelope, behind a result that already
+   *                             answered that call. Pairing is one-to-one, so
+   *                             the first result consumes the id and every
+   *                             later copy of it is textified here.
+   */
+  | {
+      kind: 'stray_tool_result_textified';
+      toolUseId: string;
+      fromEnvelope: number;
+      recoveredChars: number;
+      reason: 'cycle_closed' | 'duplicate_in_cycle';
+    }
   | { kind: 'pending_in_flight'; toolUseId: string }
-  | { kind: 'cache_suppressed_for_synthetic'; envelopeIndex: number }
   | {
       /**
        * Fires when the first envelope after re-roling is assistant and a
