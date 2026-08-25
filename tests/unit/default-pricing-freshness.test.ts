@@ -75,8 +75,19 @@ describe('pricing freshness is machine-readable', () => {
     expect(DEFAULT_PRICING_LAST_VERIFIED).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 
-  it('stamps every default row with that date', () => {
+  it('stamps currently-published rows with that date', () => {
     expect(getDefaultPricing('claude-sonnet-4-6')?.asOf).toBe(DEFAULT_PRICING_LAST_VERIFIED);
+  });
+
+  it('dates a retired row to when its rate was last published, not to today', () => {
+    // Claude 3.5 Sonnet is off the price page entirely; 3/15 is the last rate
+    // it was published at. Stamping it with the sweep date would claim that
+    // number was verified against a page that no longer lists it. `asOf` is a
+    // PER-ROW date for exactly this reason.
+    const retired = getDefaultPricing('claude-3-5-sonnet');
+
+    expect(retired?.asOf).toBe('2025-07-01');
+    expect(retired?.asOf).not.toBe(DEFAULT_PRICING_LAST_VERIFIED);
   });
 
   it('surfaces the date on the cost breakdown as pricingAsOf', () => {

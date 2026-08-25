@@ -5,13 +5,17 @@ import type { ModelPricing } from '../types/provider.js';
  * Used as fallback when no ModelRegistry is configured; registry pricing
  * (if available) takes precedence.
  *
- * Every row below was read off the provider's own public price page on the
- * date in {@link DEFAULT_PRICING_LAST_VERIFIED}; the per-section comments name
- * the page. Rows carry that date through `ModelPricing.asOf` and out to
- * `CostBreakdown.pricingAsOf`, so a caller can see how old the number it is
- * billing against is instead of trusting a prose header. The previous header
- * claimed "Last updated: 2025-07" while the table carried Claude 4.6 rows, and
- * three rows were simply wrong by the time they were checked.
+ * Every row carries its OWN verification date through `ModelPricing.asOf`, out
+ * to `CostBreakdown.pricingAsOf`, so a caller can see how old the number it is
+ * billing against is instead of trusting a prose header. Currently-published
+ * rows were read off the provider's own price page on the date in
+ * {@link DEFAULT_PRICING_LAST_VERIFIED} (the per-section comments name the
+ * page) and carry it. A row for a RETIRED model carries the date its rate was
+ * last published instead — claude-3-5-sonnet is dated 2025-07-01 because it is
+ * no longer listed anywhere to verify against, and stamping it with the sweep
+ * date would claim a check that cannot be performed. The previous header
+ * claimed "Last updated: 2025-07" for the whole table while it carried Claude
+ * 4.6 rows, and three rows were simply wrong by the time they were checked.
  *
  * Matching is longest-prefix (see {@link getDefaultPricing}), so a more
  * specific row always wins over a more general one and rows may be listed in
