@@ -22,7 +22,7 @@ import {
   abortError,
   networkError,
 } from '../types/index.js';
-import { safeParseJson, createCombinedSignal, SSELineParser } from './utils.js';
+import { safeParseJson, createCombinedSignal, SSELineParser, throwOnStreamErrorFrame } from './utils.js';
 
 // ============================================================================
 // Types
@@ -243,13 +243,8 @@ export class OpenRouterAdapter implements ProviderAdapter {
           // OpenRouter delivers mid-stream failures (e.g. upstream 429s) as an
           // SSE data line with an `error` payload. Silently ignoring it would
           // yield a fake-successful empty completion — surface it instead so
-          // retry logic can handle it.
-          if (typeof parsed === 'object' && parsed !== null && parsed.error) {
-            const err = parsed.error as { code?: number | string; message?: string };
-            throw new Error(
-              `OpenRouter stream error${err.code !== undefined ? ` (${err.code})` : ''}: ${err.message ?? JSON.stringify(err)}`
-            );
-          }
+          // retry logic can handle it. Shared with every other SSE adapter.
+          throwOnStreamErrorFrame(parsed, 'OpenRouter');
 
           try {
             const delta = parsed.choices?.[0]?.delta;

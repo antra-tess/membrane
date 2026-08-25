@@ -30,7 +30,7 @@ import {
   abortError,
   networkError,
 } from '../types/index.js';
-import { safeParseJson, createCombinedSignal, SSELineParser } from './utils.js';
+import { safeParseJson, createCombinedSignal, SSELineParser, throwOnStreamErrorFrame } from './utils.js';
 
 // ============================================================================
 // Types
@@ -212,8 +212,18 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         for (const data of dataLines) {
           if (data === '[DONE]') continue;
 
+          // Parse first; only JSON noise is ignorable. Everything after the
+          // parse must NOT be swallowed by the catch below.
+          let parsed: Record<string, any>;
           try {
-            const parsed = JSON.parse(data);
+            parsed = JSON.parse(data);
+          } catch {
+            continue; // Ignore parse errors (partial/keep-alive lines)
+          }
+
+          throwOnStreamErrorFrame(parsed, this.name);
+
+          try {
             const delta = parsed.choices?.[0]?.delta;
 
             if (delta?.content) {

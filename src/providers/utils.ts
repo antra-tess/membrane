@@ -1,3 +1,57 @@
+import { networkError } from '../types/errors.js';
+
+/**
+ * Throw when an SSE data frame carries a provider `error` payload.
+ *
+ * Every provider delivers mid-stream failures (upstream 429s, capacity loss,
+ * safety aborts) as a data line with an `error` object inside an HTTP-200
+ * stream. A loop that only looks for `choices`/`candidates` drops that frame,
+ * reaches EOF, and builds a well-formed success out of whatever arrived first:
+ * partial content, the initialised default finish reason, zero usage. Nothing
+ * distinguishes it from the model choosing to stop, so the truncated turn is
+ * persisted as a real one.
+ *
+ * The house ruled this a bug twice before it was hoisted here — once in
+ * openrouter.ts (tests/unit/openrouter-stream-error.test.ts) and once in
+ * openai-responses-api.ts — and both times the fix stayed in the one adapter
+ * that was being touched. This is the single site every SSE adapter calls.
+ */
+export function throwOnStreamErrorFrame(parsed: unknown, providerLabel: string): void {
+  if (typeof parsed !== 'object' || parsed === null) return;
+  const streamError = (parsed as { error?: unknown }).error;
+  if (!streamError) return;
+
+  const { code, message } = streamError as { code?: number | string; message?: string };
+  throw new Error(
+    `${providerLabel} stream error${code !== undefined ? ` (${code})` : ''}: ` +
+      `${message ?? JSON.stringify(streamError)}`
+  );
+}
+
+/**
+ * Throw when a stream reached EOF without ever observing a terminal event.
+ *
+ * The terminal signal (`finish_reason`, `[DONE]`, Anthropic's `message_delta`,
+ * Gemini's `finishReason`) must be an OBSERVATION, not a default. A graceful
+ * upstream close with no terminal frame — proxy/LB idle timeout, early FIN,
+ * a gateway truncating the body — otherwise yields a clean-looking
+ * `end_turn` over partial content plus a fabricated `finish_reason` that never
+ * came off the wire. Abrupt resets already reject the read; graceful ones did
+ * not. Retryable by construction: the request was never answered in full.
+ */
+export function assertTerminalEventObserved(
+  sawTerminalEvent: boolean,
+  providerLabel: string,
+  rawRequest?: unknown
+): void {
+  if (sawTerminalEvent) return;
+  throw networkError(
+    `${providerLabel} stream ended before a terminal event (connection dropped mid-stream)`,
+    undefined,
+    rawRequest
+  );
+}
+
 /**
  * Safely parse a JSON string, returning an empty object on failure.
  * Used for tool call arguments which may be malformed from streaming.
