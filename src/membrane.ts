@@ -35,6 +35,7 @@ import {
   isOverloadedError,
   isTextContent,
   isAbortedResponse,
+  unsupportedError,
 } from './types/index.js';
 import type { BuildResult } from './formatters/types.js';
 import {
@@ -248,6 +249,20 @@ export class Membrane {
     // If streaming is explicitly disabled on the request, fall back to complete()
     // and synthesize the streaming callbacks from the full response
     if (request.streaming === false) {
+      // complete() has no tool loop, and neither branch of this fallback can
+      // build one: honouring onToolCalls here would mean re-implementing the
+      // whole XML/native continuation machinery. Silently dropping it turned
+      // a working agent into one that narrates tool calls it never makes —
+      // the raw <function_calls> XML lands in the returned text and the turn
+      // ends. Refuse where the option is passed, before spending a call.
+      if (options.onToolCalls) {
+        throw unsupportedError(
+          'stream() cannot execute tools with streaming: false — the non-streaming ' +
+          'fallback routes to complete(), which has no tool loop, so onToolCalls ' +
+          'would never run. Leave streaming enabled (or drive the loop yourself ' +
+          'with complete() per round).'
+        );
+      }
       const response = await this.complete(request, options);
       // Synthesize onChunk callbacks so callers that depend on them still work
       if (options.onChunk && 'content' in response) {
