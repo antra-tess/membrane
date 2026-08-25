@@ -23,7 +23,6 @@ import type {
   ToolResult,
   ToolContext,
   RetryConfig,
-  ToolMode,
   ToolDefinition,
 } from './types/index.js';
 import { lastCacheableBlockIndex } from './formatters/native.js';
@@ -248,8 +247,8 @@ export class Membrane {
       return response;
     }
 
-    // Determine tool mode
-    const toolMode = this.resolveToolMode(request);
+    // Determine tool mode against the formatter that will build the request
+    const toolMode = this.resolveToolMode(request, options.formatter ?? this.formatter);
     const useNative = toolMode === 'native' && !!request.tools && request.tools.length > 0;
 
     // Overloaded (529) pre-emission retry. The streaming paths have no retry
@@ -322,18 +321,43 @@ export class Membrane {
   }
 
   /**
-   * Determine the effective tool mode
+   * Determine the effective tool mode.
+   *
+   * THE single source of truth for the mode: both complete() (via
+   * transformRequest → BuildOptions.toolMode) and the streaming paths (via
+   * their native-vs-XML path choice) resolve here, so a given request resolves
+   * to the same mode whichever entry point it arrives through.
+   *
+   * Precedence, strongest first:
+   *   1. an explicit non-'auto' `request.toolMode`
+   *   2. the mode the BUILDING formatter was explicitly constructed with
+   *      (`AnthropicXmlFormatter({ toolMode: 'native' })`) — a caller's stated
+   *      choice, not a derivation
+   *   3. formatter/provider derivation
+   *
+   * `formatter` is the formatter that will actually build the request — a
+   * per-request override (`CompleteOptions.formatter` / `StreamOptions.formatter`)
+   * when one is given — because resolving against the instance formatter while
+   * building with another is exactly the split this method exists to prevent.
    */
-  private resolveToolMode(request: NormalizedRequest): ToolMode {
+  private resolveToolMode(
+    request: NormalizedRequest,
+    formatter: PrefillFormatter = this.formatter
+  ): 'xml' | 'native' {
     // Explicit mode takes precedence
     if (request.toolMode && request.toolMode !== 'auto') {
       return request.toolMode;
     }
 
+    // A formatter constructed with an explicit mode states its caller's choice
+    if (formatter.configuredToolMode) {
+      return formatter.configuredToolMode;
+    }
+
     // Auto mode: choose based on formatter
     // NativeFormatter → native tools via API
     // AnthropicXmlFormatter (default) → XML tools in prefill
-    if (this.formatter.name === 'native' || this.formatter.name === 'openai-responses') {
+    if (formatter.name === 'native' || formatter.name === 'openai-responses') {
       return 'native';
     }
 
@@ -1755,6 +1779,10 @@ export class Membrane {
       participantMode: 'multiuser',
       assistantParticipant: request.assistantParticipant ?? this.config.assistantParticipant ?? 'Claude',
       tools: request.tools,
+      // One resolution for every entry point: complete() used to build from the
+      // formatter's constructor-time mode alone, so request.toolMode was a
+      // second, disconnected source of truth on this path.
+      toolMode: this.resolveToolMode(request, activeFormatter),
       thinking: request.config.thinking,
       systemPrompt: request.system,
       promptCaching: request.promptCaching ?? this.config.defaultPromptCaching ?? true, // Default true for backward compat
