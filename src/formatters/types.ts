@@ -136,7 +136,6 @@ export type NormalizeEvent =
       recoveredChars: number;
     }
   | { kind: 'pending_in_flight'; toolUseId: string }
-  | { kind: 'cache_suppressed_for_synthetic'; envelopeIndex: number }
   | {
       /**
        * Fires when the first envelope after re-roling is assistant and a

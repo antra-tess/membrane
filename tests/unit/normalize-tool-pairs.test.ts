@@ -492,97 +492,71 @@ describe('normalizeToolPairs', () => {
     });
   });
 
-  describe('cache-control suppression', () => {
-    it('strips cache_control from blocks at-or-after a synthetic envelope', () => {
-      const cached = (block: ProviderBlock): ProviderBlock => ({
-        ...block,
-        cache_control: { type: 'ephemeral' },
-      });
-      const input: ProviderMessage[] = [
-        user(t('q')),
-        assistant(u('A')),
-        // No matching result for A → will synthesize at envelope index 2.
-        user(cached(t('this would be a cache breakpoint'))),
-        assistant(t('continuing')),
-      ];
-      const { events, onEvent } = collectEvents();
-      const out = normalize(input, { onEvent });
-
-      // The synthetic was inserted in the user envelope at index 2.
-      // After phase 5.5, no block at index >= 2 should carry cache_control.
-      for (let i = 2; i < out.messages.length; i++) {
-        for (const block of out.messages[i]!.content) {
-          expect(block).not.toHaveProperty('cache_control');
-        }
-      }
-      expect(events.some((e) => e.kind === 'cache_suppressed_for_synthetic')).toBe(true);
+  describe('cache markers survive stranded-call synthesis (F17)', () => {
+    const cached = (block: ProviderBlock): ProviderBlock => ({
+      ...block,
+      cache_control: { type: 'ephemeral' },
     });
 
-    it('cache_suppressed_for_synthetic.envelopeIndex stays correct after phase-7 prepend', () => {
-      // Regression: when phase 5 synthesizes a [pending] result AND phase 7
-      // prepends a [continuing] envelope (both fire for an assistant-first
-      // input with an unmatched tool_use), the cache-suppression event's
-      // envelopeIndex must refer to the FINAL output array, not the
-      // pre-phase-7 working array.
-      const cached = (block: ProviderBlock): ProviderBlock => ({
-        ...block,
-        cache_control: { type: 'ephemeral' },
-      });
+    it('keeps cache_control at and after a synthetic-bearing envelope', () => {
+      // The strip's premise was that synthetic bytes get rewritten when the
+      // real result lands. Phase 5 only ever synthesizes for an id the caller
+      // did NOT declare pending — i.e. a stranded call — and its `[pending]`
+      // payload is a fixed literal reproduced identically on every later
+      // compile. Nothing invalidates, so nothing needed protecting, and the
+      // strip cost the whole remaining conversation's prompt cache for as
+      // long as the stranded tool_use stayed in the window.
       const input: ProviderMessage[] = [
-        // Assistant-first (triggers phase 7) with an orphan tool_use
-        // (triggers phase 5 synthesis + phase 5.5 cache suppression).
-        assistant(u('A')),
-        user(cached(t('would-be cache breakpoint after the synthetic'))),
+        user(t('go')),
+        assistant(u('ite1')),
+        user(cached(t('this is a cache breakpoint'))),
+        assistant(t('continuing')),
+      ];
+      const out = normalize(input);
+
+      const surviving = out.messages
+        .flatMap((m) => m.content)
+        .filter((b) => 'cache_control' in b);
+      expect(surviving).toHaveLength(1);
+    });
+
+    it('emits no cache-suppression telemetry', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(cached(t('this is a cache breakpoint'))),
         assistant(t('continuing')),
       ];
       const { events, onEvent } = collectEvents();
-      const out = normalize(input, { onEvent });
+      normalize(input, { onEvent });
 
-      // Both events must fire.
-      const leadEv = events.find((e) => e.kind === 'leading_user_synthesized');
-      const cacheEv = events.find((e) => e.kind === 'cache_suppressed_for_synthetic') as
-        | { envelopeIndex: number }
-        | undefined;
-      expect(leadEv).toBeDefined();
-      expect(cacheEv).toBeDefined();
+      expect(events.map((e) => e.kind)).not.toContain('cache_suppressed_for_synthetic');
+      expect(events.some((e) => e.kind === 'synthetic_pending_result')).toBe(true);
+    });
 
-      // The cache-suppressed envelope index must point at an envelope
-      // actually containing a synthetic tool_result in the FINAL output.
-      const idx = cacheEv!.envelopeIndex;
-      expect(idx).toBeGreaterThanOrEqual(0);
-      expect(idx).toBeLessThan(out.messages.length);
-      const targetEnv = out.messages[idx]!;
-      const hasSyntheticPending = targetEnv.content.some(
-        (b) =>
-          b.type === 'tool_result' &&
-          (b as ProviderBlock & { content?: unknown }).content === '[pending]',
-      );
-      expect(hasSyntheticPending).toBe(true);
+    it('the synthetic payload is byte-stable across compiles', () => {
+      // The property the strip was defending against the absence of.
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(cached(t('this is a cache breakpoint'))),
+        assistant(t('continuing')),
+      ];
+      const first = normalize(input);
+      const second = normalize(input);
 
-      // And it must NOT point at the synthesized [continuing] user turn.
-      expect(targetEnv.role).toBe('user');
-      const isContinuing =
-        targetEnv.content.length === 1 &&
-        targetEnv.content[0]!.type === 'text' &&
-        (targetEnv.content[0] as ProviderBlock & { text: string }).text === '[continuing]';
-      expect(isContinuing).toBe(false);
+      expect(JSON.stringify(first.messages)).toBe(JSON.stringify(second.messages));
     });
 
     it('leaves cache_control alone when no synthetic was needed', () => {
-      const cached = (block: ProviderBlock): ProviderBlock => ({
-        ...block,
-        cache_control: { type: 'ephemeral' },
-      });
       const input: ProviderMessage[] = [
         user(cached(t('cache me'))),
         assistant(t('ok')),
       ];
-      const { events, onEvent } = collectEvents();
-      const out = normalize(input, { onEvent });
+      const out = normalize(input);
 
       const firstBlock = out.messages[0]!.content[0]! as ProviderBlock & { cache_control?: unknown };
       expect(firstBlock.cache_control).toBeDefined();
-      expect(events.some((e) => e.kind === 'cache_suppressed_for_synthetic')).toBe(false);
     });
   });
 

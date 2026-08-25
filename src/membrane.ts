@@ -30,6 +30,7 @@ import { lastCacheableBlockIndex } from './formatters/native.js';
 import {
   DEFAULT_RETRY_CONFIG,
   MembraneError,
+  MembraneNotReadyError,
   classifyError,
   isOverloadedError,
   isTextContent,
@@ -1362,11 +1363,15 @@ export class Membrane {
     // tool_results to `messages`. Any unmatched tool_use that reaches
     // this splice is upstream stranding (the bug class this fix exists
     // to catch) — `[pending]` is exactly the right synthesis.
-    // A synthesized [pending] tool_result's bytes are rewritten when the
-    // real result lands — the floating-marker block below must not cache
-    // past one. `synthetic_pending_result` (not the downstream
-    // cache_suppressed_for_synthetic, which only fires when a marker was
-    // actually stripped) is the root condition.
+    //
+    // The floating-marker block below still withholds its marker when a
+    // synthesis happened, keyed on `synthetic_pending_result`. Note this is
+    // now a caution about a rewrite that does not actually occur: the
+    // `[pending]` payload is a fixed literal, byte-identical on every later
+    // compile, which is why the normalizer's own cache-suppression phase was
+    // removed. Two other repairs — orphan textification and the converse
+    // sweep's stray handling — also rewrite the prefix and fire DIFFERENT
+    // events, so this guard does not cover them.
     let pendingResultSynthesized = false;
     const normalized = normalizeToolPairs(providerMessages, {
       onEvent: (e) => {
@@ -1764,6 +1769,21 @@ export class Membrane {
       contextPrefix: request.contextPrefix,
       prefillUserMessage: request.prefillUserMessage,
     });
+
+    // Readiness gate. `BuildResult.ready` is the tool-pair normalizer's
+    // answer to `BuildOptions.pendingToolCallIds`: false means a tool_use in
+    // this build has no result yet and the caller declared that id still in
+    // flight, so the normalizer deliberately did NOT synthesize a `[pending]`
+    // over it. The flag used to be written by two formatters and read
+    // nowhere, which made membrane's own paths safe only by accident (they
+    // never populate the pending set) while any consumer-supplied formatter
+    // following that example shipped an unmatched tool_use — the exact 400
+    // the normalizer exists to prevent, reached by using its documented
+    // option. This is the one place that ships bytes, so this is where the
+    // flag is read.
+    if (buildResult.ready === false) {
+      throw new MembraneNotReadyError(activeFormatter.name);
+    }
 
     // Byte-wall policy point (2026-07-12): transformRequest serves BOTH
     // complete() and the streaming path through EVERY adapter. Oversize

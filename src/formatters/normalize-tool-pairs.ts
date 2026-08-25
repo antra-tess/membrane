@@ -140,37 +140,9 @@ export function normalizeToolPairs(
   const ready = orphanRes.ready;
 
   // ---------------------------------------------------------------------
-  // Phase 5.5: suppress cache_control on/after any envelope containing
-  // a synthetic block, so cache keys don't get invalidated when the
-  // real result arrives in a later round.
-  //
-  // The suppression itself happens here (we know which envelope is the
-  // first synthetic by its position in the current array), but the
-  // `cache_suppressed_for_synthetic` telemetry is deferred until after
-  // phase 6 (which can drop empty envelopes before the synthetic) and
-  // phase 7 (which can prepend a `[continuing]` envelope, shifting
-  // everything by +1). The event's `envelopeIndex` must refer to the
-  // final output array so consumers can index back into it reliably.
-  // We pin the envelope by reference and recompute the index after
-  // those phases settle.
-  // ---------------------------------------------------------------------
-  let pendingCacheSuppressionRef: Envelope | null = null;
-  if (orphanRes.firstSyntheticEnvelope !== null) {
-    const ref = envelopes[orphanRes.firstSyntheticEnvelope]!;
-    const suppressed = suppressCacheControlFrom(envelopes, orphanRes.firstSyntheticEnvelope);
-    if (suppressed) {
-      pendingCacheSuppressionRef = ref;
-    }
-  }
-
-  // ---------------------------------------------------------------------
   // Phase 6: drop empty envelopes (can arise from phase 4 dropping or
   // phase 3 hoisting). We deliberately do NOT merge consecutive
   // same-role envelopes here — that's the formatter's job.
-  //
-  // The synthetic-bearing envelope (held by `pendingCacheSuppressionRef`)
-  // cannot be dropped here — phase 5 unshifts its synthetic block onto
-  // that envelope's content, so it's guaranteed non-empty.
   // ---------------------------------------------------------------------
   envelopes = envelopes.filter((e) => e.content.length > 0);
 
@@ -212,28 +184,6 @@ export function normalizeToolPairs(
     const leadingBlockTypes = envelopes[0]!.content.map((b) => b.type);
     envelopes.unshift({ role: 'user', content: [{ type: 'text', text: '[continuing]' }] });
     onEvent({ kind: 'leading_user_synthesized', originalFirstRole, leadingBlockTypes });
-  }
-
-  // ---------------------------------------------------------------------
-  // Deferred phase 5.5 telemetry: emit `cache_suppressed_for_synthetic`
-  // now that index-mutating phases (6, 7) have settled. The envelope
-  // reference pinned in phase 5.5 survives both — phase 6 can't drop it
-  // (the synthetic block keeps it non-empty), and phase 7 either leaves
-  // it in place or shifts it by +1 via unshift.
-  // ---------------------------------------------------------------------
-  if (pendingCacheSuppressionRef !== null) {
-    const envelopeIndex = envelopes.indexOf(pendingCacheSuppressionRef);
-    // Assertion: indexOf must succeed. Phases 6 and 7 only filter/prepend;
-    // neither can remove an envelope holding a synthetic block.
-    if (envelopeIndex < 0) {
-      throw new MembraneNormalizerError(
-        `Phase 5.5 envelope reference vanished between phase 6 and phase 7 — ` +
-          `internal bug: synthetic-bearing envelope should be reachable after both phases.`,
-        input.map(cloneMsg),
-        envelopes.map(toProviderMessage),
-      );
-    }
-    onEvent({ kind: 'cache_suppressed_for_synthetic', envelopeIndex });
   }
 
   // ---------------------------------------------------------------------
@@ -661,7 +611,6 @@ function evictInterlopers(
 interface OrphanResolution {
   envelopes: Envelope[];
   ready: boolean;
-  firstSyntheticEnvelope: number | null;
 }
 
 function resolveOrphans(
@@ -670,7 +619,6 @@ function resolveOrphans(
   onEvent: (e: NormalizeEvent) => void,
 ): OrphanResolution {
   let ready = true;
-  let firstSyntheticEnvelope: number | null = null;
 
   // First pass: textify any tool_result whose tool_use never appeared
   // anywhere in the message list (orphan result).
@@ -747,7 +695,6 @@ function resolveOrphans(
       // does not match the order it made the calls.
       nextEnv.content.splice(syntheticInsertionIndex(nextEnv, useIds, useIdIndex), 0, synth);
       presentIds.add(useId);
-      if (firstSyntheticEnvelope === null) firstSyntheticEnvelope = nextIdx;
       onEvent({
         kind: 'synthetic_pending_result',
         toolUseId: useId,
@@ -756,7 +703,7 @@ function resolveOrphans(
     }
   }
 
-  return { envelopes, ready, firstSyntheticEnvelope };
+  return { envelopes, ready };
 }
 
 /**
@@ -779,36 +726,6 @@ function syntheticInsertionIndex(
     if (at >= 0) return at + 1;
   }
   return 0;
-}
-
-function suppressCacheControlFrom(
-  envelopes: Envelope[],
-  startIndex: number,
-): boolean {
-  // Strip cache_control from blocks at-or-after startIndex. We must NOT
-  // mutate the caller's input blocks (envelopes share references with
-  // the input via rebuildEnvelopes), so clone-on-write: replace any
-  // block carrying cache_control with a shallow copy that omits it.
-  // The envelope's content array is replaced wholesale via .map; this
-  // is the only place in the normalizer that creates new block objects
-  // out of existing ones (synthetics aside).
-  //
-  // Returns whether any block was actually suppressed, so the caller
-  // can decide whether to emit telemetry. Emission is deferred until
-  // after phases 6 and 7 settle the final envelope ordering.
-  let suppressed = false;
-  for (let i = startIndex; i < envelopes.length; i++) {
-    const env = envelopes[i]!;
-    env.content = env.content.map((block) => {
-      if (!('cache_control' in block)) return block;
-      suppressed = true;
-      const { cache_control: _drop, ...rest } = block as ProviderBlock & {
-        cache_control?: unknown;
-      };
-      return rest as ProviderBlock;
-    });
-  }
-  return suppressed;
 }
 
 function validate(
