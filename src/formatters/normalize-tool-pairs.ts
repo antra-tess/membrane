@@ -490,16 +490,22 @@ function hoistMatchingResults(
         .filter((id): id is string => typeof id === 'string'),
     );
 
-    for (const useId of useIds) {
+    for (let useIdIndex = 0; useIdIndex < useIds.length; useIdIndex++) {
+      const useId = useIds[useIdIndex]!;
       if (presentIds.has(useId)) continue;
 
       // Search downstream envelopes for this id; hoist the first match.
       const found = removeFirstMatchingResult(envelopes, nextIdx + 1, useId);
       if (found) {
-        // Place the hoisted result at the front of nextEnv to keep
-        // tool_results adjacent to (and before) any interloping content
-        // already present.
-        nextEnv.content.unshift(found.block);
+        // Place the hoisted result at its own call's position, which is the
+        // front while no earlier call's result has landed — so hoisted
+        // results still precede any interloping content already present, but
+        // a batch of them no longer comes back reversed.
+        nextEnv.content.splice(
+          callOrderInsertionIndex(nextEnv, useIds, useIdIndex),
+          0,
+          found.block,
+        );
         presentIds.add(useId);
         onEvent({
           kind: 'tool_result_hoisted',

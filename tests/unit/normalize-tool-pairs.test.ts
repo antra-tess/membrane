@@ -1026,6 +1026,47 @@ describe('normalizeToolPairs', () => {
   });
 
   // --------------------------------------------------------------------------
+  // Phase 3's hoist had the same front-insertion defect as the converse sweep
+  // above, and predates this branch. Found while reproducing that one.
+  // --------------------------------------------------------------------------
+
+  describe('phase 3 hoist preserves call order', () => {
+    it('hoists a bundled pair into the cycle as [ite1, ite2], not reversed', () => {
+      // Both results live downstream of their cycle, so phase 3 pulls them
+      // back — one unshift each, which reversed the pair.
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1'), u('ite2')),
+        user(t('zz-interlude')),
+        assistant(t('zz-ok')),
+        user(r('ite1', 'zz-first payload'), r('ite2', 'zz-second payload')),
+      ];
+      const out = normalize(input);
+
+      const cycle = out.messages.find((m) => resultIds(m.content).length === 2)!;
+      expect(resultIds(cycle.content)).toEqual(['ite1', 'ite2']);
+    });
+
+    it('threads hoisted results around one that already landed', () => {
+      // ite2's result is already in the cycle; ite1 and ite3 are hoisted in
+      // around it, and must land on either side of it by call position.
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1'), u('ite2'), u('ite3')),
+        user(r('ite2', 'zz-second payload')),
+        assistant(t('zz-ok')),
+        user(r('ite3', 'zz-third payload'), r('ite1', 'zz-first payload')),
+      ];
+      const { events, onEvent } = collectEvents();
+      const out = normalize(input, { onEvent });
+
+      const cycle = out.messages.find((m) => resultIds(m.content).length === 3)!;
+      expect(resultIds(cycle.content)).toEqual(['ite1', 'ite2', 'ite3']);
+      expect(events.some((e) => e.kind === 'synthetic_pending_result')).toBe(false);
+    });
+  });
+
+  // --------------------------------------------------------------------------
   // Entry guards. A producer defect must refuse BEFORE any phase rebuilds
   // envelopes, so the failure is typed, early, and independent of whether the
   // input happened to need repair. (Review findings F14, F15a, F16.)
