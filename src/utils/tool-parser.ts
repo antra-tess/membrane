@@ -430,6 +430,18 @@ export function parseAccumulatedIntoBlocks(
   blocks: ContentBlock[];
   toolCalls: ToolCall[];
   toolResults: ToolResult[];
+  /**
+   * The text ends inside a tool block — an opener with no closer, or a cut
+   * mid-tag. The membrane loop does not resume on a length stop, so this is
+   * what a max_tokens truncation leaves behind, and persisting it bare lets the
+   * next round's closer splice onto the stale opener.
+   */
+  unclosedToolBlock: boolean;
+  /**
+   * function_calls blocks that yielded no invokes at all. Always a defect —
+   * never how a well-formed block ends.
+   */
+  emptyToolBlocks: number;
 } {
   // If we're starting inside a block from prefill, prepend a synthetic opening tag
   // so the regex can match the closing tag properly
@@ -444,6 +456,7 @@ export function parseAccumulatedIntoBlocks(
   const blocks: ContentBlock[] = [];
   const toolCalls: ToolCall[] = [];
   const toolResults: ToolResult[] = [];
+  let emptyToolBlocks = 0;
 
   // Track positions of all special blocks to extract plain text between them
   type BlockPosition = {
@@ -519,7 +532,9 @@ export function parseAccumulatedIntoBlocks(
       });
     }
 
-    if (blockToolCalls.length > 0) {
+    if (blockToolCalls.length === 0) {
+      emptyToolBlocks++;
+    } else {
       positions.push({
         start: resolvedBlock.start,
         end: resolvedBlock.end,
@@ -672,7 +687,13 @@ export function parseAccumulatedIntoBlocks(
     }
   }
 
-  return { blocks, toolCalls, toolResults };
+  return {
+    blocks,
+    toolCalls,
+    toolResults,
+    unclosedToolBlock: endsWithPartialToolBlock(processedText),
+    emptyToolBlocks,
+  };
 }
 
 // ============================================================================
