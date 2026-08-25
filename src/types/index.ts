@@ -74,6 +74,7 @@ export type {
   StopReason,
   BasicUsage,
   DetailedUsage,
+  DiscardedAttemptsUsage,
   CostBreakdown,
   StopInfo,
   ModelInfo,

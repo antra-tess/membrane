@@ -16,6 +16,7 @@ import type {
   CompleteOptions,
   BasicUsage,
   DetailedUsage,
+  DiscardedAttemptsUsage,
   StopReason,
   TimingInfo,
   CacheInfo,
@@ -109,6 +110,10 @@ export class Membrane {
     // refusal is a successful HTTP call with an unwanted verdict, and letting
     // it consume error retries would couple two unrelated budgets.
     let refusalRetriesUsed = 0;
+    // Spend on attempts we threw away. A refused attempt is a completed,
+    // billed HTTP call; reporting only the surviving attempt's usage
+    // under-reports the turn by one full call per retry.
+    let discardedUsage: DiscardedAttemptsUsage | undefined;
 
     while (true) {
       attempts++;
@@ -154,7 +159,19 @@ export class Membrane {
           refusalRetriesUsed < Math.max(0, options.refusalRetries ?? 0)
         ) {
           refusalRetriesUsed++;
+          discardedUsage = this.mergeDiscardedAttempts(
+            discardedUsage,
+            this.discardedAttemptFrom(response.usage)
+          );
           continue;
+        }
+
+        // Report what the discarded attempts cost. Set BEFORE afterResponse
+        // so a hook that logs spend sees the whole turn, not just the
+        // attempt that stands.
+        if (discardedUsage) {
+          response.details.usage.discardedAttempts =
+            this.pricedDiscardedAttempts(discardedUsage, request.config.model);
         }
 
         // Call afterResponse hook
@@ -1845,7 +1862,9 @@ export class Membrane {
        */
       onRetrying?: (info: { attempt: number; maxAttempts: number; category?: string }) => void;
     }
-  ) {
+  ): Promise<
+    import('./types/provider.js').ProviderResponse & { discardedUsage?: DiscardedAttemptsUsage }
+  > {
     // Strip `normalizedRequest` before forwarding to the adapter — it's
     // not part of `ProviderRequestOptions` and TypeScript's structural
     // compatibility won't catch the excess field (checked only on object
@@ -1858,10 +1877,20 @@ export class Membrane {
     // attempt, so they require BOTH a budget and an onRetrying hook.
     const maxAttempts = onRetrying ? Math.max(0, refusalRetries ?? 0) : 0;
     let retried = 0;
+    // Every re-issued attempt was a completed, billed provider call. The
+    // caller's usage accumulator only ever sees the surviving result, so the
+    // abandoned spend rides back out on the result itself.
+    let discardedUsage: DiscardedAttemptsUsage | undefined;
     while (true) {
       const result = await this.adapter.stream(finalRequest, callbacks, adapterOptions);
-      if (result.stopReason !== 'refusal' || retried >= maxAttempts) return result;
+      if (result.stopReason !== 'refusal' || retried >= maxAttempts) {
+        return discardedUsage ? { ...result, discardedUsage } : result;
+      }
       retried++;
+      discardedUsage = this.mergeDiscardedAttempts(
+        discardedUsage,
+        this.discardedAttemptFrom(result.usage)
+      );
       const category = (result.raw as { response?: { stop_details?: { category?: string } } } | undefined)
         ?.response?.stop_details?.category;
       onRetrying!({ attempt: retried, maxAttempts, category });
@@ -2234,6 +2263,52 @@ export class Membrane {
         response: rawResponse,
       },
     };
+  }
+
+  /**
+   * Fold one discarded (billed but abandoned) attempt's usage into a carry.
+   * Returns a NEW object so a caller's earlier snapshot is never mutated.
+   */
+  private mergeDiscardedAttempts(
+    carry: DiscardedAttemptsUsage | undefined,
+    add: DiscardedAttemptsUsage | undefined
+  ): DiscardedAttemptsUsage | undefined {
+    if (!add) return carry;
+    const next: DiscardedAttemptsUsage = carry
+      ? { ...carry }
+      : { attempts: 0, inputTokens: 0, outputTokens: 0 };
+    next.attempts += add.attempts;
+    next.inputTokens += add.inputTokens;
+    next.outputTokens += add.outputTokens;
+    if (add.cacheCreationTokens) {
+      next.cacheCreationTokens = (next.cacheCreationTokens ?? 0) + add.cacheCreationTokens;
+    }
+    if (add.cacheReadTokens) {
+      next.cacheReadTokens = (next.cacheReadTokens ?? 0) + add.cacheReadTokens;
+    }
+    return next;
+  }
+
+  /** One provider call's usage as a single-attempt discard record. */
+  private discardedAttemptFrom(usage: DetailedUsage | BasicUsage | undefined): DiscardedAttemptsUsage {
+    const detailed = (usage ?? { inputTokens: 0, outputTokens: 0 }) as DetailedUsage;
+    return {
+      attempts: 1,
+      inputTokens: detailed.inputTokens ?? 0,
+      outputTokens: detailed.outputTokens ?? 0,
+      ...(detailed.cacheCreationTokens ? { cacheCreationTokens: detailed.cacheCreationTokens } : {}),
+      ...(detailed.cacheReadTokens ? { cacheReadTokens: detailed.cacheReadTokens } : {}),
+    };
+  }
+
+  /** Price the discarded spend so a caller can read it without re-deriving. */
+  private pricedDiscardedAttempts(
+    discarded: DiscardedAttemptsUsage | undefined,
+    model: string
+  ): DiscardedAttemptsUsage | undefined {
+    if (!discarded) return undefined;
+    const estimatedCost = this.estimateCost(discarded, model);
+    return estimatedCost ? { ...discarded, estimatedCost } : discarded;
   }
 
   private mapStopReason(providerReason: string): StopReason {
@@ -3041,6 +3116,8 @@ export class Membrane {
     let allTextAccumulated = '';
     const executedToolCalls: ToolCall[] = [];
     const executedToolResults: ToolResult[] = [];
+    // Spend on refusal attempts this turn threw away (see streamOnce).
+    let discardedUsage: DiscardedAttemptsUsage | undefined;
 
     let messages = [...request.messages];
     let allContentBlocks: ContentBlock[] = [];
@@ -3173,6 +3250,10 @@ export class Membrane {
         lastStopReason = this.mapStopReason(streamResult.stopReason);
         lastStopSequence = streamResult.stopSequence ?? undefined;
 
+        // Attempts this round re-issued past a refusal are billed calls whose
+        // output was discarded — carry their spend to the final response.
+        discardedUsage = this.mergeDiscardedAttempts(discardedUsage, streamResult.discardedUsage);
+
         // Accumulate usage (including cache metrics)
         totalUsage.inputTokens += streamResult.usage.inputTokens;
         totalUsage.outputTokens += streamResult.usage.outputTokens;
@@ -3301,7 +3382,12 @@ export class Membrane {
             triggeredSequence: lastStopSequence,
             wasTruncated: lastStopReason === 'max_tokens',
           },
-          usage: { ...totalUsage },
+          usage: {
+            ...totalUsage,
+            ...(discardedUsage
+              ? { discardedAttempts: this.pricedDiscardedAttempts(discardedUsage, request.config.model) }
+              : {}),
+          },
           timing: {
             totalDurationMs: durationMs,
             attempts: 1,

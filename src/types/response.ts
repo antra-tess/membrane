@@ -42,6 +42,22 @@ export interface DetailedUsage extends BasicUsage {
   
   /** Estimated cost breakdown */
   estimatedCost?: CostBreakdown;
+
+  /**
+   * Spend on provider calls whose output was thrown away — today, refusal
+   * retries. Those attempts were completed, billed HTTP calls; the response
+   * describes only the attempt that STANDS, so without this the real cost of
+   * a turn is invisible. Absent when nothing was discarded.
+   *
+   * Reported on `details.usage` only: the top-level `usage` stays the
+   * surviving attempt's, so existing consumers keep their meaning.
+   */
+  discardedAttempts?: DiscardedAttemptsUsage;
+}
+
+export interface DiscardedAttemptsUsage extends DetailedUsage {
+  /** How many billed-but-abandoned provider calls are summed here. */
+  attempts: number;
 }
 
 export interface CostBreakdown {
