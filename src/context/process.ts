@@ -467,16 +467,7 @@ export function truncateMessages(
     return { kept: messages, dropped: 0 };
   }
   
-  let startIdx = Math.max(0, ...candidateStartIndices);
-  
-  // Never open the window on a tool_result whose tool_use was just dropped:
-  // the wire-level normalizer only covers two of the four request builders,
-  // and the default (XML prefill) path ships the orphan verbatim.
-  startIdx = snapStartIndexToCycleBoundary(messages, startIdx);
-  
-  // Floor the kept window at one message. An empty messages[] is rejected by
-  // every provider; residual overflow is reported through ContextInfo instead.
-  startIdx = Math.min(startIdx, messages.length - 1);
+  const startIdx = resolveWindowStart(messages, Math.max(0, ...candidateStartIndices));
   
   return {
     kept: messages.slice(startIdx),
@@ -509,41 +500,83 @@ function startIndexForBudget(
 }
 
 /**
- * Advance a truncation start index past any message that would open the kept
- * window with an unmatched tool_result, so the cut lands on a clean
- * tool-cycle boundary. Only the head can be orphaned by a front cut, so the
- * scan stops at the first message that references no unseen tool_use.
+ * Resolve the index the kept window actually starts at: the deepest cut at or
+ * after the requested one whose window is both non-empty and free of
+ * tool_results whose tool_use was dropped.
+ *
+ * Snapping forward and flooring at one message used to be two independent
+ * steps that could undo each other. When the newest message is a tool_result,
+ * the forward snap runs off the end of the array and the floor pulls the index
+ * back onto that same orphan - so truncating a final tool cycle to one message
+ * kept exactly the result, which is what the snap exists to prevent. A cut that
+ * cannot go forward now walks BACKWARD to the call that opens the final cycle:
+ * the window overshoots the requested size (reported through
+ * ContextInfo.residualOverflow) rather than shipping a corrupt transcript.
  */
-function snapStartIndexToCycleBoundary(
+function resolveWindowStart(
   messages: MessageWithTokens[],
-  startIdx: number
+  desiredStartIdx: number
 ): number {
-  if (startIdx <= 0 || startIdx >= messages.length) {
-    return startIdx;
+  const lastIdx = messages.length - 1;
+  
+  if (desiredStartIdx <= 0) {
+    return 0;
   }
   
-  let idx = startIdx;
+  const windowIsCleanAt = markCleanWindowStarts(messages);
+  const cappedStartIdx = Math.min(desiredStartIdx, lastIdx);
   
-  while (idx < messages.length && opensWithOrphanToolResult(messages[idx]!.message)) {
-    idx++;
+  for (let idx = cappedStartIdx; idx <= lastIdx; idx++) {
+    if (windowIsCleanAt[idx]) {
+      return idx;
+    }
   }
   
-  return idx;
+  for (let idx = cappedStartIdx - 1; idx >= 0; idx--) {
+    if (windowIsCleanAt[idx]) {
+      return idx;
+    }
+  }
+  
+  // No clean boundary exists anywhere: the supplied history itself carries a
+  // tool_result whose tool_use is not in it. Dropping messages cannot repair
+  // that, so the requested cut stands, floored at one message.
+  return cappedStartIdx;
 }
 
-function opensWithOrphanToolResult(message: NormalizedMessage): boolean {
-  const toolUseIdsSeenInMessage = new Set<string>();
+/**
+ * For every index, whether the window starting there contains no tool_result
+ * whose tool_use is missing from it. A result is matched by a tool_use in an
+ * earlier message or earlier in its own message, so one backward pass carrying
+ * the still-unmatched result ids answers every index in linear time.
+ */
+function markCleanWindowStarts(messages: MessageWithTokens[]): boolean[] {
+  const windowIsCleanAt = new Array<boolean>(messages.length).fill(false);
+  const resultIdsAwaitingTheirCall = new Set<string>();
   
-  for (const block of message.content) {
-    if (block.type === 'tool_use') {
-      toolUseIdsSeenInMessage.add(block.id);
+  for (let idx = messages.length - 1; idx >= 0; idx--) {
+    const callIdsInMessage = new Set<string>();
+    const resultIdsNeedingAnEarlierCall: string[] = [];
+    
+    for (const block of messages[idx]!.message.content) {
+      if (block.type === 'tool_use') {
+        callIdsInMessage.add(block.id);
+      } else if (block.type === 'tool_result' && !callIdsInMessage.has(block.toolUseId)) {
+        resultIdsNeedingAnEarlierCall.push(block.toolUseId);
+      }
     }
-    if (block.type === 'tool_result' && !toolUseIdsSeenInMessage.has(block.toolUseId)) {
-      return true;
+    
+    for (const callId of callIdsInMessage) {
+      resultIdsAwaitingTheirCall.delete(callId);
     }
+    for (const resultId of resultIdsNeedingAnEarlierCall) {
+      resultIdsAwaitingTheirCall.add(resultId);
+    }
+    
+    windowIsCleanAt[idx] = resultIdsAwaitingTheirCall.size === 0;
   }
   
-  return false;
+  return windowIsCleanAt;
 }
 
 export function placeCacheMarkers(

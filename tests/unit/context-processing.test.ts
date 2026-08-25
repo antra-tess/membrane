@@ -539,3 +539,43 @@ describe('S2: retained markers are clamped to the module cap', () => {
     expect(output.state.cacheMarkers.length).toBe(3);
   });
 });
+
+// ---------------------------------------------------------------------------
+// S3 — the cycle snap and the one-message floor no longer undo each other
+// ---------------------------------------------------------------------------
+
+describe('S3: the kept window never opens on an orphan tool_result', () => {
+  it('keeps the whole final cycle when the target would keep only its result', () => {
+    const messages = zzToolCycles(2);
+    expect(messages.length).toBe(6);
+
+    const result = truncateMessages(withTokens(messages), undefined, 1, baseConfig());
+    const kept = result.kept.map((m) => m.message);
+
+    expect(orphanToolResultIds(kept)).toEqual([]);
+    expect(kept.map((m) => m.metadata?.sourceId)).toEqual(['ite2b', 'ite2c']);
+    expect(result.dropped).toBe(4);
+  });
+
+  it('reports the overshoot instead of stranding the result (processContext)', async () => {
+    const messages = zzToolCycles(2);
+
+    const output = await processContext(
+      mockMembrane(),
+      {
+        messages,
+        config: zzGenerationConfig,
+        context: baseConfig({ limits: { maxMessages: 1 } }),
+      },
+      null
+    );
+
+    expect(output.info.messagesKept).toBe(2);
+    expect(output.info.hardLimitHit).toBe(true);
+    expect(output.info.residualOverflow).toEqual({
+      unit: 'messages',
+      limit: 1,
+      actual: 2,
+    });
+  });
+});
