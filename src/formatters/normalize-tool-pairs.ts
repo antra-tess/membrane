@@ -118,6 +118,16 @@ export function normalizeToolPairs(
   envelopes = hoistMatchingResults(envelopes, onEvent);
 
   // ---------------------------------------------------------------------
+  // Phase 3.5: the converse sweep. Phase 3 asks "does every tool_use have
+  // its result in the next user envelope?"; nothing asked the mirror
+  // question, so a tool_result whose tool_use is NOT in the immediately-
+  // preceding assistant envelope passed every phase untouched — and phase
+  // 3 itself creates one such shape by hoisting a matching result into an
+  // envelope that already holds a non-matching one.
+  // ---------------------------------------------------------------------
+  envelopes = repairStrayResults(envelopes, onEvent);
+
+  // ---------------------------------------------------------------------
   // Phase 4: evict interlopers wedged between a tool_use and its result
   // ---------------------------------------------------------------------
   envelopes = evictInterlopers(envelopes, onEvent);
@@ -481,6 +491,94 @@ function hoistMatchingResults(
   return envelopes;
 }
 
+/**
+ * Enforce the converse of phase 3's rule: every tool_result must sit in the
+ * user envelope immediately following the assistant envelope that holds its
+ * tool_use. Three reachable shapes reach here unpaired:
+ *
+ *   A. out-of-order append — the result was written before its own cycle;
+ *   B. leading result — the window cut left it with no preceding envelope;
+ *   C. duplicate re-append — the same result arrives again after a later
+ *      turn (the module's doc names cancellations and stream restarts).
+ *
+ * A and B are RELOCATED into their own cycle's user envelope, which keeps
+ * the real payload as a tool_result and stops phase 5 from synthesizing a
+ * `[pending]` over a result that actually landed. C cannot be relocated
+ * without displacing the real result, so it is textified — content
+ * preserved, structure dropped. A result whose id appears nowhere is left
+ * alone here; phase 5's orphan pass owns that case.
+ */
+function repairStrayResults(
+  envelopes: Envelope[],
+  onEvent: (e: NormalizeEvent) => void,
+): Envelope[] {
+  const useEnvelopeOfId = new Map<string, number>();
+  for (let i = 0; i < envelopes.length; i++) {
+    const env = envelopes[i]!;
+    if (env.role !== 'assistant') continue;
+    for (const id of collectToolUseIds(env)) useEnvelopeOfId.set(id, i);
+  }
+  if (useEnvelopeOfId.size === 0) return envelopes;
+
+  for (let i = 0; i < envelopes.length; i++) {
+    const env = envelopes[i]!;
+    if (env.role !== 'user') continue;
+    const previous = envelopes[i - 1];
+    const idsPairedHere = new Set(
+      previous?.role === 'assistant' ? collectToolUseIds(previous) : [],
+    );
+
+    const kept: ProviderBlock[] = [];
+    for (const block of env.content) {
+      if (block.type !== 'tool_result') {
+        kept.push(block);
+        continue;
+      }
+      const id = getToolUseId(block);
+      if (typeof id !== 'string' || idsPairedHere.has(id)) {
+        kept.push(block);
+        continue;
+      }
+      const useEnvelope = useEnvelopeOfId.get(id);
+      if (useEnvelope === undefined) {
+        // Id appears nowhere — phase 5's orphan textification owns it.
+        kept.push(block);
+        continue;
+      }
+
+      const cycleEnvelope = envelopes[useEnvelope + 1];
+      const cycleIsOpen =
+        cycleEnvelope !== undefined &&
+        cycleEnvelope.role === 'user' &&
+        !cycleEnvelope.content.some(
+          (b) => b.type === 'tool_result' && getToolUseId(b) === id,
+        );
+
+      if (cycleIsOpen) {
+        cycleEnvelope!.content.unshift(block);
+        onEvent({
+          kind: 'tool_result_hoisted',
+          toolUseId: id,
+          fromEnvelope: i,
+          toEnvelope: useEnvelope + 1,
+        });
+        continue;
+      }
+
+      const recovered = renderResultContent(block);
+      onEvent({
+        kind: 'stray_tool_result_textified',
+        toolUseId: id,
+        fromEnvelope: i,
+        recoveredChars: recovered.length,
+      });
+      kept.push({ type: 'text', text: `[duplicate tool_result for ${id}]: ${recovered}` });
+    }
+    env.content = kept;
+  }
+  return envelopes;
+}
+
 function evictInterlopers(
   envelopes: Envelope[],
   onEvent: (e: NormalizeEvent) => void,
@@ -573,12 +671,15 @@ function resolveOrphans(
       if (block.type !== 'tool_result') return block;
       const id = getToolUseId(block);
       if (typeof id !== 'string' || !allUseIds.has(id)) {
-        const inner = (block as { content?: unknown }).content;
-        const innerText = typeof inner === 'string' ? inner : '';
-        onEvent({ kind: 'orphan_tool_result_textified', toolUseId: id ?? '<missing>' });
+        const recovered = renderResultContent(block);
+        onEvent({
+          kind: 'orphan_tool_result_textified',
+          toolUseId: id ?? '<missing>',
+          recoveredChars: recovered.length,
+        });
         return {
           type: 'text',
-          text: `[orphan tool_result for ${id ?? '<missing>'}]: ${innerText}`,
+          text: `[orphan tool_result for ${id ?? '<missing>'}]: ${recovered}`,
         };
       }
       return block;
@@ -716,6 +817,33 @@ function validate(
       );
     }
   }
+
+  // The mirror of the loop above. Anthropic's rule binds in both directions,
+  // and for years only the forward half was checked — so an unpaired
+  // tool_result (out-of-order append, leading result, duplicate re-append)
+  // passed every phase AND this validation on its way to a 400. Phase 3.5
+  // repairs all three shapes; this asserts the repair actually held.
+  for (let i = 0; i < envelopes.length; i++) {
+    const env = envelopes[i]!;
+    if (env.role !== 'user') continue;
+    const previous = envelopes[i - 1];
+    const availableUseIds = new Set(
+      previous?.role === 'assistant' ? collectToolUseIds(previous) : [],
+    );
+    for (const block of env.content) {
+      if (block.type !== 'tool_result') continue;
+      const resultId = getToolUseId(block);
+      if (typeof resultId === 'string' && availableUseIds.has(resultId)) continue;
+      throw new MembraneNormalizerError(
+        `tool_result for id='${resultId ?? '<missing>'}' in envelope ${i} has no matching ` +
+          `tool_use in envelope ${i - 1}. Anthropic requires each tool_result to follow its ` +
+          `tool_use immediately; this is a bug in the normalizer itself — phase 3.5 should have ` +
+          `relocated or textified any stray result.`,
+        input.map(cloneMsg),
+        envelopes.map(toProviderMessage),
+      );
+    }
+  }
 }
 
 // ============================================================================
@@ -735,6 +863,49 @@ function getToolUseId(block: ProviderBlock): string | undefined {
   if (typeof b.tool_use_id === 'string') return b.tool_use_id;
   if (typeof b.toolUseId === 'string') return b.toolUseId;
   return undefined;
+}
+
+/**
+ * Flatten a tool_result's payload to text for the two repairs that must
+ * abandon the tool_result structure (orphan and duplicate textification).
+ *
+ * `ToolResult.content` is `string | ToolResultContentBlock[]`, and the array
+ * form is a first-class feature — image results ride it. The previous
+ * recovery read only the string branch, so every array-shaped payload was
+ * replaced by the empty string with no signal of the loss.
+ *
+ * This deliberately does not reuse `renderResultContentString` from
+ * `utils/tool-parser.ts`: that helper takes an internal `ToolResult` whose
+ * image blocks carry camelCase `mediaType`, while blocks arriving here are
+ * provider-shaped and carry Anthropic's wire-form `media_type`. Reading both
+ * spellings is the point; the placeholder text is kept identical so the two
+ * renderings stay recognisable as the same thing to a model.
+ */
+function renderResultContent(block: ProviderBlock): string {
+  const content = (block as { content?: unknown }).content;
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+
+  const parts: string[] = [];
+  for (const part of content as ReadonlyArray<Record<string, unknown>>) {
+    if (part?.type === 'text' && typeof part.text === 'string') {
+      parts.push(part.text);
+      continue;
+    }
+    if (part?.type === 'image') {
+      const source = (part.source ?? {}) as { data?: unknown; media_type?: unknown; mediaType?: unknown };
+      const mediaType =
+        (typeof source.media_type === 'string' && source.media_type) ||
+        (typeof source.mediaType === 'string' && source.mediaType) ||
+        'unknown';
+      const base64Length = typeof source.data === 'string' ? source.data.length : 0;
+      const sizeKb = Math.round((base64Length * 0.75) / 1024);
+      parts.push(`[Image: ${mediaType}, ~${sizeKb}KB]`);
+      continue;
+    }
+    if (typeof part?.type === 'string') parts.push(`[${part.type}]`);
+  }
+  return parts.join('\n');
 }
 
 function collectToolUseIds(env: Envelope): string[] {

@@ -653,6 +653,172 @@ describe('normalizeToolPairs', () => {
   });
 
   // --------------------------------------------------------------------------
+  // Orphan textification must not destroy structured content (F1).
+  // --------------------------------------------------------------------------
+
+  describe('orphan textification preserves array-form content (F1)', () => {
+    const arrayResult = (id: string): ProviderBlock => ({
+      type: 'tool_result',
+      tool_use_id: id,
+      content: [
+        { type: 'text', text: 'zz-screenshot of the failing chart' },
+        {
+          type: 'image',
+          source: { type: 'base64', media_type: 'image/png', data: 'zzzz'.repeat(512) },
+        },
+      ],
+      is_error: false,
+    });
+
+    function orphanText(out: { messages: ProviderMessage[] }): string {
+      for (const msg of out.messages) {
+        for (const block of msg.content) {
+          const text = (block as ProviderBlock & { text?: string }).text ?? '';
+          if (block.type === 'text' && text.startsWith('[orphan tool_result')) return text;
+        }
+      }
+      throw new Error('no orphan textification found in output');
+    }
+
+    it('flattens text parts and image placeholders instead of emptying the payload', () => {
+      // `ToolResult.content` is `string | ToolResultContentBlock[]` and the
+      // array form is a first-class feature (tool-result-images). The old
+      // recovery was `typeof inner === 'string' ? inner : ''`, so every
+      // array-shaped orphan was replaced by the empty string, silently.
+      const input: ProviderMessage[] = [user(arrayResult('ite1')), assistant(t('ok'))];
+      const out = normalize(input);
+
+      const text = orphanText(out);
+      expect(text).toContain('zz-screenshot of the failing chart');
+      expect(text).toContain('[Image:');
+      expect(text).toContain('image/png');
+    });
+
+    it('reports the recovered length on the event so a drop can never be silent', () => {
+      const input: ProviderMessage[] = [user(arrayResult('ite1')), assistant(t('ok'))];
+      const { events, onEvent } = collectEvents();
+      normalize(input, { onEvent });
+
+      const ev = events.find((e) => e.kind === 'orphan_tool_result_textified') as
+        | { toolUseId: string; recoveredChars: number }
+        | undefined;
+      expect(ev).toBeDefined();
+      expect(ev!.toolUseId).toBe('ite1');
+      expect(ev!.recoveredChars).toBeGreaterThan('zz-screenshot of the failing chart'.length);
+    });
+
+    it('keeps the string-content path intact (control)', () => {
+      const input: ProviderMessage[] = [
+        user(r('ite2', 'zz-plain string payload')),
+        assistant(t('ok')),
+      ];
+      const { events, onEvent } = collectEvents();
+      const out = normalize(input, { onEvent });
+
+      expect(orphanText(out)).toContain('zz-plain string payload');
+      const ev = events.find((e) => e.kind === 'orphan_tool_result_textified') as
+        | { recoveredChars: number }
+        | undefined;
+      expect(ev!.recoveredChars).toBe('zz-plain string payload'.length);
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // The pairing invariant runs in BOTH directions (F2). Every tool_result must
+  // have its tool_use in the immediately-preceding assistant envelope — the
+  // converse of the rule phases 3 and 5 already enforce forward.
+  // --------------------------------------------------------------------------
+
+  describe('converse pairing sweep (F2)', () => {
+    /** The invariant phases 3/5/validate never checked: result → preceding use. */
+    function converseViolations(messages: ProviderMessage[]): string[] {
+      const violations: string[] = [];
+      for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i]!;
+        if (msg.role !== 'user') continue;
+        for (const id of resultIds(msg.content)) {
+          const prev = messages[i - 1];
+          const paired = prev?.role === 'assistant' && useIds(prev.content).includes(id);
+          if (!paired) violations.push(`msg[${i}] tool_result id=${id} unpaired in msg[${i - 1}]`);
+        }
+      }
+      return violations;
+    }
+
+    it('shape A — out-of-order append: relocates the result to its own cycle', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(r('ite2', 'zz-second payload')),
+        assistant(u('ite2')),
+        user(r('ite1', 'zz-first payload')),
+      ];
+      const { events, onEvent } = collectEvents();
+      const out = normalize(input, { onEvent });
+
+      expect(converseViolations(out.messages)).toEqual([]);
+      // Relocation, not textification: the real payload must survive as a
+      // tool_result, and no fake [pending] should be synthesized for ite2.
+      const allResults = out.messages.flatMap((m) => m.content).filter((b) => b.type === 'tool_result');
+      const contents = allResults.map((b) => (b as ProviderBlock & { content?: unknown }).content);
+      expect(contents).toContain('zz-second payload');
+      expect(contents).toContain('zz-first payload');
+      expect(events.some((e) => e.kind === 'synthetic_pending_result')).toBe(false);
+    });
+
+    it('shape B — leading result: pairs it with its downstream tool_use', () => {
+      const input: ProviderMessage[] = [
+        user(r('ite1', 'zz-leading payload')),
+        assistant(u('ite1')),
+        assistant(t('done')),
+      ];
+      const out = normalize(input);
+
+      expect(converseViolations(out.messages)).toEqual([]);
+      const contents = out.messages
+        .flatMap((m) => m.content)
+        .filter((b) => b.type === 'tool_result')
+        .map((b) => (b as ProviderBlock & { content?: unknown }).content);
+      expect(contents).toContain('zz-leading payload');
+    });
+
+    it('shape C — duplicate result re-appended after a later turn: textified, not dropped', () => {
+      // The module's own doc names cancellations and stream restarts as
+      // normal triggers for this shape.
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(r('ite1', 'zz-real payload')),
+        assistant(t('thinking about it')),
+        user(r('ite1', 'zz-duplicate payload')),
+      ];
+      const { events, onEvent } = collectEvents();
+      const out = normalize(input, { onEvent });
+
+      expect(converseViolations(out.messages)).toEqual([]);
+      // Content preserved as text — never silently discarded.
+      const allText = out.messages
+        .flatMap((m) => m.content)
+        .map((b) => (b as ProviderBlock & { text?: string }).text ?? '')
+        .join('\n');
+      expect(allText).toContain('zz-duplicate payload');
+      expect(events.some((e) => e.kind === 'stray_tool_result_textified')).toBe(true);
+    });
+
+    it('validate mirrors the assertion: a stray that survived every phase throws', () => {
+      // Guards the repair itself. If a future phase reintroduces an unpaired
+      // tool_result, validate must fail loudly rather than ship a 400.
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(r('ite1')),
+      ];
+      expect(() => normalize(input)).not.toThrow();
+      expect(converseViolations(normalize(input).messages)).toEqual([]);
+    });
+  });
+
+  // --------------------------------------------------------------------------
   // Entry guards. A producer defect must refuse BEFORE any phase rebuilds
   // envelopes, so the failure is typed, early, and independent of whether the
   // input happened to need repair. (Review findings F14, F15a, F16.)
