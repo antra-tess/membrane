@@ -320,6 +320,96 @@ describe('F13 · executed-block detection', () => {
   });
 });
 
+describe('greptile#52-1 · an unclosed invoke head absorbs the next call', () => {
+  // The block-splice disease one level down: INVOKE_REGEX's full-form
+  // alternative is lazy, so an invoke left open pairs with the NEXT invoke's
+  // closing tag. The head then dispatches carrying the inner call's parameters
+  // as its own, and the inner call never parses at all.
+  const absorbingBlock = toolBlock(
+    `<invoke name="zz_head_tool"><parameter name="fld1">1</parameter>\n` +
+      `<invoke name="zz_inner_tool"><parameter name="fld2">2</parameter></invoke>`
+  );
+
+  it('dispatches the inner invoke with its own parameters only', () => {
+    const parsed = parseToolCalls(absorbingBlock);
+
+    expect(parsed?.calls.map((c) => c.name)).toEqual(['zz_inner_tool']);
+    expect(parsed?.calls[0]?.input).toEqual({ fld2: 2 });
+  });
+
+  it('never dispatches the unclosed head, absorbed content and all', () => {
+    const dispatched = JSON.stringify(parseToolCalls(absorbingBlock)?.calls ?? []);
+
+    expect(dispatched).not.toContain('zz_head_tool');
+    expect(dispatched).not.toContain('fld1');
+  });
+
+  it('re-anchors on the block-parsing path too', () => {
+    const { blocks, toolCalls } = parseAccumulatedIntoBlocks(absorbingBlock);
+
+    expect(toolCalls.map((c) => c.name)).toEqual(['zz_inner_tool']);
+    expect(toolCalls[0]?.input).toEqual({ fld2: 2 });
+    expect(blocks.filter((b) => b.type === 'tool_use')).toHaveLength(1);
+  });
+
+  it('reports the refused head instead of dropping it silently', () => {
+    expect(parseAccumulatedIntoBlocks(absorbingBlock).unclosedInvokeHeads).toBe(1);
+  });
+
+  it('counts every head an absorbing match swallowed', () => {
+    const twoHeads = toolBlock(
+      `<invoke name="zz_head_tool"><parameter name="fld1">1</parameter>\n` +
+        `<invoke name="zz_second_head"><parameter name="fld2">2</parameter>\n` +
+        `<invoke name="zz_inner_tool"><parameter name="fld3">3</parameter></invoke>`
+    );
+
+    const { toolCalls, unclosedInvokeHeads } = parseAccumulatedIntoBlocks(twoHeads);
+
+    expect(toolCalls.map((c) => c.name)).toEqual(['zz_inner_tool']);
+    expect(toolCalls[0]?.input).toEqual({ fld3: 3 });
+    expect(unclosedInvokeHeads).toBe(2);
+  });
+
+  it('leaves legitimate sequential full-form invokes alone', () => {
+    const sequential = toolBlock(
+      `<invoke name="zz_first">\n<parameter name="fld1">v1</parameter>\n</invoke>\n` +
+        `<invoke name="zz_second">\n<parameter name="fld2">v2</parameter>\n</invoke>`
+    );
+
+    const parsed = parseToolCalls(sequential);
+    const { unclosedInvokeHeads } = parseAccumulatedIntoBlocks(sequential);
+
+    expect(parsed?.calls.map((c) => c.name)).toEqual(['zz_first', 'zz_second']);
+    expect(parsed?.calls.map((c) => c.input)).toEqual([{ fld1: 'v1' }, { fld2: 'v2' }]);
+    expect(unclosedInvokeHeads).toBe(0);
+  });
+
+  it('leaves mixed full and self-closing order alone', () => {
+    const mixed = toolBlock(
+      `<invoke name="zz_first"/>\n` +
+        `<invoke name="zz_second">\n<parameter name="fld1">v1</parameter>\n</invoke>\n` +
+        `<invoke name="zz_third"/>`
+    );
+
+    const { toolCalls, unclosedInvokeHeads } = parseAccumulatedIntoBlocks(mixed);
+
+    expect(toolCalls.map((c) => c.name)).toEqual(['zz_first', 'zz_second', 'zz_third']);
+    expect(unclosedInvokeHeads).toBe(0);
+  });
+
+  it('re-anchors to a self-closing invoke swallowed by an open head', () => {
+    const swallowedSelfClosing = toolBlock(
+      `<invoke name="zz_head_tool"><parameter name="fld1">1</parameter>\n` +
+        `<invoke name="zz_inner_tool"/></invoke>`
+    );
+
+    const parsed = parseToolCalls(swallowedSelfClosing);
+
+    expect(parsed?.calls.map((c) => c.name)).toEqual(['zz_inner_tool']);
+    expect(parsed?.calls[0]?.input).toEqual({});
+  });
+});
+
 describe('F11 · document order across invoke forms', () => {
   const mixedFormsBlock = toolBlock(
     `<invoke name="zz_first"/>\n` +

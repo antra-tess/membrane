@@ -75,6 +75,87 @@ const INVOKE_REGEX =
 
 const INVOKE_NAME_GROUP = 3;
 const INVOKE_BODY_GROUP = 4;
+const INVOKE_CLOSER_PREFIX_GROUP = 5;
+
+// Same pattern without /g, for the re-anchor read that runs INSIDE the outer
+// iteration: sharing the /g instance would clobber its lastIndex. Built from
+// the one source so the two can never drift apart.
+const INVOKE_REANCHOR_REGEX = new RegExp(INVOKE_REGEX.source);
+
+// An invoke OPENER on its own — the containment test one level below the
+// block fix, since an opener that never closed is invisible to INVOKE_REGEX.
+const INVOKE_OPEN_REGEX = /<(antml:)?invoke\s+name=/g;
+
+const INVOKE_CLOSE_TAG = '</invoke>';
+
+/**
+ * The invokes one block's inner content dispatches, plus the heads it refused.
+ *
+ * The full-form alternative of INVOKE_REGEX is lazy, so an invoke the model
+ * left OPEN pairs with the NEXT invoke's closing tag: the head matched, carried
+ * the inner call's parameters as its own, and the inner call never parsed at
+ * all — the same block-splice disease one level down. A match whose BODY holds
+ * another opener is therefore refused as a dispatchable invoke and re-anchored
+ * to the innermost opener inside it, which is where the live call begins. The
+ * re-anchored text holds no further opener by construction, so this terminates.
+ */
+interface ParsedInvokes {
+  calls: Array<{ name: string; input: Record<string, unknown> }>;
+  unclosedHeads: number;
+}
+
+/** Offsets of every invoke opener inside one matched invoke body. */
+function invokeOpenerOffsets(invokeBody: string): number[] {
+  const offsets: number[] = [];
+  INVOKE_OPEN_REGEX.lastIndex = 0;
+  let openerMatch: RegExpExecArray | null;
+  while ((openerMatch = INVOKE_OPEN_REGEX.exec(invokeBody)) !== null) {
+    offsets.push(openerMatch.index);
+  }
+  return offsets;
+}
+
+function collectInvokes(innerContent: string): ParsedInvokes {
+  const calls: Array<{ name: string; input: Record<string, unknown> }> = [];
+  let unclosedHeads = 0;
+
+  INVOKE_REGEX.lastIndex = 0;
+  let invokeMatch: RegExpExecArray | null;
+  while ((invokeMatch = INVOKE_REGEX.exec(innerContent)) !== null) {
+    const invokeBody = invokeMatch[INVOKE_BODY_GROUP];
+    const swallowedOpenerOffsets = invokeBody === undefined ? [] : invokeOpenerOffsets(invokeBody);
+
+    if (swallowedOpenerOffsets.length === 0) {
+      calls.push({
+        name: invokeMatch[INVOKE_NAME_GROUP] ?? '',
+        input: parseInvokeParameters(invokeBody),
+      });
+      continue;
+    }
+
+    // Every opener in the body is a head that never closed, and so is the
+    // matched head itself; only the innermost one owns the closing tag.
+    unclosedHeads += swallowedOpenerOffsets.length;
+
+    const fullMatch = invokeMatch[0];
+    const closerLength =
+      INVOKE_CLOSE_TAG.length + (invokeMatch[INVOKE_CLOSER_PREFIX_GROUP]?.length ?? 0);
+    const bodyOffset = fullMatch.length - closerLength - invokeBody!.length;
+    const innermostOffset = swallowedOpenerOffsets[swallowedOpenerOffsets.length - 1]!;
+    const reanchoredMatch = INVOKE_REANCHOR_REGEX.exec(fullMatch.slice(bodyOffset + innermostOffset));
+
+    // A re-anchored head that still does not parse — a nameless invoke, say —
+    // is refused like any other: counted above, dispatched never.
+    if (reanchoredMatch) {
+      calls.push({
+        name: reanchoredMatch[INVOKE_NAME_GROUP] ?? '',
+        input: parseInvokeParameters(reanchoredMatch[INVOKE_BODY_GROUP]),
+      });
+    }
+  }
+
+  return { calls, unclosedHeads };
+}
 
 // Parameter tags
 const PARAMETER_REGEX = /<(antml:)?parameter\s+name="([^"]+)">([\s\S]*?)<\/(antml:)?parameter>/g;
@@ -190,18 +271,11 @@ export function parseToolCalls(text: string): ParsedToolCalls | null {
   const beforeText = text.slice(0, lastUnexecutedBlock.start);
   const afterText = text.slice(lastUnexecutedBlock.end);
 
-  const calls: ToolCall[] = [];
-
-  INVOKE_REGEX.lastIndex = 0;
-  let invokeMatch: RegExpExecArray | null;
-
-  while ((invokeMatch = INVOKE_REGEX.exec(innerContent)) !== null) {
-    calls.push({
-      id: generateToolId(),
-      name: invokeMatch[INVOKE_NAME_GROUP] ?? '',
-      input: parseInvokeParameters(invokeMatch[INVOKE_BODY_GROUP]),
-    });
-  }
+  const calls: ToolCall[] = collectInvokes(innerContent).calls.map((invoke) => ({
+    id: generateToolId(),
+    name: invoke.name,
+    input: invoke.input,
+  }));
 
   return {
     calls,
@@ -570,6 +644,12 @@ export function parseAccumulatedIntoBlocks(
    * being repaired at read time.
    */
   splicedToolBlocks: number;
+  /**
+   * `<invoke>` heads that were left open and swallowed a later invoke, so the
+   * match was refused and re-anchored to the call it absorbed. Nothing was
+   * dispatched under the head's name, and the head itself never ran.
+   */
+  unclosedInvokeHeads: number;
 } {
   // If we're starting inside a block from prefill, prepend a synthetic opening tag
   // so the regex can match the closing tag properly
@@ -586,6 +666,7 @@ export function parseAccumulatedIntoBlocks(
   const toolResults: ToolResult[] = [];
   let emptyToolBlocks = 0;
   let splicedToolBlocks = 0;
+  let unclosedInvokeHeads = 0;
 
   // Track positions of all special blocks to extract plain text between them
   type BlockPosition = {
@@ -657,12 +738,13 @@ export function parseAccumulatedIntoBlocks(
       const blockToolCalls: ContentBlock[] = [];
       const blockCalls: ToolCall[] = [];
 
-      // Parse invoke tags in this block (both forms, in document order)
-      INVOKE_REGEX.lastIndex = 0;
-      let invokeMatch: RegExpExecArray | null;
-      while ((invokeMatch = INVOKE_REGEX.exec(resolvedBlock.innerContent)) !== null) {
-        const toolName = invokeMatch[INVOKE_NAME_GROUP] ?? '';
-        const input = parseInvokeParameters(invokeMatch[INVOKE_BODY_GROUP]);
+      // Parse invoke tags in this block (both forms, in document order); an
+      // invoke left open is refused and re-anchored to the call it swallowed.
+      const parsedInvokes = collectInvokes(resolvedBlock.innerContent);
+      unclosedInvokeHeads += parsedInvokes.unclosedHeads;
+      for (const invoke of parsedInvokes.calls) {
+        const toolName = invoke.name;
+        const input = invoke.input;
 
         const id = generateToolId();
         blockCalls.push({ id, name: toolName, input });
@@ -817,6 +899,7 @@ export function parseAccumulatedIntoBlocks(
     unclosedToolBlock: endsWithPartialToolBlock(textOutsideSpans(processedText, survivingSpans)),
     emptyToolBlocks,
     splicedToolBlocks,
+    unclosedInvokeHeads,
   };
 }
 

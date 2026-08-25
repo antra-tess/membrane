@@ -2128,6 +2128,7 @@ export class Membrane {
       unclosedToolBlock: boolean;
       emptyToolBlocks: number;
       splicedToolBlocks?: number;
+      unclosedInvokeHeads?: number;
     },
     stopReason: StopReason
   ): void {
@@ -2155,6 +2156,15 @@ export class Membrane {
         `[membrane] ${diagnostics.splicedToolBlocks} tool block(s) spanned a second ` +
         `<function_calls> opener and were re-anchored to the innermost one — an ` +
         `earlier truncated block is present in this conversation's assistant text.`
+      );
+    }
+
+    if (diagnostics.unclosedInvokeHeads) {
+      warnLog.warn(
+        `[membrane] ${diagnostics.unclosedInvokeHeads} <invoke> head(s) were left ` +
+        `unclosed and swallowed the invoke that followed — nothing was dispatched ` +
+        `under an unclosed head's name, and the call it absorbed was re-anchored ` +
+        `and ran with its own parameters.`
       );
     }
   }
