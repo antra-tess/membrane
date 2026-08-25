@@ -654,6 +654,52 @@ describe('normalizeToolPairs', () => {
   });
 
   // --------------------------------------------------------------------------
+  // A synthetic [pending] belongs at its own tool_use's position (F18).
+  // --------------------------------------------------------------------------
+
+  describe('synthetic placement follows call order (F18)', () => {
+    it('inserts the synthetic after the real result of an earlier call', () => {
+      // Two calls in one turn; the SECOND is unmatched. Unshifting the
+      // synthetic to position 0 put call #2's [pending] ahead of call #1's
+      // real result — wire-valid, but the model reads results in an order
+      // that does not match the order it made the calls.
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1'), u('ite2')),
+        user(r('ite1', 'zz-first landed')),
+      ];
+      const out = normalize(input);
+
+      const cycle = out.messages[2]!;
+      expect(resultIds(cycle.content)).toEqual(['ite1', 'ite2']);
+    });
+
+    it('still fronts the synthetic when the unmatched call came first', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1'), u('ite2')),
+        user(r('ite2', 'zz-second landed')),
+      ];
+      const out = normalize(input);
+
+      const cycle = out.messages[2]!;
+      expect(resultIds(cycle.content)).toEqual(['ite1', 'ite2']);
+    });
+
+    it('orders three synthetics among two landed results by call order', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1'), u('ite2'), u('ite3'), u('ite4'), u('ite5')),
+        user(r('ite2', 'zz-two landed'), r('ite4', 'zz-four landed')),
+      ];
+      const out = normalize(input);
+
+      const cycle = out.messages[2]!;
+      expect(resultIds(cycle.content)).toEqual(['ite1', 'ite2', 'ite3', 'ite4', 'ite5']);
+    });
+  });
+
+  // --------------------------------------------------------------------------
   // A re-roled thinking block must never be welded into an assistant envelope
   // that already holds a tool_use (F7). rebuildEnvelopes opened a new envelope
   // on ROLE change only, so a thinking block under a user message landed in

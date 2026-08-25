@@ -732,7 +732,8 @@ function resolveOrphans(
         .filter((id): id is string => typeof id === 'string'),
     );
 
-    for (const useId of useIds) {
+    for (let useIdIndex = 0; useIdIndex < useIds.length; useIdIndex++) {
+      const useId = useIds[useIdIndex]!;
       if (presentIds.has(useId)) continue;
       if (pending.has(useId)) {
         ready = false;
@@ -740,8 +741,11 @@ function resolveOrphans(
         continue;
       }
       const synth = syntheticToolResult(useId);
-      // Place at the front so it's adjacent to the tool_use.
-      nextEnv.content.unshift(synth);
+      // Place the synthetic at its own call's position. Unshifting to the
+      // front put a [pending] for call #2 ahead of the REAL result of call
+      // #1: wire-valid, but the model then reads results in an order that
+      // does not match the order it made the calls.
+      nextEnv.content.splice(syntheticInsertionIndex(nextEnv, useIds, useIdIndex), 0, synth);
       presentIds.add(useId);
       if (firstSyntheticEnvelope === null) firstSyntheticEnvelope = nextIdx;
       onEvent({
@@ -753,6 +757,28 @@ function resolveOrphans(
   }
 
   return { envelopes, ready, firstSyntheticEnvelope };
+}
+
+/**
+ * Where a synthetic result for `useIds[useIdIndex]` belongs in the cycle's
+ * user envelope: immediately after the result of the nearest earlier call
+ * that already landed, or at the front when no earlier call has one. Because
+ * synthesis walks `useIds` in call order and each insertion is visible to the
+ * next lookup, the envelope's tool_results end up ordered by call order.
+ */
+function syntheticInsertionIndex(
+  envelope: Envelope,
+  useIds: ReadonlyArray<string>,
+  useIdIndex: number,
+): number {
+  for (let earlier = useIdIndex - 1; earlier >= 0; earlier--) {
+    const earlierId = useIds[earlier]!;
+    const at = envelope.content.findIndex(
+      (block) => block.type === 'tool_result' && getToolUseId(block) === earlierId,
+    );
+    if (at >= 0) return at + 1;
+  }
+  return 0;
 }
 
 function suppressCacheControlFrom(
