@@ -686,8 +686,19 @@ describe('normalizeToolPairs', () => {
       thinking: 'zz-reasoning',
       signature,
     });
+    const redactedThinking = (data: string): ProviderBlock => ({
+      type: 'redacted_thinking',
+      data,
+    });
 
-    /** Assistant envelopes holding a thinking block positioned after a tool_use. */
+    // Both reasoning variants, spelled out. `startsWith('thinking')` — the
+    // shape the guard itself once used — silently excludes
+    // `redacted_thinking`, so a detector written that way cannot see the
+    // very weld this block is here to forbid.
+    const isReasoningType = (type: string): boolean =>
+      type === 'thinking' || type === 'redacted_thinking';
+
+    /** Assistant envelopes holding a reasoning block positioned after a tool_use. */
     function weldedEnvelopes(messages: ProviderMessage[]): number[] {
       const welded: number[] = [];
       for (let i = 0; i < messages.length; i++) {
@@ -696,7 +707,7 @@ describe('normalizeToolPairs', () => {
         const types = blockTypes(msg);
         const firstUse = types.indexOf('tool_use');
         if (firstUse < 0) continue;
-        if (types.slice(firstUse).some((type) => type.startsWith('thinking'))) welded.push(i);
+        if (types.slice(firstUse).some(isReasoningType)) welded.push(i);
       }
       return welded;
     }
@@ -726,6 +737,45 @@ describe('normalizeToolPairs', () => {
         .map((b) => (b as ProviderBlock & { signature?: string }).signature)
         .filter(Boolean);
       expect(allSignatures).toContain('zz-sig-2');
+    });
+
+    it('opens a fresh envelope for a re-roled redacted_thinking too', () => {
+      // The guard tested above keyed on `block.type.startsWith('thinking')`,
+      // which is false for `redacted_thinking` — the one reasoning variant
+      // whose payload is opaque, so a misattributed one cannot even be read
+      // back out of the transcript. Both strict reasoning variants must
+      // break the envelope.
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(signedThinking('zz-sig-1'), u('ite1')),
+        user(redactedThinking('zz-enc-2'), r('ite1')),
+      ];
+      const out = normalize(input);
+
+      expect(weldedEnvelopes(out.messages)).toEqual([]);
+
+      const firstToolTurn = out.messages.find(
+        (m) => m.role === 'assistant' && useIds(m.content).includes('ite1'),
+      )!;
+      expect(blockTypes(firstToolTurn)).not.toContain('redacted_thinking');
+
+      // Opaque payload preserved, not dropped in the course of moving it.
+      const allData = out.messages
+        .flatMap((m) => m.content)
+        .map((b) => (b as ProviderBlock & { data?: string }).data)
+        .filter(Boolean);
+      expect(allData).toContain('zz-enc-2');
+    });
+
+    it('survives mergeConsecutiveRoles for redacted_thinking as well', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(signedThinking('zz-sig-1'), u('ite1')),
+        user(redactedThinking('zz-enc-2'), r('ite1')),
+      ];
+      const merged = mergeConsecutiveRoles(normalize(input).messages) as ProviderMessage[];
+
+      expect(weldedEnvelopes(merged)).toEqual([]);
     });
 
     it('survives mergeConsecutiveRoles, which every callsite runs next', () => {

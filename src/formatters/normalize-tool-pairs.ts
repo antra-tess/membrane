@@ -347,10 +347,9 @@ type RequiredRole = 'user' | 'assistant' | 'inherit';
  * through the safety net.
  */
 function requiredRoleOf(block: ProviderBlock): RequiredRole {
+  if (isStrictReasoningBlock(block)) return 'assistant';
   switch (block.type) {
     case 'tool_use':
-    case 'thinking':
-    case 'redacted_thinking':
       return 'assistant';
     case 'tool_result':
       return 'user';
@@ -360,6 +359,25 @@ function requiredRoleOf(block: ProviderBlock): RequiredRole {
       }
       return 'inherit';
   }
+}
+
+/**
+ * The reasoning block types Anthropic pins to the assistant role, listed
+ * once so {@link requiredRoleOf} and the weld guard in
+ * {@link rebuildEnvelopes} cannot drift apart. Membership is exact, not
+ * prefix-based: `redacted_thinking` does not start with `thinking`, and a
+ * `startsWith` test here silently exempted the one variant whose payload is
+ * opaque — a misattributed one cannot even be read back out of the
+ * transcript. Any unknown `thinking`-prefixed type is 'inherit' (see the
+ * default branch), so it never reaches the guard at all.
+ */
+const STRICT_REASONING_BLOCK_TYPES: ReadonlySet<string> = new Set([
+  'thinking',
+  'redacted_thinking',
+]);
+
+function isStrictReasoningBlock(block: ProviderBlock): boolean {
+  return STRICT_REASONING_BLOCK_TYPES.has(block.type);
 }
 
 const _warnedTypes = new Set<string>();
@@ -418,6 +436,9 @@ function rebuildEnvelopes(
       // live on 2026-08-25 (claude-haiku-4-5, and sonnet-4-6 independently),
       // replaying a genuinely signed thinking block positioned after its
       // tool_use returns 200, exactly as the correctly-ordered control does.
+      // Re-measured the same day for redacted_thinking (a real block from the
+      // documented magic-string trigger, claude-haiku-4-5): welded 200,
+      // control 200 — same verdict, so both variants move for attribution.
       // types/tools.ts:100 still asserts this shape "fails API validation" —
       // that claim is stale.
       // Phase 3 guarantees a user envelope after any tool_use-bearing
@@ -426,7 +447,7 @@ function rebuildEnvelopes(
       const wouldWeldReasoningPastToolUse =
         req === 'assistant' &&
         req !== msg.role &&
-        block.type.startsWith('thinking') &&
+        isStrictReasoningBlock(block) &&
         current !== null &&
         current.role === 'assistant' &&
         current.content.some((held) => held.type === 'tool_use');
