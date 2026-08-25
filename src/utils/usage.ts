@@ -60,3 +60,26 @@ export function calculateCacheHitRatio(
 export function resetUndeclaredConventionWarnings(): void {
   warnedUndeclaredAdapters.clear();
 }
+
+/** Unconvertible provider item types warn once each, not once per response. */
+const warnedUnconvertibleProviderItems = new Set<string>();
+
+/**
+ * A provider content item membrane cannot normalize is preserved verbatim on a
+ * zero-width carrier rather than dropped, but the caller should know its
+ * content is invisible to normalized consumers. Once per type, not per item.
+ */
+export function warnUnconvertibleProviderItem(itemType: string): void {
+  if (warnedUnconvertibleProviderItems.has(itemType)) return;
+  warnedUnconvertibleProviderItems.add(itemType);
+  console.warn(
+    `[membrane:content] no normalized ContentBlock for provider item type "${itemType}"`
+    + ' — preserving it verbatim as a rawItem carrier so it can be replayed, but its'
+    + ' content is not visible to normalized consumers.'
+  );
+}
+
+/** Test seam: the once-per-type warn latch is process-wide otherwise. */
+export function resetUnconvertibleProviderItemWarnings(): void {
+  warnedUnconvertibleProviderItems.clear();
+}

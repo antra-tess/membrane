@@ -58,7 +58,11 @@ import { AnthropicXmlFormatter } from './formatters/anthropic-xml.js';
 import { normalizeToolPairs, mergeConsecutiveRoles } from './formatters/normalize-tool-pairs.js';
 import { YieldingStreamImpl } from './yielding-stream.js';
 import { calculateCost, warnUnpricedModel } from './utils/cost.js';
-import { calculateCacheHitRatio, normalizeUsageToCacheExcluded } from './utils/usage.js';
+import {
+  calculateCacheHitRatio,
+  normalizeUsageToCacheExcluded,
+  warnUnconvertibleProviderItem,
+} from './utils/usage.js';
 import {
   isAcceptedImageMediaType,
   strippedImagePlaceholder,
@@ -1586,14 +1590,23 @@ export class Membrane {
             data: item.data,
             mimeType: item.mimeType,
           });
-        } else if (item.rawItem) {
+        } else if (item.rawItem || item.type) {
           // Opaque Responses items such as encrypted compaction or custom
           // tool records have no normalized ContentBlock equivalent. Retain a
           // zero-width carrier so Chronicle and the Responses formatter can
           // replay the raw item without surfacing synthetic prompt text.
           // Anthropic-bound conversion paths filter these out (empty text
           // blocks are a 400 there); the Responses formatter replays rawItem.
-          blocks.push({ type: 'text', text: '', rawItem: item.rawItem });
+          //
+          // An item with a `type` this switch does not know (server_tool_use,
+          // web_search_tool_result, search_result, mcp_tool_use, or whatever a
+          // provider adds next) used to fall out of this chain and vanish. It
+          // gets the same carrier treatment, holding the item itself, plus a
+          // one-time warning so the gap surfaces instead of being inferred
+          // later from missing content.
+          const carriedRawItem = item.rawItem ?? item;
+          if (!item.rawItem) warnUnconvertibleProviderItem(item.type);
+          blocks.push({ type: 'text', text: '', rawItem: carriedRawItem });
         }
       }
       return blocks;
