@@ -208,7 +208,13 @@ export async function processContext(
 // ============================================================================
 
 function mergeConfig(config: ContextConfig): ContextConfig {
+  // The caller's config is the base, so a top-level field is carried through
+  // by default and only the three sub-objects that have defaults are merged.
+  // Enumerating the survivors instead silently dropped assistantParticipant:
+  // every helper test passed a config straight in, so the loss was invisible
+  // until an end-to-end call classified the configured assistant as a user.
   return {
+    ...config,
     rolling: {
       ...DEFAULT_CONTEXT_CONFIG.rolling,
       ...config.rolling,
@@ -221,7 +227,6 @@ function mergeConfig(config: ContextConfig): ContextConfig {
       ...DEFAULT_CONTEXT_CONFIG.cache,
       ...config.cache,
     },
-    tokenEstimator: config.tokenEstimator,
   };
 }
 

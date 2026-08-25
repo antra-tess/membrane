@@ -457,3 +457,38 @@ describe('F9: preferUserMessages consults the configured assistant', () => {
     expect(messages[markers[0]!.messageIndex]!.participant).toBe('zz-user');
   });
 });
+
+// ---------------------------------------------------------------------------
+// S1 — the configured assistant survives config merging (processContext level)
+// ---------------------------------------------------------------------------
+
+function zzBotAlternating(count: number, charsPerMessage: number): NormalizedMessage[] {
+  return Array.from({ length: count }, (_, i) =>
+    zzMessage(
+      i % 2 === 0 ? 'zz-user' : 'zz-bot',
+      `ite${i}`,
+      `zz-${'x'.repeat(Math.max(0, charsPerMessage - 3))}`
+    )
+  );
+}
+
+describe('S1: processContext honours ContextConfig.assistantParticipant', () => {
+  it('places the marker on a user turn when the assistant is a configured name', async () => {
+    const messages = zzBotAlternating(60, 200);
+
+    const output = await processContext(
+      mockMembrane(),
+      {
+        messages,
+        config: zzGenerationConfig,
+        context: baseConfig({ assistantParticipant: 'zz-bot' }),
+      },
+      null
+    );
+
+    expect(output.info.cacheMarkers.length).toBe(1);
+    const markedId = output.info.cacheMarkers[0]!.messageId;
+    const marked = messages.find((m) => m.metadata?.sourceId === markedId)!;
+    expect(marked.participant).toBe('zz-user');
+  });
+});
