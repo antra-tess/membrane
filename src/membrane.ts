@@ -2250,22 +2250,40 @@ export class Membrane {
   }
 
   /**
-   * Price against the model that ACTUALLY served the request when the provider
-   * named one, falling back to the requested id. An alias or an auto-routed
-   * request otherwise prices against a string the provider already replaced —
-   * a live 2026-08-25 call asking for `gpt-4o-mini` was served by
-   * `gpt-4o-mini-2024-07-18`. The fallback also covers the served model simply
-   * being absent from the pricing table.
+   * Pricing is resolved on TWO axes, and SOURCE outranks SPECIFICITY:
+   *
+   *   registry[served] → registry[requested] → builtin[served] → builtin[requested]
+   *
+   * Specificity — preferring the model that ACTUALLY served over the id that
+   * was requested — is real: an alias or an auto-routed request otherwise
+   * prices against a string the provider already replaced, and a live
+   * 2026-08-25 call asking for `gpt-4o-mini` was served by
+   * `gpt-4o-mini-2024-07-18`. But it only breaks ties WITHIN one source.
+   * A configured `ModelRegistry` is the caller stating their own rates —
+   * account-specific, negotiated, authoritative; the built-in table is
+   * membrane's shipped guess at public list prices. Merging the two per-model
+   * (`registry[served] ?? builtin[served]`, return on the first hit) let the
+   * guess for a snapshot outrank the caller's own entry for the alias they
+   * asked for, so a caller who prices their alias and lets the provider pick
+   * the snapshot was billed at membrane's number instead of theirs.
+   *
+   * Both fallbacks stay: the served model may be absent from a source, and the
+   * provider may name none at all.
    */
   private resolvePricing(
     requestedModel: string,
     actualModel?: string
   ): import('./types/provider.js').ModelPricing | undefined {
-    if (actualModel && actualModel !== requestedModel) {
-      const actualPricing = this.registry?.getPricing(actualModel) ?? getDefaultPricing(actualModel);
-      if (actualPricing) return actualPricing;
-    }
-    return this.registry?.getPricing(requestedModel) ?? getDefaultPricing(requestedModel);
+    const servedModel = actualModel && actualModel !== requestedModel ? actualModel : undefined;
+    const fromRegistry = (modelId: string | undefined) =>
+      modelId === undefined ? undefined : this.registry?.getPricing(modelId);
+    const fromBuiltin = (modelId: string | undefined) =>
+      modelId === undefined ? undefined : getDefaultPricing(modelId);
+
+    return fromRegistry(servedModel)
+      ?? fromRegistry(requestedModel)
+      ?? fromBuiltin(servedModel)
+      ?? fromBuiltin(requestedModel);
   }
 
   /** Resolve pricing + calculate cost in one call (for one-shot use outside loops). */
