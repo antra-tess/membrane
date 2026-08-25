@@ -946,6 +946,43 @@ describe('normalizeToolPairs', () => {
       expect(events.some((e) => e.kind === 'stray_tool_result_textified')).toBe(true);
     });
 
+    it('relocates two strays into the cycle in CALL order, not reversed', () => {
+      // Relocation repeatedly unshifted, so each relocated result landed in
+      // front of the one before it: calls [ite1, ite2] came back as results
+      // [ite2, ite1] — the same read-order defect F18 removed from synthetic
+      // placement, reintroduced by the converse sweep.
+      const input: ProviderMessage[] = [
+        user(t('go'), r('ite1', 'zz-first payload'), r('ite2', 'zz-second payload')),
+        assistant(u('ite1'), u('ite2')),
+        user(t('zz-after')),
+      ];
+      const out = normalize(input);
+
+      expect(converseViolations(out.messages)).toEqual([]);
+      const cycle = out.messages.find((m) => resultIds(m.content).length === 2)!;
+      expect(resultIds(cycle.content)).toEqual(['ite1', 'ite2']);
+    });
+
+    it('orders relocated strays by call position even when they arrive scrambled', () => {
+      // Source order of the strays must not decide the outcome: the call
+      // sequence does. Here ite2 already sits in its cycle and the strays
+      // arrive [ite3, ite1], so a fix that merely appends instead of
+      // unshifting still gets this one wrong.
+      const input: ProviderMessage[] = [
+        user(t('go'), r('ite3', 'zz-third payload'), r('ite1', 'zz-first payload')),
+        assistant(u('ite1'), u('ite2'), u('ite3')),
+        user(r('ite2', 'zz-second payload')),
+      ];
+      const { events, onEvent } = collectEvents();
+      const out = normalize(input, { onEvent });
+
+      expect(converseViolations(out.messages)).toEqual([]);
+      const cycle = out.messages.find((m) => resultIds(m.content).length === 3)!;
+      expect(resultIds(cycle.content)).toEqual(['ite1', 'ite2', 'ite3']);
+      // Real payloads relocated, nothing synthesized over them.
+      expect(events.some((e) => e.kind === 'synthetic_pending_result')).toBe(false);
+    });
+
     it('validate mirrors the assertion: a stray that survived every phase throws', () => {
       // Guards the repair itself. If a future phase reintroduces an unpaired
       // tool_result, validate must fail loudly rather than ship a 400.

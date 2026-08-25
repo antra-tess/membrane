@@ -578,7 +578,16 @@ function repairStrayResults(
         );
 
       if (cycleIsOpen) {
-        cycleEnvelope!.content.unshift(block);
+        // At its own call's position, never at the front: unshifting each
+        // relocated result reversed a multi-call batch ([ite1, ite2] came
+        // back as [ite2, ite1]), which is the read-order defect phase 5
+        // already fixed for synthetics.
+        const cycleUseIds = collectToolUseIds(envelopes[useEnvelope]!);
+        cycleEnvelope!.content.splice(
+          callOrderInsertionIndex(cycleEnvelope!, cycleUseIds, cycleUseIds.indexOf(id)),
+          0,
+          block,
+        );
         onEvent({
           kind: 'tool_result_hoisted',
           toolUseId: id,
@@ -748,7 +757,7 @@ function resolveOrphans(
       // front put a [pending] for call #2 ahead of the REAL result of call
       // #1: wire-valid, but the model then reads results in an order that
       // does not match the order it made the calls.
-      nextEnv.content.splice(syntheticInsertionIndex(nextEnv, useIds, useIdIndex), 0, synth);
+      nextEnv.content.splice(callOrderInsertionIndex(nextEnv, useIds, useIdIndex), 0, synth);
       presentIds.add(useId);
       onEvent({
         kind: 'synthetic_pending_result',
@@ -762,13 +771,17 @@ function resolveOrphans(
 }
 
 /**
- * Where a synthetic result for `useIds[useIdIndex]` belongs in the cycle's
- * user envelope: immediately after the result of the nearest earlier call
- * that already landed, or at the front when no earlier call has one. Because
- * synthesis walks `useIds` in call order and each insertion is visible to the
- * next lookup, the envelope's tool_results end up ordered by call order.
+ * Where the result for `useIds[useIdIndex]` belongs in the cycle's user
+ * envelope: immediately after the result of the nearest earlier call that
+ * already landed, or at the front when no earlier call has one. Every phase
+ * that puts a result into a cycle envelope — synthesis (phase 5) and
+ * relocation (phase 3.5) alike — routes through here, so the envelope's
+ * tool_results end up in call order no matter which phase placed them or in
+ * what sequence. Anchoring on landed neighbours rather than on a running
+ * counter is what makes it order-independent: a stray arriving before its
+ * earlier siblings still lands ahead of the later ones already present.
  */
-function syntheticInsertionIndex(
+function callOrderInsertionIndex(
   envelope: Envelope,
   useIds: ReadonlyArray<string>,
   useIdIndex: number,
