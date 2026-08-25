@@ -236,12 +236,16 @@ export class YieldingStreamImpl implements YieldingStream {
         return { value: undefined as unknown as StreamEvent, done: true };
       },
 
-      // Reached through `yield*` delegation. Same departure, and reporting
-      // done keeps a delegating generator from failing with a TypeError for
-      // a missing method.
-      throw: async (): Promise<IteratorResult<StreamEvent>> => {
+      // Reached through `yield*` delegation, or by a caller injecting an
+      // error by hand. Same departure as return() — nobody is reading this
+      // stream again — and then the error continues on its way, exactly as an
+      // async generator with no handler of its own would rethrow it. Reporting
+      // `done: true` here instead swallowed it: a `yield*` delegating to this
+      // stream resumed after the delegation as if nothing had been thrown in,
+      // and a direct `.throw(e)` resolved rather than rejecting.
+      throw: async (error?: unknown): Promise<IteratorResult<StreamEvent>> => {
         this.departConsumer();
-        return { value: undefined as unknown as StreamEvent, done: true };
+        throw error;
       },
     };
   }

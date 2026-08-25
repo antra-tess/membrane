@@ -101,19 +101,47 @@ describe('breaking out of the loop stops the producer', () => {
     expect(afterDeparture).toEqual([]);
   });
 
-  it('throw() also stops the producer', async () => {
+  it('throw() stops the producer AND rejects with the error it was given', async () => {
     const adapter = new ResumingAdapter();
     const stream = new Membrane(adapter).streamYielding(REQUEST);
     const iterator = stream[Symbol.asyncIterator]();
 
     await iterator.next();
     expect(typeof iterator.throw).toBe('function');
-    const result = await iterator.throw!(new Error('zz consumer gave up'));
-    expect(result.done).toBe(true);
+
+    // An async generator with no handler of its own rejects with the injected
+    // error. Reporting `done: true` instead made the error vanish: a `yield*`
+    // delegating to this stream resumed after the delegation as if nothing
+    // had been thrown into it.
+    const injected = new Error('zz consumer gave up');
+    const outcome = await iterator.throw!(injected).then(
+      (result) => ({ resolved: result }),
+      (error: unknown) => ({ rejected: error }),
+    );
+    expect(outcome).toEqual({ rejected: injected });
 
     const callsAtDeparture = adapter.streamCalls;
     await settle();
     expect(adapter.streamCalls).toBeLessThanOrEqual(callsAtDeparture + 1);
+  });
+
+  it('an error thrown into a yield* delegation reaches the delegating generator', async () => {
+    const adapter = new ResumingAdapter();
+    const stream = new Membrane(adapter).streamYielding(REQUEST);
+
+    async function* delegating(): AsyncGenerator<StreamEvent> {
+      yield* stream;
+    }
+
+    const outer = delegating();
+    await outer.next();
+
+    const injected = new Error('zz delegating consumer gave up');
+    const outcome = await outer.throw(injected).then(
+      (result) => ({ resolved: result }),
+      (error: unknown) => ({ rejected: error }),
+    );
+    expect(outcome).toEqual({ rejected: injected });
   });
 });
 
