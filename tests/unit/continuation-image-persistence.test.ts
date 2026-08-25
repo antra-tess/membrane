@@ -175,6 +175,40 @@ describe('split-turn image continuation persistence', () => {
   });
 });
 
+describe('a second image round composes onto the first', () => {
+  it('stacks both image turns without duplicating text across the seams', async () => {
+    const adapter = new RecordingXmlAdapter([
+      { text: `zz preamble one\n${CALL_XML}`, stopReason: 'stop_sequence', stopSequence: '</function_calls>' },
+      { text: `zz preamble two\n${CALL_XML}`, stopReason: 'stop_sequence', stopSequence: '</function_calls>' },
+      { text: 'zz final answer', stopReason: 'end_turn' },
+    ]);
+    const membrane = new Membrane(adapter);
+    await membrane.stream(REQUEST, {
+      onToolCalls: async (calls) => [imageResult(calls[0]!.id)],
+    });
+
+    expect(adapter.streamCalls).toBe(3);
+    expect(roleCensus(adapter.requests[2]!)).toEqual([
+      'user:text',
+      'assistant:text',
+      'user:[image]',
+      'assistant:text',
+      'user:[image]',
+      'assistant:text',
+    ]);
+
+    const messages = adapter.requests[2]!.messages as Array<{ role: string; content: unknown }>;
+    const firstAssistant = messages[1]!.content as string;
+    const secondAssistant = messages[3]!.content as string;
+    const thirdAssistant = messages[5]!.content as string;
+
+    expect(firstAssistant).toContain('zz preamble one');
+    expect(secondAssistant).not.toContain('zz preamble one');
+    expect(secondAssistant).toContain('zz preamble two');
+    expect(thirdAssistant).not.toContain('zz preamble two');
+  });
+});
+
 describe('continuation builders carry the transformRequest extra contract', () => {
   it('supplies normalizedMessages on every continuation, and prompt on both builders', async () => {
     const { adapter } = await runTwoToolRounds();
