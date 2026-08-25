@@ -1027,12 +1027,6 @@ export class Membrane {
       while (toolDepth <= maxToolDepth) {
         // Build provider request with native tools
         const providerRequest = this.buildNativeToolRequest(request, messages, toolDepth > 0);
-        // Telemetry reports what this builder actually placed on the wire —
-        // strategy breakpoints, stale passthrough, fallback and float alike.
-        // Both native paths used to hardcode 0, which made the 4-breakpoint
-        // discipline unauditable from the response on exactly the paths that
-        // spend the budget hardest.
-        markersInLastRequest = countWireCacheMarkers(providerRequest);
 
         // Stream from provider
         let textAccumulated = '';
@@ -1062,6 +1056,14 @@ export class Membrane {
             onRequest: (req) => {
               rawRequest = req;
               onRequest?.(req);
+            },
+            // Telemetry reports what this request actually SHIPPED with —
+            // builder breakpoints, stale passthrough, fallback, float, plus
+            // whatever the beforeRequest hook and the wire clamp did after
+            // the build. Both native paths used to hardcode 0, and counting
+            // at build time reported a number no request ever had.
+            onWireCacheMarkers: (markerCount) => {
+              markersInLastRequest = markerCount;
             },
           }
         );
@@ -1957,6 +1959,18 @@ export class Membrane {
        * somewhere upstream.
        */
       onRetrying?: (info: { attempt: number; maxAttempts: number; category?: string }) => void;
+      /**
+       * Receives the number of cache_control markers the request ACTUALLY
+       * ships with, taken from the clamp's own tally below — i.e. after the
+       * `beforeRequest` hook has added or removed markers of its own and
+       * after everything past the 4-breakpoint budget has been dropped.
+       *
+       * Telemetry that counts the request at BUILD time reports a number no
+       * request ever had (a hook placing 7 markers on a wire that carries 4
+       * was reported as the builder's 1), which defeats the audit the count
+       * exists for. This is the only count that describes the wire.
+       */
+      onWireCacheMarkers?: (markerCount: number) => void;
     }
   ) {
     // Strip `normalizedRequest` before forwarding to the adapter — it's
@@ -1964,14 +1978,16 @@ export class Membrane {
     // compatibility won't catch the excess field (checked only on object
     // literals, not on variables). Leaving it in would silently leak the
     // normalized form into every adapter's options.
-    const { normalizedRequest, refusalRetries, onRetrying, ...adapterOptions } = options;
+    const { normalizedRequest, refusalRetries, onRetrying, onWireCacheMarkers, ...adapterOptions } = options;
     const finalRequest = (await this.applyBeforeRequestHook(normalizedRequest, request)) as typeof request;
 
     // Last exit before the adapter: the only place that sees EVERY
     // contribution (builder, formatter, passthrough, float, hook). Every
     // streaming path — stream(), streamYielding(), both tool loops — funnels
-    // through here, so this is the one clamp they all get.
-    clampCacheMarkers(finalRequest, 'streamOnce');
+    // through here, so this is the one clamp they all get, and its tally is
+    // therefore the only count that describes the wire.
+    const clampOutcome = clampCacheMarkers(finalRequest, 'streamOnce');
+    onWireCacheMarkers?.(clampOutcome.total);
 
     // Retries are only safe when the caller can discard the abandoned
     // attempt, so they require BOTH a budget and an onRetrying hook.
@@ -3139,12 +3155,6 @@ export class Membrane {
 
         // Build provider request with native tools
         const providerRequest = this.buildNativeToolRequest(request, messages, toolDepth > 0);
-        // Telemetry reports what this builder actually placed on the wire —
-        // strategy breakpoints, stale passthrough, fallback and float alike.
-        // Both native paths used to hardcode 0, which made the 4-breakpoint
-        // discipline unauditable from the response on exactly the paths that
-        // spend the budget hardest.
-        markersInLastRequest = countWireCacheMarkers(providerRequest);
 
         // Stream from provider
         let textAccumulated = '';
@@ -3230,6 +3240,14 @@ export class Membrane {
             idleTimeoutMs: options.idleTimeoutMs,
             normalizedRequest: request,
             onRequest: (req: unknown) => { rawRequest = req; },
+            // Telemetry reports what this request actually SHIPPED with —
+            // builder breakpoints, stale passthrough, fallback, float, plus
+            // whatever the beforeRequest hook and the wire clamp did after
+            // the build. Both native paths used to hardcode 0, and counting
+            // at build time reported a number no request ever had.
+            onWireCacheMarkers: (markerCount: number) => {
+              markersInLastRequest = markerCount;
+            },
             refusalRetries: options.refusalRetries,
             // Discard the refused attempt: roll the accumulators back to
             // where this attempt began and tell the consumer to drop what it
