@@ -18,8 +18,14 @@ import type { Socket } from 'node:net';
 import { Membrane } from '../../src/membrane.js';
 import { OpenAIAdapter } from '../../src/providers/openai.js';
 import { GeminiAdapter } from '../../src/providers/gemini.js';
+import { OpenAICompletionsAdapter } from '../../src/providers/openai-completions.js';
+import { OpenAICompatibleAdapter } from '../../src/providers/openai-compatible.js';
+import { OpenRouterAdapter } from '../../src/providers/openrouter.js';
+import { OpenAIResponsesAPIAdapter } from '../../src/providers/openai-responses-api.js';
+import { BedrockAdapter } from '../../src/providers/bedrock.js';
+import { OpenAIResponsesAdapter } from '../../src/providers/openai-responses.js';
 import { createCombinedSignal, isDeadlineAbort } from '../../src/providers/utils.js';
-import { MembraneError, isAbortedResponse } from '../../src/types/index.js';
+import { MembraneError, isAbortedResponse, isTimeoutAbortError } from '../../src/types/index.js';
 import type { NormalizedRequest, StreamEvent } from '../../src/types/index.js';
 
 const REQUEST: NormalizedRequest = {
@@ -215,4 +221,47 @@ describe('the mark survives the platform fetch', () => {
     expect((error as Error).name).toBe('AbortError');
     expect(isDeadlineAbort(error)).toBe(true);
   });
+});
+
+describe('every createCombinedSignal-based adapter maps its own deadline', () => {
+  // The end-to-end tests above drive two adapters through Membrane. The arm
+  // that maps a marked abort lives in each adapter's own handleError, so the
+  // family fact is pinned here directly: given a wedged connection and a
+  // deadline, each adapter rejects with the typed timeout rather than with a
+  // generic abort.
+  const adapters: [string, () => { stream: (...args: never[]) => Promise<unknown> }][] = [
+    ['openai', () => new OpenAIAdapter({ apiKey: 'zz-not-a-key' })],
+    ['gemini', () => new GeminiAdapter({ apiKey: 'zz-not-a-key' })],
+    ['openai-completions', () => new OpenAICompletionsAdapter({ baseURL: 'http://zz-host.invalid/v1', apiKey: 'zz-not-a-key' })],
+    ['openai-compatible', () => new OpenAICompatibleAdapter({ baseURL: 'http://zz-host.invalid/v1', apiKey: 'zz-not-a-key' })],
+    ['openrouter', () => new OpenRouterAdapter({ apiKey: 'zz-not-a-key' })],
+    ['openai-responses-api', () => new OpenAIResponsesAPIAdapter({ apiKey: 'zz-not-a-key' })],
+    ['openai-responses', () => new OpenAIResponsesAdapter({ apiKey: 'zz-not-a-key' })],
+    ['bedrock', () => new BedrockAdapter({ accessKeyId: 'zz-not-a-key-id', secretAccessKey: 'zz-not-a-secret', region: 'zz-region-1' })],
+  ] as never;
+
+  for (const [name, build] of adapters) {
+    it(`${name} rejects with a TimeoutAbortError`, async () => {
+      installHangingFetch();
+      const adapter = build() as unknown as {
+        stream: (
+          request: unknown,
+          callbacks: unknown,
+          options: { timeoutMs: number },
+        ) => Promise<unknown>;
+      };
+
+      const error = await adapter
+        .stream(
+          { model: 'zz-model', messages: [{ role: 'user', content: 'zz hello' }], maxTokens: 16 },
+          {},
+          { timeoutMs: 5 },
+        )
+        .then(() => undefined, (e: unknown) => e);
+
+      expect(isTimeoutAbortError(error)).toBe(true);
+      expect((error as MembraneError).type).toBe('timeout');
+      expect((error as MembraneError).retryable).toBe(false);
+    });
+  }
 });
