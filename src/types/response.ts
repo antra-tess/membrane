@@ -60,6 +60,13 @@ export interface CostBreakdown {
   cacheRead?: number;
   total: number;
   currency: string;
+
+  /**
+   * ISO date the rates behind this breakdown were last verified against the
+   * provider's published prices, when the pricing source records one. Unset
+   * means the source vouches for no date, NOT that the numbers are current.
+   */
+  pricingAsOf?: string;
 }
 
 // ============================================================================

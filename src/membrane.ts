@@ -57,7 +57,7 @@ import type { PrefillFormatter, StreamParser } from './formatters/types.js';
 import { AnthropicXmlFormatter } from './formatters/anthropic-xml.js';
 import { normalizeToolPairs, mergeConsecutiveRoles } from './formatters/normalize-tool-pairs.js';
 import { YieldingStreamImpl } from './yielding-stream.js';
-import { calculateCost } from './utils/cost.js';
+import { calculateCost, warnUnpricedModel } from './utils/cost.js';
 import { calculateCacheHitRatio, normalizeUsageToCacheExcluded } from './utils/usage.js';
 import {
   isAcceptedImageMediaType,
@@ -2279,7 +2279,15 @@ export class Membrane {
     actualModel?: string
   ): import('./types/response.js').CostBreakdown | undefined {
     const pricing = this.resolvePricing(requestedModel, actualModel);
-    return pricing ? calculateCost(usage, pricing) : undefined;
+    if (!pricing) {
+      // An absent cost and a zero cost are different claims. Returning
+      // undefined says "membrane does not know what this costs"; saying it out
+      // loud once per model keeps that from reading as "free" to a caller that
+      // only ever sees the omission.
+      warnUnpricedModel(actualModel || requestedModel);
+      return undefined;
+    }
+    return calculateCost(usage, pricing);
   }
 
   private calculateRetryDelay(attempt: number, overloaded = false): number {

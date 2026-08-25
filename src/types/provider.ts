@@ -112,6 +112,14 @@ export interface ModelPricing {
   
   /** Currency code */
   currency: string;
+
+  /**
+   * ISO date these rates were last checked against the provider's published
+   * price page, surfaced to callers as {@link CostBreakdown.pricingAsOf}. A
+   * pricing source that cannot vouch for a date leaves it unset — better an
+   * absent freshness signal than a fabricated one.
+   */
+  asOf?: string;
 }
 
 // ============================================================================
