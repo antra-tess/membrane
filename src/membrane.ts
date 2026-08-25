@@ -390,7 +390,11 @@ export class Membrane {
     const parser = formatter.createStreamParser();
     let toolDepth = 0;
     let totalUsage: DetailedUsage = { inputTokens: 0, outputTokens: 0 };
-    const pricing = this.resolvePricing(request.config.model);
+    // Both re-resolved once the provider names the model it actually served:
+    // an alias or an auto-routed request otherwise prices against a string the
+    // provider already replaced.
+    let lastActualModel: string | undefined;
+    let pricing = this.resolvePricing(request.config.model);
     const contentBlocks: ContentBlock[] = [];
     let lastStopReason: StopReason = 'end_turn';
     let lastStopSequence: string | undefined;
@@ -605,6 +609,11 @@ export class Membrane {
         lastStopSequence = streamResult.stopSequence ?? undefined;
 
         // Accumulate usage (including cache metrics)
+        if (streamResult.model && streamResult.model !== lastActualModel) {
+          lastActualModel = streamResult.model;
+          pricing = this.resolvePricing(request.config.model, lastActualModel);
+        }
+
         totalUsage.inputTokens += streamResult.usage.inputTokens;
         totalUsage.outputTokens += streamResult.usage.outputTokens;
         if (streamResult.usage.cacheCreationTokens) {
@@ -940,7 +949,8 @@ export class Membrane {
         executedToolCalls,
         executedToolResults,
         initialBlockType,
-        lastStopSequence
+        lastStopSequence,
+        lastActualModel
       );
 
       // Append non-text content blocks (e.g., generated_image) that the XML parser can't handle
@@ -995,7 +1005,11 @@ export class Membrane {
 
     let toolDepth = 0;
     let totalUsage: DetailedUsage = { inputTokens: 0, outputTokens: 0 };
-    const pricing = this.resolvePricing(request.config.model);
+    // Both re-resolved once the provider names the model it actually served:
+    // an alias or an auto-routed request otherwise prices against a string the
+    // provider already replaced.
+    let lastActualModel: string | undefined;
+    let pricing = this.resolvePricing(request.config.model);
     let lastStopReason: StopReason = 'end_turn';
     let lastStopSequence: string | undefined;
     let rawRequest: unknown;
@@ -1059,6 +1073,11 @@ export class Membrane {
         lastStopSequence = streamResult.stopSequence ?? undefined;
 
         // Accumulate usage (including cache metrics)
+        if (streamResult.model && streamResult.model !== lastActualModel) {
+          lastActualModel = streamResult.model;
+          pricing = this.resolvePricing(request.config.model, lastActualModel);
+        }
+
         totalUsage.inputTokens += streamResult.usage.inputTokens;
         totalUsage.outputTokens += streamResult.usage.outputTokens;
         if (streamResult.usage.cacheCreationTokens) {
@@ -1177,7 +1196,7 @@ export class Membrane {
           },
           model: {
             requested: request.config.model,
-            actual: request.config.model,
+            actual: lastActualModel || request.config.model,
             provider: this.adapter.name,
           },
           cache: {
@@ -2087,7 +2106,7 @@ export class Membrane {
       cacheCreationTokens: providerResponse.usage.cacheCreationTokens,
       cacheReadTokens: providerResponse.usage.cacheReadTokens,
       reasoningTokens: providerResponse.usage.reasoningTokens,
-      estimatedCost: this.estimateCost(providerResponse.usage, request.config.model),
+      estimatedCost: this.estimateCost(providerResponse.usage, request.config.model, providerResponse.model),
     };
 
     return {
@@ -2143,7 +2162,8 @@ export class Membrane {
     executedToolCalls: ToolCall[] = [],
     executedToolResults: ToolResult[] = [],
     startInsideBlock: 'thinking' | 'tool_call' | 'tool_result' | null = null,
-    triggeredSequence?: string
+    triggeredSequence?: string,
+    actualModel?: string
   ): NormalizedResponse {
     // Parse accumulated text into structured content blocks
     // This extracts thinking, tool_use, tool_result, and text blocks
@@ -2184,7 +2204,7 @@ export class Membrane {
         },
         usage: {
           ...usage,
-          estimatedCost: usage.estimatedCost ?? this.estimateCost(usage, request.config.model),
+          estimatedCost: usage.estimatedCost ?? this.estimateCost(usage, request.config.model, actualModel),
         },
         timing: {
           totalDurationMs: durationMs,
@@ -2192,7 +2212,7 @@ export class Membrane {
         },
         model: {
           requested: request.config.model,
-          actual: request.config.model, // TODO: get from response
+          actual: actualModel || request.config.model,
           provider: this.adapter.name,
         },
         cache: {
@@ -2233,13 +2253,32 @@ export class Membrane {
     return calculateCacheHitRatio(usage);
   }
 
-  private resolvePricing(model: string): import('./types/provider.js').ModelPricing | undefined {
-    return this.registry?.getPricing(model) ?? getDefaultPricing(model);
+  /**
+   * Price against the model that ACTUALLY served the request when the provider
+   * named one, falling back to the requested id. An alias or an auto-routed
+   * request otherwise prices against a string the provider already replaced —
+   * a live 2026-08-25 call asking for `gpt-4o-mini` was served by
+   * `gpt-4o-mini-2024-07-18`. The fallback also covers the served model simply
+   * being absent from the pricing table.
+   */
+  private resolvePricing(
+    requestedModel: string,
+    actualModel?: string
+  ): import('./types/provider.js').ModelPricing | undefined {
+    if (actualModel && actualModel !== requestedModel) {
+      const actualPricing = this.registry?.getPricing(actualModel) ?? getDefaultPricing(actualModel);
+      if (actualPricing) return actualPricing;
+    }
+    return this.registry?.getPricing(requestedModel) ?? getDefaultPricing(requestedModel);
   }
 
   /** Resolve pricing + calculate cost in one call (for one-shot use outside loops). */
-  private estimateCost(usage: import('./utils/cost.js').CostableUsage, model: string): import('./types/response.js').CostBreakdown | undefined {
-    const pricing = this.resolvePricing(model);
+  private estimateCost(
+    usage: import('./utils/cost.js').CostableUsage,
+    requestedModel: string,
+    actualModel?: string
+  ): import('./types/response.js').CostBreakdown | undefined {
+    const pricing = this.resolvePricing(requestedModel, actualModel);
     return pricing ? calculateCost(usage, pricing) : undefined;
   }
 
@@ -2430,7 +2469,11 @@ export class Membrane {
     // Once-per-stream latch for the injectedMessages-unsupported warning.
     let warnedInjectionUnsupported = false;
     let totalUsage: DetailedUsage = { inputTokens: 0, outputTokens: 0 };
-    const pricing = this.resolvePricing(request.config.model);
+    // Both re-resolved once the provider names the model it actually served:
+    // an alias or an auto-routed request otherwise prices against a string the
+    // provider already replaced.
+    let lastActualModel: string | undefined;
+    let pricing = this.resolvePricing(request.config.model);
     const contentBlocks: ContentBlock[] = [];
     let lastStopReason: StopReason = 'end_turn';
     let lastStopSequence: string | undefined;
@@ -2601,6 +2644,11 @@ export class Membrane {
         lastStopSequence = streamResult.stopSequence ?? undefined;
 
         // Accumulate usage (including cache metrics)
+        if (streamResult.model && streamResult.model !== lastActualModel) {
+          lastActualModel = streamResult.model;
+          pricing = this.resolvePricing(request.config.model, lastActualModel);
+        }
+
         totalUsage.inputTokens += streamResult.usage.inputTokens;
         totalUsage.outputTokens += streamResult.usage.outputTokens;
         if (streamResult.usage.cacheCreationTokens) {
@@ -2950,7 +2998,8 @@ export class Membrane {
         executedToolCalls,
         executedToolResults,
         initialBlockType,
-        lastStopSequence
+        lastStopSequence,
+        lastActualModel
       );
 
       // Merge provider thinking signatures into parser-derived thinking blocks
@@ -3002,7 +3051,11 @@ export class Membrane {
 
     let toolDepth = 0;
     let totalUsage: DetailedUsage = { inputTokens: 0, outputTokens: 0 };
-    const pricing = this.resolvePricing(request.config.model);
+    // Both re-resolved once the provider names the model it actually served:
+    // an alias or an auto-routed request otherwise prices against a string the
+    // provider already replaced.
+    let lastActualModel: string | undefined;
+    let pricing = this.resolvePricing(request.config.model);
     let lastStopReason: StopReason = 'end_turn';
     let lastStopSequence: string | undefined;
     let rawRequest: unknown;
@@ -3144,6 +3197,11 @@ export class Membrane {
         lastStopSequence = streamResult.stopSequence ?? undefined;
 
         // Accumulate usage (including cache metrics)
+        if (streamResult.model && streamResult.model !== lastActualModel) {
+          lastActualModel = streamResult.model;
+          pricing = this.resolvePricing(request.config.model, lastActualModel);
+        }
+
         totalUsage.inputTokens += streamResult.usage.inputTokens;
         totalUsage.outputTokens += streamResult.usage.outputTokens;
         if (streamResult.usage.cacheCreationTokens) {
@@ -3278,7 +3336,7 @@ export class Membrane {
           },
           model: {
             requested: request.config.model,
-            actual: request.config.model,
+            actual: lastActualModel || request.config.model,
             provider: this.adapter.name,
           },
           cache: {

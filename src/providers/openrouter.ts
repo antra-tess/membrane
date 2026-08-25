@@ -246,6 +246,10 @@ export class OpenRouterAdapter implements ProviderAdapter {
       let finishReason = 'stop';
       let toolCalls: OpenRouterToolCall[] = [];
       let streamUsage: OpenRouterResponse['usage'] | undefined;
+      // The model the provider actually served, echoed on every SSE
+      // chunk. Reporting the requested id instead hides alias
+      // resolution (and, on OpenRouter, which provider it routed to).
+      let servedModel: string | undefined;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -312,6 +316,10 @@ export class OpenRouterAdapter implements ProviderAdapter {
             if (parsed.usage) {
               streamUsage = parsed.usage;
             }
+
+            if (parsed.model) {
+              servedModel = parsed.model;
+            }
           } catch (e) {
             // Ignore parse errors
           }
@@ -328,7 +336,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
         message.tool_calls = toolCalls;
       }
 
-      return this.parseStreamedResponse(message, finishReason, request.model, streamUsage, openRouterRequest);
+      return this.parseStreamedResponse(message, finishReason, servedModel ?? request.model, streamUsage, openRouterRequest);
 
     } catch (error) {
       throw this.handleError(error, openRouterRequest);
