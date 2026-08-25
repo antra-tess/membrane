@@ -73,6 +73,7 @@ export type {
 export type {
   StopReason,
   BasicUsage,
+  CallUsage,
   DetailedUsage,
   DiscardedAttemptsUsage,
   CostBreakdown,

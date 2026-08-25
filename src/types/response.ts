@@ -30,19 +30,28 @@ export interface BasicUsage {
   outputTokens: number;
 }
 
-export interface DetailedUsage extends BasicUsage {
+/**
+ * What ONE priced unit of work cost — a turn, or the discarded attempts summed
+ * together. Held apart from `DetailedUsage` so the discarded-spend record can
+ * carry every token field without also inheriting `discardedAttempts`, which
+ * would let the type describe discarded spend nested inside discarded spend:
+ * a shape nothing produces and nothing could read sensibly.
+ */
+export interface CallUsage extends BasicUsage {
   /** Tokens used for cache creation */
   cacheCreationTokens?: number;
-  
+
   /** Tokens read from cache */
   cacheReadTokens?: number;
-  
+
   /** Tokens used for thinking/reasoning */
   thinkingTokens?: number;
-  
+
   /** Estimated cost breakdown */
   estimatedCost?: CostBreakdown;
+}
 
+export interface DetailedUsage extends CallUsage {
   /**
    * Spend on provider calls whose output was thrown away — today, refusal
    * retries. Those attempts were completed, billed HTTP calls; the response
@@ -55,10 +64,22 @@ export interface DetailedUsage extends BasicUsage {
   discardedAttempts?: DiscardedAttemptsUsage;
 }
 
-export interface DiscardedAttemptsUsage extends DetailedUsage {
+export interface DiscardedAttemptsUsage extends CallUsage {
   /** How many billed-but-abandoned provider calls are summed here. */
   attempts: number;
 }
+
+type Assert<TCondition extends true> = TCondition;
+
+/**
+ * Erased at build; checked by `tsc --noEmit`, which covers src/ and not the
+ * test suite — so this is where a type-level guarantee can actually fail the
+ * build. Re-widening the discarded record to `DetailedUsage` reintroduces
+ * discarded-spend-inside-discarded-spend and turns this line red.
+ */
+type DiscardedSpendDoesNotNest = Assert<
+  'discardedAttempts' extends keyof DiscardedAttemptsUsage ? false : true
+>;
 
 export interface CostBreakdown {
   input: number;
