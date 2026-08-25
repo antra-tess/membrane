@@ -209,6 +209,46 @@ describe('F9 · a contained call is filtered before legacy results are paired', 
   });
 });
 
+describe('F9 · the dispatch path applies the same containment', () => {
+  const declinedCall = toolBlock(`<invoke name="zz_declined_tool"/>`);
+
+  it('does not dispatch a call the model quoted and declined inside thinking', () => {
+    const text = `<thinking>zz musing: I could call ${declinedCall} but I will not.\n</thinking>\nzz_bot: no.`;
+
+    expect(parseToolCalls(text)).toBeNull();
+  });
+
+  it('does not dispatch a call quoted inside a tool result', () => {
+    const text =
+      `zz_bot: reading\n` +
+      resultsBlock(`<result>\n<stdout>zz-result quoting ${declinedCall} verbatim</stdout>\n</result>`) +
+      '\nzz_bot: done.';
+
+    expect(parseToolCalls(text)).toBeNull();
+  });
+
+  it('still dispatches the live call that follows a quoted one', () => {
+    const text =
+      `<thinking>zz musing: I could call ${declinedCall} but I will not.\n</thinking>\n` +
+      `zz_bot: this one though\n${toolBlock(`<invoke name="zz_live_tool"/>`)}`;
+
+    const parsed = parseToolCalls(text);
+
+    expect(parsed?.calls.map((c) => c.name)).toEqual(['zz_live_tool']);
+    expect(parsed?.beforeText).toContain('zz_declined_tool');
+  });
+
+  it('selects the last unexecuted LIVE block, ignoring quoted ones after it', () => {
+    const text =
+      `zz_bot: calling\n${toolBlock(`<invoke name="zz_live_tool"/>`)}\n` +
+      `<thinking>zz musing: I could also call ${declinedCall} but I will not.\n</thinking>`;
+
+    const parsed = parseToolCalls(text);
+
+    expect(parsed?.calls.map((c) => c.name)).toEqual(['zz_live_tool']);
+  });
+});
+
 describe('F9 · diagnostics count only the spans that survive containment', () => {
   it('does not count a quoted zero-invoke block as an empty tool block', () => {
     const quotedEmptyBlock = toolBlock('zz musing: no invokes in here');

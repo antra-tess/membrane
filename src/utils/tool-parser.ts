@@ -61,10 +61,6 @@ function parseInvokeParameters(invokeBody: string | undefined): Record<string, u
 // Tool Call Parsing
 // ============================================================================
 
-// Regex patterns supporting both plain and antml: prefix
-// Pattern matches: <function_calls> or <function_calls>
-const FUNCTION_CALLS_REGEX = /<(antml:)?function_calls>([\s\S]*?)<\/(antml:)?function_calls>/g;
-
 // Invoke tags, both forms in ONE alternation so a block that mixes them keeps
 // document order (two sequential passes appended full-then-self-closing).
 // The name may be single- or double-quoted and whitespace may precede the
@@ -174,18 +170,14 @@ function isFollowedByResults(text: string, afterPos: number): boolean {
  * that doesn't have function_results immediately following it.
  */
 export function parseToolCalls(text: string): ParsedToolCalls | null {
-  // Reset regex
-  FUNCTION_CALLS_REGEX.lastIndex = 0;
-
-  // Find all function_calls blocks and pick the last unexecuted one
-  let blockMatch: RegExpExecArray | null = null;
+  // Pick the last unexecuted block among those that survive containment: a
+  // block quoted inside thinking or echoed in a tool result is content, and
+  // dispatching from it runs a call the model never made.
   let lastUnexecutedBlock: ResolvedToolBlock | null = null;
 
-  while ((blockMatch = FUNCTION_CALLS_REGEX.exec(text)) !== null) {
-    const afterPos = blockMatch.index + blockMatch[0].length;
-
-    if (!isFollowedByResults(text, afterPos)) {
-      lastUnexecutedBlock = resolveToolBlock(text, blockMatch);
+  for (const block of collectLiveToolBlocks(text)) {
+    if (!isFollowedByResults(text, block.end)) {
+      lastUnexecutedBlock = block;
     }
   }
 
@@ -446,6 +438,77 @@ function retainOutermostSpans(spans: CandidateSpan[]): CandidateSpan[] {
  * structure: counting it made a model that merely described an unclosed block
  * indistinguishable from one whose block was truncated mid-write.
  */
+/**
+ * Every span the three block sweeps find, unfiltered and unregistered.
+ *
+ * Both parse entry points read the document through this one census, so the
+ * dispatch path and the block path can never disagree about which blocks are
+ * real.
+ */
+function collectCandidateSpans(text: string): CandidateSpan[] {
+  const spans: CandidateSpan[] = [];
+
+  THINKING_BLOCK_REGEX.lastIndex = 0;
+  let thinkingMatch: RegExpExecArray | null;
+  while ((thinkingMatch = THINKING_BLOCK_REGEX.exec(text)) !== null) {
+    spans.push({
+      kind: 'thinking',
+      start: thinkingMatch.index,
+      end: thinkingMatch.index + thinkingMatch[0].length,
+      thinking: thinkingMatch[2] ?? '',
+    });
+  }
+
+  FUNCTION_BLOCK_WITH_CONTENT_REGEX.lastIndex = 0;
+  let funcMatch: RegExpExecArray | null;
+  while ((funcMatch = FUNCTION_BLOCK_WITH_CONTENT_REGEX.exec(text)) !== null) {
+    // A spliced match (a stale opener joined to a later round's closer) is
+    // rejected as a block and re-anchored to its innermost opener; see
+    // resolveToolBlock. Containment reads the RESOLVED span, which is where
+    // the live block actually begins.
+    const resolvedBlock = resolveToolBlock(text, funcMatch);
+    spans.push({
+      kind: 'calls',
+      start: resolvedBlock.start,
+      end: resolvedBlock.end,
+      resolvedBlock,
+    });
+  }
+
+  FUNCTION_RESULTS_BLOCK_REGEX.lastIndex = 0;
+  let resultsMatch: RegExpExecArray | null;
+  while ((resultsMatch = FUNCTION_RESULTS_BLOCK_REGEX.exec(text)) !== null) {
+    spans.push({
+      kind: 'results',
+      start: resultsMatch.index,
+      end: resultsMatch.index + resultsMatch[0].length,
+      innerContent: resultsMatch[2] ?? '',
+      // Verbatim document text the harness placed — carried for exact replay
+      // on the prefill path (membrane#36).
+      rawXml: resultsMatch[0],
+    });
+  }
+
+  return spans;
+}
+
+/**
+ * The function_calls blocks that are structure rather than content: those that
+ * survive containment, in document order.
+ *
+ * A block quoted inside a <thinking> block or echoed inside a tool result is
+ * text the model wrote ABOUT a call, not a call. Selecting from the raw sweep
+ * dispatched it — a model that named a tool and explicitly declined to use it
+ * had it executed anyway.
+ */
+function collectLiveToolBlocks(text: string): ResolvedToolBlock[] {
+  const live: ResolvedToolBlock[] = [];
+  for (const span of retainOutermostSpans(collectCandidateSpans(text))) {
+    if (span.kind === 'calls') live.push(span.resolvedBlock);
+  }
+  return live;
+}
+
 function textOutsideSpans(text: string, spans: CandidateSpan[]): string {
   let residue = '';
   let cursor = 0;
@@ -558,48 +621,7 @@ export function parseAccumulatedIntoBlocks(
   // filtering after produced a call site that a legacy result could claim and
   // that the filter then deleted, leaving a tool_result addressed to a
   // tool_use no longer in the response.
-  const candidateSpans: CandidateSpan[] = [];
-
-  THINKING_BLOCK_REGEX.lastIndex = 0;
-  let thinkingMatch: RegExpExecArray | null;
-  while ((thinkingMatch = THINKING_BLOCK_REGEX.exec(processedText)) !== null) {
-    candidateSpans.push({
-      kind: 'thinking',
-      start: thinkingMatch.index,
-      end: thinkingMatch.index + thinkingMatch[0].length,
-      thinking: thinkingMatch[2] ?? '',
-    });
-  }
-
-  FUNCTION_BLOCK_WITH_CONTENT_REGEX.lastIndex = 0;
-  let funcMatch: RegExpExecArray | null;
-  while ((funcMatch = FUNCTION_BLOCK_WITH_CONTENT_REGEX.exec(processedText)) !== null) {
-    // A spliced match (a stale opener joined to a later round's closer) is
-    // rejected as a block and re-anchored to its innermost opener; see
-    // resolveToolBlock. Containment reads the RESOLVED span, which is where
-    // the live block actually begins.
-    const resolvedBlock = resolveToolBlock(processedText, funcMatch);
-    candidateSpans.push({
-      kind: 'calls',
-      start: resolvedBlock.start,
-      end: resolvedBlock.end,
-      resolvedBlock,
-    });
-  }
-
-  FUNCTION_RESULTS_BLOCK_REGEX.lastIndex = 0;
-  let resultsMatch: RegExpExecArray | null;
-  while ((resultsMatch = FUNCTION_RESULTS_BLOCK_REGEX.exec(processedText)) !== null) {
-    candidateSpans.push({
-      kind: 'results',
-      start: resultsMatch.index,
-      end: resultsMatch.index + resultsMatch[0].length,
-      innerContent: resultsMatch[2] ?? '',
-      // Verbatim document text the harness placed — carried for exact replay
-      // on the prefill path (membrane#36).
-      rawXml: resultsMatch[0],
-    });
-  }
+  const candidateSpans = collectCandidateSpans(processedText);
 
   // ── Pass 2: containment ──────────────────────────────────────────────────
   //
