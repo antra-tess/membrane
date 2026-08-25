@@ -83,6 +83,16 @@ interface GeminiResponse {
   error?: { code: number; message: string; status: string };
 }
 
+interface GeminiStreamState {
+  text: string;
+  toolCalls: { name: string; args: Record<string, unknown> }[];
+  images: { data: string; mimeType: string }[];
+  candidateFinishReason: string | undefined;
+  sawCandidateData: boolean;
+  promptFeedback: GeminiResponse['promptFeedback'];
+  lastUsage: GeminiResponse['usageMetadata'];
+}
+
 // ============================================================================
 // Adapter Configuration
 // ============================================================================
@@ -192,11 +202,15 @@ export class GeminiAdapter implements ProviderAdapter {
       }
 
       const decoder = new TextDecoder();
-      let accumulated = '';
-      let finishReason = 'STOP';
-      let toolCalls: { name: string; args: Record<string, unknown> }[] = [];
-      let images: { data: string; mimeType: string }[] = [];
-      let lastUsage: GeminiResponse['usageMetadata'] | undefined;
+      const streamState: GeminiStreamState = {
+        text: '',
+        toolCalls: [],
+        images: [],
+        candidateFinishReason: undefined,
+        sawCandidateData: false,
+        promptFeedback: undefined,
+        lastUsage: undefined,
+      };
       let buffer = '';
 
       while (true) {
@@ -210,109 +224,105 @@ export class GeminiAdapter implements ProviderAdapter {
 
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue;
-          const data = line.slice(6).trim();
-          if (!data || data === '[DONE]') continue;
-
-          try {
-            const parsed = JSON.parse(data) as GeminiResponse;
-            const candidate = parsed.candidates?.[0];
-
-            if (candidate?.content?.parts) {
-              for (const part of candidate.content.parts) {
-                if (part.text) {
-                  accumulated += part.text;
-                  callbacks.onChunk(part.text);
-                }
-                if (part.inlineData) {
-                  images.push({
-                    data: part.inlineData.data,
-                    mimeType: part.inlineData.mimeType,
-                  });
-                }
-                if (part.functionCall) {
-                  toolCalls.push({
-                    name: part.functionCall.name,
-                    args: part.functionCall.args,
-                  });
-                }
-              }
-            }
-
-            if (candidate?.finishReason) {
-              finishReason = candidate.finishReason;
-            }
-
-            if (parsed.usageMetadata) {
-              lastUsage = parsed.usageMetadata;
-            }
-          } catch {
-            // Ignore parse errors in stream chunks
-          }
+          this.consumeStreamFrame(line.slice(6).trim(), streamState, callbacks);
         }
       }
 
       // Process any remaining data in the buffer (final chunk may not end with newline)
-      if (buffer.trim()) {
-        const remaining = buffer.trim();
-        const dataLine = remaining.startsWith('data: ') ? remaining.slice(6).trim() : remaining;
-        if (dataLine && dataLine !== '[DONE]') {
-          try {
-            const parsed = JSON.parse(dataLine) as GeminiResponse;
-            const candidate = parsed.candidates?.[0];
-
-            if (candidate?.content?.parts) {
-              for (const part of candidate.content.parts) {
-                if (part.text) {
-                  accumulated += part.text;
-                  callbacks.onChunk(part.text);
-                }
-                if (part.inlineData) {
-                  images.push({
-                    data: part.inlineData.data,
-                    mimeType: part.inlineData.mimeType,
-                  });
-                }
-                if (part.functionCall) {
-                  toolCalls.push({
-                    name: part.functionCall.name,
-                    args: part.functionCall.args,
-                  });
-                }
-              }
-            }
-
-            if (candidate?.finishReason) {
-              finishReason = candidate.finishReason;
-            }
-
-            if (parsed.usageMetadata) {
-              lastUsage = parsed.usageMetadata;
-            }
-          } catch {
-            // Final buffer wasn't valid JSON — nothing to do
-          }
-        }
+      const trailing = buffer.trim();
+      if (trailing) {
+        this.consumeStreamFrame(
+          trailing.startsWith('data: ') ? trailing.slice(6).trim() : trailing,
+          streamState,
+          callbacks
+        );
       }
 
       return {
-        content: this.buildContentBlocks(accumulated, toolCalls, images),
-        stopReason: this.mapFinishReason(finishReason),
+        content: this.buildContentBlocks(streamState.text, streamState.toolCalls, streamState.images),
+        stopReason: this.resolveStopReason(
+          streamState.sawCandidateData,
+          streamState.candidateFinishReason,
+          streamState.promptFeedback
+        ),
         stopSequence: undefined,
         usage: {
-          inputTokens: lastUsage?.promptTokenCount ?? 0,
-          outputTokens: lastUsage?.candidatesTokenCount ?? 0,
-          cacheReadTokens: lastUsage?.cachedContentTokenCount
-            ? lastUsage.cachedContentTokenCount
+          inputTokens: streamState.lastUsage?.promptTokenCount ?? 0,
+          outputTokens: streamState.lastUsage?.candidatesTokenCount ?? 0,
+          cacheReadTokens: streamState.lastUsage?.cachedContentTokenCount
+            ? streamState.lastUsage.cachedContentTokenCount
             : undefined,
         },
         model: request.model,
         rawRequest: geminiRequest,
-        raw: { finishReason, usage: lastUsage },
+        raw: {
+          finishReason: streamState.candidateFinishReason ?? 'STOP',
+          usage: streamState.lastUsage,
+          ...(streamState.promptFeedback !== undefined
+            ? { promptFeedback: streamState.promptFeedback }
+            : {}),
+        },
       };
     } catch (error) {
       throw this.handleError(error, geminiRequest);
     } finally {
       cleanup?.();
+    }
+  }
+
+  private consumeStreamFrame(
+    frameData: string,
+    streamState: GeminiStreamState,
+    callbacks: StreamCallbacks
+  ): void {
+    if (!frameData || frameData === '[DONE]') return;
+
+    let parsed: GeminiResponse;
+    try {
+      parsed = JSON.parse(frameData) as GeminiResponse;
+    } catch {
+      // A frame that isn't valid JSON carries nothing to accumulate
+      return;
+    }
+
+    const candidate = parsed.candidates?.[0];
+
+    if (candidate?.content !== undefined || candidate?.finishReason !== undefined) {
+      streamState.sawCandidateData = true;
+    }
+
+    if (candidate?.content?.parts) {
+      for (const part of candidate.content.parts) {
+        if (part.text) {
+          streamState.text += part.text;
+          callbacks.onChunk(part.text);
+        }
+        if (part.inlineData) {
+          streamState.images.push({
+            data: part.inlineData.data,
+            mimeType: part.inlineData.mimeType,
+          });
+        }
+        if (part.functionCall) {
+          streamState.toolCalls.push({
+            name: part.functionCall.name,
+            args: part.functionCall.args,
+          });
+        }
+      }
+    }
+
+    if (candidate?.finishReason) {
+      streamState.candidateFinishReason = candidate.finishReason;
+    }
+
+    // A blocked prompt can ride a frame of its own, with zero candidates
+    if (parsed.promptFeedback?.blockReason !== undefined) {
+      streamState.promptFeedback = parsed.promptFeedback;
+    }
+
+    if (parsed.usageMetadata) {
+      streamState.lastUsage = parsed.usageMetadata;
     }
   }
 
@@ -565,16 +575,13 @@ export class GeminiAdapter implements ProviderAdapter {
       }
     }
 
-    // A prompt blocked BEFORE generation comes back as a 200 with
-    // promptFeedback.blockReason and no candidates at all — no data.error, no
-    // finishReason — so it used to parse as an empty, clean end_turn.
-    const promptBlockReason = candidate === undefined ? response.promptFeedback?.blockReason : undefined;
-
     return {
       content: this.buildContentBlocks(text, toolCalls, images),
-      stopReason: promptBlockReason !== undefined
-        ? this.mapFinishReason(promptBlockReason)
-        : this.mapFinishReason(candidate?.finishReason),
+      stopReason: this.resolveStopReason(
+        candidate !== undefined,
+        candidate?.finishReason,
+        response.promptFeedback
+      ),
       stopSequence: undefined,
       usage: {
         inputTokens: response.usageMetadata?.promptTokenCount ?? 0,
@@ -618,6 +625,21 @@ export class GeminiAdapter implements ProviderAdapter {
     }
 
     return content;
+  }
+
+  // A prompt blocked BEFORE generation comes back as a 200 with
+  // promptFeedback.blockReason and no candidate data at all — no data.error, no
+  // finishReason — so it used to read as an empty, clean end_turn. complete()
+  // and stream() both resolve here so the two paths cannot drift apart again.
+  private resolveStopReason(
+    sawCandidateData: boolean,
+    candidateFinishReason: string | undefined,
+    promptFeedback: GeminiResponse['promptFeedback']
+  ): string {
+    const promptBlockReason = sawCandidateData ? undefined : promptFeedback?.blockReason;
+    return promptBlockReason !== undefined
+      ? this.mapFinishReason(promptBlockReason)
+      : this.mapFinishReason(candidateFinishReason);
   }
 
   private mapFinishReason(reason: string | undefined): string {
