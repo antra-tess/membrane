@@ -34,6 +34,7 @@ import {
   MembraneError,
   classifyError,
   isOverloadedError,
+  isTypedAbortError,
   isTextContent,
   isAbortedResponse,
 } from './types/index.js';
@@ -2312,20 +2313,18 @@ export class Membrane {
   }
 
   /**
-   * Check if an error is an abort error
+   * Check if an error is an abort error.
+   *
+   * Typed only — name === 'AbortError', a DOMException AbortError, or a
+   * MembraneError of type 'abort' (which is what every adapter throws for a
+   * cancelled request). The old substring arms turned any error whose text
+   * merely contained "abort" into a well-formed AbortedResponse{reason:
+   * 'user'}: a host tool failing with "...aborted..." inside the same try
+   * became a phantom user cancellation, and the real error was destroyed.
+   * Everything else now throws through attachRawRequest.
    */
   private isAbortError(error: unknown): boolean {
-    if (error instanceof Error) {
-      // Standard AbortError
-      if (error.name === 'AbortError') return true;
-      // Anthropic SDK abort
-      if (error.message.includes('aborted') || error.message.includes('abort')) return true;
-    }
-    // DOMException for browser environments
-    if (typeof DOMException !== 'undefined' && error instanceof DOMException) {
-      return error.name === 'AbortError';
-    }
-    return false;
+    return isTypedAbortError(error);
   }
 
   /**
