@@ -25,9 +25,15 @@ import {
  *
  * Anthropic accepts at most 4 `cache_control` blocks per request, and the
  * request builders spend from that same budget (a system/tools fallback
- * block, the floating tool-loop marker). Nothing reconciles those spends
- * against `cache.points`, so the module keeps one slot free rather than
- * risk a 400 on the default XML path, which always marks the system block.
+ * block, a `contextPrefix` block when that option is set, the floating
+ * tool-loop marker). Nothing reconciles those spends against
+ * `cache.points`, so the module keeps one slot free rather than risk a 400
+ * on the default XML path, which always marks the system block. A caller
+ * combining this module with MORE than one formatter spend (e.g. system
+ * prompt AND `contextPrefix`) can still exceed the provider budget: the
+ * module cannot see the formatter's choices from here, which is why the
+ * request-side wire clamp (the cache-marker budget PR) is the layer that
+ * makes the ceiling safe by construction rather than by convention.
  */
 const MAX_MODULE_CACHE_POINTS = 3;
 
