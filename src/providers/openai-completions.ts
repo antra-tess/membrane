@@ -49,6 +49,7 @@ interface CompletionsRequest {
   repetition_penalty?: number;
   stop?: string[];
   stream?: boolean;
+  stream_options?: { include_usage?: boolean };
 }
 
 interface CompletionsResponse {
@@ -174,6 +175,9 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
   ): Promise<ProviderResponse> {
     const completionsRequest = this.buildRequest(request);
     completionsRequest.stream = true;
+    // Ask for usage in the stream — without this the endpoint sends no usage
+    // frame at all and every streamed call reports 0/0 tokens.
+    completionsRequest.stream_options = { include_usage: true };
     options?.onRequest?.(completionsRequest);
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
@@ -200,6 +204,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
       let accumulated = '';
       let finishReason = 'stop';
       let sawTerminalEvent = false;
+      let streamUsage: CompletionsResponse['usage'] | undefined;
 
       // Post-facto truncation of the adapter's own eotToken.
       // The adapter serializes the prompt with this.eotToken and sends it as an
@@ -274,6 +279,11 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
               finishReason = parsed.choices[0].finish_reason;
               sawTerminalEvent = true;
             }
+
+            // Usage rides the final chunk when stream_options.include_usage is set
+            if (parsed.usage) {
+              streamUsage = parsed.usage;
+            }
           } catch {
             // Ignore parse errors in stream
           }
@@ -290,7 +300,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
 
       assertTerminalEventObserved(sawTerminalEvent, this.name, completionsRequest);
 
-      return this.buildStreamedResponse(accumulated, finishReason, request.model, completionsRequest);
+      return this.buildStreamedResponse(accumulated, finishReason, request.model, streamUsage, completionsRequest);
 
     } catch (error) {
       throw this.handleError(error, completionsRequest);
@@ -520,6 +530,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
     accumulated: string,
     finishReason: string,
     requestedModel: string,
+    streamUsage?: CompletionsResponse['usage'],
     rawRequest?: unknown
   ): ProviderResponse {
     return {
@@ -527,12 +538,14 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
       stopReason: this.mapFinishReason(finishReason),
       stopSequence: undefined,
       usage: {
-        inputTokens: 0, // Not available in streaming
-        outputTokens: 0,
+        // Zeros only as the genuinely-absent fallback: an endpoint that
+        // ignores stream_options sends no usage frame.
+        inputTokens: streamUsage?.prompt_tokens ?? 0,
+        outputTokens: streamUsage?.completion_tokens ?? 0,
       },
       model: requestedModel,
       rawRequest,
-      raw: { text: accumulated, finish_reason: finishReason },
+      raw: { text: accumulated, finish_reason: finishReason, usage: streamUsage },
     };
   }
 

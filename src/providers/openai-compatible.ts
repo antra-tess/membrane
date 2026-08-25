@@ -180,6 +180,9 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   ): Promise<ProviderResponse> {
     const openAIRequest = this.buildRequest(request);
     openAIRequest.stream = true;
+    // Ask for usage in the stream — without this the endpoint sends no usage
+    // frame at all and every streamed call reports 0/0 tokens.
+    openAIRequest.stream_options = { include_usage: true };
     options?.onRequest?.(openAIRequest);
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
@@ -208,6 +211,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       let finishReason = 'stop';
       let sawTerminalEvent = false;
       let toolCalls: OpenAIToolCall[] = [];
+      let streamUsage: OpenAIResponse['usage'] | undefined;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -269,6 +273,11 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
               finishReason = parsed.choices[0].finish_reason;
               sawTerminalEvent = true;
             }
+
+            // Usage rides the final chunk when stream_options.include_usage is set
+            if (parsed.usage) {
+              streamUsage = parsed.usage;
+            }
           } catch {
             // Ignore parse errors in stream
           }
@@ -289,7 +298,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         message.tool_calls = toolCalls;
       }
 
-      return this.parseStreamedResponse(message, finishReason, request.model, openAIRequest);
+      return this.parseStreamedResponse(message, finishReason, request.model, streamUsage, openAIRequest);
 
     } catch (error) {
       throw this.handleError(error, openAIRequest);
@@ -545,6 +554,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     message: OpenAIMessage,
     finishReason: string,
     requestedModel: string,
+    streamUsage?: OpenAIResponse['usage'],
     rawRequest?: unknown
   ): ProviderResponse {
     return {
@@ -552,12 +562,14 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       stopReason: this.mapFinishReason(finishReason),
       stopSequence: undefined,
       usage: {
-        inputTokens: 0, // Not available in streaming
-        outputTokens: 0,
+        // Zeros only as the genuinely-absent fallback: an endpoint that
+        // ignores stream_options sends no usage frame.
+        inputTokens: streamUsage?.prompt_tokens ?? 0,
+        outputTokens: streamUsage?.completion_tokens ?? 0,
       },
       model: requestedModel,
       rawRequest,
-      raw: { message, finish_reason: finishReason },
+      raw: { message, finish_reason: finishReason, usage: streamUsage },
     };
   }
 
