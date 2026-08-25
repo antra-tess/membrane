@@ -12,6 +12,8 @@ Releases up to and including 0.5.75 predate this file; for their contents see
 
 ## Unreleased
 
+## 0.5.80 — 2026-08-25
+
 ### Added
 
 - **Floating cache marker: incremental prompt caching inside the native tool
@@ -83,6 +85,24 @@ Releases up to and including 0.5.75 predate this file; for their contents see
     sliding was demonstrated on the **5m** cache as a 12-minute proxy; the 1h
     cache was not held open for a multi-hour test. The unit tests use fake
     timers and a mocked send.
+
+### Changed
+
+- Changelog entries now land as per-change fragment files in `changelog.d/`
+  (`<slug>.<breaking|added|changed|fixed>.md`), folded into the version
+  section at release time — concurrent PRs no longer conflict in
+  `CHANGELOG.md`. Editing `## Unreleased` directly still works and is merged
+  at the same point.
+
+### Fixed
+
+- **Anthropic context-length heuristic is now gated on HTTP 400** (#17, #48).
+  `AnthropicAdapter.handleError` classified any error whose message contained
+  "context" or "too long" as non-retryable `context_length` regardless of
+  status, so transient 5xx bodies like "Internal error: context processing
+  failed" suppressed retries and failed permanently. Genuine prompt-too-long
+  errors — including mid-stream SSE ones, whose status is recovered from the
+  body's `invalid_request_error` type — still classify as `context_length`.
 
 ## 0.5.78 — 2026-08-06
 
