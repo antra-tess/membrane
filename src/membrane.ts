@@ -34,6 +34,11 @@ import {
   stripThinkingForPrefill,
 } from './utils/thinking-carriers.js';
 import {
+  countWireCacheMarkers,
+  clampCacheMarkers,
+  MAX_CACHE_BREAKPOINTS,
+} from './utils/cache-marker-budget.js';
+import {
   DEFAULT_RETRY_CONFIG,
   MembraneError,
   classifyError,
@@ -60,7 +65,11 @@ import type {
 } from './types/yielding-stream.js';
 import type { PrefillFormatter, StreamParser } from './formatters/types.js';
 import { AnthropicXmlFormatter } from './formatters/anthropic-xml.js';
-import { normalizeToolPairs, mergeConsecutiveRoles } from './formatters/normalize-tool-pairs.js';
+import {
+  normalizeToolPairs,
+  mergeConsecutiveRoles,
+  PREFIX_REWRITING_NORMALIZE_EVENT_KINDS,
+} from './formatters/normalize-tool-pairs.js';
 import { YieldingStreamImpl } from './yielding-stream.js';
 import { calculateCost } from './utils/cost.js';
 import {
@@ -128,6 +137,10 @@ export class Membrane {
         // Cast back to the local provider-request shape: the hook returns
         // `unknown` deliberately, and we acknowledge the cast at the boundary.
         const finalRequest = (await this.applyBeforeRequestHook(request, providerRequest)) as typeof providerRequest;
+
+        // Last exit before the adapter: the only place that sees EVERY
+        // contribution (builder, formatter, passthrough, float, hook).
+        clampCacheMarkers(finalRequest, 'complete');
 
         const providerResponse = await this.adapter.complete(finalRequest, {
           signal: options.signal,
@@ -1203,8 +1216,37 @@ export class Membrane {
     }
   }
 
-  /** See the floating-cache-marker block in buildNativeToolRequest. */
-  private floatBudgetWarned = false;
+  /**
+   * Rate-limit state for the float's budget warning. See the
+   * floating-cache-marker block in buildNativeToolRequest.
+   *
+   * A once-per-instance latch made the ONLY observable of an over-budget wire
+   * go quiet for the life of the process: a long-lived Membrane warns for the
+   * first agent that trips it and never again, so the condition looks like it
+   * healed. Warn on the first occurrence, then at most once per interval,
+   * carrying the count of what was suppressed in between.
+   */
+  private floatBudgetWarnState = { lastWarnedAtMs: 0, suppressedSinceWarn: 0 };
+  private static readonly FLOAT_BUDGET_WARN_INTERVAL_MS = 60_000;
+
+  private warnFloatBudgetExhausted(wireMarkers: number): void {
+    const now = Date.now();
+    const state = this.floatBudgetWarnState;
+    const elapsed = now - state.lastWarnedAtMs;
+    if (state.lastWarnedAtMs !== 0 && elapsed < Membrane.FLOAT_BUDGET_WARN_INTERVAL_MS) {
+      state.suppressedSinceWarn++;
+      return;
+    }
+    const suppressed = state.suppressedSinceWarn;
+    state.lastWarnedAtMs = now;
+    state.suppressedSinceWarn = 0;
+    console.warn(
+      `[membrane] floating cache marker withheld: upstream markers already ` +
+      `occupy all ${MAX_CACHE_BREAKPOINTS} cache_control slots (${wireMarkers} on the wire). ` +
+      `Tool-round suffixes will not cache incrementally.` +
+      (suppressed > 0 ? ` (${suppressed} further occurrences suppressed since the last warning.)` : '')
+    );
+  }
 
   /**
    * Build a provider request with native tool support.
@@ -1238,11 +1280,13 @@ export class Membrane {
     // Anthropic allows at most 4 cache_control breakpoints per request. The
     // message breakpoints are the valuable ones (they cache the longest prefixes,
     // and every one already includes tools+system at the front of the request).
-    // So tools/system get a breakpoint only as a FALLBACK — when no message
-    // breakpoint was marked — otherwise they're redundant and would push the
-    // total past 4, which the API hard-rejects (the agent goes unresponsive).
-    let messageBreakpoints = 0;
-
+    // So tools/system get a breakpoint only as a FALLBACK — when no marker
+    // exists anywhere on the wire — otherwise they're redundant and would push
+    // the total past 4, which the API hard-rejects (the agent goes
+    // unresponsive). The fallback gate reads a RECOUNT of the built artifacts
+    // (see below), never a running tally: a running tally cannot see a
+    // caller-marked system block, and double-counts a message breakpoint that
+    // lands on a block already carrying stale cache_control.
     for (const msg of messages) {
       const isAssistant = msg.participant === assistantName;
       const role = isAssistant ? 'assistant' : 'user';
@@ -1263,14 +1307,13 @@ export class Membrane {
           }
           const textBlock: Record<string, unknown> = { type: 'text', text };
           if ((block as any).cache_control) {
-            textBlock.cache_control = (block as any).cache_control;
             // A block-level passthrough occupies one of the 4 breakpoint slots
-            // exactly like a marked message — count it, so the tools/system
-            // fallback below doesn't stack more on top. (Imported/seeded
-            // conversations can carry stale request-time cache_control on
-            // stored blocks — first seen wedging Sill 2026-07-25: 3 cm markers
-            // + 2 stale Arc-export blocks = 5 → hard 400 on every inference.)
-            messageBreakpoints++;
+            // exactly like a marked message; the recount below sees it.
+            // (Imported/seeded conversations carry stale request-time
+            // cache_control on stored blocks — first seen wedging Sill
+            // 2026-07-25: 3 cm markers + 2 stale Arc-export blocks = 5 → hard
+            // 400 on every inference.)
+            textBlock.cache_control = (block as any).cache_control;
           }
           content.push(textBlock);
         } else if (block.type === 'tool_use') {
@@ -1342,7 +1385,6 @@ export class Membrane {
         const bpIdx = lastCacheableBlockIndex(content as Array<Record<string, unknown>>);
         if (bpIdx >= 0) {
           content[bpIdx].cache_control = cacheControl;
-          messageBreakpoints++;
         }
       }
 
@@ -1373,13 +1415,31 @@ export class Membrane {
     // past one. `synthetic_pending_result` (not the downstream
     // cache_suppressed_for_synthetic, which only fires when a marker was
     // actually stripped) is the root condition.
-    let pendingResultSynthesized = false;
+    // Every repair that REWRITES prefix bytes stands the float down, not just
+    // the synthetic [pending] result: a textified orphan tool_result is
+    // rewritten the same way when its real pairing arrives, so caching at or
+    // past one poisons the prefix identically. The kinds live in one exported
+    // set so a normalizer that grows a new prefix-rewriting repair cannot
+    // silently escape this guard.
+    let prefixRewritten = false;
     const normalized = normalizeToolPairs(providerMessages, {
       onEvent: (e) => {
-        if (e.kind === 'synthetic_pending_result') pendingResultSynthesized = true;
+        if (PREFIX_REWRITING_NORMALIZE_EVENT_KINDS.has(e.kind)) prefixRewritten = true;
       },
     });
     const mergedMessages = mergeConsecutiveRoles(normalized.messages);
+
+    // ONE recount of the constructed wire artifacts, taken BEFORE the
+    // tools/system fallback decision so the fallback and the float share a
+    // single truth. Counted post-normalize, so phase-5.5 cache suppression is
+    // already reflected. `request.system` is the caller's own system content:
+    // it explicitly accepts pre-marked blocks, and those are real wire markers
+    // that no running tally ever saw (three of them plus both fallbacks = 5 on
+    // the wire = a 400 on every inference of that config).
+    const upstreamWireMarkers = countWireCacheMarkers({
+      messages: mergedMessages,
+      system: request.system,
+    });
 
     // Convert tools to provider format.
     // Native tool names must match ^[a-zA-Z0-9_-]{1,128}$ — sanitize colons
@@ -1392,7 +1452,7 @@ export class Membrane {
       };
       // Cache the tool list (last tool) only as a fallback — a marked message
       // breakpoint already caches the tools as part of its prefix.
-      if (cacheControl && messageBreakpoints === 0 && request.tools && idx === request.tools.length - 1) {
+      if (cacheControl && upstreamWireMarkers === 0 && request.tools && idx === request.tools.length - 1) {
         t.cache_control = cacheControl;
       }
       return t;
@@ -1402,9 +1462,9 @@ export class Membrane {
     // breakpoint marked); otherwise a message breakpoint already caches
     // tools+system as part of its prefix.
     let system: unknown = request.system;
-    if (cacheControl && messageBreakpoints === 0 && typeof system === 'string' && system.length > 0) {
+    if (cacheControl && upstreamWireMarkers === 0 && typeof system === 'string' && system.length > 0) {
       system = [{ type: 'text', text: system, cache_control: cacheControl }];
-    } else if (cacheControl && messageBreakpoints === 0 && Array.isArray(system) && system.length > 0) {
+    } else if (cacheControl && upstreamWireMarkers === 0 && Array.isArray(system) && system.length > 0) {
       const blocks = system as Record<string, unknown>[];
       system = blocks.map((block, idx) =>
         idx === blocks.length - 1 ? { ...block, cache_control: cacheControl } : block
@@ -1443,39 +1503,13 @@ export class Membrane {
     // ------------------------------------------------------------------
     const floatingEnabled =
       request.floatingCacheMarker ?? this.config.defaultFloatingCacheMarker ?? true;
-    if (toolLoopRebuild && floatingEnabled && cacheControl && !pendingResultSynthesized) {
-      // Residuum from a RECOUNT of the constructed wire artifacts, not the
-      // running messageBreakpoints tally — the tally diverges from the wire
-      // in both directions (mirrors NativeFormatter's recount, same bug
-      // class as the Sill 2026-07-25 wedge): a message-level breakpoint
-      // landing on a block already carrying stale cache_control is one
-      // physical marker counted twice, and a pre-marked system block is a
-      // real wire marker the tally never sees. Counted post-fallback and
-      // post-normalize, so fallback spend and phase-5.5 suppression are
-      // both reflected.
-      let wireMarkers = 0;
-      for (const m of mergedMessages) {
-        if (!Array.isArray(m.content)) continue;
-        for (const b of m.content as Array<Record<string, unknown>>) {
-          if (b.cache_control) wireMarkers++;
-        }
-      }
-      if (tools) for (const t of tools) { if (t.cache_control) wireMarkers++; }
-      if (Array.isArray(system)) {
-        for (const b of system as Array<Record<string, unknown>>) {
-          if (b.cache_control) wireMarkers++;
-        }
-      }
-      let residuum = 4 - wireMarkers;
+    if (toolLoopRebuild && floatingEnabled && cacheControl && !prefixRewritten) {
+      // Same recount as the fallback gate, re-taken POST-fallback so the
+      // fallback's own spend is inside the residuum.
+      const wireMarkers = countWireCacheMarkers({ messages: mergedMessages, system, tools });
+      let residuum = MAX_CACHE_BREAKPOINTS - wireMarkers;
       if (residuum <= 0) {
-        if (!this.floatBudgetWarned) {
-          this.floatBudgetWarned = true;
-          console.warn(
-            `[membrane] floating cache marker withheld: upstream markers already ` +
-            `occupy all 4 cache_control slots (${wireMarkers} on the wire). ` +
-            `Tool-round suffixes will not cache incrementally.`
-          );
-        }
+        this.warnFloatBudgetExhausted(wireMarkers);
       } else {
         // Newest message first; then the previous round's endpoint (two
         // wire messages back: [..., prevResults, assistant, results]).
@@ -1922,6 +1956,12 @@ export class Membrane {
     // normalized form into every adapter's options.
     const { normalizedRequest, refusalRetries, onRetrying, ...adapterOptions } = options;
     const finalRequest = (await this.applyBeforeRequestHook(normalizedRequest, request)) as typeof request;
+
+    // Last exit before the adapter: the only place that sees EVERY
+    // contribution (builder, formatter, passthrough, float, hook). Every
+    // streaming path — stream(), streamYielding(), both tool loops — funnels
+    // through here, so this is the one clamp they all get.
+    clampCacheMarkers(finalRequest, 'streamOnce');
 
     // Retries are only safe when the caller can discard the abandoned
     // attempt, so they require BOTH a budget and an onRetrying hook.

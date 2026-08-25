@@ -43,6 +43,24 @@ import type { NormalizeEvent } from './types.js';
  */
 export type ProviderBlock = Record<string, unknown> & { type: string };
 
+/**
+ * The repairs that REWRITE prefix bytes rather than only re-shaping
+ * envelopes. Both placeholders here are rewritten again the moment the real
+ * pairing arrives — the synthetic `[pending]` result when its tool_result
+ * lands, the textified orphan when its tool_use does — so a cache breakpoint
+ * placed at or past one caches a prefix that is about to change, poisoning
+ * every subsequent read.
+ *
+ * Consumers gate cache placement on this SET rather than on a single kind, so
+ * a normalizer that grows another prefix-rewriting repair adds its kind here
+ * once instead of leaving every cache site silently uncovered. (A new kind is
+ * a compile error here until it is added to `NormalizeEvent` — deliberate.)
+ */
+export const PREFIX_REWRITING_NORMALIZE_EVENT_KINDS: ReadonlySet<NormalizeEvent['kind']> = new Set([
+  'synthetic_pending_result',
+  'orphan_tool_result_textified',
+] satisfies Array<NormalizeEvent['kind']>);
+
 export interface NormalizeOptions {
   /** See `BuildOptions.pendingToolCallIds`. */
   pendingToolCallIds?: ReadonlySet<string>;
