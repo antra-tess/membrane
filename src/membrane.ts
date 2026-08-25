@@ -28,6 +28,11 @@ import type {
 } from './types/index.js';
 import { lastCacheableBlockIndex } from './formatters/native.js';
 import {
+  sameThinkingText,
+  findSpanningProviderRun,
+  thinkingCarrierKey,
+} from './utils/thinking-carriers.js';
+import {
   DEFAULT_RETRY_CONFIG,
   MembraneError,
   classifyError,
@@ -1602,10 +1607,32 @@ export class Membrane {
 
   /**
    * Merge provider thinking signatures into parser-derived thinking blocks
-   * (matched in stream order), and prepend any leftover provider blocks —
-   * signature-only thinking (display:'omitted') never appears in the text
-   * stream, so the parser produces no block for it. redacted_thinking
-   * blocks are always prepended verbatim.
+   * and prepend any leftover provider blocks — signature-only thinking
+   * (display:'omitted') never appears in the text stream, so the parser
+   * produces no block for it. redacted_thinking blocks are always prepended
+   * verbatim.
+   *
+   * Pairing is by CONTENT IDENTITY, never by index. The two lists are
+   * differently shaped whenever the provider emits a block the parser cannot
+   * see (signature-only), the parser emits a block the provider never
+   * produced (the XML path's literal `Claude: <thinking>` prefill turns
+   * VISIBLE text into a thinking block), or one provider block spans several
+   * (auto-continuation: capture runs per round while the parser sees the
+   * CONCATENATED accumulation). Index-zipping crosses the lists in all three
+   * shapes and stamps a signature onto content that never produced it —
+   * which round-trips into the consumer's stored history and fails Anthropic
+   * signature validation on the next turn.
+   *
+   * The three rules, in order:
+   *   1. identity — a provider block pairs with the parsed block whose
+   *      thinking text is the same; empty-thinking (signature-only) blocks
+   *      are never text-match candidates and are prepend-only.
+   *   2. span — a parsed block that reconstructs as the concatenation of a
+   *      RUN of consecutive unpaired provider blocks is REPLACED in place by
+   *      those originals, so the spanning block never wears a fragment's
+   *      signature and no reasoning is sent twice.
+   *   3. leftover — everything still unpaired is prepended, de-duplicated
+   *      against what `content` already carries (and against itself).
    *
    * Mutates `content` in place. Shared by the XML stream paths
    * (streamWithXmlTools and runXmlToolsYielding).
@@ -1616,25 +1643,74 @@ export class Membrane {
   ): void {
     if (providerThinkingBlocks.length === 0) return;
 
-    const parsedThinking = content.filter(
+    const providerThinking = providerThinkingBlocks.filter(
       (b) => b.type === 'thinking'
-    ) as Array<{ type: 'thinking'; thinking: string; signature?: string }>;
-
-    const providerThinking = providerThinkingBlocks.filter((b) => b.type === 'thinking');
+    ) as Array<{ type: 'thinking'; thinking?: string; signature?: string }>;
     const redacted = providerThinkingBlocks.filter((b) => b.type === 'redacted_thinking');
 
-    const matched = Math.min(providerThinking.length, parsedThinking.length);
-    for (let i = 0; i < matched; i++) {
-      const sig = (providerThinking[i] as { signature?: string }).signature;
-      if (sig) {
-        parsedThinking[i]!.signature = sig;
-      }
+    const pairedProviderBlocks = new Set<number>();
+    const claimedParsedIndices = new Set<number>();
+    const parsedThinkingIndices = () =>
+      content.reduce<number[]>((acc, block, index) => {
+        if (block.type === 'thinking') acc.push(index);
+        return acc;
+      }, []);
+
+    for (let p = 0; p < providerThinking.length; p++) {
+      const providerText = providerThinking[p]!.thinking ?? '';
+      if (providerText === '') continue;
+      const match = parsedThinkingIndices().find(
+        (index) =>
+          !claimedParsedIndices.has(index) &&
+          sameThinkingText((content[index] as { thinking?: string }).thinking ?? '', providerText)
+      );
+      if (match === undefined) continue;
+      const signature = providerThinking[p]!.signature;
+      if (signature) (content[match] as { signature?: string }).signature = signature;
+      claimedParsedIndices.add(match);
+      pairedProviderBlocks.add(p);
     }
 
-    const leftover = providerThinking.slice(matched);
-    if (leftover.length > 0 || redacted.length > 0) {
-      content.unshift(...leftover, ...redacted);
+    for (const parsedIndex of parsedThinkingIndices().reverse()) {
+      if (claimedParsedIndices.has(parsedIndex)) continue;
+      const parsedText = (content[parsedIndex] as { thinking?: string }).thinking ?? '';
+      if (parsedText === '') continue;
+      const run = findSpanningProviderRun(providerThinking, pairedProviderBlocks, parsedText);
+      if (!run) continue;
+      content.splice(
+        parsedIndex,
+        1,
+        ...run.map((p) => {
+          pairedProviderBlocks.add(p);
+          const block = providerThinking[p]!;
+          return {
+            type: 'thinking',
+            thinking: block.thinking ?? '',
+            ...(block.signature ? { signature: block.signature } : {}),
+          } as ContentBlock;
+        })
+      );
+      claimedParsedIndices.add(parsedIndex);
     }
+
+    const seen = new Set(content.map((block) => thinkingCarrierKey(block)));
+    const leftover: ContentBlock[] = [];
+    for (let p = 0; p < providerThinking.length; p++) {
+      if (pairedProviderBlocks.has(p)) continue;
+      const block = providerThinking[p]! as unknown as ContentBlock;
+      const key = thinkingCarrierKey(block);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      leftover.push(block);
+    }
+    for (const block of redacted) {
+      const key = thinkingCarrierKey(block);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      leftover.push(block);
+    }
+
+    if (leftover.length > 0) content.unshift(...leftover);
   }
 
   // ==========================================================================
