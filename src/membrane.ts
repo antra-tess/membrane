@@ -369,6 +369,8 @@ export class Membrane {
       onResponse,
       maxToolDepth = 10,
       signal,
+      timeoutMs,
+      idleTimeoutMs,
       formatter: requestFormatter,
     } = options;
 
@@ -547,6 +549,8 @@ export class Membrane {
           },
           {
             signal,
+            timeoutMs,
+            idleTimeoutMs,
             normalizedRequest: request,
             // The tag-based parser tracks thinking via <thinking> tags — ask the
             // provider to wrap native thinking deltas so they don't stream as
@@ -980,6 +984,8 @@ export class Membrane {
       onResponse,
       maxToolDepth = 10,
       signal,
+      timeoutMs,
+      idleTimeoutMs,
     } = options;
 
     let toolDepth = 0;
@@ -1031,6 +1037,8 @@ export class Membrane {
           },
           {
             signal,
+            timeoutMs,
+            idleTimeoutMs,
             normalizedRequest: request,
             onRequest: (req) => {
               rawRequest = req;
