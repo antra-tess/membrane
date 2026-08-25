@@ -161,6 +161,7 @@ class PassthroughParser implements StreamParser {
 export class NativeFormatter implements PrefillFormatter {
   readonly name = 'native';
   readonly usesPrefill = false;
+  readonly supportsNativeTools = true;
 
   private config: Required<NativeFormatterConfig>;
 

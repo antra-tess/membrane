@@ -183,6 +183,8 @@ class CompletionsStreamParser implements StreamParser {
 export class CompletionsFormatter implements PrefillFormatter {
   readonly name = 'completions';
   readonly usesPrefill = true;
+  /** Text-completion wire shape: there is no tool channel to put tools in. */
+  readonly supportsNativeTools = false;
 
   private config: Required<Omit<CompletionsFormatterConfig, 'unsupportedMedia' | 'warnOnStrip'>> & {
     unsupportedMedia: 'strip'; // Always strip for completions

@@ -258,6 +258,17 @@ export interface PrefillFormatter {
   /** Whether this formatter uses prefill (vs native pass-through) */
   readonly usesPrefill: boolean;
 
+  /**
+   * Whether this formatter can carry provider-native tool definitions —
+   * i.e. whether `buildMessages` can populate `BuildResult.nativeTools`.
+   *
+   * `Membrane.resolveToolMode` reads this to pick the default tool mode:
+   * native wherever the formatter can carry it, XML/prefill only for a
+   * formatter that genuinely cannot (a text-completion surface) or when the
+   * caller opts in explicitly.
+   */
+  readonly supportsNativeTools: boolean;
+
   // ==========================================================================
   // REQUEST BUILDING
   // ==========================================================================

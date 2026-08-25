@@ -34,6 +34,7 @@ import {
   isOverloadedError,
   isTextContent,
   isAbortedResponse,
+  unsupportedError,
 } from './types/index.js';
 import type { BuildResult } from './formatters/types.js';
 import {
@@ -63,6 +64,7 @@ import {
   shedImagesToFitByteBudget, assertWithinByteBudget,
 } from './utils/image-media.js';
 import { getDefaultPricing } from './registry/default-pricing.js';
+import { supportsAssistantPrefill } from './registry/model-capabilities.js';
 
 // ============================================================================
 // Membrane Class
@@ -322,28 +324,57 @@ export class Membrane {
   }
 
   /**
-   * Determine the effective tool mode
+   * Determine the effective tool mode.
+   *
+   * Native is the default wherever the formatter can carry native tools.
+   * XML tools ride in an assistant prefill, and current Anthropic models
+   * (4.6+ and the 5-series) refuse assistant prefill outright — so defaulting
+   * to XML aimed the library's out-of-the-box path at a provider 400 on the
+   * models most callers reach for. XML is now an explicit opt-in, or the
+   * fallback for a formatter with no tool channel at all (text completions).
+   *
+   * When XML/prefill IS selected against a model that refuses prefill, fail
+   * here with a typed error naming the incompatibility rather than building a
+   * request whose only outcome is an opaque provider 400.
    */
   private resolveToolMode(request: NormalizedRequest): ToolMode {
+    const mode = this.resolveToolModeUnchecked(request);
+    if (mode === 'xml' && this.formatter.usesPrefill) {
+      this.assertPrefillSupported(
+        request.config.model,
+        `xml tool mode (formatter "${this.formatter.name}")`,
+      );
+    }
+    return mode;
+  }
+
+  private resolveToolModeUnchecked(request: NormalizedRequest): ToolMode {
     // Explicit mode takes precedence
     if (request.toolMode && request.toolMode !== 'auto') {
       return request.toolMode;
     }
 
-    // Auto mode: choose based on formatter
-    // NativeFormatter → native tools via API
-    // AnthropicXmlFormatter (default) → XML tools in prefill
-    if (this.formatter.name === 'native' || this.formatter.name === 'openai-responses') {
-      return 'native';
-    }
+    // Auto mode: the formatter owns the wire shape of a tool definition, so
+    // its own declared capability decides. Adapter-level special cases used
+    // to live here (openrouter) and are now subsumed: native is the default.
+    return this.formatter.supportsNativeTools ? 'native' : 'xml';
+  }
 
-    // Also handle known native-tool providers regardless of formatter
-    if (this.adapter.name === 'openrouter') {
-      return 'native';
-    }
-
-    // Default to XML for prefill compatibility
-    return 'xml';
+  /**
+   * Refuse a prefill-shaped request aimed at a model that rejects assistant
+   * prefill, before the round-trip. See registry/model-capabilities.ts for
+   * the measured table.
+   */
+  private assertPrefillSupported(model: string, site: string): void {
+    if (supportsAssistantPrefill(model)) return;
+    throw unsupportedError(
+      `Model "${model}" does not support assistant prefill, and ${site} ` +
+      `builds one: the conversation would end in an assistant turn, ` +
+      `which this model rejects with HTTP 400. ` +
+      `Use a native path instead — NativeFormatter, or toolMode: 'native' with ` +
+      `the XML formatter — or target a prefill-capable model ` +
+      `(Claude 4.5 and earlier, including claude-haiku-4-5).`,
+    );
   }
 
   /**
@@ -1764,6 +1795,14 @@ export class Membrane {
       contextPrefix: request.contextPrefix,
       prefillUserMessage: request.prefillUserMessage,
     });
+
+    // Prefill-capability policy point: this is the one place membrane
+    // MANUFACTURES an assistant prefill, and a model that refuses prefill
+    // answers it with an opaque 400. Refuse here, typed and named, before
+    // the round-trip. Covers the no-tools path as well as xml tool mode.
+    if (buildResult.assistantPrefill) {
+      this.assertPrefillSupported(request.config.model, `formatter "${activeFormatter.name}"`);
+    }
 
     // Byte-wall policy point (2026-07-12): transformRequest serves BOTH
     // complete() and the streaming path through EVERY adapter. Oversize

@@ -74,6 +74,7 @@ type NativeItem = { type?: string; id?: string; [key: string]: unknown };
 export class OpenAIResponsesFormatter implements PrefillFormatter {
   readonly name = 'openai-responses';
   readonly usesPrefill = false;
+  readonly supportsNativeTools = true;
 
   buildMessages(messages: NormalizedMessage[], options: BuildOptions): BuildResult {
     const items: NativeItem[] = [];
