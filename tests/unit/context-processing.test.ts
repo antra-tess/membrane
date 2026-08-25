@@ -492,3 +492,50 @@ describe('S1: processContext honours ContextConfig.assistantParticipant', () => 
     expect(marked.participant).toBe('zz-user');
   });
 });
+
+// ---------------------------------------------------------------------------
+// S2 — the 3-marker cap binds the stability path, not just fresh placement
+// ---------------------------------------------------------------------------
+
+function zzFourMarkerState(messages: NormalizedMessage[]): ContextState {
+  return {
+    ...createInitialState(),
+    cacheMarkers: [
+      { messageId: 'ite5', messageIndex: 5, tokenEstimate: 300 },
+      { messageId: 'ite12', messageIndex: 12, tokenEstimate: 650 },
+      { messageId: 'ite19', messageIndex: 19, tokenEstimate: 1000 },
+      { messageId: 'ite26', messageIndex: 26, tokenEstimate: 1350 },
+    ],
+    windowMessageIds: messages.map((m) => m.metadata?.sourceId as string),
+  };
+}
+
+describe('S2: retained markers are clamped to the module cap', () => {
+  it('keeps only the deepest three markers carried over from prior state', () => {
+    const messages = zzAlternating(40, 200);
+
+    const markers = placeCacheMarkers(
+      messages,
+      withTokens(messages),
+      zzFourMarkerState(messages),
+      false,
+      baseConfig()
+    );
+
+    expect(markers.map((m) => m.messageId)).toEqual(['ite12', 'ite19', 'ite26']);
+  });
+
+  it('migrates a pre-upgrade four-marker state down to three end to end', async () => {
+    const messages = zzAlternating(40, 200);
+
+    const output = await processContext(
+      mockMembrane(),
+      { messages, config: zzGenerationConfig, context: baseConfig() },
+      zzFourMarkerState(messages)
+    );
+
+    expect(output.info.didRoll).toBe(false);
+    expect(output.info.cacheMarkers.length).toBe(3);
+    expect(output.state.cacheMarkers.length).toBe(3);
+  });
+});

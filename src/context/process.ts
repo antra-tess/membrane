@@ -576,19 +576,30 @@ export function placeCacheMarkers(
     const validMarkers = state.cacheMarkers.filter(m => currentIds.has(m.messageId));
     
     if (validMarkers.length > 0) {
-      // Recalculate token estimates for valid markers
-      return validMarkers.map(marker => {
-        const idx = messages.findIndex(m => getMessageId(m) === marker.messageId);
-        const tokenEstimate = messageTokens
-          .slice(0, idx + 1)
-          .reduce((sum, m) => sum + m.tokens, 0);
-        
-        return {
-          messageId: marker.messageId,
-          messageIndex: idx,
-          tokenEstimate,
-        };
-      });
+      // Recalculate token estimates for valid markers, then apply the same cap
+      // fresh placement obeys. The cap is a property of the REQUEST (Anthropic
+      // accepts four cache_control blocks and the builders spend from the same
+      // budget), so honouring it only on the fresh path let a state written
+      // before the cap existed - or by a caller that asked for four points -
+      // keep re-spending four slots on every subsequent call, which is where
+      // the builders' own marker turns the request into a 400. The deepest
+      // markers cover the longest prefixes, so those are the ones kept.
+      const retainedMarkers = validMarkers
+        .map(marker => {
+          const idx = messages.findIndex(m => getMessageId(m) === marker.messageId);
+          const tokenEstimate = messageTokens
+            .slice(0, idx + 1)
+            .reduce((sum, m) => sum + m.tokens, 0);
+          
+          return {
+            messageId: marker.messageId,
+            messageIndex: idx,
+            tokenEstimate,
+          };
+        })
+        .sort((a, b) => a.messageIndex - b.messageIndex);
+      
+      return retainedMarkers.slice(-MAX_MODULE_CACHE_POINTS);
     }
   }
   

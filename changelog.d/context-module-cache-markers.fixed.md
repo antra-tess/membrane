@@ -9,3 +9,6 @@
   `cache.points`, keeping one of Anthropic's four `cache_control` slots free for
   the request builders' own spends (the XML formatter's system block, the
   floating tool-loop marker), which nothing reconciles against `cache.points`.
+  The cap binds the stability path too: markers carried over from prior state
+  are clamped to the deepest 3, so a state written before the cap existed does
+  not keep re-spending four slots on every later call.
