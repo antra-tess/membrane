@@ -331,6 +331,43 @@ export class AnthropicAdapter implements ProviderAdapter {
       // thinking blocks with no thinking_delta at all (signature only).
       const wrapThinkingTags = options?.wrapThinkingTags === true;
       let thinkingTagOpen = false;
+      // Index of a block that has started and not yet been stopped. A stream
+      // can end with one still open: measured live against claude-haiku-4-5
+      // (2026-08-25), a tool call truncated by max_tokens emits
+      // content_block_start + input_json_delta fragments and then goes
+      // straight to message_delta — no content_block_stop at all.
+      let openBlockIndex = -1;
+
+      const finalizeContentBlock = (blockIdx: number, sawBlockStop: boolean): void => {
+        const block = contentBlocks[blockIdx];
+        if (block) {
+          if (block.type === 'text') {
+            block.text = currentBlockContent;
+          } else if (block.type === 'thinking') {
+            block.thinking = currentBlockContent;
+            if (thinkingTagOpen) {
+              callbacks.onChunk('</thinking>\n');
+              thinkingTagOpen = false;
+            }
+          } else if (block.type === 'tool_use') {
+            if (!sawBlockStop) {
+              // Arguments never finished arriving, so `input` is still the
+              // empty object content_block_start carried — a plausible no-arg
+              // call that nothing downstream can distinguish from a real one.
+              block.unparseableInput = currentBlockInputJson;
+            } else if (currentBlockInputJson) {
+              try {
+                block.input = JSON.parse(currentBlockInputJson);
+              } catch {
+                // Same fabrication, reached by a block that did stop: keep the
+                // raw accumulation and mark it so consumers can refuse.
+                block.unparseableInput = currentBlockInputJson;
+              }
+            }
+          }
+        }
+        callbacks.onContentBlock?.(blockIdx, contentBlocks[blockIdx]);
+      };
 
       for await (const event of stream) {
         sawEvent = true;
@@ -356,6 +393,7 @@ export class AnthropicAdapter implements ProviderAdapter {
 
         } else if (event.type === 'content_block_start') {
           currentBlockIndex = event.index;
+          openBlockIndex = event.index;
           currentBlockContent = '';
           currentBlockInputJson = '';
           contentBlocks[currentBlockIndex] = { ...event.content_block };
@@ -389,22 +427,8 @@ export class AnthropicAdapter implements ProviderAdapter {
 
         } else if (event.type === 'content_block_stop') {
           // Finalize block — use event.index for defensive correctness
-          const blockIdx = (event as { index: number }).index;
-          const block = contentBlocks[blockIdx];
-          if (block) {
-            if (block.type === 'text') {
-              block.text = currentBlockContent;
-            } else if (block.type === 'thinking') {
-              block.thinking = currentBlockContent;
-              if (thinkingTagOpen) {
-                callbacks.onChunk('</thinking>\n');
-                thinkingTagOpen = false;
-              }
-            } else if (block.type === 'tool_use' && currentBlockInputJson) {
-              try { block.input = JSON.parse(currentBlockInputJson); } catch { /* partial JSON */ }
-            }
-          }
-          callbacks.onContentBlock?.(blockIdx, contentBlocks[blockIdx]);
+          finalizeContentBlock((event as { index: number }).index, true);
+          openBlockIndex = -1;
 
         } else if (event.type === 'message_delta') {
           // All content blocks are finalized by the time message_delta arrives.
@@ -440,6 +464,14 @@ export class AnthropicAdapter implements ProviderAdapter {
       // Clean up idle timer and external signal listener
       if (idleTimer) clearTimeout(idleTimer);
       options?.signal?.removeEventListener('abort', onExternalAbort);
+
+      // A block still open here never received its content_block_stop: the
+      // turn ended mid-block. Finalize it so the accumulated text is not lost
+      // and a truncated tool call is marked rather than persisted as `{}`.
+      if (openBlockIndex >= 0) {
+        finalizeContentBlock(openBlockIndex, false);
+        openBlockIndex = -1;
+      }
 
       // Force-close the HTTP connection so we don't block on SSE drain
       try { stream.controller.abort(); } catch { /* already closed */ }
