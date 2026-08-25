@@ -1,0 +1,2 @@
+- XML tool parser: `<invoke>` tags are now recognised with single-quoted names and with whitespace before the closing angle bracket. Previously only one spelling (`name="…">`, no space) parsed, and any other spelling yielded a `<function_calls>` block with zero calls — the call became silent assistant prose and the turn ended.
+- XML tool parser: a block that mixes self-closing and full `<invoke>` tags now yields its calls in document order. Two sequential regex passes previously emitted every full invoke before every self-closing one.

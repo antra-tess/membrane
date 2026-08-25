@@ -41,6 +41,22 @@ function parseParamValue(value: string): unknown {
   }
 }
 
+/**
+ * Parse the parameters of one invoke body. A self-closing invoke has no body
+ * and therefore no parameters.
+ */
+function parseInvokeParameters(invokeBody: string | undefined): Record<string, unknown> {
+  const input: Record<string, unknown> = {};
+  if (invokeBody === undefined) return input;
+
+  PARAMETER_REGEX.lastIndex = 0;
+  let paramMatch: RegExpExecArray | null;
+  while ((paramMatch = PARAMETER_REGEX.exec(invokeBody)) !== null) {
+    input[paramMatch[2] ?? ''] = parseParamValue(paramMatch[3] ?? '');
+  }
+  return input;
+}
+
 // ============================================================================
 // Tool Call Parsing
 // ============================================================================
@@ -49,11 +65,16 @@ function parseParamValue(value: string): unknown {
 // Pattern matches: <function_calls> or <function_calls>
 const FUNCTION_CALLS_REGEX = /<(antml:)?function_calls>([\s\S]*?)<\/(antml:)?function_calls>/g;
 
-// Full invoke tags with content
-const INVOKE_REGEX_FULL = /<(antml:)?invoke\s+name="([^"]+)">([\s\S]*?)<\/(antml:)?invoke>/g;
+// Invoke tags, both forms in ONE alternation so a block that mixes them keeps
+// document order (two sequential passes appended full-then-self-closing).
+// The name may be single- or double-quoted and whitespace may precede the
+// closing angle bracket; the quote character is backreferenced so the opposite
+// quote stays legal inside the name.
+// Groups: 1 = antml prefix, 2 = quote char, 3 = name, 4 = body (full form only).
+const INVOKE_REGEX = /<(antml:)?invoke\s+name=(["'])(.*?)\2\s*(?:\/>|>([\s\S]*?)<\/(antml:)?invoke>)/g;
 
-// Self-closing invoke tags (no parameters)
-const INVOKE_REGEX_SELF_CLOSE = /<(antml:)?invoke\s+name="([^"]+)"\s*\/>/g;
+const INVOKE_NAME_GROUP = 3;
+const INVOKE_BODY_GROUP = 4;
 
 // Parameter tags
 const PARAMETER_REGEX = /<(antml:)?parameter\s+name="([^"]+)">([\s\S]*?)<\/(antml:)?parameter>/g;
@@ -104,45 +125,14 @@ export function parseToolCalls(text: string): ParsedToolCalls | null {
 
   const calls: ToolCall[] = [];
 
-  // Parse full invoke tags (with content and closing tag)
-  INVOKE_REGEX_FULL.lastIndex = 0;
+  INVOKE_REGEX.lastIndex = 0;
   let invokeMatch: RegExpExecArray | null;
 
-  while ((invokeMatch = INVOKE_REGEX_FULL.exec(innerContent)) !== null) {
-    const toolName = invokeMatch[2] ?? ''; // Group 2 is the name
-    const invokeContent = invokeMatch[3] ?? ''; // Group 3 is the content
-
-    // Parse parameters
-    const input: Record<string, unknown> = {};
-    PARAMETER_REGEX.lastIndex = 0;
-    let paramMatch: RegExpExecArray | null;
-
-    while ((paramMatch = PARAMETER_REGEX.exec(invokeContent)) !== null) {
-      const paramName = paramMatch[2] ?? ''; // Group 2 is the name
-      const paramValue = paramMatch[3] ?? ''; // Group 3 is the value
-
-      // Parse value with special handling for large integers
-      input[paramName] = parseParamValue(paramValue);
-    }
-
+  while ((invokeMatch = INVOKE_REGEX.exec(innerContent)) !== null) {
     calls.push({
       id: generateToolId(),
-      name: toolName,
-      input,
-    });
-  }
-
-  // Parse self-closing invoke tags (no parameters)
-  INVOKE_REGEX_SELF_CLOSE.lastIndex = 0;
-  let selfCloseMatch: RegExpExecArray | null;
-
-  while ((selfCloseMatch = INVOKE_REGEX_SELF_CLOSE.exec(innerContent)) !== null) {
-    const toolName = selfCloseMatch[2] ?? ''; // Group 2 is the name
-
-    calls.push({
-      id: generateToolId(),
-      name: toolName,
-      input: {}, // No parameters for self-closing tag
+      name: invokeMatch[INVOKE_NAME_GROUP] ?? '',
+      input: parseInvokeParameters(invokeMatch[INVOKE_BODY_GROUP]),
     });
   }
 
@@ -432,23 +422,12 @@ export function parseAccumulatedIntoBlocks(
     const rawXml = funcMatch[0];
     const blockToolCalls: ContentBlock[] = [];
 
-    // Parse invoke tags in this block
-    INVOKE_REGEX_FULL.lastIndex = 0;
+    // Parse invoke tags in this block (both forms, in document order)
+    INVOKE_REGEX.lastIndex = 0;
     let invokeMatch: RegExpExecArray | null;
-    while ((invokeMatch = INVOKE_REGEX_FULL.exec(innerContent)) !== null) {
-      const toolName = invokeMatch[2] ?? '';
-      const invokeContent = invokeMatch[3] ?? '';
-      const input: Record<string, unknown> = {};
-
-      // Parse parameters
-      PARAMETER_REGEX.lastIndex = 0;
-      let paramMatch: RegExpExecArray | null;
-      while ((paramMatch = PARAMETER_REGEX.exec(invokeContent)) !== null) {
-        const paramName = paramMatch[2] ?? '';
-        const paramValue = paramMatch[3] ?? '';
-        // Parse value with special handling for large integers
-        input[paramName] = parseParamValue(paramValue);
-      }
+    while ((invokeMatch = INVOKE_REGEX.exec(innerContent)) !== null) {
+      const toolName = invokeMatch[INVOKE_NAME_GROUP] ?? '';
+      const input = parseInvokeParameters(invokeMatch[INVOKE_BODY_GROUP]);
 
       const id = generateToolId();
       const toolCall: ToolCall = { id, name: toolName, input };
@@ -459,24 +438,6 @@ export function parseAccumulatedIntoBlocks(
         id,
         name: toolName,
         input,
-        rawXml,
-      });
-    }
-
-    // Parse self-closing invoke tags
-    INVOKE_REGEX_SELF_CLOSE.lastIndex = 0;
-    let selfCloseMatch: RegExpExecArray | null;
-    while ((selfCloseMatch = INVOKE_REGEX_SELF_CLOSE.exec(innerContent)) !== null) {
-      const toolName = selfCloseMatch[2] ?? '';
-      const id = generateToolId();
-      const toolCall: ToolCall = { id, name: toolName, input: {} };
-      toolCalls.push(toolCall);
-      callSites.push({ id, name: toolName, pos: funcMatch.index });
-      blockToolCalls.push({
-        type: 'tool_use',
-        id,
-        name: toolName,
-        input: {},
         rawXml,
       });
     }
