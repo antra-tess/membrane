@@ -450,6 +450,8 @@ export function parseAccumulatedIntoBlocks(
     start: number;
     end: number;
     block: ContentBlock | ContentBlock[];
+    calls?: ToolCall[];
+    results?: ToolResult[];
   };
   const positions: BlockPosition[] = [];
 
@@ -496,6 +498,7 @@ export function parseAccumulatedIntoBlocks(
     // of synthesizing a paraphrase (membrane#36).
     const rawXml = resolvedBlock.fullMatch;
     const blockToolCalls: ContentBlock[] = [];
+    const blockCalls: ToolCall[] = [];
 
     // Parse invoke tags in this block (both forms, in document order)
     INVOKE_REGEX.lastIndex = 0;
@@ -505,8 +508,7 @@ export function parseAccumulatedIntoBlocks(
       const input = parseInvokeParameters(invokeMatch[INVOKE_BODY_GROUP]);
 
       const id = generateToolId();
-      const toolCall: ToolCall = { id, name: toolName, input };
-      toolCalls.push(toolCall);
+      blockCalls.push({ id, name: toolName, input });
       callSites.push({ id, name: toolName, pos: resolvedBlock.start });
       blockToolCalls.push({
         type: 'tool_use',
@@ -522,6 +524,7 @@ export function parseAccumulatedIntoBlocks(
         start: resolvedBlock.start,
         end: resolvedBlock.end,
         block: blockToolCalls,
+        calls: blockCalls,
       });
     }
   }
@@ -535,6 +538,7 @@ export function parseAccumulatedIntoBlocks(
     // on the prefill path (membrane#36).
     const rawXml = resultsMatch[0];
     const blockResults: ContentBlock[] = [];
+    const blockResultValues: ToolResult[] = [];
 
     // Parse result tags
     RESULT_REGEX.lastIndex = 0;
@@ -543,8 +547,7 @@ export function parseAccumulatedIntoBlocks(
       const toolUseId = resultMatch[1] ?? '';
       const content = unescapeXml(resultMatch[2] ?? '');
       pairedCallIds.add(toolUseId);
-      const result: ToolResult = { toolUseId, content, isError: false };
-      toolResults.push(result);
+      blockResultValues.push({ toolUseId, content, isError: false });
       blockResults.push({
         type: 'tool_result',
         toolUseId,
@@ -561,8 +564,7 @@ export function parseAccumulatedIntoBlocks(
       const toolUseId = errorMatch[1] ?? '';
       const content = unescapeXml(errorMatch[2] ?? '');
       pairedCallIds.add(toolUseId);
-      const result: ToolResult = { toolUseId, content, isError: true };
-      toolResults.push(result);
+      blockResultValues.push({ toolUseId, content, isError: true });
       blockResults.push({
         type: 'tool_result',
         toolUseId,
@@ -580,7 +582,7 @@ export function parseAccumulatedIntoBlocks(
       const toolName = legacyResultMatch[1]?.trim() || undefined;
       const content = unescapeXml(legacyResultMatch[2] ?? '');
       const toolUseId = claimCall(resultsMatch.index, toolName);
-      toolResults.push({ toolUseId, toolName, content, isError: false });
+      blockResultValues.push({ toolUseId, toolName, content, isError: false });
       blockResults.push({
         type: 'tool_result',
         toolUseId,
@@ -595,7 +597,7 @@ export function parseAccumulatedIntoBlocks(
     while ((legacyErrorMatch = LEGACY_ERROR_REGEX.exec(innerContent)) !== null) {
       const content = unescapeXml(legacyErrorMatch[1] ?? '');
       const toolUseId = claimCall(resultsMatch.index);
-      toolResults.push({ toolUseId, content, isError: true });
+      blockResultValues.push({ toolUseId, content, isError: true });
       blockResults.push({
         type: 'tool_result',
         toolUseId,
@@ -610,17 +612,38 @@ export function parseAccumulatedIntoBlocks(
         start: resultsMatch.index,
         end: resultsMatch.index + resultsMatch[0].length,
         block: blockResults,
+        results: blockResultValues,
       });
     }
   }
 
-  // Sort positions by start index
-  positions.sort((a, b) => a.start - b.start);
+  // Sort positions by start index, outermost span first on a tie
+  positions.sort((a, b) => a.start - b.start || b.end - a.end);
+
+  // Three independent regex sweeps can record overlapping spans — a
+  // function_calls block quoted INSIDE a thinking block is found by both. Left
+  // alone that emits the same source text twice (once as thinking content,
+  // once as a real tool_use) and walks lastEnd past the inner span, so the gap
+  // logic then renders the container's own closing tag as visible model text.
+  // A span fully inside one already retained is therefore dropped: it is
+  // content of the container, not a sibling of it.
+  const retainedPositions: BlockPosition[] = [];
+  let furthestRetainedEnd = -1;
+  for (const pos of positions) {
+    if (pos.end <= furthestRetainedEnd) continue;
+    retainedPositions.push(pos);
+    furthestRetainedEnd = pos.end;
+  }
+
+  for (const pos of retainedPositions) {
+    if (pos.calls) toolCalls.push(...pos.calls);
+    if (pos.results) toolResults.push(...pos.results);
+  }
 
   // Build final blocks array, inserting text blocks between special blocks
   // Use processedText for slicing since positions are relative to it
   let lastEnd = 0;
-  for (const pos of positions) {
+  for (const pos of retainedPositions) {
     // Add text block for content before this special block
     if (pos.start > lastEnd) {
       const textContent = processedText.slice(lastEnd, pos.start).trim();
@@ -636,7 +659,7 @@ export function parseAccumulatedIntoBlocks(
       blocks.push(pos.block);
     }
 
-    lastEnd = pos.end;
+    lastEnd = Math.max(lastEnd, pos.end);
   }
 
   // Add any remaining text after the last special block

@@ -105,6 +105,42 @@ describe('F3 · a truncated block spliced with a later round closer', () => {
   });
 });
 
+describe('F9 · overlapping block spans', () => {
+  const hypotheticalCall = toolBlock(
+    `<invoke name="zz_hypothetical">\n<parameter name="fld1">v1</parameter>\n</invoke>`
+  );
+  const musingTurn =
+    `<thinking>zz musing: I could call ${hypotheticalCall} but I will not.\n</thinking>\n` +
+    'zz_bot: no.';
+
+  it('does not emit a phantom tool_use for a block contained in a thinking block', () => {
+    const { blocks, toolCalls } = parseAccumulatedIntoBlocks(musingTurn);
+
+    expect(toolCalls).toEqual([]);
+    expect(blocks.filter((b) => b.type === 'tool_use')).toHaveLength(0);
+  });
+
+  it('does not leak raw structural tags into visible text', () => {
+    const { blocks } = parseAccumulatedIntoBlocks(musingTurn);
+
+    const visibleText = blocks
+      .filter((b) => b.type === 'text')
+      .map((b) => (b as { text: string }).text)
+      .join('\n');
+
+    expect(visibleText).not.toContain('</thinking>');
+    expect(visibleText).not.toContain('zz_hypothetical');
+    expect(visibleText).toBe('zz_bot: no.');
+  });
+
+  it('keeps the containing thinking block whole', () => {
+    const { blocks } = parseAccumulatedIntoBlocks(musingTurn);
+
+    expect(blocks.map((b) => b.type)).toEqual(['thinking', 'text']);
+    expect((blocks[0] as { thinking: string }).thinking).toContain('zz_hypothetical');
+  });
+});
+
 describe('F13 · executed-block detection', () => {
   it('treats a block as executed when only whitespace separates it from its results', () => {
     const text =
