@@ -44,22 +44,53 @@ import type { NormalizeEvent } from './types.js';
 export type ProviderBlock = Record<string, unknown> & { type: string };
 
 /**
- * The repairs that REWRITE prefix bytes rather than only re-shaping
- * envelopes. Both placeholders here are rewritten again the moment the real
- * pairing arrives — the synthetic `[pending]` result when its tool_result
- * lands, the textified orphan when its tool_use does — so a cache breakpoint
- * placed at or past one caches a prefix that is about to change, poisoning
- * every subsequent read.
+ * Does this repair REWRITE prefix bytes, or only re-shape envelopes?
  *
- * Consumers gate cache placement on this SET rather than on a single kind, so
- * a normalizer that grows another prefix-rewriting repair adds its kind here
- * once instead of leaving every cache site silently uncovered. (A new kind is
- * a compile error here until it is added to `NormalizeEvent` — deliberate.)
+ * The two `true` entries are placeholders that get rewritten again the moment
+ * the real pairing arrives — the synthetic `[pending]` result when its
+ * tool_result lands, the textified orphan when its tool_use does — so a cache
+ * breakpoint placed at or past one caches a prefix that is about to change,
+ * poisoning every subsequent read.
+ *
+ * EVERY kind is listed, and the type is a `Record` over the whole union
+ * precisely so the compiler forces that: a new `NormalizeEvent` kind is a
+ * missing-property error here until someone decides which side it falls on.
+ * The previous shape (`[...] satisfies Array<NormalizeEvent['kind']>`) only
+ * checked that the listed kinds were REAL, and a `satisfies` on an array
+ * accepts any subset — so a new prefix-rewriting repair could be added to the
+ * union, never listed, and silently escape the cache gate below while the
+ * comment claimed a compile error that did not exist.
+ *
+ * NOTE FOR COMPOSE: the `stray_tool_result_textified` kind landing from the
+ * stray-orphan lane belongs here as `true` — it rewrites prefix bytes for the
+ * same reason `orphan_tool_result_textified` does.
  */
-export const PREFIX_REWRITING_NORMALIZE_EVENT_KINDS: ReadonlySet<NormalizeEvent['kind']> = new Set([
-  'synthetic_pending_result',
-  'orphan_tool_result_textified',
-] satisfies Array<NormalizeEvent['kind']>);
+const NORMALIZE_EVENT_REWRITES_PREFIX: Record<NormalizeEvent['kind'], boolean> = {
+  block_re_roled: false,
+  tool_result_hoisted: false,
+  interloper_deferred: false,
+  synthetic_pending_result: true,
+  orphan_tool_result_textified: true,
+  pending_in_flight: false,
+  cache_suppressed_for_synthetic: false,
+  leading_user_synthesized: false,
+};
+
+function deriveKindsThatRewritePrefix(): ReadonlySet<NormalizeEvent['kind']> {
+  const kinds = Object.entries(NORMALIZE_EVENT_REWRITES_PREFIX)
+    .filter(([, rewritesPrefix]) => rewritesPrefix)
+    .map(([kind]) => kind as NormalizeEvent['kind']);
+  return new Set(kinds);
+}
+
+/**
+ * The repairs that rewrite prefix bytes, derived from the exhaustive
+ * classification above. Consumers gate cache placement on this SET rather
+ * than on a single kind, so a normalizer that grows another prefix-rewriting
+ * repair is covered at every cache site by classifying it once.
+ */
+export const PREFIX_REWRITING_NORMALIZE_EVENT_KINDS: ReadonlySet<NormalizeEvent['kind']> =
+  deriveKindsThatRewritePrefix();
 
 export interface NormalizeOptions {
   /** See `BuildOptions.pendingToolCallIds`. */

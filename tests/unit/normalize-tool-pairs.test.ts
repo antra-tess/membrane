@@ -14,6 +14,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   normalizeToolPairs,
+  PREFIX_REWRITING_NORMALIZE_EVENT_KINDS,
   type ProviderBlock,
 } from '../../src/formatters/normalize-tool-pairs.js';
 import type { NormalizeEvent } from '../../src/formatters/types.js';
@@ -649,5 +650,36 @@ describe('normalizeToolPairs', () => {
       expect(synth.content).toBe('[pending]');
       expect(synth.is_error).toBe(false);
     });
+  });
+});
+
+/**
+ * The cache-placement gate reads this set. Its real guarantee is a compile
+ * error — the classification behind it is a `Record` over the whole
+ * `NormalizeEvent` union, so a new kind cannot be added without deciding
+ * which side it falls on (measured: adding a kind to the union fails tsc with
+ * TS2741 "Property ... is missing"). These cases pin the runtime shape the
+ * derivation produces from that classification.
+ */
+describe('PREFIX_REWRITING_NORMALIZE_EVENT_KINDS', () => {
+  it('holds exactly the repairs that rewrite prefix bytes', () => {
+    expect([...PREFIX_REWRITING_NORMALIZE_EVENT_KINDS].sort()).toEqual([
+      'orphan_tool_result_textified',
+      'synthetic_pending_result',
+    ]);
+  });
+
+  it('excludes the envelope-only repairs, which do not poison a cached prefix', () => {
+    const envelopeOnly: Array<NormalizeEvent['kind']> = [
+      'block_re_roled',
+      'tool_result_hoisted',
+      'interloper_deferred',
+      'pending_in_flight',
+      'cache_suppressed_for_synthetic',
+      'leading_user_synthesized',
+    ];
+    for (const kind of envelopeOnly) {
+      expect(PREFIX_REWRITING_NORMALIZE_EVENT_KINDS.has(kind)).toBe(false);
+    }
   });
 });
