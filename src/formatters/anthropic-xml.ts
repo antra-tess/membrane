@@ -118,9 +118,13 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
   readonly name = 'anthropic-xml';
   readonly usesPrefill = true;
 
+  /** See PrefillFormatter.configuredToolMode — undefined when the caller left the mode to Membrane. */
+  readonly configuredToolMode: 'xml' | 'native' | undefined;
+
   private config: Required<AnthropicXmlFormatterConfig>;
 
   constructor(config: AnthropicXmlFormatterConfig = {}) {
+    this.configuredToolMode = config.toolMode;
     this.config = {
       toolMode: config.toolMode ?? 'xml',
       toolInjectionMode: config.toolInjectionMode ?? 'conversation',
@@ -149,6 +153,10 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
       hasCacheMarker,
     } = options;
 
+    // Membrane resolves the mode per request and passes it here; the
+    // constructor-time mode is the fallback for direct callers only.
+    const toolMode = options.toolMode ?? this.config.toolMode;
+
     // Build cache_control object (with optional TTL for extended caching)
     const cacheControl: Record<string, unknown> = { type: 'ephemeral' };
     if (cacheTtl) {
@@ -173,7 +181,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     const toolInjectionIndex = Math.max(0, totalMessages - this.config.toolInjectionPosition);
     let toolsInjected = false;
     const hasToolsForConversation =
-      this.config.toolMode === 'xml' &&
+      toolMode === 'xml' &&
       this.config.toolInjectionMode === 'conversation' &&
       tools &&
       tools.length > 0;
@@ -189,7 +197,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     }
 
     // Inject tools into system if configured
-    if (this.config.toolMode === 'xml' && this.config.toolInjectionMode === 'system' && tools?.length) {
+    if (toolMode === 'xml' && this.config.toolInjectionMode === 'system' && tools?.length) {
       const toolsXml = this.formatToolDefinitionsXml(tools);
       systemText = this.injectToolsIntoSystem(systemText, toolsXml);
     }
@@ -416,7 +424,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     const stopSequences = this.buildStopSequences(messages, assistantParticipant, options);
 
     // Native tools if configured
-    const nativeTools = this.config.toolMode === 'native' && tools?.length
+    const nativeTools = toolMode === 'native' && tools?.length
       ? this.convertToNativeTools(tools)
       : undefined;
 

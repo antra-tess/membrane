@@ -23,7 +23,6 @@ import type {
   ToolResult,
   ToolContext,
   RetryConfig,
-  ToolMode,
   ToolDefinition,
 } from './types/index.js';
 import { lastCacheableBlockIndex } from './formatters/native.js';
@@ -111,11 +110,15 @@ export class Membrane {
     // it consume error retries would couple two unrelated budgets.
     let refusalRetriesUsed = 0;
 
+    // One selection for the whole call: mode resolution and the build must
+    // name the same formatter instance (see resolveActiveFormatter).
+    const activeFormatter = this.resolveActiveFormatter(options.formatter);
+
     while (true) {
       attempts++;
 
       try {
-        const { providerRequest, prefillResult } = this.transformRequest(request, options.formatter);
+        const { providerRequest, prefillResult } = this.transformRequest(request, activeFormatter);
 
         // Route through the single canonical hook helper so any future
         // change to hook semantics (logging, retry interaction, error
@@ -249,8 +252,9 @@ export class Membrane {
       return response;
     }
 
-    // Determine tool mode
-    const toolMode = this.resolveToolMode(request);
+    // Determine tool mode against the formatter that will build the request
+    const activeFormatter = this.resolveActiveFormatter(options.formatter);
+    const toolMode = this.resolveToolMode(request, activeFormatter);
     const useNative = toolMode === 'native' && !!request.tools && request.tools.length > 0;
 
     // Overloaded (529) pre-emission retry. The streaming paths have no retry
@@ -280,8 +284,8 @@ export class Membrane {
 
       try {
         const result = useNative
-          ? await this.streamWithNativeTools(request, tracked)
-          : await this.streamWithXmlTools(request, tracked);
+          ? await this.streamWithNativeTools(request, tracked, activeFormatter)
+          : await this.streamWithXmlTools(request, tracked, activeFormatter);
         // The inner paths report attempts: 1 — they can't see this wrapper.
         // A call that succeeded after N overloaded retries must not look like
         // a first-attempt success in durable logs, so patch the real count
@@ -323,18 +327,68 @@ export class Membrane {
   }
 
   /**
-   * Determine the effective tool mode
+   * Select the ACTIVE formatter for a request: the one instance that resolves
+   * its tool mode, builds its provider request, and parses its stream.
+   *
+   * A per-request override (`CompleteOptions.formatter` /
+   * `StreamOptions.formatter`) wins over the instance formatter, with ONE
+   * transport exception: the Responses adapter's input is a provider-native
+   * item array, and a generic override (for example Context Manager's
+   * NativeFormatter) produces Anthropic-style `{ role, content: [{ type:
+   * 'text' }] }` envelopes the Responses API rejects before inference — so a
+   * configured Responses formatter stays authoritative there.
+   *
+   * The exception is why this selection is a method rather than a `??` at each
+   * call site: while it lived inside transformRequest alone, the BUILD honored
+   * it and every other formatter reader resolved against a different instance,
+   * which is the split resolveToolMode exists to prevent, one layer down.
+   * Every entry point selects once, here, and threads the result.
    */
-  private resolveToolMode(request: NormalizedRequest): ToolMode {
+  private resolveActiveFormatter(requestFormatter?: PrefillFormatter): PrefillFormatter {
+    if (this.adapter.name === 'openai-responses-api' && this.formatter.name === 'openai-responses') {
+      return this.formatter;
+    }
+    return requestFormatter ?? this.formatter;
+  }
+
+  /**
+   * Determine the effective tool mode.
+   *
+   * THE single source of truth for the mode: both complete() (via
+   * transformRequest → BuildOptions.toolMode) and the streaming paths (via
+   * their native-vs-XML path choice) resolve here, so a given request resolves
+   * to the same mode whichever entry point it arrives through.
+   *
+   * Precedence, strongest first:
+   *   1. an explicit non-'auto' `request.toolMode`
+   *   2. the mode the BUILDING formatter was explicitly constructed with
+   *      (`AnthropicXmlFormatter({ toolMode: 'native' })`) — a caller's stated
+   *      choice, not a derivation
+   *   3. formatter/provider derivation
+   *
+   * `formatter` is the formatter that will actually build the request — the
+   * instance `resolveActiveFormatter` selected for this call — because
+   * resolving against one formatter while building with another is exactly the
+   * split this method exists to prevent.
+   */
+  private resolveToolMode(
+    request: NormalizedRequest,
+    formatter: PrefillFormatter = this.formatter
+  ): 'xml' | 'native' {
     // Explicit mode takes precedence
     if (request.toolMode && request.toolMode !== 'auto') {
       return request.toolMode;
     }
 
+    // A formatter constructed with an explicit mode states its caller's choice
+    if (formatter.configuredToolMode) {
+      return formatter.configuredToolMode;
+    }
+
     // Auto mode: choose based on formatter
     // NativeFormatter → native tools via API
     // AnthropicXmlFormatter (default) → XML tools in prefill
-    if (this.formatter.name === 'native' || this.formatter.name === 'openai-responses') {
+    if (formatter.name === 'native' || formatter.name === 'openai-responses') {
       return 'native';
     }
 
@@ -356,7 +410,8 @@ export class Membrane {
    */
   private async streamWithXmlTools(
     request: NormalizedRequest,
-    options: StreamOptions
+    options: StreamOptions,
+    activeFormatter: PrefillFormatter = this.resolveActiveFormatter(options.formatter)
   ): Promise<NormalizedResponse | AbortedResponse> {
     const startTime = Date.now();
     const {
@@ -370,11 +425,12 @@ export class Membrane {
       onResponse,
       maxToolDepth = 10,
       signal,
-      formatter: requestFormatter,
     } = options;
 
-    // Use per-request formatter if provided, otherwise use instance formatter
-    const formatter = requestFormatter ?? this.formatter;
+    // The formatter stream() selected: the same instance that resolved the
+    // mode and will build the request, so the parser can never be reading a
+    // different format than the one on the wire.
+    const formatter = activeFormatter;
 
     // Initialize parser from formatter for format-specific tracking
     const parser = formatter.createStreamParser();
@@ -968,7 +1024,8 @@ export class Membrane {
    */
   private async streamWithNativeTools(
     request: NormalizedRequest,
-    options: StreamOptions
+    options: StreamOptions,
+    activeFormatter: PrefillFormatter = this.resolveActiveFormatter(options.formatter)
   ): Promise<NormalizedResponse | AbortedResponse> {
     const startTime = Date.now();
     const {
@@ -1006,7 +1063,7 @@ export class Membrane {
       // Tool execution loop
       while (toolDepth <= maxToolDepth) {
         // Build provider request with native tools
-        const providerRequest = this.buildNativeToolRequest(request, messages, toolDepth > 0);
+        const providerRequest = this.buildNativeToolRequest(request, messages, toolDepth > 0, activeFormatter);
 
         // Stream from provider
         let textAccumulated = '';
@@ -1207,18 +1264,25 @@ export class Membrane {
    * `toolLoopRebuild` is true when this build is a tool-loop continuation
    * (toolDepth > 0) rather than the turn's first request — the only case
    * where the floating cache marker applies.
+   *
+   * `activeFormatter` is the formatter the caller selected for the request
+   * (see resolveActiveFormatter). Reading `this.formatter` here instead made
+   * the native loop build through the instance formatter while the mode had
+   * been resolved against a per-request override — the two disagreeing about
+   * which formatter is active.
    */
   private buildNativeToolRequest(
     request: NormalizedRequest,
     messages: typeof request.messages,
-    toolLoopRebuild = false
+    toolLoopRebuild = false,
+    activeFormatter: PrefillFormatter = this.formatter
   ): any {
     // Provider-native formatters own their complete input-item shape. The
     // legacy implementation below is intentionally Anthropic-specific; using
     // it for Responses would normalize away item IDs, encrypted reasoning,
     // assistant phases, and compaction items.
-    if (this.formatter.name === 'openai-responses') {
-      return this.transformRequest({ ...request, messages }, this.formatter).providerRequest;
+    if (activeFormatter.name === 'openai-responses') {
+      return this.transformRequest({ ...request, messages }, activeFormatter).providerRequest;
     }
 
     // Convert messages to provider format
@@ -1723,24 +1787,18 @@ export class Membrane {
   }
 
   /**
-   * Transform a normalized request into provider format using the formatter
+   * Transform a normalized request into provider format using the formatter.
+   *
+   * `activeFormatter` is the instance the caller already selected via
+   * resolveActiveFormatter — including that selection's Responses-transport
+   * authority rule, which used to live inline here. It is a parameter and not
+   * a re-derivation so that the formatter which BUILDS is the same one that
+   * resolved the tool mode and drives the loop.
    */
-  private transformRequest(request: NormalizedRequest, formatter?: PrefillFormatter): {
+  private transformRequest(request: NormalizedRequest, activeFormatter: PrefillFormatter = this.formatter): {
     providerRequest: any;
     prefillResult: BuildResult;
   } {
-    // The Responses adapter's input is a provider-native item array. A generic
-    // per-request formatter (for example Context Manager's NativeFormatter)
-    // produces Anthropic-style `{ role, content: [{ type: 'text' }] }`
-    // envelopes, which the Responses API rejects before inference. Keep the
-    // configured Responses formatter authoritative at this transport boundary;
-    // per-request formatter overrides remain available for adapters whose wire
-    // format supports them.
-    const activeFormatter =
-      this.adapter.name === 'openai-responses-api' && this.formatter.name === 'openai-responses'
-        ? this.formatter
-        : formatter ?? this.formatter;
-
     // Extract user-provided stop sequences
     const additionalStopSequences = Array.isArray(request.stopSequences)
       ? request.stopSequences
@@ -1756,6 +1814,10 @@ export class Membrane {
       participantMode: 'multiuser',
       assistantParticipant: request.assistantParticipant ?? this.config.assistantParticipant ?? 'Claude',
       tools: request.tools,
+      // One resolution for every entry point: complete() used to build from the
+      // formatter's constructor-time mode alone, so request.toolMode was a
+      // second, disconnected source of truth on this path.
+      toolMode: this.resolveToolMode(request, activeFormatter),
       thinking: request.config.thinking,
       systemPrompt: request.system,
       promptCaching: request.promptCaching ?? this.config.defaultPromptCaching ?? true, // Default true for backward compat
@@ -2403,7 +2465,12 @@ export class Membrane {
     request: NormalizedRequest,
     options: YieldingStreamOptions = {}
   ): YieldingStream {
-    const toolMode = this.resolveToolMode(request);
+    // YieldingStreamOptions carries no per-request formatter override, so the
+    // selection here can only land on the instance formatter — it goes through
+    // resolveActiveFormatter anyway so this path reads the same single source
+    // as complete() and stream() if an override is ever added.
+    const activeFormatter = this.resolveActiveFormatter();
+    const toolMode = this.resolveToolMode(request, activeFormatter);
 
     // refusalRetries is implemented on the native path only. The XML path
     // accumulates into a streaming parser carrying prefill context and
@@ -2419,8 +2486,8 @@ export class Membrane {
 
     // Create the yielding stream with the appropriate inference runner
     const runInference = toolMode === 'native'
-      ? (stream: YieldingStreamImpl) => this.runNativeToolsYielding(request, options, stream)
-      : (stream: YieldingStreamImpl) => this.runXmlToolsYielding(request, options, stream);
+      ? (stream: YieldingStreamImpl) => this.runNativeToolsYielding(request, options, stream, activeFormatter)
+      : (stream: YieldingStreamImpl) => this.runXmlToolsYielding(request, options, stream, activeFormatter);
 
     return new YieldingStreamImpl(options, runInference);
   }
@@ -2431,7 +2498,8 @@ export class Membrane {
   private async runXmlToolsYielding(
     request: NormalizedRequest,
     options: YieldingStreamOptions,
-    stream: YieldingStreamImpl
+    stream: YieldingStreamImpl,
+    activeFormatter: PrefillFormatter = this.resolveActiveFormatter()
   ): Promise<void> {
     const startTime = Date.now();
     const {
@@ -2473,8 +2541,9 @@ export class Membrane {
     let prevRoundStopSequence: string | undefined;
     const warnLog = this.config.logger ?? console;
 
-    // Initialize parser from formatter for format-specific tracking
-    const formatter = this.formatter;
+    // Initialize parser from the formatter streamYielding selected, so the
+    // parser and the build below read the same format.
+    const formatter = activeFormatter;
     const parser = formatter.createStreamParser();
     let toolDepth = 0;
     // Once-per-stream latch for the injectedMessages-unsupported warning.
@@ -3031,7 +3100,8 @@ export class Membrane {
   private async runNativeToolsYielding(
     request: NormalizedRequest,
     options: YieldingStreamOptions,
-    stream: YieldingStreamImpl
+    stream: YieldingStreamImpl,
+    activeFormatter: PrefillFormatter = this.resolveActiveFormatter()
   ): Promise<void> {
     const startTime = Date.now();
     const {
@@ -3081,7 +3151,7 @@ export class Membrane {
         }
 
         // Build provider request with native tools
-        const providerRequest = this.buildNativeToolRequest(request, messages, toolDepth > 0);
+        const providerRequest = this.buildNativeToolRequest(request, messages, toolDepth > 0, activeFormatter);
 
         // Stream from provider
         let textAccumulated = '';

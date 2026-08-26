@@ -49,6 +49,16 @@ export interface BuildOptions {
   /** Tool definitions to include */
   tools?: ToolDefinition[];
 
+  /**
+   * The tool mode Membrane RESOLVED for this request (see
+   * `Membrane.resolveToolMode`), which already accounts for `request.toolMode`,
+   * the formatter's own configured mode, and provider/formatter derivation.
+   * A formatter that supports both shapes must build for THIS mode; its
+   * constructor-time mode is only the fallback for direct `buildMessages`
+   * callers that resolve nothing.
+   */
+  toolMode?: 'xml' | 'native';
+
   /** Whether thinking is enabled */
   thinking?: { enabled: boolean; budgetTokens?: number };
 
@@ -257,6 +267,16 @@ export interface PrefillFormatter {
 
   /** Whether this formatter uses prefill (vs native pass-through) */
   readonly usesPrefill: boolean;
+
+  /**
+   * The tool mode this formatter instance was EXPLICITLY constructed with, if
+   * any. Read by `Membrane.resolveToolMode` as the fallback under an explicit
+   * `request.toolMode`: a formatter that can build either shape carries its
+   * caller's configured choice here so resolution honors it instead of
+   * re-deriving one from the formatter's name. Left undefined by formatters
+   * that build exactly one shape.
+   */
+  readonly configuredToolMode?: 'xml' | 'native';
 
   // ==========================================================================
   // REQUEST BUILDING
