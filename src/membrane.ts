@@ -973,6 +973,7 @@ export class Membrane {
     const {
       onChunk,
       onContentBlockUpdate,
+      onBlock,
       onToolCalls,
       onPreToolContent,
       onUsage,
@@ -1010,24 +1011,65 @@ export class Membrane {
         // Stream from provider
         let textAccumulated = '';
         let blockIndex = 0;
+        // Track block-type from the provider's content_block_start signal so
+        // every token chunk is tagged with the membrane block it belongs to —
+        // the same shape runNativeToolsYielding uses (#19). Before this,
+        // complete() hardcoded meta.type = 'text' on every chunk, so a caller
+        // wiring onChunk to a UI saw thinking_delta chunks labelled as visible
+        // text, and onBlock was never invoked from this path (#20).
+        let currentBlockType: MembraneBlockType = 'text';
+        const seenBlockIndices = new Set<number>();
+        const mapApiBlockType = (apiType: string | undefined): MembraneBlockType => {
+          if (apiType === 'thinking') return 'thinking';
+          if (apiType === 'tool_use') return 'tool_call';
+          return 'text';
+        };
         const streamResult = await this.streamOnce(
           providerRequest,
           {
             onChunk: (chunk) => {
               textAccumulated += chunk;
               allTextAccumulated += chunk;
-              // For native mode, emit text chunks with basic metadata
-              // TODO: Use native API content_block events for richer metadata
               const meta: ChunkMeta = {
-                type: 'text',
-                visible: true,
+                type: currentBlockType,
+                visible: currentBlockType === 'text',
                 blockIndex,
               };
               onChunk?.(chunk, meta);
             },
-            onContentBlock: onContentBlockUpdate
-              ? (index: number, block: unknown) => onContentBlockUpdate(index, block as ContentBlock)
-              : undefined,
+            onContentBlock: (index: number, block: unknown) => {
+              const apiType = (block as { type?: string } | undefined)?.type;
+              const mbType = mapApiBlockType(apiType);
+              const isStart = !seenBlockIndices.has(index);
+              if (isStart) {
+                seenBlockIndices.add(index);
+                currentBlockType = mbType;
+                blockIndex = index;
+                onBlock?.({ event: 'block_start', index, block: { type: mbType } });
+              } else {
+                // Second call for the same index = content_block_stop: the
+                // provider has filled the block, surface the final payload.
+                const apiBlock = block as {
+                  type?: string;
+                  text?: string;
+                  thinking?: string;
+                  id?: string;
+                  name?: string;
+                  input?: unknown;
+                } | undefined;
+                const mb: MembraneBlock = { type: mbType };
+                if (mbType === 'text') mb.content = apiBlock?.text;
+                else if (mbType === 'thinking') mb.content = apiBlock?.thinking;
+                else if (mbType === 'tool_call') {
+                  mb.toolId = apiBlock?.id;
+                  mb.toolName = apiBlock?.name;
+                  mb.input = apiBlock?.input as Record<string, unknown> | undefined;
+                }
+                onBlock?.({ event: 'block_complete', index, block: mb });
+              }
+              // Deprecated pass-through, kept for callers still on it.
+              onContentBlockUpdate?.(index, block as ContentBlock);
+            },
           },
           {
             signal,
