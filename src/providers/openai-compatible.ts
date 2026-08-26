@@ -129,6 +129,14 @@ export interface OpenAICompatibleAdapterConfig {
 
 export class OpenAICompatibleAdapter implements ProviderAdapter {
   readonly name: string;
+
+  /**
+   * NOT ESTABLISHED, and not establishable per-adapter: this fronts arbitrary
+   * OpenAI-shaped third-party endpoints whose caching semantics vary by vendor.
+   * Moot today — the adapter never populates `cacheReadTokens`, so the warn
+   * never fires; it becomes live the moment cache reporting is added here.
+   */
+  readonly usageCacheConvention = 'unknown' as const;
   private baseURL: string;
   private apiKey: string;
   private defaultMaxTokens: number;

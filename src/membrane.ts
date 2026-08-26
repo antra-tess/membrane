@@ -10,6 +10,7 @@ import type {
   AbortedResponse,
   ContentBlock,
   ProviderAdapter,
+  ProviderResponse,
   ModelRegistry,
   MembraneConfig,
   StreamOptions,
@@ -75,7 +76,13 @@ import {
   PREFIX_REWRITING_NORMALIZE_EVENT_KINDS,
 } from './formatters/normalize-tool-pairs.js';
 import { YieldingStreamImpl } from './yielding-stream.js';
-import { calculateCost } from './utils/cost.js';
+import { calculateCost, warnUnpricedModel } from './utils/cost.js';
+import {
+  TurnUsageAccumulator,
+  calculateCacheHitRatio,
+  normalizeUsageToCacheExcluded,
+  warnUnconvertibleProviderItem,
+} from './utils/usage.js';
 import {
   isAcceptedImageMediaType,
   strippedImagePlaceholder,
@@ -242,7 +249,7 @@ export class Membrane {
         // contribution (builder, formatter, passthrough, float, hook).
         clampCacheMarkers(finalRequest, 'complete');
 
-        const providerResponse = await this.adapter.complete(finalRequest, {
+        const rawProviderResponse = await this.adapter.complete(finalRequest, {
           signal: options.signal,
           timeoutMs: options.timeoutMs,
           onRequest: (req) => {
@@ -250,6 +257,15 @@ export class Membrane {
             options.onRequest?.(req);
           },
         });
+        // Restate usage in the one convention before any ratio or price sees it.
+        const providerResponse: ProviderResponse = {
+          ...rawProviderResponse,
+          usage: normalizeUsageToCacheExcluded(
+            rawProviderResponse.usage,
+            this.adapter.name,
+            this.adapter.usageCacheConvention,
+          ),
+        };
 
         // Call onResponse callback with raw response from API
         options.onResponse?.(providerResponse.raw);
@@ -606,12 +622,18 @@ export class Membrane {
     // Initialize parser from formatter for format-specific tracking
     const parser = formatter.createStreamParser();
     let toolDepth = 0;
+    // Each round is priced under the model that served THAT round and the
+    // costs are summed: a routed turn can change models mid-turn, and pricing
+    // the whole accumulated usage at the latest rate re-bills every earlier
+    // round at a price it was never charged.
+    const turnUsage = new TurnUsageAccumulator(
+      request.config.model,
+      (servedModel) => this.resolvePricing(request.config.model, servedModel),
+    );
     // Honest turn telemetry: provider calls actually made (including refusal
     // re-issues inside streamOnce) and continuation rounds.
     let providerCalls = 0;
     let rounds = 0;
-    let totalUsage: DetailedUsage = { inputTokens: 0, outputTokens: 0 };
-    const pricing = this.resolvePricing(request.config.model);
     const contentBlocks: ContentBlock[] = [];
     let lastStopReason: StopReason = 'end_turn';
     let lastStopSequence: string | undefined;
@@ -695,7 +717,7 @@ export class Membrane {
       if (resumptionRounds === RESUMPTION_WARN_ROUNDS) {
         warnLog.warn(
           `[membrane] automatic resumption at round ${resumptionRounds} ` +
-          `(${totalUsage.inputTokens} input tokens so far this turn) — ` +
+          `(${turnUsage.total.inputTokens} input tokens so far this turn) — ` +
           `a spin shows up here before it shows up on the bill`
         );
       }
@@ -703,7 +725,7 @@ export class Membrane {
         warnLog.warn(
           `[membrane] automatic resumption cap (${maxResumptionRounds}) reached — ` +
           `ending turn with stopReason 'round_limit'. ` +
-          `${totalUsage.inputTokens} input tokens spent this turn.`
+          `${turnUsage.total.inputTokens} input tokens spent this turn.`
         );
         return false;
       }
@@ -830,17 +852,11 @@ export class Membrane {
         lastStopReason = this.mapStopReason(streamResult.stopReason);
         lastStopSequence = streamResult.stopSequence ?? undefined;
 
-        // Accumulate usage (including cache metrics)
-        totalUsage.inputTokens += streamResult.usage.inputTokens;
-        totalUsage.outputTokens += streamResult.usage.outputTokens;
-        if (streamResult.usage.cacheCreationTokens) {
-          totalUsage.cacheCreationTokens = (totalUsage.cacheCreationTokens ?? 0) + streamResult.usage.cacheCreationTokens;
-        }
-        if (streamResult.usage.cacheReadTokens) {
-          totalUsage.cacheReadTokens = (totalUsage.cacheReadTokens ?? 0) + streamResult.usage.cacheReadTokens;
-        }
-        if (pricing) totalUsage.estimatedCost = calculateCost(totalUsage, pricing);
-        onUsage?.(totalUsage);
+        // Accumulate usage (including cache metrics), priced at this round's
+        // model. NOT inlined into the optional call — `onUsage?.(addRound())`
+        // skips evaluating its argument entirely when no callback is set.
+        const usageSoFar = turnUsage.addRound(streamResult.model, streamResult.usage);
+        onUsage?.(usageSoFar);
 
         // Flush the parser to complete any in-progress streaming block
         const flushResult = parser.flush();
@@ -874,7 +890,7 @@ export class Membrane {
               `[membrane] ${consecutiveStalledResumptions} consecutive automatic resumptions ` +
               `made no progress (${streamedThisRound} chars this round, stop ` +
               `${JSON.stringify(lastStopSequence ?? null)} repeated) — ending turn with ` +
-              `stopReason 'no_progress'. ${totalUsage.inputTokens} input tokens spent this turn.`
+              `stopReason 'no_progress'. ${turnUsage.total.inputTokens} input tokens spent this turn.`
             );
             lastStopReason = 'no_progress';
             break;
@@ -1156,7 +1172,7 @@ export class Membrane {
         newContent,
         contentBlocks,
         lastStopReason,
-        totalUsage,
+        turnUsage,
         request,
         prefillResult,
         startTime,
@@ -1166,7 +1182,7 @@ export class Membrane {
         executedToolCalls,
         executedToolResults,
         initialBlockType,
-        lastStopSequence
+        lastStopSequence,
       );
 
       // Append non-text content blocks (e.g., generated_image) that the XML parser can't handle
@@ -1189,7 +1205,7 @@ export class Membrane {
 
         return this.buildAbortedResponse(
           newContent,
-          totalUsage,
+          turnUsage.total,
           executedToolCalls,
           executedToolResults,
           this.abortReason(error, signal),
@@ -1226,12 +1242,16 @@ export class Membrane {
     } = options;
 
     let toolDepth = 0;
+    // See streamWithXmlTools: one accumulator per turn, pricing each round
+    // under the model that served it.
+    const turnUsage = new TurnUsageAccumulator(
+      request.config.model,
+      (servedModel) => this.resolvePricing(request.config.model, servedModel),
+    );
     // Honest turn telemetry: provider calls actually made (including refusal
     // re-issues inside streamOnce) and continuation rounds.
     let providerCalls = 0;
     let rounds = 0;
-    let totalUsage: DetailedUsage = { inputTokens: 0, outputTokens: 0 };
-    const pricing = this.resolvePricing(request.config.model);
     let lastStopReason: StopReason = 'end_turn';
     let lastStopSequence: string | undefined;
     let rawRequest: unknown;
@@ -1316,17 +1336,11 @@ export class Membrane {
         lastStopReason = this.mapStopReason(streamResult.stopReason);
         lastStopSequence = streamResult.stopSequence ?? undefined;
 
-        // Accumulate usage (including cache metrics)
-        totalUsage.inputTokens += streamResult.usage.inputTokens;
-        totalUsage.outputTokens += streamResult.usage.outputTokens;
-        if (streamResult.usage.cacheCreationTokens) {
-          totalUsage.cacheCreationTokens = (totalUsage.cacheCreationTokens ?? 0) + streamResult.usage.cacheCreationTokens;
-        }
-        if (streamResult.usage.cacheReadTokens) {
-          totalUsage.cacheReadTokens = (totalUsage.cacheReadTokens ?? 0) + streamResult.usage.cacheReadTokens;
-        }
-        if (pricing) totalUsage.estimatedCost = calculateCost(totalUsage, pricing);
-        onUsage?.(totalUsage);
+        // Accumulate usage (including cache metrics), priced at this round's
+        // model. NOT inlined into the optional call — `onUsage?.(addRound())`
+        // skips evaluating its argument entirely when no callback is set.
+        const usageSoFar = turnUsage.addRound(streamResult.model, streamResult.usage);
+        onUsage?.(usageSoFar);
 
         // Parse content blocks from response
         const responseBlocks = this.parseProviderContent(streamResult.content);
@@ -1414,6 +1428,7 @@ export class Membrane {
       }
 
       const durationMs = Date.now() - startTime;
+      const totalUsage = turnUsage.total;
 
       return {
         content: allContentBlocks,
@@ -1436,8 +1451,9 @@ export class Membrane {
           },
           model: {
             requested: request.config.model,
-            actual: request.config.model,
+            actual: turnUsage.lastServedModel || request.config.model,
             provider: this.adapter.name,
+            perRound: turnUsage.perRound,
           },
           cache: {
             markersInRequest: markersInLastRequest,
@@ -1456,7 +1472,7 @@ export class Membrane {
       if (this.isAbortError(error)) {
         return this.buildAbortedResponse(
           allTextAccumulated,
-          totalUsage,
+          turnUsage.total,
           executedToolCalls,
           executedToolResults,
           this.abortReason(error, signal)
@@ -1857,14 +1873,23 @@ export class Membrane {
             data: item.data,
             mimeType: item.mimeType,
           });
-        } else if (item.rawItem) {
+        } else if (item.rawItem || item.type) {
           // Opaque Responses items such as encrypted compaction or custom
           // tool records have no normalized ContentBlock equivalent. Retain a
           // zero-width carrier so Chronicle and the Responses formatter can
           // replay the raw item without surfacing synthetic prompt text.
           // Anthropic-bound conversion paths filter these out (empty text
           // blocks are a 400 there); the Responses formatter replays rawItem.
-          blocks.push({ type: 'text', text: '', rawItem: item.rawItem });
+          //
+          // An item with a `type` this switch does not know (server_tool_use,
+          // web_search_tool_result, search_result, mcp_tool_use, or whatever a
+          // provider adds next) used to fall out of this chain and vanish. It
+          // gets the same carrier treatment, holding the item itself, plus a
+          // one-time warning so the gap surfaces instead of being inferred
+          // later from missing content.
+          const carriedRawItem = item.rawItem ?? item;
+          if (!item.rawItem) warnUnconvertibleProviderItem(item.type);
+          blocks.push({ type: 'text', text: '', rawItem: carriedRawItem });
         }
       }
       return blocks;
@@ -2255,7 +2280,13 @@ export class Membrane {
     let providerCalls = 0;
     while (true) {
       providerCalls++;
-      const result = await this.adapter.stream(finalRequest, callbacks, adapterOptions);
+      const rawResult = await this.adapter.stream(finalRequest, callbacks, adapterOptions);
+      // Restate usage in the one convention before any accumulator, ratio or
+      // price sees it — this is the only door streamed usage enters through.
+      const result: ProviderResponse = {
+        ...rawResult,
+        usage: normalizeUsageToCacheExcluded(rawResult.usage, this.adapter.name, this.adapter.usageCacheConvention),
+      };
       if (result.stopReason !== 'refusal' || retried >= maxAttempts) {
         return {
           ...result,
@@ -2512,9 +2543,17 @@ export class Membrane {
     const stopReason = this.mapStopReason(providerResponse.stopReason);
     this.reportToolParseDiagnostics({ unclosedToolBlock, emptyToolBlocks }, stopReason);
     const durationMs = Date.now() - startTime;
-    const usage = {
+    // `NormalizedResponse.usage` is typed DetailedUsage and the streaming paths
+    // already return the whole thing; complete() used to narrow it to
+    // input/output here, so a caller reading `response.usage.cacheReadTokens`
+    // saw undefined on one path and a number on the other.
+    const usage: DetailedUsage = {
       inputTokens: providerResponse.usage.inputTokens,
       outputTokens: providerResponse.usage.outputTokens,
+      cacheCreationTokens: providerResponse.usage.cacheCreationTokens,
+      cacheReadTokens: providerResponse.usage.cacheReadTokens,
+      thinkingTokens: providerResponse.usage.thinkingTokens,
+      estimatedCost: this.estimateCost(providerResponse.usage, request.config.model, providerResponse.model),
     };
 
     return {
@@ -2531,13 +2570,7 @@ export class Membrane {
           wasTruncated: stopReason === 'max_tokens',
           unclosedToolBlock,
         },
-        usage: {
-          inputTokens: providerResponse.usage.inputTokens,
-          outputTokens: providerResponse.usage.outputTokens,
-          cacheCreationTokens: providerResponse.usage.cacheCreationTokens,
-          cacheReadTokens: providerResponse.usage.cacheReadTokens,
-          estimatedCost: this.estimateCost(providerResponse.usage, request.config.model),
-        },
+        usage,
         timing: {
           totalDurationMs: durationMs,
           attempts,
@@ -2619,7 +2652,7 @@ export class Membrane {
     accumulated: string,
     contentBlocks: ContentBlock[],
     stopReason: StopReason,
-    usage: DetailedUsage,
+    turnUsage: TurnUsageAccumulator,
     request: NormalizedRequest,
     prefillResult: {
       cacheMarkersApplied?: number;
@@ -2631,8 +2664,9 @@ export class Membrane {
     executedToolCalls: ToolCall[] = [],
     executedToolResults: ToolResult[] = [],
     startInsideBlock: 'thinking' | 'tool_call' | 'tool_result' | null = null,
-    triggeredSequence?: string
+    triggeredSequence?: string,
   ): NormalizedResponse {
+    const usage = turnUsage.total;
     // Parse accumulated text into structured content blocks
     // This extracts thinking, tool_use, tool_result, and text blocks
     let finalContent: ContentBlock[];
@@ -2675,18 +2709,19 @@ export class Membrane {
           wasTruncated: stopReason === 'max_tokens',
           unclosedToolBlock,
         },
-        usage: {
-          ...usage,
-          estimatedCost: usage.estimatedCost ?? this.estimateCost(usage, request.config.model),
-        },
+        // Priced per round by the accumulator and summed — NOT re-derived here
+        // from the turn totals, which would re-bill every round at the last
+        // model's rate.
+        usage,
         timing: {
           totalDurationMs: durationMs,
           attempts,
         },
         model: {
           requested: request.config.model,
-          actual: request.config.model, // TODO: get from response
+          actual: turnUsage.lastServedModel || request.config.model,
           provider: this.adapter.name,
+          perRound: turnUsage.perRound,
         },
         cache: {
           markersInRequest: prefillResult.cacheMarkersApplied ?? 0,
@@ -2769,20 +2804,62 @@ export class Membrane {
   }
 
   private calculateCacheHitRatio(usage: Pick<DetailedUsage, 'inputTokens' | 'cacheReadTokens'>): number {
-    const cacheRead = usage.cacheReadTokens ?? 0;
-    const total = usage.inputTokens ?? 0;
-    if (total === 0) return 0;
-    return cacheRead / total;
+    return calculateCacheHitRatio(usage);
   }
 
-  private resolvePricing(model: string): import('./types/provider.js').ModelPricing | undefined {
-    return this.registry?.getPricing(model) ?? getDefaultPricing(model);
+  /**
+   * Pricing is resolved on TWO axes, and SOURCE outranks SPECIFICITY:
+   *
+   *   registry[served] → registry[requested] → builtin[served] → builtin[requested]
+   *
+   * Specificity — preferring the model that ACTUALLY served over the id that
+   * was requested — is real: an alias or an auto-routed request otherwise
+   * prices against a string the provider already replaced, and a live
+   * 2026-08-25 call asking for `gpt-4o-mini` was served by
+   * `gpt-4o-mini-2024-07-18`. But it only breaks ties WITHIN one source.
+   * A configured `ModelRegistry` is the caller stating their own rates —
+   * account-specific, negotiated, authoritative; the built-in table is
+   * membrane's shipped guess at public list prices. Merging the two per-model
+   * (`registry[served] ?? builtin[served]`, return on the first hit) let the
+   * guess for a snapshot outrank the caller's own entry for the alias they
+   * asked for, so a caller who prices their alias and lets the provider pick
+   * the snapshot was billed at membrane's number instead of theirs.
+   *
+   * Both fallbacks stay: the served model may be absent from a source, and the
+   * provider may name none at all.
+   */
+  private resolvePricing(
+    requestedModel: string,
+    actualModel?: string
+  ): import('./types/provider.js').ModelPricing | undefined {
+    const servedModel = actualModel && actualModel !== requestedModel ? actualModel : undefined;
+    const fromRegistry = (modelId: string | undefined) =>
+      modelId === undefined ? undefined : this.registry?.getPricing(modelId);
+    const fromBuiltin = (modelId: string | undefined) =>
+      modelId === undefined ? undefined : getDefaultPricing(modelId);
+
+    return fromRegistry(servedModel)
+      ?? fromRegistry(requestedModel)
+      ?? fromBuiltin(servedModel)
+      ?? fromBuiltin(requestedModel);
   }
 
   /** Resolve pricing + calculate cost in one call (for one-shot use outside loops). */
-  private estimateCost(usage: import('./utils/cost.js').CostableUsage, model: string): import('./types/response.js').CostBreakdown | undefined {
-    const pricing = this.resolvePricing(model);
-    return pricing ? calculateCost(usage, pricing) : undefined;
+  private estimateCost(
+    usage: import('./utils/cost.js').CostableUsage,
+    requestedModel: string,
+    actualModel?: string
+  ): import('./types/response.js').CostBreakdown | undefined {
+    const pricing = this.resolvePricing(requestedModel, actualModel);
+    if (!pricing) {
+      // An absent cost and a zero cost are different claims. Returning
+      // undefined says "membrane does not know what this costs"; saying it out
+      // loud once per model keeps that from reading as "free" to a caller that
+      // only ever sees the omission.
+      warnUnpricedModel(actualModel || requestedModel);
+      return undefined;
+    }
+    return calculateCost(usage, pricing);
   }
 
   private calculateRetryDelay(attempt: number, overloaded = false): number {
@@ -3000,8 +3077,12 @@ export class Membrane {
     let rounds = 0;
     // Once-per-stream latch for the injectedMessages-unsupported warning.
     let warnedInjectionUnsupported = false;
-    let totalUsage: DetailedUsage = { inputTokens: 0, outputTokens: 0 };
-    const pricing = this.resolvePricing(request.config.model);
+    // See streamWithXmlTools: one accumulator per turn, pricing each round
+    // under the model that served it.
+    const turnUsage = new TurnUsageAccumulator(
+      request.config.model,
+      (servedModel) => this.resolvePricing(request.config.model, servedModel),
+    );
     const contentBlocks: ContentBlock[] = [];
     let lastStopReason: StopReason = 'end_turn';
     let lastStopSequence: string | undefined;
@@ -3050,7 +3131,7 @@ export class Membrane {
       if (resumptionRounds === RESUMPTION_WARN_ROUNDS) {
         warnLog.warn(
           `[membrane] automatic resumption at round ${resumptionRounds} ` +
-          `(${totalUsage.inputTokens} input tokens so far this turn) — ` +
+          `(${turnUsage.total.inputTokens} input tokens so far this turn) — ` +
           `a spin shows up here before it shows up on the bill`
         );
       }
@@ -3058,7 +3139,7 @@ export class Membrane {
         warnLog.warn(
           `[membrane] automatic resumption cap (${maxResumptionRounds}) reached — ` +
           `ending turn with stopReason 'round_limit'. ` +
-          `${totalUsage.inputTokens} input tokens spent this turn.`
+          `${turnUsage.total.inputTokens} input tokens spent this turn.`
         );
         return false;
       }
@@ -3174,18 +3255,10 @@ export class Membrane {
         lastStopReason = this.mapStopReason(streamResult.stopReason);
         lastStopSequence = streamResult.stopSequence ?? undefined;
 
-        // Accumulate usage (including cache metrics)
-        totalUsage.inputTokens += streamResult.usage.inputTokens;
-        totalUsage.outputTokens += streamResult.usage.outputTokens;
-        if (streamResult.usage.cacheCreationTokens) {
-          totalUsage.cacheCreationTokens = (totalUsage.cacheCreationTokens ?? 0) + streamResult.usage.cacheCreationTokens;
-        }
-        if (streamResult.usage.cacheReadTokens) {
-          totalUsage.cacheReadTokens = (totalUsage.cacheReadTokens ?? 0) + streamResult.usage.cacheReadTokens;
-        }
-        if (pricing) totalUsage.estimatedCost = calculateCost(totalUsage, pricing);
+        // Accumulate usage (including cache metrics), priced at this round's model
+        const usageSoFar = turnUsage.addRound(streamResult.model, streamResult.usage);
         if (emitUsage) {
-          stream.emit({ type: 'usage', usage: { ...totalUsage } });
+          stream.emit({ type: 'usage', usage: usageSoFar });
         }
 
         // Flush the parser
@@ -3213,7 +3286,7 @@ export class Membrane {
               `[membrane] ${consecutiveStalledResumptions} consecutive automatic resumptions ` +
               `made no progress (${streamedThisRound} chars this round, stop ` +
               `${JSON.stringify(lastStopSequence ?? null)} repeated) — ending turn with ` +
-              `stopReason 'no_progress'. ${totalUsage.inputTokens} input tokens spent this turn.`
+              `stopReason 'no_progress'. ${turnUsage.total.inputTokens} input tokens spent this turn.`
             );
             lastStopReason = 'no_progress';
             break;
@@ -3514,7 +3587,7 @@ export class Membrane {
         newContent,
         contentBlocks,
         lastStopReason,
-        totalUsage,
+        turnUsage,
         request,
         prefillResult,
         startTime,
@@ -3524,7 +3597,7 @@ export class Membrane {
         executedToolCalls,
         executedToolResults,
         initialBlockType,
-        lastStopSequence
+        lastStopSequence,
       );
 
       // Merge provider thinking signatures into parser-derived thinking blocks
@@ -3578,12 +3651,16 @@ export class Membrane {
         : maxToolDepthOpt;
 
     let toolDepth = 0;
+    // See streamWithXmlTools: one accumulator per turn, pricing each round
+    // under the model that served it.
+    const turnUsage = new TurnUsageAccumulator(
+      request.config.model,
+      (servedModel) => this.resolvePricing(request.config.model, servedModel),
+    );
     // Honest turn telemetry: provider calls actually made (including refusal
     // re-issues inside streamOnce) and continuation rounds.
     let providerCalls = 0;
     let rounds = 0;
-    let totalUsage: DetailedUsage = { inputTokens: 0, outputTokens: 0 };
-    const pricing = this.resolvePricing(request.config.model);
     let lastStopReason: StopReason = 'end_turn';
     let lastStopSequence: string | undefined;
     let rawRequest: unknown;
@@ -3700,18 +3777,10 @@ export class Membrane {
         // output was discarded — carry their spend to the final response.
         discardedUsage = this.mergeDiscardedAttempts(discardedUsage, streamResult.discardedUsage);
 
-        // Accumulate usage (including cache metrics)
-        totalUsage.inputTokens += streamResult.usage.inputTokens;
-        totalUsage.outputTokens += streamResult.usage.outputTokens;
-        if (streamResult.usage.cacheCreationTokens) {
-          totalUsage.cacheCreationTokens = (totalUsage.cacheCreationTokens ?? 0) + streamResult.usage.cacheCreationTokens;
-        }
-        if (streamResult.usage.cacheReadTokens) {
-          totalUsage.cacheReadTokens = (totalUsage.cacheReadTokens ?? 0) + streamResult.usage.cacheReadTokens;
-        }
-        if (pricing) totalUsage.estimatedCost = calculateCost(totalUsage, pricing);
+        // Accumulate usage (including cache metrics), priced at this round's model
+        const usageSoFar = turnUsage.addRound(streamResult.model, streamResult.usage);
         if (emitUsage) {
-          stream.emit({ type: 'usage', usage: { ...totalUsage } });
+          stream.emit({ type: 'usage', usage: usageSoFar });
         }
 
         // Parse content blocks from response
@@ -3814,6 +3883,7 @@ export class Membrane {
       }
 
       const durationMs = Date.now() - startTime;
+      const totalUsage = turnUsage.total;
 
       const response: NormalizedResponse = {
         content: allContentBlocks,
@@ -3841,8 +3911,9 @@ export class Membrane {
           },
           model: {
             requested: request.config.model,
-            actual: request.config.model,
+            actual: turnUsage.lastServedModel || request.config.model,
             provider: this.adapter.name,
+            perRound: turnUsage.perRound,
           },
           cache: {
             markersInRequest: markersInLastRequest,

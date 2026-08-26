@@ -133,6 +133,16 @@ export interface OpenAIResponsesAPIAdapterConfig {
 export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
   readonly name = 'openai-responses-api';
 
+  /**
+   * Reads `usage.input_tokens_details.cached_tokens` from OpenAI's account-wide
+   * automatic prompt caching — the same mechanism verified live on
+   * /v1/chat/completions on 2026-08-25 (prompt_tokens constant at 1732 across a
+   * hit reporting cached_tokens 1664, so cached is a subset). A same-day probe
+   * of /v1/responses did not itself produce a cache hit to confirm on that
+   * endpoint.
+   */
+  readonly usageCacheConvention = 'cache-inclusive' as const;
+
   private readonly apiKey: string;
   private readonly baseURL: string;
   private readonly organization?: string;

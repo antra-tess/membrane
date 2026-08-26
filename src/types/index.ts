@@ -75,6 +75,7 @@ export type {
   BasicUsage,
   CallUsage,
   DetailedUsage,
+  TurnRoundUsage,
   DiscardedAttemptsUsage,
   CostBreakdown,
   StopInfo,
@@ -103,6 +104,7 @@ export type {
   ProviderRequestOptions,
   ProviderResponse,
   StreamCallbacks,
+  UsageCacheConvention,
 } from './provider.js';
 
 // Streaming

@@ -188,6 +188,14 @@ function noStopSupport(model: string): boolean {
 
 export class OpenAIAdapter implements ProviderAdapter {
   readonly name = 'openai';
+
+  /**
+   * Verified live 2026-08-25 (gpt-4o-mini, 1,732-token prompt): prompt_tokens
+   * stayed at 1732 across a cache hit reporting
+   * prompt_tokens_details.cached_tokens 1664 — the cached span is a SUBSET of
+   * prompt_tokens, not an addition to it.
+   */
+  readonly usageCacheConvention = 'cache-inclusive' as const;
   private apiKey: string;
   private baseURL: string;
   private organization?: string;
@@ -266,6 +274,10 @@ export class OpenAIAdapter implements ProviderAdapter {
       let sawTerminalEvent = false;
       let toolCalls: OpenAIToolCall[] = [];
       let streamUsage: OpenAIResponse['usage'] | undefined;
+      // The model the provider actually served, echoed on every SSE
+      // chunk. Reporting the requested id instead hides alias
+      // resolution (and, on OpenRouter, which provider it routed to).
+      let servedModel: string | undefined;
 
       // One frame handler for both the streamed lines and the EOF flush — the
       // trailing buffer carries real terminal frames, not leftovers.
@@ -322,6 +334,10 @@ export class OpenAIAdapter implements ProviderAdapter {
           if (parsed.usage) {
             streamUsage = parsed.usage;
           }
+
+          if (parsed.model) {
+            servedModel = parsed.model;
+          }
         } catch {
           // Ignore parse errors in stream
         }
@@ -357,7 +373,7 @@ export class OpenAIAdapter implements ProviderAdapter {
         message.tool_calls = toolCalls;
       }
 
-      return this.parseStreamedResponse(message, finishReason, request.model, streamUsage, openAIRequest);
+      return this.parseStreamedResponse(message, finishReason, servedModel ?? request.model, streamUsage, openAIRequest);
 
     } catch (error) {
       throw this.handleError(error, openAIRequest);

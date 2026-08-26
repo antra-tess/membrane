@@ -20,6 +20,7 @@ import {
   authError,
   serverError,
   abortError,
+  unsupportedError,
 } from '../types/index.js';
 import { flattenRootSchemaUnion } from './anthropic-tool-schema.js';
 import { assertTerminalEventObserved } from './utils.js';
@@ -165,6 +166,14 @@ export interface AnthropicAdapterConfig {
 
 export class AnthropicAdapter implements ProviderAdapter {
   readonly name = 'anthropic';
+
+  /**
+   * Verified live 2026-08-25 (claude-haiku-4-5, 4,650-token cached system
+   * prompt): call 1 returned input_tokens 8 / cache_creation_input_tokens 4650,
+   * call 2 input_tokens 8 / cache_read_input_tokens 4650. `input_tokens` never
+   * counts the cached span.
+   */
+  readonly usageCacheConvention = 'cache-excluded' as const;
   private client: Anthropic;
   private defaultMaxTokens: number;
   /** Any anthropic-beta value from defaultHeaders (e.g. the oauth beta for
@@ -924,6 +933,23 @@ export function toAnthropicContent(blocks: ContentBlock[]): Anthropic.ContentBlo
             media_type: block.source.mediaType as 'application/pdf',
             data: block.source.data,
           },
+          // Anthropic's document block carries the filename as `title`; it was
+          // being dropped, so the model lost the one hint about what the PDF is.
+          ...(block.filename ? { title: block.filename } : {}),
+        });
+        break;
+
+      case 'generated_image':
+        // A provider-generated image is a base64 image with a MIME type, which
+        // is exactly Anthropic's image block — carrying it across costs nothing
+        // and lets an image Gemini produced re-enter Anthropic history.
+        result.push({
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: block.mimeType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
+            data: block.data,
+          },
         });
         break;
         
@@ -963,10 +989,51 @@ export function toAnthropicContent(blocks: ContentBlock[]): Anthropic.ContentBlo
           data: (block as any).data,
         } as any);
         break;
+
+      default: {
+        // The REQUEST path cannot degrade gracefully: a dropped block reaches
+        // the model as an absence, and it answers about content it was never
+        // shown. `audio` and `video` have no Anthropic Messages representation
+        // at all, and a block type added later would silently join them. Fail
+        // loudly at the boundary instead — the caller can strip or transcode.
+        const unsupportedType = (block as { type?: string }).type ?? 'unknown';
+        throw unsupportedError(
+          `Anthropic has no representation for a "${unsupportedType}" content block, and dropping`
+          + ' it would send the model a message missing content the caller supplied.'
+          + ' Remove or convert the block before sending it on this provider.'
+        );
+      }
     }
   }
 
   return result;
+}
+
+/** Unrecognised response block types warn once each, not once per conversion. */
+const warnedUnconvertibleResponseBlocks = new Set<string>();
+
+/**
+ * The RESPONSE path can degrade gracefully where the request path cannot: the
+ * provider's own block is in hand, so keeping it verbatim on a zero-width
+ * carrier loses nothing recoverable and lets formatters replay it. Warn once
+ * per type so a new provider block type surfaces without flooding the log.
+ */
+function preserveUnconvertibleBlock(block: unknown, sourceLabel: string): ContentBlock {
+  const blockType = (block as { type?: string })?.type ?? 'unknown';
+  if (!warnedUnconvertibleResponseBlocks.has(blockType)) {
+    warnedUnconvertibleResponseBlocks.add(blockType);
+    console.warn(
+      `[membrane:${sourceLabel}] no normalized ContentBlock for provider block type`
+      + ` "${blockType}" — preserving it verbatim as a rawItem carrier so it can be`
+      + ' replayed, but its content is not visible to normalized consumers.'
+    );
+  }
+  return { type: 'text', text: '', rawItem: block } as ContentBlock;
+}
+
+/** Test seam: the once-per-type warn latch is process-wide otherwise. */
+export function resetUnconvertibleBlockWarnings(): void {
+  warnedUnconvertibleResponseBlocks.clear();
 }
 
 /**
@@ -999,11 +1066,14 @@ export function fromAnthropicContent(blocks: Anthropic.ContentBlock[]): ContentB
         break;
         
       default:
-        // Handle redacted_thinking or unknown types
         if ((block as any).type === 'redacted_thinking') {
           // Preserve the encrypted `data` payload — without it the block
           // cannot be round-tripped and prior reasoning is lost.
           result.push({ type: 'redacted_thinking', data: (block as any).data } as any);
+        } else {
+          // server_tool_use, web_search_tool_result, search_result, mcp_tool_use
+          // and anything Anthropic adds later used to fall out here silently.
+          result.push(preserveUnconvertibleBlock(block, 'anthropic'));
         }
         break;
     }

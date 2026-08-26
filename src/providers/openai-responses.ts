@@ -123,6 +123,9 @@ export interface OpenAIResponsesAdapterConfig {
 
 export class OpenAIResponsesAdapter implements ProviderAdapter {
   readonly name = 'openai-responses';
+
+  /** Images API adapter: it reports no token usage at all. */
+  readonly usageCacheConvention = 'cache-excluded' as const;
   private apiKey: string;
   private baseURL: string;
   private organization?: string;

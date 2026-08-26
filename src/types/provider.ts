@@ -82,6 +82,21 @@ export interface ProviderCapabilities {
 // Model Pricing
 // ============================================================================
 
+/**
+ * Whether a provider's prompt-token count INCLUDES the span served from cache.
+ *
+ * Measured live 2026-08-25 — Anthropic (`cache-excluded`): a 4,650-token cached
+ * system prompt returned `input_tokens: 8` with `cache_read_input_tokens: 4650`.
+ * OpenAI (`cache-inclusive`): `prompt_tokens` stayed at 1732 across a cache hit
+ * that reported `cached_tokens: 1664`, so cached is a SUBSET of the prompt.
+ *
+ * `unknown` is a real epistemic state, not a default to lean on: it means no
+ * one has established this adapter's convention, and membrane will pass the
+ * counts through unchanged and warn the first time a cache read makes the
+ * ambiguity bite.
+ */
+export type UsageCacheConvention = 'cache-excluded' | 'cache-inclusive' | 'unknown';
+
 export interface ModelPricing {
   /** Cost per million input tokens */
   inputPerMillion: number;
@@ -97,6 +112,14 @@ export interface ModelPricing {
   
   /** Currency code */
   currency: string;
+
+  /**
+   * ISO date these rates were last checked against the provider's published
+   * price page, surfaced to callers as {@link CostBreakdown.pricingAsOf}. A
+   * pricing source that cannot vouch for a date leaves it unset — better an
+   * absent freshness signal than a fabricated one.
+   */
+  asOf?: string;
 }
 
 // ============================================================================
@@ -169,6 +192,21 @@ export interface ProviderAdapter {
   /** Provider name */
   readonly name: string;
   
+  /**
+   * Which convention this adapter's `usage.inputTokens` carries. Membrane
+   * normalizes every response onto `cache-excluded` before any ratio or cost is
+   * computed, and it can only do that if the adapter says what it is reporting.
+   *
+   * OPTIONAL, defaulting to `'unknown'`: an adapter that declares nothing is in
+   * exactly the state `'unknown'` names, and treating it that way — pass the
+   * counts through untouched, warn once when a cache read makes the ambiguity
+   * bite — is the honest reading of silence. Requiring it would also stop every
+   * external custom adapter compiling for a fact membrane can already say it
+   * does not know. Declare it: `'unknown'` is a real epistemic state, not a
+   * resting place.
+   */
+  usageCacheConvention?: UsageCacheConvention;
+
   /** Check if this adapter handles a model */
   supportsModel(modelId: string): boolean;
   
@@ -272,6 +310,23 @@ export interface ProviderResponse {
     outputTokens: number;
     cacheCreationTokens?: number;
     cacheReadTokens?: number;
+
+    /**
+     * Thinking/reasoning tokens reported separately from the visible-output
+     * count and already folded INTO `outputTokens`.
+     * See {@link DetailedUsage.thinkingTokens}.
+     */
+    thinkingTokens?: number;
+
+    /**
+     * Overrides {@link ProviderAdapter.usageCacheConvention} for THIS response.
+     * Needed where one adapter fronts several upstream conventions: OpenRouter
+     * reads `cache_read_input_tokens` (Anthropic, cache-excluded) OR
+     * `prompt_tokens_details.cached_tokens` (OpenAI, cache-inclusive) depending
+     * on which provider it routed to, so the convention is a per-response fact
+     * there rather than a per-adapter one.
+     */
+    cacheConvention?: UsageCacheConvention;
   };
   
   /** Model that actually ran */

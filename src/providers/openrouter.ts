@@ -12,6 +12,7 @@ import type {
   StreamCallbacks,
   ContentBlock,
   ToolDefinition,
+  UsageCacheConvention,
 } from '../types/index.js';
 import {
   MembraneError,
@@ -144,8 +145,33 @@ export interface OpenRouterAdapterConfig {
 // OpenRouter Adapter
 // ============================================================================
 
+/**
+ * Which convention the tokens OpenRouter just handed back are in. OpenRouter
+ * passes the routed provider's usage payload through, so an Anthropic-routed
+ * call reports `cache_read_input_tokens` (disjoint from prompt_tokens) while an
+ * OpenAI-routed one reports `prompt_tokens_details.cached_tokens` (a subset of
+ * it). The field that carried the number therefore identifies the convention.
+ */
+function resolveRoutedCacheConvention(
+  anthropicShapedCacheRead: number | undefined,
+  resolvedCacheRead: number | undefined,
+): UsageCacheConvention | undefined {
+  if (resolvedCacheRead == null) return undefined;
+  return anthropicShapedCacheRead != null ? 'cache-excluded' : 'cache-inclusive';
+}
+
 export class OpenRouterAdapter implements ProviderAdapter {
   readonly name = 'openrouter';
+
+  /**
+   * OpenRouter fronts BOTH conventions: it passes through Anthropic's
+   * `cache_read_input_tokens` (cache-excluded) or OpenAI's
+   * `prompt_tokens_details.cached_tokens` (cache-inclusive) depending on which
+   * provider it routed to. The convention is therefore a per-response fact —
+   * each parse sets `usage.cacheConvention` from the field it actually read,
+   * and this adapter-level value is only the no-cache-tokens fallback.
+   */
+  readonly usageCacheConvention = 'unknown' as const;
   private apiKey: string;
   private baseURL: string;
   private httpReferer: string;
@@ -221,6 +247,10 @@ export class OpenRouterAdapter implements ProviderAdapter {
       let sawTerminalEvent = false;
       let toolCalls: OpenRouterToolCall[] = [];
       let streamUsage: OpenRouterResponse['usage'] | undefined;
+      // The model the provider actually served, echoed on every SSE
+      // chunk. Reporting the requested id instead hides alias
+      // resolution (and, on OpenRouter, which provider it routed to).
+      let servedModel: string | undefined;
 
       // One frame handler for both the streamed lines and the EOF flush — the
       // trailing buffer carries real terminal frames, not leftovers.
@@ -281,6 +311,10 @@ export class OpenRouterAdapter implements ProviderAdapter {
           if (parsed.usage) {
             streamUsage = parsed.usage;
           }
+
+          if (parsed.model) {
+            servedModel = parsed.model;
+          }
         } catch (e) {
           // Ignore parse errors
         }
@@ -316,7 +350,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
         message.tool_calls = toolCalls;
       }
 
-      return this.parseStreamedResponse(message, finishReason, request.model, streamUsage, openRouterRequest);
+      return this.parseStreamedResponse(message, finishReason, servedModel ?? request.model, streamUsage, openRouterRequest);
 
     } catch (error) {
       throw this.handleError(error, openRouterRequest);
@@ -616,8 +650,10 @@ export class OpenRouterAdapter implements ProviderAdapter {
     // Anthropic: cache_creation_input_tokens, cache_read_input_tokens
     // OpenAI: prompt_tokens_details.cached_tokens
     const cacheCreationTokens = response.usage?.cache_creation_input_tokens;
-    const cacheReadTokens = response.usage?.cache_read_input_tokens
+    const anthropicShapedCacheRead = response.usage?.cache_read_input_tokens;
+    const cacheReadTokens = anthropicShapedCacheRead
       ?? response.usage?.prompt_tokens_details?.cached_tokens;
+    const cacheConvention = resolveRoutedCacheConvention(anthropicShapedCacheRead, cacheReadTokens);
 
     return {
       content: this.messageToContent(message),
@@ -628,6 +664,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
         outputTokens: response.usage?.completion_tokens ?? 0,
         cacheCreationTokens: cacheCreationTokens ?? undefined,
         cacheReadTokens: cacheReadTokens ?? undefined,
+        cacheConvention,
       },
       model: response.model ?? requestedModel,
       rawRequest,
@@ -644,8 +681,10 @@ export class OpenRouterAdapter implements ProviderAdapter {
   ): ProviderResponse {
     // Extract cache tokens if available from stream usage
     const cacheCreationTokens = streamUsage?.cache_creation_input_tokens;
-    const cacheReadTokens = streamUsage?.cache_read_input_tokens
+    const anthropicShapedCacheRead = streamUsage?.cache_read_input_tokens;
+    const cacheReadTokens = anthropicShapedCacheRead
       ?? streamUsage?.prompt_tokens_details?.cached_tokens;
+    const cacheConvention = resolveRoutedCacheConvention(anthropicShapedCacheRead, cacheReadTokens);
 
     return {
       content: this.messageToContent(message),
@@ -656,6 +695,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
         outputTokens: streamUsage?.completion_tokens ?? 0,
         cacheCreationTokens: cacheCreationTokens ?? undefined,
         cacheReadTokens: cacheReadTokens ?? undefined,
+        cacheConvention,
       },
       model: requestedModel,
       rawRequest,
