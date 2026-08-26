@@ -28,7 +28,7 @@ import {
   abortError,
   networkError,
 } from '../types/index.js';
-import { createCombinedSignal, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
+import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
 
 // ============================================================================
 // Gemini API Types
@@ -610,6 +610,10 @@ export class GeminiAdapter implements ProviderAdapter {
   // --------------------------------------------------------------------------
 
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
+    // A deadline abort is a timeout and stays one. Collapsing it into a bare
+    // abortError() here is what erased the identity before Membrane's
+    // caller-signal > timeout > error ladder could read it.
+    if (isDeadlineAbort(error)) return deadlineTimeoutError(error, rawRequest);
     if (error instanceof MembraneError) return error;
 
     if (error instanceof Error) {

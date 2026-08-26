@@ -20,7 +20,7 @@ import {
   serverError,
   abortError,
 } from '../types/index.js';
-import { createCombinedSignal, assertTerminalEventObserved } from './utils.js';
+import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, assertTerminalEventObserved } from './utils.js';
 import {
   INTERLEAVED_THINKING_BETA,
   needsInterleavedThinkingBeta,
@@ -924,6 +924,10 @@ export class BedrockAdapter implements ProviderAdapter {
   }
 
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
+    // A deadline abort is a timeout and stays one. Collapsing it into a bare
+    // abortError() here is what erased the identity before Membrane's
+    // caller-signal > timeout > error ladder could read it.
+    if (isDeadlineAbort(error)) return deadlineTimeoutError(error, rawRequest);
     // Already-classified failures (e.g. the stream-integrity guards) keep
     // their type and retryability instead of being re-derived from a string.
     if (error instanceof MembraneError) return error;

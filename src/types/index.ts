@@ -73,7 +73,9 @@ export type {
 export type {
   StopReason,
   BasicUsage,
+  CallUsage,
   DetailedUsage,
+  DiscardedAttemptsUsage,
   CostBreakdown,
   StopInfo,
   ModelInfo,
@@ -162,6 +164,8 @@ export {
   networkError,
   timeoutError,
   abortError,
+  TimeoutAbortError,
+  isTimeoutAbortError,
   safetyError,
   unsupportedError,
   classifyError,

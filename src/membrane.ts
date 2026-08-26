@@ -16,6 +16,7 @@ import type {
   CompleteOptions,
   BasicUsage,
   DetailedUsage,
+  DiscardedAttemptsUsage,
   StopReason,
   TimingInfo,
   CacheInfo,
@@ -43,8 +44,10 @@ import {
   MembraneError,
   classifyError,
   isOverloadedError,
+  isTimeoutAbortError,
   isTextContent,
   isAbortedResponse,
+  unsupportedError,
 } from './types/index.js';
 import type { BuildResult } from './formatters/types.js';
 import {
@@ -213,6 +216,10 @@ export class Membrane {
     // refusal is a successful HTTP call with an unwanted verdict, and letting
     // it consume error retries would couple two unrelated budgets.
     let refusalRetriesUsed = 0;
+    // Spend on attempts we threw away. A refused attempt is a completed,
+    // billed HTTP call; reporting only the surviving attempt's usage
+    // under-reports the turn by one full call per retry.
+    let discardedUsage: DiscardedAttemptsUsage | undefined;
 
     // One selection for the whole call: mode resolution and the build must
     // name the same formatter instance (see resolveActiveFormatter).
@@ -266,7 +273,19 @@ export class Membrane {
           refusalRetriesUsed < Math.max(0, options.refusalRetries ?? 0)
         ) {
           refusalRetriesUsed++;
+          discardedUsage = this.mergeDiscardedAttempts(
+            discardedUsage,
+            this.discardedAttemptFrom(response.usage)
+          );
           continue;
+        }
+
+        // Report what the discarded attempts cost. Set BEFORE afterResponse
+        // so a hook that logs spend sees the whole turn, not just the
+        // attempt that stands.
+        if (discardedUsage) {
+          response.details.usage.discardedAttempts =
+            this.pricedDiscardedAttempts(discardedUsage, request.config.model);
         }
 
         // Call afterResponse hook
@@ -307,9 +326,16 @@ export class Membrane {
             }
           }
 
-          // Wait before retry (abort-aware)
+          // Wait before retry (abort-aware). An abort landing inside the
+          // sleep must fail like every other failure of this method — a
+          // MembraneError — rather than escaping the loop as a raw
+          // DOMException whose shape no caller of complete() expects.
           const delay = this.calculateRetryDelay(attempts, isOverloaded);
-          await this.sleep(delay, options.signal);
+          try {
+            await this.sleep(delay, options.signal);
+          } catch (sleepError) {
+            throw this.attachRawRequest(sleepError, rawRequest);
+          }
           continue;
         }
 
@@ -343,6 +369,20 @@ export class Membrane {
     // If streaming is explicitly disabled on the request, fall back to complete()
     // and synthesize the streaming callbacks from the full response
     if (request.streaming === false) {
+      // complete() has no tool loop, and neither branch of this fallback can
+      // build one: honouring onToolCalls here would mean re-implementing the
+      // whole XML/native continuation machinery. Silently dropping it turned
+      // a working agent into one that narrates tool calls it never makes —
+      // the raw <function_calls> XML lands in the returned text and the turn
+      // ends. Refuse where the option is passed, before spending a call.
+      if (options.onToolCalls) {
+        throw unsupportedError(
+          'stream() cannot execute tools with streaming: false — the non-streaming ' +
+          'fallback routes to complete(), which has no tool loop, so onToolCalls ' +
+          'would never run. Leave streaming enabled (or drive the loop yourself ' +
+          'with complete() per round).'
+        );
+      }
       const response = await this.complete(request, options);
       // Synthesize onChunk callbacks so callers that depend on them still work
       if (options.onChunk && 'content' in response) {
@@ -394,12 +434,14 @@ export class Membrane {
         const result = useNative
           ? await this.streamWithNativeTools(request, tracked, activeFormatter)
           : await this.streamWithXmlTools(request, tracked, activeFormatter);
-        // The inner paths report attempts: 1 — they can't see this wrapper.
-        // A call that succeeded after N overloaded retries must not look like
-        // a first-attempt success in durable logs, so patch the real count
-        // (and the waits) into the response telemetry.
+        // The inner paths count their own provider calls but cannot see this
+        // wrapper's discarded attempts. Each failed attempt here died before
+        // emitting anything (that is the precondition for retrying), so it
+        // cost at least the one call it failed on — ADD those to the inner
+        // count rather than overwriting it, or a turn that retried twice and
+        // then ran three tool rounds would report 2 calls instead of 5.
         if (attempts > 1 && 'details' in result) {
-          result.details.timing.attempts = attempts;
+          result.details.timing.attempts += attempts - 1;
           result.details.timing.retryDelaysMs = retryDelaysMs;
         }
         return result;
@@ -426,7 +468,26 @@ export class Membrane {
           }
           const delay = this.calculateRetryDelay(attempts, true);
           retryDelaysMs.push(delay);
-          await this.sleep(delay, options.signal);
+          // An abort during the backoff window is still a cancellation of
+          // this stream, and stream() documents cancellation as an
+          // AbortedResponse. Letting the sleep's rejection escape made that
+          // contract depend on which millisecond the abort landed in.
+          // Nothing has been emitted on this path (that is the precondition
+          // for retrying at all), so there is no partial content to report.
+          try {
+            await this.sleep(delay, options.signal);
+          } catch (sleepError) {
+            if (this.isAbortError(sleepError)) {
+              return this.buildAbortedResponse(
+                '',
+                { inputTokens: 0, outputTokens: 0 },
+                [],
+                [],
+                this.abortReason(sleepError, options.signal)
+              );
+            }
+            throw sleepError;
+          }
           continue;
         }
         throw error;
@@ -533,6 +594,8 @@ export class Membrane {
       onResponse,
       maxToolDepth = 10,
       signal,
+      timeoutMs,
+      idleTimeoutMs,
     } = options;
 
     // The formatter stream() selected: the same instance that resolved the
@@ -543,6 +606,10 @@ export class Membrane {
     // Initialize parser from formatter for format-specific tracking
     const parser = formatter.createStreamParser();
     let toolDepth = 0;
+    // Honest turn telemetry: provider calls actually made (including refusal
+    // re-issues inside streamOnce) and continuation rounds.
+    let providerCalls = 0;
+    let rounds = 0;
     let totalUsage: DetailedUsage = { inputTokens: 0, outputTokens: 0 };
     const pricing = this.resolvePricing(request.config.model);
     const contentBlocks: ContentBlock[] = [];
@@ -712,6 +779,8 @@ export class Membrane {
           },
           {
             signal,
+            timeoutMs,
+            idleTimeoutMs,
             normalizedRequest: request,
             // The tag-based parser tracks thinking via <thinking> tags — ask the
             // provider to wrap native thinking deltas so they don't stream as
@@ -723,6 +792,9 @@ export class Membrane {
             },
           }
         );
+
+        rounds++;
+        providerCalls += streamResult.providerCalls;
 
         // If we detected stop sequence manually, fix up the parser and result
         if (detectedStopSequence && truncatedAccumulated !== null) {
@@ -1088,7 +1160,7 @@ export class Membrane {
         request,
         prefillResult,
         startTime,
-        1, // attempts
+        providerCalls,
         rawRequest,
         rawResponse,
         executedToolCalls,
@@ -1105,6 +1177,8 @@ export class Membrane {
       // Merge provider thinking signatures into parser-derived thinking blocks
       this.mergeProviderThinkingBlocks(response.content, providerThinkingBlocks);
 
+      response.details.timing.rounds = rounds;
+
       return response;
     } catch (error) {
       // Check if this is an abort error
@@ -1118,7 +1192,7 @@ export class Membrane {
           totalUsage,
           executedToolCalls,
           executedToolResults,
-          'user',
+          this.abortReason(error, signal),
           initialBlockType
         );
       }
@@ -1147,9 +1221,15 @@ export class Membrane {
       onResponse,
       maxToolDepth = 10,
       signal,
+      timeoutMs,
+      idleTimeoutMs,
     } = options;
 
     let toolDepth = 0;
+    // Honest turn telemetry: provider calls actually made (including refusal
+    // re-issues inside streamOnce) and continuation rounds.
+    let providerCalls = 0;
+    let rounds = 0;
     let totalUsage: DetailedUsage = { inputTokens: 0, outputTokens: 0 };
     const pricing = this.resolvePricing(request.config.model);
     let lastStopReason: StopReason = 'end_turn';
@@ -1204,6 +1284,8 @@ export class Membrane {
           },
           {
             signal,
+            timeoutMs,
+            idleTimeoutMs,
             normalizedRequest: request,
             onRequest: (req) => {
               rawRequest = req;
@@ -1223,6 +1305,8 @@ export class Membrane {
         // Single-callback adapters (OpenAI Responses) report each finalised
         // block once, after the stream: complete whatever never saw a stop.
         tracker.flush();
+        rounds++;
+        providerCalls += streamResult.providerCalls;
 
         rawResponse = streamResult.raw;
 
@@ -1347,7 +1431,8 @@ export class Membrane {
           usage: { ...totalUsage },
           timing: {
             totalDurationMs: durationMs,
-            attempts: 1,
+            attempts: providerCalls,
+            rounds,
           },
           model: {
             requested: request.config.model,
@@ -1374,7 +1459,7 @@ export class Membrane {
           totalUsage,
           executedToolCalls,
           executedToolResults,
-          'user'
+          this.abortReason(error, signal)
         );
       }
       // Re-throw with rawRequest attached for logging
@@ -2136,7 +2221,13 @@ export class Membrane {
        */
       onWireCacheMarkers?: (markerCount: number) => void;
     }
-  ) {
+  ): Promise<
+    import('./types/provider.js').ProviderResponse & {
+      discardedUsage?: DiscardedAttemptsUsage;
+      /** Provider calls this helper made, including refusal re-issues. */
+      providerCalls: number;
+    }
+  > {
     // Strip `normalizedRequest` before forwarding to the adapter — it's
     // not part of `ProviderRequestOptions` and TypeScript's structural
     // compatibility won't catch the excess field (checked only on object
@@ -2157,10 +2248,26 @@ export class Membrane {
     // attempt, so they require BOTH a budget and an onRetrying hook.
     const maxAttempts = onRetrying ? Math.max(0, refusalRetries ?? 0) : 0;
     let retried = 0;
+    // Every re-issued attempt was a completed, billed provider call. The
+    // caller's usage accumulator only ever sees the surviving result, so the
+    // abandoned spend rides back out on the result itself.
+    let discardedUsage: DiscardedAttemptsUsage | undefined;
+    let providerCalls = 0;
     while (true) {
+      providerCalls++;
       const result = await this.adapter.stream(finalRequest, callbacks, adapterOptions);
-      if (result.stopReason !== 'refusal' || retried >= maxAttempts) return result;
+      if (result.stopReason !== 'refusal' || retried >= maxAttempts) {
+        return {
+          ...result,
+          providerCalls,
+          ...(discardedUsage ? { discardedUsage } : {}),
+        };
+      }
       retried++;
+      discardedUsage = this.mergeDiscardedAttempts(
+        discardedUsage,
+        this.discardedAttemptFrom(result.usage)
+      );
       const category = (result.raw as { response?: { stop_details?: { category?: string } } } | undefined)
         ?.response?.stop_details?.category;
       onRetrying!({ attempt: retried, maxAttempts, category });
@@ -2174,7 +2281,14 @@ export class Membrane {
   ): any {
     // Anthropic quirk: assistant content cannot end with trailing whitespace
     const trimmedAccumulated = accumulated.trimEnd();
-    
+
+    // Everything before the watermark already rides EARLIER messages (a
+    // persisted split turn), so only the suffix belongs in the trailing
+    // assistant prefill — replacing it with the whole document would
+    // duplicate the pre-seam text and flatten the image user-turn away.
+    const baseOffset = prefillResult.accumulatedBaseOffset ?? 0;
+    const trailingContent = accumulated.slice(baseOffset).trimEnd();
+
     // Build continuation messages: keep all messages up to last assistant,
     // then replace/add the accumulated content
     const messages = [...prefillResult.messages];
@@ -2183,14 +2297,14 @@ export class Membrane {
     let foundAssistant = false;
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i]?.role === 'assistant') {
-        messages[i] = { role: 'assistant', content: trimmedAccumulated };
+        messages[i] = { role: 'assistant', content: trailingContent };
         foundAssistant = true;
         break;
       }
     }
     
     if (!foundAssistant) {
-      messages.push({ role: 'assistant', content: trimmedAccumulated });
+      messages.push({ role: 'assistant', content: trailingContent });
     }
     
     return stripThinkingForPrefill({
@@ -2203,6 +2317,10 @@ export class Membrane {
       stopSequences: prefillResult.stopSequences,
       extra: {
         ...originalRequest.providerParams,
+        // Same contract transformRequest sends: adapters that reason about
+        // the normalized shape (or fall back to serializing it) must not see
+        // a continuation as a request with no normalized form at all.
+        normalizedMessages: originalRequest.messages,
         // Pre-serialized prompt for completions adapters — skip re-serialization
         prompt: trimmedAccumulated,
       },
@@ -2236,6 +2354,12 @@ export class Membrane {
     // Anthropic quirk: assistant content cannot end with trailing whitespace
     const trimmedAccumulated = accumulated.trimEnd();
 
+    // The split replaces only the CURRENT trailing assistant message, which
+    // covers the accumulated text from the previous seam onward (0 on the
+    // first split, the previous image seam on a later one).
+    const baseOffset = prefillResult.accumulatedBaseOffset ?? 0;
+    const trailingContent = accumulated.slice(baseOffset).trimEnd();
+
     // Build messages: copy all, then replace only the last assistant with split-turn
     const messages: any[] = prefillResult.messages.map(msg => ({ ...msg }));
 
@@ -2251,7 +2375,7 @@ export class Membrane {
     // Anthropic quirk: assistant content cannot end with trailing whitespace
     const trimmedAfterXml = afterImageXml.trimEnd();
     const splitTurnMessages = [
-      { role: 'assistant', content: trimmedAccumulated },
+      { role: 'assistant', content: trailingContent },
       { role: 'user', content: images },
       { role: 'assistant', content: trimmedAfterXml },
     ];
@@ -2261,6 +2385,18 @@ export class Membrane {
     } else {
       messages.push(...splitTurnMessages);
     }
+
+    // PERSIST the split. Later rounds rebuild from prefillResult.messages;
+    // without this the image user-turn exists on exactly one request and the
+    // next continuation flattens the accumulated document back over it —
+    // leaving <function_results> XML asserting a screenshot the model can no
+    // longer see. Reassign (never mutate in place): the previous array is
+    // still referenced by the request already on the wire. The watermark
+    // moves to the seam — the point in `accumulated` where afterImageXml is
+    // about to be appended — so the next builder replaces only the closing
+    // assistant turn.
+    prefillResult.messages = messages;
+    prefillResult.accumulatedBaseOffset = accumulated.length;
 
     return stripThinkingForPrefill({
       ...this.getBaseProviderParams(originalRequest.config),
@@ -2273,7 +2409,16 @@ export class Membrane {
       // Copied, not aliased: the guard below deletes the smuggled thinking
       // config, and mutating the caller's own providerParams object would
       // silently disable thinking on their NEXT (non-prefill) request.
-      extra: { ...originalRequest.providerParams },
+      extra: {
+        ...originalRequest.providerParams,
+        // Same contract as transformRequest and the plain continuation
+        // builder. Without these a completions-style adapter fell through to
+        // serializing PROVIDER-shaped messages as if they were normalized
+        // ones, re-adding participant stop sequences the continuation
+        // deliberately suppresses.
+        normalizedMessages: originalRequest.messages,
+        prompt: trimmedAccumulated,
+      },
     });
   }
 
@@ -2557,6 +2702,52 @@ export class Membrane {
     };
   }
 
+  /**
+   * Fold one discarded (billed but abandoned) attempt's usage into a carry.
+   * Returns a NEW object so a caller's earlier snapshot is never mutated.
+   */
+  private mergeDiscardedAttempts(
+    carry: DiscardedAttemptsUsage | undefined,
+    add: DiscardedAttemptsUsage | undefined
+  ): DiscardedAttemptsUsage | undefined {
+    if (!add) return carry;
+    const next: DiscardedAttemptsUsage = carry
+      ? { ...carry }
+      : { attempts: 0, inputTokens: 0, outputTokens: 0 };
+    next.attempts += add.attempts;
+    next.inputTokens += add.inputTokens;
+    next.outputTokens += add.outputTokens;
+    if (add.cacheCreationTokens) {
+      next.cacheCreationTokens = (next.cacheCreationTokens ?? 0) + add.cacheCreationTokens;
+    }
+    if (add.cacheReadTokens) {
+      next.cacheReadTokens = (next.cacheReadTokens ?? 0) + add.cacheReadTokens;
+    }
+    return next;
+  }
+
+  /** One provider call's usage as a single-attempt discard record. */
+  private discardedAttemptFrom(usage: DetailedUsage | BasicUsage | undefined): DiscardedAttemptsUsage {
+    const detailed = (usage ?? { inputTokens: 0, outputTokens: 0 }) as DetailedUsage;
+    return {
+      attempts: 1,
+      inputTokens: detailed.inputTokens ?? 0,
+      outputTokens: detailed.outputTokens ?? 0,
+      ...(detailed.cacheCreationTokens ? { cacheCreationTokens: detailed.cacheCreationTokens } : {}),
+      ...(detailed.cacheReadTokens ? { cacheReadTokens: detailed.cacheReadTokens } : {}),
+    };
+  }
+
+  /** Price the discarded spend so a caller can read it without re-deriving. */
+  private pricedDiscardedAttempts(
+    discarded: DiscardedAttemptsUsage | undefined,
+    model: string
+  ): DiscardedAttemptsUsage | undefined {
+    if (!discarded) return undefined;
+    const estimatedCost = this.estimateCost(discarded, model);
+    return estimatedCost ? { ...discarded, estimatedCost } : discarded;
+  }
+
   private mapStopReason(providerReason: string): StopReason {
     switch (providerReason) {
       case 'end_turn':
@@ -2629,6 +2820,10 @@ export class Membrane {
    * Check if an error is an abort error
    */
   private isAbortError(error: unknown): boolean {
+    // An adapter's own deadline: a timeout by classification, still an abort
+    // by provenance, so the streaming paths hand back the partial content
+    // they collected instead of throwing.
+    if (isTimeoutAbortError(error)) return true;
     if (error instanceof Error) {
       // Standard AbortError
       if (error.name === 'AbortError') return true;
@@ -2640,6 +2835,20 @@ export class Membrane {
       return error.name === 'AbortError';
     }
     return false;
+  }
+
+  /**
+   * Why a caught abort happened. The caller's own signal is authoritative:
+   * if it fired, the cancellation is theirs whatever the error text says.
+   * Otherwise an adapter-side deadline classifies as a timeout — the adapters
+   * mark the abort createCombinedSignal's timeoutMs raises and map it to a
+   * TimeoutAbortError, so the identity survives their error handling — and
+   * anything else that reached the abort catch is a failure, not a person.
+   */
+  private abortReason(error: unknown, signal?: AbortSignal): 'user' | 'timeout' | 'error' {
+    if (signal?.aborted) return 'user';
+    if (classifyError(error).type === 'timeout') return 'timeout';
+    return 'error';
   }
 
   /**
@@ -2785,6 +2994,10 @@ export class Membrane {
     const formatter = activeFormatter;
     const parser = formatter.createStreamParser();
     let toolDepth = 0;
+    // Honest turn telemetry: provider calls actually made (including refusal
+    // re-issues inside streamOnce) and continuation rounds.
+    let providerCalls = 0;
+    let rounds = 0;
     // Once-per-stream latch for the injectedMessages-unsupported warning.
     let warnedInjectionUnsupported = false;
     let totalUsage: DetailedUsage = { inputTokens: 0, outputTokens: 0 };
@@ -2940,6 +3153,9 @@ export class Membrane {
             onRequest: (req: unknown) => { rawRequest = req; },
           }
         );
+
+        rounds++;
+        providerCalls += streamResult.providerCalls;
 
         // If we detected stop sequence manually, fix up the parser and result
         if (detectedStopSequence && truncatedAccumulated !== null) {
@@ -3302,7 +3518,7 @@ export class Membrane {
         request,
         prefillResult,
         startTime,
-        1,
+        providerCalls,
         rawRequest,
         rawResponse,
         executedToolCalls,
@@ -3314,6 +3530,8 @@ export class Membrane {
       // Merge provider thinking signatures into parser-derived thinking blocks
       this.mergeProviderThinkingBlocks(response.content, providerThinkingBlocks);
 
+      response.details.timing.rounds = rounds;
+
       stream.emit({ type: 'complete', response });
     } catch (error) {
       if (this.isAbortError(error)) {
@@ -3321,7 +3539,7 @@ export class Membrane {
         const newContent = fullAccumulated.slice(initialPrefillLength);
         stream.emit({
           type: 'aborted',
-          reason: 'user',
+          reason: this.abortReason(error, stream.signal),
           partialContent: parseAccumulatedIntoBlocks(newContent).blocks,
           rawAssistantText: newContent,
           toolCalls: executedToolCalls,
@@ -3360,6 +3578,10 @@ export class Membrane {
         : maxToolDepthOpt;
 
     let toolDepth = 0;
+    // Honest turn telemetry: provider calls actually made (including refusal
+    // re-issues inside streamOnce) and continuation rounds.
+    let providerCalls = 0;
+    let rounds = 0;
     let totalUsage: DetailedUsage = { inputTokens: 0, outputTokens: 0 };
     const pricing = this.resolvePricing(request.config.model);
     let lastStopReason: StopReason = 'end_turn';
@@ -3370,6 +3592,8 @@ export class Membrane {
     let allTextAccumulated = '';
     const executedToolCalls: ToolCall[] = [];
     const executedToolResults: ToolResult[] = [];
+    // Spend on refusal attempts this turn threw away (see streamOnce).
+    let discardedUsage: DiscardedAttemptsUsage | undefined;
 
     let messages = [...request.messages];
     let allContentBlocks: ContentBlock[] = [];
@@ -3465,10 +3689,16 @@ export class Membrane {
         // Single-callback adapters (OpenAI Responses) report each finalised
         // block once, after the stream: complete whatever never saw a stop.
         tracker.flush();
+        rounds++;
+        providerCalls += streamResult.providerCalls;
 
         rawResponse = streamResult.raw;
         lastStopReason = this.mapStopReason(streamResult.stopReason);
         lastStopSequence = streamResult.stopSequence ?? undefined;
+
+        // Attempts this round re-issued past a refusal are billed calls whose
+        // output was discarded — carry their spend to the final response.
+        discardedUsage = this.mergeDiscardedAttempts(discardedUsage, streamResult.discardedUsage);
 
         // Accumulate usage (including cache metrics)
         totalUsage.inputTokens += streamResult.usage.inputTokens;
@@ -3598,10 +3828,16 @@ export class Membrane {
             triggeredSequence: lastStopSequence,
             wasTruncated: lastStopReason === 'max_tokens',
           },
-          usage: { ...totalUsage },
+          usage: {
+            ...totalUsage,
+            ...(discardedUsage
+              ? { discardedAttempts: this.pricedDiscardedAttempts(discardedUsage, request.config.model) }
+              : {}),
+          },
           timing: {
             totalDurationMs: durationMs,
-            attempts: 1,
+            attempts: providerCalls,
+            rounds,
           },
           model: {
             requested: request.config.model,
@@ -3626,7 +3862,7 @@ export class Membrane {
       if (this.isAbortError(error)) {
         stream.emit({
           type: 'aborted',
-          reason: 'user',
+          reason: this.abortReason(error, stream.signal),
           rawAssistantText: allTextAccumulated,
           toolCalls: executedToolCalls,
           toolResults: executedToolResults,

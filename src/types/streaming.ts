@@ -194,9 +194,15 @@ export interface StreamOptions {
   /** Abort signal for cancellation */
   signal?: AbortSignal;
   
-  /** Request timeout */
+  /** Request timeout (per provider call, not per turn) */
   timeoutMs?: number;
-  
+
+  /**
+   * Abort a call whose stream goes silent for this many ms. Parity with
+   * YieldingStreamOptions.idleTimeoutMs; the adapter owns the default.
+   */
+  idleTimeoutMs?: number;
+
   /** Request ID for correlation */
   requestId?: string;
   
