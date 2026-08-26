@@ -908,7 +908,7 @@ export class Membrane {
           parser.push(closeTag);
           // Note: closing tag is structural XML, not emitted via onChunk (invisible)
 
-          const parsed = parseToolCalls(parser.getAccumulated());
+          const parsed = parseToolCalls(parser.getAccumulated(), { tools: request.tools });
 
           if (parsed && parsed.calls.length > 0) {
             // Notify about pre-tool content
@@ -1209,7 +1209,8 @@ export class Membrane {
           executedToolCalls,
           executedToolResults,
           this.abortReason(error, signal),
-          initialBlockType
+          initialBlockType,
+          request.tools
         );
       }
       // Re-throw with rawRequest attached for logging
@@ -2529,7 +2530,7 @@ export class Membrane {
     // This handles prefill mode where tools are XML in the text
     let emptyToolBlocks = 0;
     if (toolCalls.length === 0 && rawAssistantText.includes('<function_calls>')) {
-      const parsed = parseToolCalls(rawAssistantText);
+      const parsed = parseToolCalls(rawAssistantText, { tools: request.tools });
       if (parsed?.calls.length) {
         for (const tc of parsed.calls) {
           toolCalls.push(tc);
@@ -2684,7 +2685,10 @@ export class Membrane {
       // XML mode - parse accumulated text into blocks
       // If we started inside a block (from prefill), pass that context so the parser
       // can correctly handle closing tags without corresponding opening tags
-      const parseOptions = startInsideBlock ? { startInsideBlock } : undefined;
+      const parseOptions = {
+        tools: request.tools,
+        ...(startInsideBlock ? { startInsideBlock } : {}),
+      };
       const parsed = parseAccumulatedIntoBlocks(accumulated, parseOptions);
       finalContent = parsed.blocks;
       toolCalls = parsed.toolCalls.length > 0 ? parsed.toolCalls : executedToolCalls;
@@ -2937,11 +2941,15 @@ export class Membrane {
     toolCalls: ToolCall[],
     toolResults: ToolResult[],
     reason: 'user' | 'timeout' | 'error',
-    startInsideBlock: 'thinking' | 'tool_call' | 'tool_result' | null = null
+    startInsideBlock: 'thinking' | 'tool_call' | 'tool_result' | null = null,
+    tools?: ToolDefinition[]
   ): AbortedResponse {
     // Parse accumulated text into content blocks for partial content
     // If we started inside a block (from prefill), pass that context
-    const parseOptions = startInsideBlock ? { startInsideBlock } : undefined;
+    const parseOptions = {
+      tools,
+      ...(startInsideBlock ? { startInsideBlock } : {}),
+    };
     const { blocks } = parseAccumulatedIntoBlocks(accumulated, parseOptions);
 
     return {
@@ -3156,7 +3164,7 @@ export class Membrane {
           stream.emit({
             type: 'aborted',
             reason: 'user',
-            partialContent: parseAccumulatedIntoBlocks(newContent).blocks,
+            partialContent: parseAccumulatedIntoBlocks(newContent, { tools: request.tools }).blocks,
             rawAssistantText: newContent,
             toolCalls: executedToolCalls,
             toolResults: executedToolResults,
@@ -3302,7 +3310,7 @@ export class Membrane {
           const closeTag = '</function_calls>';
           parser.push(closeTag);
 
-          const parsed = parseToolCalls(parser.getAccumulated());
+          const parsed = parseToolCalls(parser.getAccumulated(), { tools: request.tools });
 
           if (parsed && parsed.calls.length > 0) {
             // Emit block events for each tool call
@@ -3613,7 +3621,7 @@ export class Membrane {
         stream.emit({
           type: 'aborted',
           reason: this.abortReason(error, stream.signal),
-          partialContent: parseAccumulatedIntoBlocks(newContent).blocks,
+          partialContent: parseAccumulatedIntoBlocks(newContent, { tools: request.tools }).blocks,
           rawAssistantText: newContent,
           toolCalls: executedToolCalls,
           toolResults: executedToolResults,

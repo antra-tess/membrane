@@ -31,6 +31,8 @@ import {
   formatToolResults as formatToolResultsXml,
   parseAccumulatedIntoBlocks,
   formatToolDefinitions,
+  collectDeclaredParameters,
+  resolveDeclaredType,
   type ToolDefinitionForPrompt,
 } from '../utils/tool-parser.js';
 import { IncrementalXmlParser } from '../utils/stream-parser.js';
@@ -490,8 +492,8 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     return new IncrementalXmlParser();
   }
 
-  parseToolCalls(content: string): ToolCall[] {
-    const result = parseToolCallsXml(content);
+  parseToolCalls(content: string, tools?: ToolDefinition[]): ToolCall[] {
+    const result = parseToolCallsXml(content, tools ? { tools } : undefined);
     return result?.calls ?? [];
   }
 
@@ -499,8 +501,8 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     return /<(antml:)?function_calls>/.test(content);
   }
 
-  parseContentBlocks(content: string): ContentBlock[] {
-    const { blocks } = parseAccumulatedIntoBlocks(content);
+  parseContentBlocks(content: string, tools?: ToolDefinition[]): ContentBlock[] {
+    const { blocks } = parseAccumulatedIntoBlocks(content, tools ? { tools } : undefined);
     return blocks;
   }
 
@@ -653,19 +655,20 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     const toolsForPrompt: ToolDefinitionForPrompt[] = tools.map((tool) => ({
       name: tool.name,
       description: tool.description,
-      parameters: tool.inputSchema.properties
-        ? Object.fromEntries(
-            Object.entries(tool.inputSchema.properties).map(([name, schema]) => [
-              name,
-              {
-                type: schema.type,
-                description: schema.description,
-                required: tool.inputSchema.required?.includes(name),
-                enum: schema.enum,
-              },
-            ])
-          )
-        : {},
+      parameters: Object.fromEntries(
+        Object.entries(collectDeclaredParameters(tool.inputSchema)).map(([name, schema]) => [
+          name,
+          {
+            // The SAME resolution the parser applies, so what the model is
+            // told a parameter is and what the parser decides it is cannot
+            // drift: one derivation, two surfaces.
+            type: resolveDeclaredType(schema, tool.inputSchema),
+            description: schema.description,
+            required: tool.inputSchema.required?.includes(name),
+            enum: schema.enum,
+          },
+        ])
+      ),
     }));
 
     return formatToolDefinitions(toolsForPrompt);

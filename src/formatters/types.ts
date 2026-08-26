@@ -324,8 +324,13 @@ export interface PrefillFormatter {
   /**
    * Parse tool calls from accumulated content.
    * Returns empty array if no tool calls detected.
+   *
+   * `tools` carries the round's declared schemas. XML-style formatters use them
+   * to parse parameter values by declared type (a `string` parameter keeps its
+   * raw, untrimmed text) instead of guessing; formatters whose provider returns
+   * typed arguments ignore it.
    */
-  parseToolCalls(content: string): ToolCall[];
+  parseToolCalls(content: string, tools?: ToolDefinition[]): ToolCall[];
 
   /**
    * Check if content indicates tool use.
@@ -336,6 +341,8 @@ export interface PrefillFormatter {
   /**
    * Parse content blocks from accumulated response.
    * Extracts text, thinking, tool_use blocks, etc.
+   *
+   * `tools` is used exactly as in {@link PrefillFormatter.parseToolCalls}.
    */
-  parseContentBlocks(content: string): ContentBlock[];
+  parseContentBlocks(content: string, tools?: ToolDefinition[]): ContentBlock[];
 }
