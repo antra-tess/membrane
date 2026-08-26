@@ -26,7 +26,7 @@ import {
   rateLimitError,
   serverError,
 } from '../types/index.js';
-import { createCombinedSignal, SSELineParser, safeParseJson, isDeadlineAbort, deadlineTimeoutError } from './utils.js';
+import { createCombinedSignal, SSELineParser, safeParseJson, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame } from './utils.js';
 
 // ============================================================================
 // Provider-native Responses API types
@@ -175,7 +175,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
 
       await this.assertSuccessfulHTTPResponse(response);
       const data = (await response.json()) as OpenAIResponsesAPIResponse;
-      this.assertSuccessfulAPIResponse(data);
+      this.assertSuccessfulAPIResponse(data, responsesRequest, 'response error');
       return this.parseResponse(data, request.model, responsesRequest);
     } catch (error) {
       throw this.handleError(error, responsesRequest);
@@ -242,15 +242,23 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
         ) {
           terminalResponse = event.response;
         } else if (event.type === 'response.failed') {
+          // This adapter dispatches on event.type rather than running the
+          // shared SSE line loop, but its error frames are the same class of
+          // payload: a structured code the caller's retry policy needs. Route
+          // both throw sites through the one classifier so the token lists
+          // have a single source of truth. A response.failed carrying no error
+          // object at all falls through to the loud generic below.
           const failed = event.response as OpenAIResponsesAPIResponse | undefined;
-          throw new Error(
-            `OpenAI Responses API error: ${failed?.error?.code ?? 'response_failed'} ` +
-              `${failed?.error?.message ?? 'Response failed'}`
-          );
+          throwOnStreamErrorFrame(failed, 'OpenAI Responses API', responsesRequest);
+          throw new Error('OpenAI Responses API stream error (response_failed): Response failed');
         } else if (event.type === 'error') {
-          throw new Error(
-            `OpenAI Responses API error: ${event.code ?? 'stream_error'} ` +
-              `${event.message ?? 'Streaming request failed'}`
+          // The event's own `type` is the SSE event name ('error'), not a
+          // provider classification, so only code and message are handed over.
+          // The payload object is always present, so this always throws.
+          throwOnStreamErrorFrame(
+            { error: { code: event.code, message: event.message ?? 'Streaming request failed' } },
+            'OpenAI Responses API',
+            responsesRequest
           );
         }
       };
@@ -280,7 +288,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
         );
       }
 
-      this.assertSuccessfulAPIResponse(terminalResponse);
+      this.assertSuccessfulAPIResponse(terminalResponse, responsesRequest);
 
       const parsed = this.parseResponse(terminalResponse, request.model, responsesRequest);
       parsed.content.forEach((block, index) => callbacks.onContentBlock?.(index, block));
@@ -593,12 +601,20 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
     throw new Error(`OpenAI Responses API error: ${response.status} ${errorText}`);
   }
 
-  private assertSuccessfulAPIResponse(response: OpenAIResponsesAPIResponse): void {
+  /**
+   * A terminal response can carry a structured `error` object on a 200, from
+   * the stream's terminal frame or from a non-streaming body. That payload
+   * never reaches an HTTP-status boundary classifier — the status was 200 —
+   * so it is classified here, by the same helper and the same token lists as
+   * every other provider error payload.
+   */
+  private assertSuccessfulAPIResponse(
+    response: OpenAIResponsesAPIResponse,
+    rawRequest?: unknown,
+    errorNoun?: string
+  ): void {
     if (!response.error) return;
-    throw new Error(
-      `OpenAI Responses API error: ${response.error.code ?? 'api_error'} ` +
-        `${response.error.message ?? 'Unknown error'}`
-    );
+    throwOnStreamErrorFrame(response, 'OpenAI Responses API', rawRequest, errorNoun);
   }
 
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {

@@ -102,6 +102,16 @@ export interface StopInfo {
   
   /** Whether output was truncated */
   wasTruncated: boolean;
+
+  /**
+   * XML tool mode: the turn ended with a tool block still open — a
+   * `<function_calls>` opener with no closer, or text cut mid-tag. The loop
+   * does not resume on a length stop, so this is the shape a max_tokens
+   * truncation leaves behind. A consumer persisting the turn must not write it
+   * back bare: on the next round the stale opener would be read as part of that
+   * round's block.
+   */
+  unclosedToolBlock?: boolean;
 }
 
 // ============================================================================

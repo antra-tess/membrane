@@ -41,25 +41,208 @@ function parseParamValue(value: string): unknown {
   }
 }
 
+/**
+ * Parse the parameters of one invoke body. A self-closing invoke has no body
+ * and therefore no parameters.
+ */
+function parseInvokeParameters(invokeBody: string | undefined): Record<string, unknown> {
+  const input: Record<string, unknown> = {};
+  if (invokeBody === undefined) return input;
+
+  PARAMETER_REGEX.lastIndex = 0;
+  let paramMatch: RegExpExecArray | null;
+  while ((paramMatch = PARAMETER_REGEX.exec(invokeBody)) !== null) {
+    input[paramMatch[2] ?? ''] = parseParamValue(paramMatch[3] ?? '');
+  }
+  return input;
+}
+
 // ============================================================================
 // Tool Call Parsing
 // ============================================================================
 
-// Regex patterns supporting both plain and antml: prefix
-// Pattern matches: <function_calls> or <function_calls>
-const FUNCTION_CALLS_REGEX = /<(antml:)?function_calls>([\s\S]*?)<\/(antml:)?function_calls>/g;
+// Invoke tags, both forms in ONE alternation so a block that mixes them keeps
+// document order (two sequential passes appended full-then-self-closing).
+// The name may be single- or double-quoted and whitespace may precede the
+// closing angle bracket; the quote character is backreferenced so the opposite
+// quote stays legal inside the name.
+// The name is at least one character and cannot contain its own quote, so a
+// nameless invoke and a stray second attribute both fail to match rather than
+// yielding a garbage tool name — a block that parses to no invokes is reported.
+// Groups: 1 = antml prefix, 2 = quote char, 3 = name, 4 = body (full form only).
+const INVOKE_REGEX =
+  /<(antml:)?invoke\s+name=(["'])((?:(?!\2).)+)\2\s*(?:\/>|>([\s\S]*?)<\/(antml:)?invoke>)/g;
 
-// Full invoke tags with content
-const INVOKE_REGEX_FULL = /<(antml:)?invoke\s+name="([^"]+)">([\s\S]*?)<\/(antml:)?invoke>/g;
+const INVOKE_NAME_GROUP = 3;
+const INVOKE_BODY_GROUP = 4;
+const INVOKE_CLOSER_PREFIX_GROUP = 5;
 
-// Self-closing invoke tags (no parameters)
-const INVOKE_REGEX_SELF_CLOSE = /<(antml:)?invoke\s+name="([^"]+)"\s*\/>/g;
+// Same pattern without /g, for the re-anchor read that runs INSIDE the outer
+// iteration: sharing the /g instance would clobber its lastIndex. Built from
+// the one source so the two can never drift apart.
+const INVOKE_REANCHOR_REGEX = new RegExp(INVOKE_REGEX.source);
+
+// An invoke OPENER on its own — the containment test one level below the
+// block fix, since an opener that never closed is invisible to INVOKE_REGEX.
+const INVOKE_OPEN_REGEX = /<(antml:)?invoke\s+name=/g;
+
+const INVOKE_CLOSE_TAG = '</invoke>';
+
+/**
+ * The invokes one block's inner content dispatches, plus the heads it refused.
+ *
+ * The full-form alternative of INVOKE_REGEX is lazy, so an invoke the model
+ * left OPEN pairs with the NEXT invoke's closing tag: the head matched, carried
+ * the inner call's parameters as its own, and the inner call never parsed at
+ * all — the same block-splice disease one level down. A match whose BODY holds
+ * another opener is therefore refused as a dispatchable invoke and re-anchored
+ * to the innermost opener inside it, which is where the live call begins. The
+ * re-anchored text holds no further opener by construction, so this terminates.
+ */
+interface ParsedInvokes {
+  calls: Array<{ name: string; input: Record<string, unknown> }>;
+  unclosedHeads: number;
+}
+
+/** Offsets of every invoke opener inside one matched invoke body. */
+function invokeOpenerOffsets(invokeBody: string): number[] {
+  const offsets: number[] = [];
+  INVOKE_OPEN_REGEX.lastIndex = 0;
+  let openerMatch: RegExpExecArray | null;
+  while ((openerMatch = INVOKE_OPEN_REGEX.exec(invokeBody)) !== null) {
+    offsets.push(openerMatch.index);
+  }
+  return offsets;
+}
+
+function collectInvokes(innerContent: string): ParsedInvokes {
+  const calls: Array<{ name: string; input: Record<string, unknown> }> = [];
+  let unclosedHeads = 0;
+
+  INVOKE_REGEX.lastIndex = 0;
+  let invokeMatch: RegExpExecArray | null;
+  while ((invokeMatch = INVOKE_REGEX.exec(innerContent)) !== null) {
+    const invokeBody = invokeMatch[INVOKE_BODY_GROUP];
+    const swallowedOpenerOffsets = invokeBody === undefined ? [] : invokeOpenerOffsets(invokeBody);
+
+    if (swallowedOpenerOffsets.length === 0) {
+      calls.push({
+        name: invokeMatch[INVOKE_NAME_GROUP] ?? '',
+        input: parseInvokeParameters(invokeBody),
+      });
+      continue;
+    }
+
+    // Every opener in the body is a head that never closed, and so is the
+    // matched head itself; only the innermost one owns the closing tag.
+    unclosedHeads += swallowedOpenerOffsets.length;
+
+    const fullMatch = invokeMatch[0];
+    const closerLength =
+      INVOKE_CLOSE_TAG.length + (invokeMatch[INVOKE_CLOSER_PREFIX_GROUP]?.length ?? 0);
+    const bodyOffset = fullMatch.length - closerLength - invokeBody!.length;
+    const innermostOffset = swallowedOpenerOffsets[swallowedOpenerOffsets.length - 1]!;
+    const reanchoredMatch = INVOKE_REANCHOR_REGEX.exec(fullMatch.slice(bodyOffset + innermostOffset));
+
+    // A re-anchored head that still does not parse — a nameless invoke, say —
+    // is refused like any other: counted above, dispatched never.
+    if (reanchoredMatch) {
+      calls.push({
+        name: reanchoredMatch[INVOKE_NAME_GROUP] ?? '',
+        input: parseInvokeParameters(reanchoredMatch[INVOKE_BODY_GROUP]),
+      });
+    }
+  }
+
+  return { calls, unclosedHeads };
+}
 
 // Parameter tags
 const PARAMETER_REGEX = /<(antml:)?parameter\s+name="([^"]+)">([\s\S]*?)<\/(antml:)?parameter>/g;
 
-// Check for function_results following a block
-const FUNCTION_RESULTS_START = /<(antml:)?function_results>/;
+const FUNCTION_CALLS_OPEN_REGEX = /<(antml:)?function_calls>/g;
+
+/**
+ * One <function_calls> block, resolved to the span its calls may be read from.
+ *
+ * The block regexes are flat: first opener to first closer, with no nesting
+ * check. When a max_tokens truncation leaves an unclosed block in the persisted
+ * turn, the next round's closer splices onto that stale opener and the match
+ * spans two rounds — so the stale invoke pairs with the NEW round's `</invoke>`
+ * and one call is dispatched bearing the stale tool's name and everything
+ * between as its argument, including intervening user text.
+ *
+ * A match whose inner content holds another opener is therefore REJECTED as a
+ * block: no dispatch ever crosses an opener. The span is then re-anchored to
+ * the innermost (last) opener inside it, which is where the live block actually
+ * begins, so the real call still runs and the stale half falls out as ordinary
+ * preceding text. Re-anchoring terminates: the re-anchored inner content holds
+ * no opener by construction.
+ */
+interface ResolvedToolBlock {
+  start: number;
+  end: number;
+  innerContent: string;
+  fullMatch: string;
+  wasSpliced: boolean;
+}
+
+function resolveToolBlock(text: string, blockMatch: RegExpExecArray): ResolvedToolBlock {
+  const end = blockMatch.index + blockMatch[0].length;
+  const innerContent = blockMatch[2] ?? '';
+  const innerStart = blockMatch.index + blockMatch[0].indexOf('>') + 1;
+
+  FUNCTION_CALLS_OPEN_REGEX.lastIndex = 0;
+  let innermostOpener: RegExpExecArray | null = null;
+  let nestedMatch: RegExpExecArray | null;
+  while ((nestedMatch = FUNCTION_CALLS_OPEN_REGEX.exec(innerContent)) !== null) {
+    innermostOpener = nestedMatch;
+  }
+
+  if (!innermostOpener) {
+    return {
+      start: blockMatch.index,
+      end,
+      innerContent,
+      fullMatch: blockMatch[0],
+      wasSpliced: false,
+    };
+  }
+
+  const reanchoredStart = innerStart + innermostOpener.index;
+  return {
+    start: reanchoredStart,
+    end,
+    innerContent: innerContent.slice(innermostOpener.index + innermostOpener[0].length),
+    fullMatch: text.slice(reanchoredStart, end),
+    wasSpliced: true,
+  };
+}
+
+// Openers that mark a block as already executed, when one is the very next
+// token after it
+const FUNCTION_RESULTS_START_ANCHORED = /^<(antml:)?function_results>/;
+
+// Longest opener the anchored test can match, so the slice it reads is bounded
+const FUNCTION_RESULTS_OPENER_MAX_LENGTH = '<function_results>'.length + 'antml:'.length;
+
+const SINGLE_WHITESPACE_REGEX = /\s/;
+
+/**
+ * Has this block already been executed? True only when the next NON-WHITESPACE
+ * token after it is a function_results opener. The previous test — "a
+ * function_results opener appears anywhere in the next 100 characters" — was
+ * wrong in both directions: padding past 100 characters re-selected a block
+ * that had already run, and a results block belonging to some later exchange
+ * marked a live call as spent.
+ */
+function isFollowedByResults(text: string, afterPos: number): boolean {
+  let scan = afterPos;
+  while (scan < text.length && SINGLE_WHITESPACE_REGEX.test(text[scan]!)) scan++;
+  return FUNCTION_RESULTS_START_ANCHORED.test(
+    text.slice(scan, scan + FUNCTION_RESULTS_OPENER_MAX_LENGTH)
+  );
+}
 
 /**
  * Parse tool calls from text containing XML function_calls blocks
@@ -68,83 +251,31 @@ const FUNCTION_RESULTS_START = /<(antml:)?function_results>/;
  * that doesn't have function_results immediately following it.
  */
 export function parseToolCalls(text: string): ParsedToolCalls | null {
-  // Reset regex
-  FUNCTION_CALLS_REGEX.lastIndex = 0;
+  // Pick the last unexecuted block among those that survive containment: a
+  // block quoted inside thinking or echoed in a tool result is content, and
+  // dispatching from it runs a call the model never made.
+  let lastUnexecutedBlock: ResolvedToolBlock | null = null;
 
-  // Find all function_calls blocks and pick the last unexecuted one
-  let blockMatch: RegExpExecArray | null = null;
-  let lastUnexecutedMatch: RegExpExecArray | null = null;
-
-  while ((blockMatch = FUNCTION_CALLS_REGEX.exec(text)) !== null) {
-    // Check if this block already has results after it
-    const afterPos = blockMatch.index + blockMatch[0].length;
-    const textAfter = text.slice(afterPos, afterPos + 100); // Check next 100 chars
-
-    if (!FUNCTION_RESULTS_START.test(textAfter.trimStart())) {
-      // This block hasn't been executed yet - store it
-      // Need to capture all properties since exec returns are reused
-      lastUnexecutedMatch = {
-        ...blockMatch,
-        index: blockMatch.index,
-        input: blockMatch.input,
-      } as RegExpExecArray;
+  for (const block of collectLiveToolBlocks(text)) {
+    if (!isFollowedByResults(text, block.end)) {
+      lastUnexecutedBlock = block;
     }
   }
 
-  if (!lastUnexecutedMatch) {
+  if (!lastUnexecutedBlock) {
     return null;
   }
 
-  const fullMatch = lastUnexecutedMatch[0];
-  const innerContent = lastUnexecutedMatch[2] ?? ''; // Group 2 is content between tags
-  const matchIndex = lastUnexecutedMatch.index;
+  const { innerContent, fullMatch } = lastUnexecutedBlock;
 
-  const beforeText = text.slice(0, matchIndex);
-  const afterText = text.slice(matchIndex + fullMatch.length);
+  const beforeText = text.slice(0, lastUnexecutedBlock.start);
+  const afterText = text.slice(lastUnexecutedBlock.end);
 
-  const calls: ToolCall[] = [];
-
-  // Parse full invoke tags (with content and closing tag)
-  INVOKE_REGEX_FULL.lastIndex = 0;
-  let invokeMatch: RegExpExecArray | null;
-
-  while ((invokeMatch = INVOKE_REGEX_FULL.exec(innerContent)) !== null) {
-    const toolName = invokeMatch[2] ?? ''; // Group 2 is the name
-    const invokeContent = invokeMatch[3] ?? ''; // Group 3 is the content
-
-    // Parse parameters
-    const input: Record<string, unknown> = {};
-    PARAMETER_REGEX.lastIndex = 0;
-    let paramMatch: RegExpExecArray | null;
-
-    while ((paramMatch = PARAMETER_REGEX.exec(invokeContent)) !== null) {
-      const paramName = paramMatch[2] ?? ''; // Group 2 is the name
-      const paramValue = paramMatch[3] ?? ''; // Group 3 is the value
-
-      // Parse value with special handling for large integers
-      input[paramName] = parseParamValue(paramValue);
-    }
-
-    calls.push({
-      id: generateToolId(),
-      name: toolName,
-      input,
-    });
-  }
-
-  // Parse self-closing invoke tags (no parameters)
-  INVOKE_REGEX_SELF_CLOSE.lastIndex = 0;
-  let selfCloseMatch: RegExpExecArray | null;
-
-  while ((selfCloseMatch = INVOKE_REGEX_SELF_CLOSE.exec(innerContent)) !== null) {
-    const toolName = selfCloseMatch[2] ?? ''; // Group 2 is the name
-
-    calls.push({
-      id: generateToolId(),
-      name: toolName,
-      input: {}, // No parameters for self-closing tag
-    });
-  }
+  const calls: ToolCall[] = collectInvokes(innerContent).calls.map((invoke) => ({
+    id: generateToolId(),
+    name: invoke.name,
+    input: invoke.input,
+  }));
 
   return {
     calls,
@@ -336,6 +467,142 @@ export function formatToolDefinitions(tools: ToolDefinitionForPrompt[]): string 
 // Regex for matching thinking blocks (both plain and antml: prefixed)
 const THINKING_BLOCK_REGEX = /<(antml:)?thinking>([\s\S]*?)<\/(antml:)?thinking>/g;
 
+/**
+ * One span the block sweeps found, before anything about it is registered.
+ *
+ * The sweeps are independent and their spans overlap: a function_calls block
+ * quoted inside a thinking block is found by both. Containment decides which
+ * spans are real, and it has to decide FIRST — every side effect downstream
+ * (call sites, legacy-result claims, diagnostic counts) is scoped to the
+ * survivors.
+ */
+type CandidateSpan =
+  | { kind: 'thinking'; start: number; end: number; thinking: string }
+  | { kind: 'calls'; start: number; end: number; resolvedBlock: ResolvedToolBlock }
+  | { kind: 'results'; start: number; end: number; innerContent: string; rawXml: string };
+
+/**
+ * Keep the outermost spans, in document order. RETAINED SPANS NEVER OVERLAP:
+ * a span whose START lies inside one already kept is refused, whether it ends
+ * inside that container or crosses out past it.
+ *
+ * Sorted by start with the outermost first on a tie, a span that begins before
+ * the furthest retained end begins INSIDE a container, and everything a
+ * container encloses is its content — the model wrote it, it did not call it.
+ * Testing only `end` let a crossing span through: a call opening inside a
+ * thinking block or a tool result and closing after it was retained alongside
+ * its container, so the quoted call dispatched and the overlapping source text
+ * was emitted twice — once as thinking content, once as a real tool_use — while
+ * the text cursor walked past the inner span, printing the container's own
+ * closing tag as visible model text. A dangling closer left downstream by such
+ * a refusal is what it looks like: ordinary text.
+ *
+ * The bound is unchanged: only a CLOSED container is visible here, so the
+ * streaming stop-sequence path, where the text is cut at `</function_calls>`
+ * before the enclosing `<thinking>` closes, is still outside this rule.
+ */
+function retainOutermostSpans(spans: CandidateSpan[]): CandidateSpan[] {
+  const sorted = [...spans].sort((a, b) => a.start - b.start || b.end - a.end);
+  const retained: CandidateSpan[] = [];
+  let furthestRetainedEnd = -1;
+  for (const span of sorted) {
+    if (span.start < furthestRetainedEnd) continue;
+    retained.push(span);
+    furthestRetainedEnd = span.end;
+  }
+  return retained;
+}
+
+/**
+ * The text left once every retained span is cut out — the document's own
+ * structural level.
+ *
+ * Structural diagnostics read this rather than the raw text, because a tool
+ * tag QUOTED inside a thinking block or a tool result is content, not
+ * structure: counting it made a model that merely described an unclosed block
+ * indistinguishable from one whose block was truncated mid-write.
+ */
+/**
+ * Every span the three block sweeps find, unfiltered and unregistered.
+ *
+ * Both parse entry points read the document through this one census, so the
+ * dispatch path and the block path can never disagree about which blocks are
+ * real.
+ */
+function collectCandidateSpans(text: string): CandidateSpan[] {
+  const spans: CandidateSpan[] = [];
+
+  THINKING_BLOCK_REGEX.lastIndex = 0;
+  let thinkingMatch: RegExpExecArray | null;
+  while ((thinkingMatch = THINKING_BLOCK_REGEX.exec(text)) !== null) {
+    spans.push({
+      kind: 'thinking',
+      start: thinkingMatch.index,
+      end: thinkingMatch.index + thinkingMatch[0].length,
+      thinking: thinkingMatch[2] ?? '',
+    });
+  }
+
+  FUNCTION_BLOCK_WITH_CONTENT_REGEX.lastIndex = 0;
+  let funcMatch: RegExpExecArray | null;
+  while ((funcMatch = FUNCTION_BLOCK_WITH_CONTENT_REGEX.exec(text)) !== null) {
+    // A spliced match (a stale opener joined to a later round's closer) is
+    // rejected as a block and re-anchored to its innermost opener; see
+    // resolveToolBlock. Containment reads the RESOLVED span, which is where
+    // the live block actually begins.
+    const resolvedBlock = resolveToolBlock(text, funcMatch);
+    spans.push({
+      kind: 'calls',
+      start: resolvedBlock.start,
+      end: resolvedBlock.end,
+      resolvedBlock,
+    });
+  }
+
+  FUNCTION_RESULTS_BLOCK_REGEX.lastIndex = 0;
+  let resultsMatch: RegExpExecArray | null;
+  while ((resultsMatch = FUNCTION_RESULTS_BLOCK_REGEX.exec(text)) !== null) {
+    spans.push({
+      kind: 'results',
+      start: resultsMatch.index,
+      end: resultsMatch.index + resultsMatch[0].length,
+      innerContent: resultsMatch[2] ?? '',
+      // Verbatim document text the harness placed — carried for exact replay
+      // on the prefill path (membrane#36).
+      rawXml: resultsMatch[0],
+    });
+  }
+
+  return spans;
+}
+
+/**
+ * The function_calls blocks that are structure rather than content: those that
+ * survive containment, in document order.
+ *
+ * A block quoted inside a <thinking> block or echoed inside a tool result is
+ * text the model wrote ABOUT a call, not a call. Selecting from the raw sweep
+ * dispatched it — a model that named a tool and explicitly declined to use it
+ * had it executed anyway.
+ */
+function collectLiveToolBlocks(text: string): ResolvedToolBlock[] {
+  const live: ResolvedToolBlock[] = [];
+  for (const span of retainOutermostSpans(collectCandidateSpans(text))) {
+    if (span.kind === 'calls') live.push(span.resolvedBlock);
+  }
+  return live;
+}
+
+function textOutsideSpans(text: string, spans: CandidateSpan[]): string {
+  let residue = '';
+  let cursor = 0;
+  for (const span of spans) {
+    if (span.start > cursor) residue += text.slice(cursor, span.start);
+    cursor = Math.max(cursor, span.end);
+  }
+  return residue + text.slice(cursor);
+}
+
 // Regex for matching function_calls blocks with their content
 const FUNCTION_BLOCK_WITH_CONTENT_REGEX = /<(antml:)?function_calls>([\s\S]*?)<\/(antml:)?function_calls>/g;
 
@@ -369,6 +636,30 @@ export function parseAccumulatedIntoBlocks(
   blocks: ContentBlock[];
   toolCalls: ToolCall[];
   toolResults: ToolResult[];
+  /**
+   * The text ends inside a tool block — an opener with no closer, or a cut
+   * mid-tag. The membrane loop does not resume on a length stop, so this is
+   * what a max_tokens truncation leaves behind, and persisting it bare lets the
+   * next round's closer splice onto the stale opener.
+   */
+  unclosedToolBlock: boolean;
+  /**
+   * function_calls blocks that yielded no invokes at all. Always a defect —
+   * never how a well-formed block ends.
+   */
+  emptyToolBlocks: number;
+  /**
+   * Block matches that spanned another opener and were re-anchored to the
+   * innermost one. Each is a truncated block that was persisted bare and is
+   * being repaired at read time.
+   */
+  splicedToolBlocks: number;
+  /**
+   * `<invoke>` heads that were left open and swallowed a later invoke, so the
+   * match was refused and re-anchored to the call it absorbed. Nothing was
+   * dispatched under the head's name, and the head itself never ran.
+   */
+  unclosedInvokeHeads: number;
 } {
   // If we're starting inside a block from prefill, prepend a synthetic opening tag
   // so the regex can match the closing tag properly
@@ -383,12 +674,17 @@ export function parseAccumulatedIntoBlocks(
   const blocks: ContentBlock[] = [];
   const toolCalls: ToolCall[] = [];
   const toolResults: ToolResult[] = [];
+  let emptyToolBlocks = 0;
+  let splicedToolBlocks = 0;
+  let unclosedInvokeHeads = 0;
 
   // Track positions of all special blocks to extract plain text between them
   type BlockPosition = {
     start: number;
     end: number;
     block: ContentBlock | ContentBlock[];
+    calls?: ToolCall[];
+    results?: ToolResult[];
   };
   const positions: BlockPosition[] = [];
 
@@ -407,98 +703,91 @@ export function parseAccumulatedIntoBlocks(
     return generateToolId();
   };
 
-  // Find all thinking blocks
-  THINKING_BLOCK_REGEX.lastIndex = 0;
-  let thinkingMatch: RegExpExecArray | null;
-  while ((thinkingMatch = THINKING_BLOCK_REGEX.exec(processedText)) !== null) {
-    positions.push({
-      start: thinkingMatch.index,
-      end: thinkingMatch.index + thinkingMatch[0].length,
-      block: {
-        type: 'thinking',
-        thinking: thinkingMatch[2] ?? '',
-      },
-    });
-  }
+  // ── Pass 1: collect every candidate span, with NO side effects ───────────
+  //
+  // The three sweeps overlap by construction (a function_calls block quoted
+  // inside a thinking block is found by both), so nothing may be registered —
+  // no callSites entry, no legacy-result claim, no diagnostic count — until
+  // containment has decided which spans are real. Registering first and
+  // filtering after produced a call site that a legacy result could claim and
+  // that the filter then deleted, leaving a tool_result addressed to a
+  // tool_use no longer in the response.
+  const candidateSpans = collectCandidateSpans(processedText);
 
-  // Find all function_calls blocks and parse their tool calls
-  FUNCTION_BLOCK_WITH_CONTENT_REGEX.lastIndex = 0;
-  let funcMatch: RegExpExecArray | null;
-  while ((funcMatch = FUNCTION_BLOCK_WITH_CONTENT_REGEX.exec(processedText)) !== null) {
-    const innerContent = funcMatch[2] ?? '';
-    // Verbatim document text of the whole block — carried on each parsed
-    // tool_use so prefill replay reproduces the generation exactly instead
-    // of synthesizing a paraphrase (membrane#36).
-    const rawXml = funcMatch[0];
-    const blockToolCalls: ContentBlock[] = [];
+  // ── Pass 2: containment ──────────────────────────────────────────────────
+  //
+  // Sorted by start, outermost span first on a tie: a span that BEGINS before
+  // the furthest retained end begins inside a container, so it is content of
+  // that container, not a sibling of it — retained spans never overlap, and a
+  // span that crosses out past its container is refused with the rest of the
+  // container's content. Zero-invoke and zero-result spans take part as
+  // containers even though they contribute no block of their own — whether a
+  // span holds anything parseable says nothing about whether it encloses the
+  // text beneath it.
+  const survivingSpans = retainOutermostSpans(candidateSpans);
 
-    // Parse invoke tags in this block
-    INVOKE_REGEX_FULL.lastIndex = 0;
-    let invokeMatch: RegExpExecArray | null;
-    while ((invokeMatch = INVOKE_REGEX_FULL.exec(innerContent)) !== null) {
-      const toolName = invokeMatch[2] ?? '';
-      const invokeContent = invokeMatch[3] ?? '';
-      const input: Record<string, unknown> = {};
+  // ── Pass 3: register the survivors, in document order ────────────────────
+  //
+  // One ordered walk, so every call site preceding a results block is already
+  // registered when that block claims — and no filtered span ever was.
+  for (const span of survivingSpans) {
+    if (span.kind === 'thinking') {
+      positions.push({
+        start: span.start,
+        end: span.end,
+        block: { type: 'thinking', thinking: span.thinking },
+      });
+      continue;
+    }
 
-      // Parse parameters
-      PARAMETER_REGEX.lastIndex = 0;
-      let paramMatch: RegExpExecArray | null;
-      while ((paramMatch = PARAMETER_REGEX.exec(invokeContent)) !== null) {
-        const paramName = paramMatch[2] ?? '';
-        const paramValue = paramMatch[3] ?? '';
-        // Parse value with special handling for large integers
-        input[paramName] = parseParamValue(paramValue);
+    if (span.kind === 'calls') {
+      const resolvedBlock = span.resolvedBlock;
+      if (resolvedBlock.wasSpliced) splicedToolBlocks++;
+      // Verbatim document text of the whole block — carried on each parsed
+      // tool_use so prefill replay reproduces the generation exactly instead
+      // of synthesizing a paraphrase (membrane#36).
+      const rawXml = resolvedBlock.fullMatch;
+      const blockToolCalls: ContentBlock[] = [];
+      const blockCalls: ToolCall[] = [];
+
+      // Parse invoke tags in this block (both forms, in document order); an
+      // invoke left open is refused and re-anchored to the call it swallowed.
+      const parsedInvokes = collectInvokes(resolvedBlock.innerContent);
+      unclosedInvokeHeads += parsedInvokes.unclosedHeads;
+      for (const invoke of parsedInvokes.calls) {
+        const toolName = invoke.name;
+        const input = invoke.input;
+
+        const id = generateToolId();
+        blockCalls.push({ id, name: toolName, input });
+        callSites.push({ id, name: toolName, pos: resolvedBlock.start });
+        blockToolCalls.push({
+          type: 'tool_use',
+          id,
+          name: toolName,
+          input,
+          rawXml,
+        });
       }
 
-      const id = generateToolId();
-      const toolCall: ToolCall = { id, name: toolName, input };
-      toolCalls.push(toolCall);
-      callSites.push({ id, name: toolName, pos: funcMatch.index });
-      blockToolCalls.push({
-        type: 'tool_use',
-        id,
-        name: toolName,
-        input,
-        rawXml,
-      });
+      if (blockToolCalls.length === 0) {
+        emptyToolBlocks++;
+      } else {
+        positions.push({
+          start: resolvedBlock.start,
+          end: resolvedBlock.end,
+          block: blockToolCalls,
+          calls: blockCalls,
+        });
+      }
+      continue;
     }
 
-    // Parse self-closing invoke tags
-    INVOKE_REGEX_SELF_CLOSE.lastIndex = 0;
-    let selfCloseMatch: RegExpExecArray | null;
-    while ((selfCloseMatch = INVOKE_REGEX_SELF_CLOSE.exec(innerContent)) !== null) {
-      const toolName = selfCloseMatch[2] ?? '';
-      const id = generateToolId();
-      const toolCall: ToolCall = { id, name: toolName, input: {} };
-      toolCalls.push(toolCall);
-      callSites.push({ id, name: toolName, pos: funcMatch.index });
-      blockToolCalls.push({
-        type: 'tool_use',
-        id,
-        name: toolName,
-        input: {},
-        rawXml,
-      });
-    }
-
-    if (blockToolCalls.length > 0) {
-      positions.push({
-        start: funcMatch.index,
-        end: funcMatch.index + funcMatch[0].length,
-        block: blockToolCalls,
-      });
-    }
-  }
-
-  // Find all function_results blocks and parse their results
-  FUNCTION_RESULTS_BLOCK_REGEX.lastIndex = 0;
-  let resultsMatch: RegExpExecArray | null;
-  while ((resultsMatch = FUNCTION_RESULTS_BLOCK_REGEX.exec(processedText)) !== null) {
-    const innerContent = resultsMatch[2] ?? '';
-    // Verbatim document text the harness placed — carried for exact replay
-    // on the prefill path (membrane#36).
-    const rawXml = resultsMatch[0];
+    const innerContent = span.innerContent;
+    const rawXml = span.rawXml;
+    const resultsStart = span.start;
     const blockResults: ContentBlock[] = [];
+    const blockResultValues: ToolResult[] = [];
 
     // Parse result tags
     RESULT_REGEX.lastIndex = 0;
@@ -507,8 +796,7 @@ export function parseAccumulatedIntoBlocks(
       const toolUseId = resultMatch[1] ?? '';
       const content = unescapeXml(resultMatch[2] ?? '');
       pairedCallIds.add(toolUseId);
-      const result: ToolResult = { toolUseId, content, isError: false };
-      toolResults.push(result);
+      blockResultValues.push({ toolUseId, content, isError: false });
       blockResults.push({
         type: 'tool_result',
         toolUseId,
@@ -525,8 +813,7 @@ export function parseAccumulatedIntoBlocks(
       const toolUseId = errorMatch[1] ?? '';
       const content = unescapeXml(errorMatch[2] ?? '');
       pairedCallIds.add(toolUseId);
-      const result: ToolResult = { toolUseId, content, isError: true };
-      toolResults.push(result);
+      blockResultValues.push({ toolUseId, content, isError: true });
       blockResults.push({
         type: 'tool_result',
         toolUseId,
@@ -543,8 +830,8 @@ export function parseAccumulatedIntoBlocks(
     while ((legacyResultMatch = LEGACY_RESULT_REGEX.exec(innerContent)) !== null) {
       const toolName = legacyResultMatch[1]?.trim() || undefined;
       const content = unescapeXml(legacyResultMatch[2] ?? '');
-      const toolUseId = claimCall(resultsMatch.index, toolName);
-      toolResults.push({ toolUseId, toolName, content, isError: false });
+      const toolUseId = claimCall(resultsStart, toolName);
+      blockResultValues.push({ toolUseId, toolName, content, isError: false });
       blockResults.push({
         type: 'tool_result',
         toolUseId,
@@ -558,8 +845,8 @@ export function parseAccumulatedIntoBlocks(
     let legacyErrorMatch: RegExpExecArray | null;
     while ((legacyErrorMatch = LEGACY_ERROR_REGEX.exec(innerContent)) !== null) {
       const content = unescapeXml(legacyErrorMatch[1] ?? '');
-      const toolUseId = claimCall(resultsMatch.index);
-      toolResults.push({ toolUseId, content, isError: true });
+      const toolUseId = claimCall(resultsStart);
+      blockResultValues.push({ toolUseId, content, isError: true });
       blockResults.push({
         type: 'tool_result',
         toolUseId,
@@ -571,15 +858,19 @@ export function parseAccumulatedIntoBlocks(
 
     if (blockResults.length > 0) {
       positions.push({
-        start: resultsMatch.index,
-        end: resultsMatch.index + resultsMatch[0].length,
+        start: span.start,
+        end: span.end,
         block: blockResults,
+        results: blockResultValues,
       });
     }
   }
 
-  // Sort positions by start index
-  positions.sort((a, b) => a.start - b.start);
+  // Survivors are already in document order, so positions are too.
+  for (const pos of positions) {
+    if (pos.calls) toolCalls.push(...pos.calls);
+    if (pos.results) toolResults.push(...pos.results);
+  }
 
   // Build final blocks array, inserting text blocks between special blocks
   // Use processedText for slicing since positions are relative to it
@@ -600,7 +891,7 @@ export function parseAccumulatedIntoBlocks(
       blocks.push(pos.block);
     }
 
-    lastEnd = pos.end;
+    lastEnd = Math.max(lastEnd, pos.end);
   }
 
   // Add any remaining text after the last special block
@@ -613,7 +904,15 @@ export function parseAccumulatedIntoBlocks(
     }
   }
 
-  return { blocks, toolCalls, toolResults };
+  return {
+    blocks,
+    toolCalls,
+    toolResults,
+    unclosedToolBlock: endsWithPartialToolBlock(textOutsideSpans(processedText, survivingSpans)),
+    emptyToolBlocks,
+    splicedToolBlocks,
+    unclosedInvokeHeads,
+  };
 }
 
 // ============================================================================
