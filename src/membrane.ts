@@ -40,6 +40,7 @@ import {
   parseToolCalls,
   formatToolResults,
   parseAccumulatedIntoBlocks,
+  endsWithPartialToolBlock,
   hasImageInToolResults,
   formatToolResultsForSplitTurn,
   type ProviderImageBlock,
@@ -2049,16 +2050,21 @@ export class Membrane {
 
     // Parse XML tool calls from text if no native tool_use blocks were found
     // This handles prefill mode where tools are XML in the text
+    let emptyToolBlocks = 0;
     if (toolCalls.length === 0 && rawAssistantText.includes('<function_calls>')) {
       const parsed = parseToolCalls(rawAssistantText);
       if (parsed?.calls.length) {
         for (const tc of parsed.calls) {
           toolCalls.push(tc);
         }
+      } else if (parsed) {
+        emptyToolBlocks = 1;
       }
     }
+    const unclosedToolBlock = endsWithPartialToolBlock(rawAssistantText);
 
     const stopReason = this.mapStopReason(providerResponse.stopReason);
+    this.reportToolParseDiagnostics({ unclosedToolBlock, emptyToolBlocks }, stopReason);
     const durationMs = Date.now() - startTime;
     const usage = {
       inputTokens: providerResponse.usage.inputTokens,
@@ -2077,6 +2083,7 @@ export class Membrane {
           reason: stopReason,
           triggeredSequence: providerResponse.stopSequence,
           wasTruncated: stopReason === 'max_tokens',
+          unclosedToolBlock,
         },
         usage: {
           inputTokens: providerResponse.usage.inputTokens,
@@ -2108,6 +2115,60 @@ export class Membrane {
     };
   }
 
+  /**
+   * The turn is over, and the two guards that detect a half-written tool block
+   * finally have a call site. Both shapes are defects a consumer must not
+   * persist blind: an unclosed block splices onto the NEXT round's closing tag
+   * (the loop does not resume on a length stop, so max_tokens leaves exactly
+   * this), and a block that parsed to nothing means the model believes it
+   * called a tool that never ran.
+   */
+  private reportToolParseDiagnostics(
+    diagnostics: {
+      unclosedToolBlock: boolean;
+      emptyToolBlocks: number;
+      splicedToolBlocks?: number;
+      unclosedInvokeHeads?: number;
+    },
+    stopReason: StopReason
+  ): void {
+    const warnLog = this.config.logger ?? console;
+
+    if (diagnostics.unclosedToolBlock) {
+      warnLog.warn(
+        `[membrane] turn ended (${stopReason}) with an unclosed tool block in the ` +
+        `assistant text — the loop does not resume on a length stop. Persisting this ` +
+        `turn verbatim lets the next round's closing tag splice onto the stale ` +
+        `opener; see details.stop.unclosedToolBlock.`
+      );
+    }
+
+    if (diagnostics.emptyToolBlocks > 0) {
+      warnLog.warn(
+        `[membrane] ${diagnostics.emptyToolBlocks} function_calls block(s) parsed to ` +
+        `zero tool calls — always a defect, never a normal ending. The call was ` +
+        `returned as assistant text and nothing executed.`
+      );
+    }
+
+    if (diagnostics.splicedToolBlocks) {
+      warnLog.warn(
+        `[membrane] ${diagnostics.splicedToolBlocks} tool block(s) spanned a second ` +
+        `<function_calls> opener and were re-anchored to the innermost one — an ` +
+        `earlier truncated block is present in this conversation's assistant text.`
+      );
+    }
+
+    if (diagnostics.unclosedInvokeHeads) {
+      warnLog.warn(
+        `[membrane] ${diagnostics.unclosedInvokeHeads} <invoke> head(s) were left ` +
+        `unclosed and swallowed the invoke that followed — nothing was dispatched ` +
+        `under an unclosed head's name, and the call it absorbed was re-anchored ` +
+        `and ran with its own parameters.`
+      );
+    }
+  }
+
   private buildFinalResponse(
     accumulated: string,
     contentBlocks: ContentBlock[],
@@ -2132,6 +2193,8 @@ export class Membrane {
     let toolCalls: ToolCall[];
     let toolResults: ToolResult[];
 
+    let unclosedToolBlock = false;
+
     if (contentBlocks.length > 0) {
       // Native mode - content blocks already structured
       finalContent = contentBlocks;
@@ -2146,6 +2209,8 @@ export class Membrane {
       finalContent = parsed.blocks;
       toolCalls = parsed.toolCalls.length > 0 ? parsed.toolCalls : executedToolCalls;
       toolResults = parsed.toolResults.length > 0 ? parsed.toolResults : executedToolResults;
+      unclosedToolBlock = parsed.unclosedToolBlock;
+      this.reportToolParseDiagnostics(parsed, stopReason);
     }
 
     const durationMs = Date.now() - startTime;
@@ -2162,6 +2227,7 @@ export class Membrane {
           reason: stopReason,
           triggeredSequence,
           wasTruncated: stopReason === 'max_tokens',
+          unclosedToolBlock,
         },
         usage: {
           ...usage,
