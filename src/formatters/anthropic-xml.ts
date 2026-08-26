@@ -34,6 +34,8 @@ import {
   type ToolDefinitionForPrompt,
 } from '../utils/tool-parser.js';
 import { IncrementalXmlParser } from '../utils/stream-parser.js';
+import { clampCacheMarkers } from '../utils/cache-marker-budget.js';
+import { lastCacheableBlockIndex } from './native.js';
 import { isAcceptedImageMediaType, strippedImagePlaceholder } from '../utils/image-media.js';
 
 // ============================================================================
@@ -118,9 +120,13 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
   readonly name = 'anthropic-xml';
   readonly usesPrefill = true;
 
+  /** See PrefillFormatter.configuredToolMode — undefined when the caller left the mode to Membrane. */
+  readonly configuredToolMode: 'xml' | 'native' | undefined;
+
   private config: Required<AnthropicXmlFormatterConfig>;
 
   constructor(config: AnthropicXmlFormatterConfig = {}) {
+    this.configuredToolMode = config.toolMode;
     this.config = {
       toolMode: config.toolMode ?? 'xml',
       toolInjectionMode: config.toolInjectionMode ?? 'conversation',
@@ -149,6 +155,10 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
       hasCacheMarker,
     } = options;
 
+    // Membrane resolves the mode per request and passes it here; the
+    // constructor-time mode is the fallback for direct callers only.
+    const toolMode = options.toolMode ?? this.config.toolMode;
+
     // Build cache_control object (with optional TTL for extended caching)
     const cacheControl: Record<string, unknown> = { type: 'ephemeral' };
     if (cacheTtl) {
@@ -165,42 +175,66 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     // message continues the same turn, so it must not get a fresh label.
     let lastWasToolResults = false;
 
-    // Track cache markers applied
-    let cacheMarkersApplied = 0;
 
     // Calculate tool injection point
     const totalMessages = messages.length;
     const toolInjectionIndex = Math.max(0, totalMessages - this.config.toolInjectionPosition);
     let toolsInjected = false;
     const hasToolsForConversation =
-      this.config.toolMode === 'xml' &&
+      toolMode === 'xml' &&
       this.config.toolInjectionMode === 'conversation' &&
       tools &&
       tools.length > 0;
     const toolsText = hasToolsForConversation ? this.formatToolsForInjection(tools!) : '';
 
-    // Build system content
-    let systemText = typeof systemPrompt === 'string' ? systemPrompt : '';
-    if (Array.isArray(systemPrompt)) {
-      systemText = systemPrompt
-        .filter((b): b is ContentBlock & { type: 'text' } => b.type === 'text')
-        .map(b => b.text)
-        .join('\n');
-    }
+    // Build system content. A caller-supplied system ARRAY keeps its block
+    // structure and its per-block cache_control: `request.system` explicitly
+    // accepts caller-marked blocks, and flattening them into one text block
+    // discarded every marker the caller placed (three in, one out) — the
+    // caller's stable prefixes then re-paid full input price forever.
+    const callerSystemBlocks = Array.isArray(systemPrompt)
+      ? systemPrompt
+          .filter((b): b is ContentBlock & { type: 'text' } => b.type === 'text')
+          .map((b) => {
+            const callerMarker = (b as unknown as { cache_control?: unknown }).cache_control;
+            const block: Record<string, unknown> = { type: 'text', text: b.text };
+            if (callerMarker) block.cache_control = callerMarker;
+            return block;
+          })
+      : undefined;
+    const systemBlocks = callerSystemBlocks?.length ? callerSystemBlocks : undefined;
+
+    let systemText = typeof systemPrompt === 'string'
+      ? systemPrompt
+      : (systemBlocks?.map((b) => b.text as string).join('\n') ?? '');
 
     // Inject tools into system if configured
-    if (this.config.toolMode === 'xml' && this.config.toolInjectionMode === 'system' && tools?.length) {
+    if (toolMode === 'xml' && this.config.toolInjectionMode === 'system' && tools?.length) {
       const toolsXml = this.formatToolDefinitionsXml(tools);
       systemText = this.injectToolsIntoSystem(systemText, toolsXml);
+      if (systemBlocks) {
+        // Append to the LAST block only — appending to the join would
+        // collapse the array and take every earlier block's marker with it.
+        const tail = systemBlocks[systemBlocks.length - 1]!;
+        tail.text = this.injectToolsIntoSystem(tail.text as string, toolsXml);
+      }
     }
 
     // Build system content with optional cache control
     let systemContent: unknown;
-    if (systemText) {
+    if (systemBlocks) {
+      // The caller's own markers are authoritative: adding one beside them
+      // spends a slot the caller already allocated.
+      const callerMarkedAny = systemBlocks.some((b) => b.cache_control);
+      if (promptCaching && !callerMarkedAny) {
+        const bpIdx = lastCacheableBlockIndex(systemBlocks);
+        if (bpIdx >= 0) systemBlocks[bpIdx]!.cache_control = cacheControl;
+      }
+      systemContent = systemBlocks;
+    } else if (systemText) {
       const systemBlock: Record<string, unknown> = { type: 'text', text: systemText };
       if (promptCaching) {
         systemBlock.cache_control = cacheControl;
-        cacheMarkersApplied++;
       }
       systemContent = [systemBlock];
     }
@@ -210,7 +244,6 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
       const prefixBlock: Record<string, unknown> = { type: 'text', text: contextPrefix };
       if (promptCaching) {
         prefixBlock.cache_control = cacheControl;
-        cacheMarkersApplied++;
       }
       providerMessages.push({
         role: 'assistant',
@@ -276,7 +309,6 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
           const content = currentConversation.join(joiner);
           const contentBlock: Record<string, unknown> = { type: 'text', text: content };
           contentBlock.cache_control = cacheControl;
-          cacheMarkersApplied++;
           providerMessages.push({
             role: 'assistant',
             content: [contentBlock],
@@ -344,7 +376,6 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         const content = currentConversation.join(joiner);
         const contentBlock: Record<string, unknown> = { type: 'text', text: content };
         contentBlock.cache_control = cacheControl;
-        cacheMarkersApplied++;
         providerMessages.push({
           role: 'assistant',
           content: [contentBlock],
@@ -396,7 +427,6 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         };
         if (promptCaching) {
           cliSystemBlock.cache_control = cacheControl;
-          cacheMarkersApplied++;
         }
         systemContent = [cliSystemBlock];
         providerMessages.unshift({
@@ -416,9 +446,21 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     const stopSequences = this.buildStopSequences(messages, assistantParticipant, options);
 
     // Native tools if configured
-    const nativeTools = this.config.toolMode === 'native' && tools?.length
+    const nativeTools = toolMode === 'native' && tools?.length
       ? this.convertToNativeTools(tools)
       : undefined;
+
+    // Budget. Five sites above attach cache_control (system, contextPrefix,
+    // hasCacheMarker flush, cacheBreakpoint flush, CLI-simulation system) and
+    // multiple cacheBreakpoints are documented input, so a prefill turn with
+    // three marked messages reaches five markers — one over Anthropic's hard
+    // limit, which rejects the request outright. Clamping here, once, on the
+    // finished artifacts is the only count that can see all five sites; the
+    // reported tally is that same recount, so it can never drift from the wire.
+    const budget = clampCacheMarkers(
+      { messages: providerMessages, system: systemContent, tools: nativeTools },
+      'anthropic-xml'
+    );
 
     return {
       messages: providerMessages,
@@ -428,7 +470,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         : undefined,
       stopSequences,
       nativeTools,
-      cacheMarkersApplied,
+      cacheMarkersApplied: budget.total,
     };
   }
 

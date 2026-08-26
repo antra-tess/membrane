@@ -23,7 +23,7 @@ import {
   abortError,
   networkError,
 } from '../types/index.js';
-import { safeParseJson, createCombinedSignal, SSELineParser } from './utils.js';
+import { safeParseJson, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
 
 // ============================================================================
 // Types
@@ -244,6 +244,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
       const sseParser = new SSELineParser();
       let accumulated = '';
       let finishReason = 'stop';
+      let sawTerminalEvent = false;
       let toolCalls: OpenRouterToolCall[] = [];
       let streamUsage: OpenRouterResponse['usage'] | undefined;
       // The model the provider actually served, echoed on every SSE
@@ -251,80 +252,93 @@ export class OpenRouterAdapter implements ProviderAdapter {
       // resolution (and, on OpenRouter, which provider it routed to).
       let servedModel: string | undefined;
 
+      // One frame handler for both the streamed lines and the EOF flush — the
+      // trailing buffer carries real terminal frames, not leftovers.
+      const processDataLine = (data: string): void => {
+        if (data === '[DONE]') {
+          sawTerminalEvent = true;
+          return;
+        }
+
+        // Parse first; only JSON noise is ignorable. Everything after the
+        // parse must NOT be swallowed by the catch below.
+        let parsed: Record<string, any>;
+        try {
+          parsed = JSON.parse(data);
+        } catch {
+          return; // Ignore parse errors (partial/keep-alive lines)
+        }
+
+        // OpenRouter delivers mid-stream failures (e.g. upstream 429s) as an
+        // SSE data line with an `error` payload. Silently ignoring it would
+        // yield a fake-successful empty completion — surface it instead so
+        // retry logic can handle it. Shared with every other SSE adapter.
+        throwOnStreamErrorFrame(parsed, 'OpenRouter', openRouterRequest);
+
+        try {
+          const delta = parsed.choices?.[0]?.delta;
+
+          if (delta?.content) {
+            accumulated += delta.content;
+            callbacks.onChunk(delta.content);
+          }
+
+          // Handle streaming tool calls
+          if (delta?.tool_calls) {
+            for (const tc of delta.tool_calls) {
+              const index = tc.index ?? 0;
+              if (!toolCalls[index]) {
+                toolCalls[index] = {
+                  id: tc.id ?? '',
+                  type: 'function',
+                  function: { name: '', arguments: '' },
+                };
+              }
+              if (tc.id) toolCalls[index].id = tc.id;
+              if (tc.function?.name) toolCalls[index].function.name = tc.function.name;
+              if (tc.function?.arguments) {
+                toolCalls[index].function.arguments += tc.function.arguments;
+              }
+            }
+          }
+
+          if (parsed.choices?.[0]?.finish_reason) {
+            finishReason = parsed.choices[0].finish_reason;
+            sawTerminalEvent = true;
+          }
+
+          // Capture usage data (comes in final chunk when stream_options.include_usage is set)
+          if (parsed.usage) {
+            streamUsage = parsed.usage;
+          }
+
+          if (parsed.model) {
+            servedModel = parsed.model;
+          }
+        } catch (e) {
+          // Ignore parse errors
+        }
+      };
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
         const chunk = decoder.decode(value, { stream: true });
-        const dataLines = sseParser.feed(chunk);
-
-        for (const data of dataLines) {
-          if (data === '[DONE]') continue;
-
-          // Parse first; only JSON noise is ignorable. Everything after the
-          // parse must NOT be swallowed by the catch below.
-          let parsed: Record<string, any>;
-          try {
-            parsed = JSON.parse(data);
-          } catch {
-            continue; // Ignore parse errors (partial/keep-alive lines)
-          }
-
-          // OpenRouter delivers mid-stream failures (e.g. upstream 429s) as an
-          // SSE data line with an `error` payload. Silently ignoring it would
-          // yield a fake-successful empty completion — surface it instead so
-          // retry logic can handle it.
-          if (typeof parsed === 'object' && parsed !== null && parsed.error) {
-            const err = parsed.error as { code?: number | string; message?: string };
-            throw new Error(
-              `OpenRouter stream error${err.code !== undefined ? ` (${err.code})` : ''}: ${err.message ?? JSON.stringify(err)}`
-            );
-          }
-
-          try {
-            const delta = parsed.choices?.[0]?.delta;
-
-            if (delta?.content) {
-              accumulated += delta.content;
-              callbacks.onChunk(delta.content);
-            }
-
-            // Handle streaming tool calls
-            if (delta?.tool_calls) {
-              for (const tc of delta.tool_calls) {
-                const index = tc.index ?? 0;
-                if (!toolCalls[index]) {
-                  toolCalls[index] = {
-                    id: tc.id ?? '',
-                    type: 'function',
-                    function: { name: '', arguments: '' },
-                  };
-                }
-                if (tc.id) toolCalls[index].id = tc.id;
-                if (tc.function?.name) toolCalls[index].function.name = tc.function.name;
-                if (tc.function?.arguments) {
-                  toolCalls[index].function.arguments += tc.function.arguments;
-                }
-              }
-            }
-
-            if (parsed.choices?.[0]?.finish_reason) {
-              finishReason = parsed.choices[0].finish_reason;
-            }
-
-            // Capture usage data (comes in final chunk when stream_options.include_usage is set)
-            if (parsed.usage) {
-              streamUsage = parsed.usage;
-            }
-
-            if (parsed.model) {
-              servedModel = parsed.model;
-            }
-          } catch (e) {
-            // Ignore parse errors
-          }
+        for (const data of sseParser.feed(chunk)) {
+          processDataLine(data);
         }
       }
+
+      // A final `data:` line that arrived without its trailing newline is still
+      // buffered here. Servers and proxies do close right after writing the
+      // last event, so dropping it would report a finished turn as a dropped
+      // connection at the guard below.
+      for (const data of sseParser.flush()) {
+        processDataLine(data);
+      }
+
+      assertTerminalEventObserved(sawTerminalEvent, 'OpenRouter', openRouterRequest);
 
       // Build response with accumulated data
       const message: OpenRouterMessage = {
@@ -736,6 +750,14 @@ export class OpenRouterAdapter implements ProviderAdapter {
   }
 
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
+    // A deadline abort is a timeout and stays one. Collapsing it into a bare
+    // abortError() here is what erased the identity before Membrane's
+    // caller-signal > timeout > error ladder could read it.
+    if (isDeadlineAbort(error)) return deadlineTimeoutError(error, rawRequest);
+    // Already-classified failures (e.g. the stream-integrity guards) keep
+    // their type and retryability instead of being re-derived from a string.
+    if (error instanceof MembraneError) return error;
+
     if (error instanceof Error) {
       const message = error.message;
 
