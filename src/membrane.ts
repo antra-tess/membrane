@@ -84,6 +84,94 @@ import { getDefaultPricing } from './registry/default-pricing.js';
 // Membrane Class
 // ============================================================================
 
+/**
+ * Block-lifecycle tracking shared by the two native-tools streaming paths
+ * (`streamWithNativeTools` and `runNativeToolsYielding`).
+ *
+ * Providers signal blocks through `onContentBlock(index, block)`, but not all
+ * of them the same way: the Anthropic and Bedrock adapters fire it twice per
+ * index (content_block_start with an empty block, content_block_stop with the
+ * finalised one), while the OpenAI Responses adapter fires it ONCE per block,
+ * already finalised, after the stream has ended. Treating "second sighting"
+ * as the only completion signal therefore left single-callback adapters with
+ * `block_start` events that never completed (#63 review). The tracker keeps
+ * the paired semantics and adds `flush()`, which the caller runs once the
+ * provider stream has returned: every started block that never saw a second
+ * callback is completed from the last block payload seen for it.
+ */
+class NativeBlockTracker {
+  currentType: MembraneBlockType = 'text';
+  blockIndex = 0;
+  private readonly started = new Map<number, MembraneBlockType>();
+  private readonly completed = new Set<number>();
+  private readonly lastSeen = new Map<number, unknown>();
+
+  constructor(private readonly emit: ((event: BlockEvent) => void) | undefined) {}
+
+  static mapApiBlockType(apiType: string | undefined): MembraneBlockType {
+    if (apiType === 'thinking' || apiType === 'redacted_thinking' || apiType === 'reasoning') return 'thinking';
+    if (apiType === 'tool_use' || apiType === 'function_call' || apiType === 'tool_call') return 'tool_call';
+    return 'text';
+  }
+
+  /** Provider block callback: first sighting of an index starts it, a second completes it. */
+  onProviderBlock(index: number, block: unknown): void {
+    this.lastSeen.set(index, block);
+    if (!this.started.has(index)) {
+      const mbType = NativeBlockTracker.mapApiBlockType((block as { type?: string } | undefined)?.type);
+      this.started.set(index, mbType);
+      this.currentType = mbType;
+      this.blockIndex = index;
+      this.emit?.({ event: 'block_start', index, block: { type: mbType } });
+      return;
+    }
+    this.complete(index, block);
+  }
+
+  /**
+   * Complete every started block that never received its second callback.
+   * Run after the provider stream has returned; idempotent, and a no-op for
+   * paired-callback adapters.
+   */
+  flush(): void {
+    for (const index of this.started.keys()) {
+      if (!this.completed.has(index)) this.complete(index, this.lastSeen.get(index));
+    }
+  }
+
+  /** Discard tracking state (refusal retry rolled the attempt back). */
+  reset(): void {
+    this.currentType = 'text';
+    this.blockIndex = 0;
+    this.started.clear();
+    this.completed.clear();
+    this.lastSeen.clear();
+  }
+
+  private complete(index: number, block: unknown): void {
+    if (this.completed.has(index)) return;
+    this.completed.add(index);
+    const mbType = this.started.get(index)
+      ?? NativeBlockTracker.mapApiBlockType((block as { type?: string } | undefined)?.type);
+    const apiBlock = block as {
+      text?: string;
+      thinking?: string;
+      id?: string;
+      name?: string;
+      input?: unknown;
+    } | undefined;
+    const mb: MembraneBlock = { type: mbType };
+    if (mbType === 'text') mb.content = apiBlock?.text;
+    else if (mbType === 'thinking') mb.content = apiBlock?.thinking;
+    else if (mbType === 'tool_call') {
+      mb.toolId = apiBlock?.id;
+      mb.toolName = apiBlock?.name;
+      mb.input = apiBlock?.input as Record<string, unknown> | undefined;
+    }
+    this.emit?.({ event: 'block_complete', index, block: mb });
+  }
+}
+
 export class Membrane {
   private adapter: ProviderAdapter;
   private registry?: ModelRegistry;
@@ -1051,6 +1139,7 @@ export class Membrane {
     const {
       onChunk,
       onContentBlockUpdate,
+      onBlock,
       onToolCalls,
       onPreToolContent,
       onUsage,
@@ -1088,25 +1177,30 @@ export class Membrane {
 
         // Stream from provider
         let textAccumulated = '';
-        let blockIndex = 0;
+        // Tag every token chunk with the membrane block it belongs to and
+        // surface the block lifecycle through onBlock — the same shape
+        // runNativeToolsYielding uses (#19). Before this, meta.type was
+        // hardcoded to 'text' on every chunk and onBlock was never invoked
+        // from this path (#20).
+        const tracker = new NativeBlockTracker(onBlock ? (event) => onBlock(event) : undefined);
         const streamResult = await this.streamOnce(
           providerRequest,
           {
             onChunk: (chunk) => {
               textAccumulated += chunk;
               allTextAccumulated += chunk;
-              // For native mode, emit text chunks with basic metadata
-              // TODO: Use native API content_block events for richer metadata
               const meta: ChunkMeta = {
-                type: 'text',
-                visible: true,
-                blockIndex,
+                type: tracker.currentType,
+                visible: tracker.currentType === 'text',
+                blockIndex: tracker.blockIndex,
               };
               onChunk?.(chunk, meta);
             },
-            onContentBlock: onContentBlockUpdate
-              ? (index: number, block: unknown) => onContentBlockUpdate(index, block as ContentBlock)
-              : undefined,
+            onContentBlock: (index: number, block: unknown) => {
+              tracker.onProviderBlock(index, block);
+              // Deprecated pass-through, kept for callers still on it.
+              onContentBlockUpdate?.(index, block as ContentBlock);
+            },
           },
           {
             signal,
@@ -1125,6 +1219,10 @@ export class Membrane {
             },
           }
         );
+
+        // Single-callback adapters (OpenAI Responses) report each finalised
+        // block once, after the stream: complete whatever never saw a stop.
+        tracker.flush();
 
         rawResponse = streamResult.raw;
 
@@ -3297,21 +3395,16 @@ export class Membrane {
 
         // Stream from provider
         let textAccumulated = '';
-        let blockIndex = 0;
         // Where this attempt starts inside the tool-loop-spanning buffer, so
         // a refusal retry can roll back exactly this attempt's contribution.
         const allTextBefore = allTextAccumulated.length;
-        // Track block-type from the provider's content_block_start signal so
+        // Track block-type from the provider's content_block signals so
         // every token chunk is tagged with the membrane block it belongs to.
         // Without this, thinking_delta chunks get mislabelled as 'text' and
         // downstream consumers (TUIs, WebUIs) can't render them distinctly.
-        let currentBlockType: MembraneBlockType = 'text';
-        const seenBlockIndices = new Set<number>();
-        const mapApiBlockType = (apiType: string | undefined): MembraneBlockType => {
-          if (apiType === 'thinking') return 'thinking';
-          if (apiType === 'tool_use') return 'tool_call';
-          return 'text';
-        };
+        const tracker = new NativeBlockTracker(
+          emitBlocks ? (event) => stream.emit({ type: 'block', event }) : undefined,
+        );
         const streamResult = await this.streamOnce(
           providerRequest,
           {
@@ -3323,54 +3416,16 @@ export class Membrane {
 
               if (emitTokens) {
                 const meta: ChunkMeta = {
-                  type: currentBlockType,
-                  visible: currentBlockType === 'text',
-                  blockIndex,
+                  type: tracker.currentType,
+                  visible: tracker.currentType === 'text',
+                  blockIndex: tracker.blockIndex,
                 };
                 stream.emit({ type: 'tokens', content: chunk, meta });
               }
             },
             onContentBlock: (index, block) => {
               if (stream.isCancelled) return;
-              const apiType = (block as { type?: string } | undefined)?.type;
-              const mbType = mapApiBlockType(apiType);
-              const isStart = !seenBlockIndices.has(index);
-              if (isStart) {
-                seenBlockIndices.add(index);
-                currentBlockType = mbType;
-                blockIndex = index;
-                if (emitBlocks) {
-                  stream.emit({
-                    type: 'block',
-                    event: { event: 'block_start', index, block: { type: mbType } },
-                  });
-                }
-              } else if (emitBlocks) {
-                // Second call for the same index = content_block_stop. The
-                // provider has filled the block with final content; surface
-                // a block_complete with the relevant fields for consumers
-                // that want full block payloads (e.g. context-manager).
-                const apiBlock = block as {
-                  type?: string;
-                  text?: string;
-                  thinking?: string;
-                  id?: string;
-                  name?: string;
-                  input?: unknown;
-                } | undefined;
-                const mb: MembraneBlock = { type: mbType };
-                if (mbType === 'text') mb.content = apiBlock?.text;
-                else if (mbType === 'thinking') mb.content = apiBlock?.thinking;
-                else if (mbType === 'tool_call') {
-                  mb.toolId = apiBlock?.id;
-                  mb.toolName = apiBlock?.name;
-                  mb.input = apiBlock?.input as Record<string, unknown> | undefined;
-                }
-                stream.emit({
-                  type: 'block',
-                  event: { event: 'block_complete', index, block: mb },
-                });
-              }
+              tracker.onProviderBlock(index, block);
             },
           },
           {
@@ -3395,9 +3450,7 @@ export class Membrane {
             onRetrying: (info) => {
               allTextAccumulated = allTextAccumulated.slice(0, allTextBefore);
               textAccumulated = '';
-              blockIndex = 0;
-              currentBlockType = 'text';
-              seenBlockIndices.clear();
+              tracker.reset();
               stream.emit({
                 type: 'retrying',
                 attempt: info.attempt,
@@ -3408,6 +3461,10 @@ export class Membrane {
             },
           }
         );
+
+        // Single-callback adapters (OpenAI Responses) report each finalised
+        // block once, after the stream: complete whatever never saw a stop.
+        tracker.flush();
 
         rawResponse = streamResult.raw;
         lastStopReason = this.mapStopReason(streamResult.stopReason);
