@@ -27,7 +27,12 @@ import {
   abortError,
   networkError,
 } from '../types/index.js';
-import { createCombinedSignal, SSELineParser } from './utils.js';
+import {
+  createCombinedSignal,
+  SSELineParser,
+  throwOnStreamErrorFrame,
+  assertTerminalEventObserved,
+} from './utils.js';
 
 // ============================================================================
 // Types
@@ -44,6 +49,7 @@ interface CompletionsRequest {
   repetition_penalty?: number;
   stop?: string[];
   stream?: boolean;
+  stream_options?: { include_usage?: boolean };
 }
 
 interface CompletionsResponse {
@@ -169,6 +175,9 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
   ): Promise<ProviderResponse> {
     const completionsRequest = this.buildRequest(request);
     completionsRequest.stream = true;
+    // Ask for usage in the stream — without this the endpoint sends no usage
+    // frame at all and every streamed call reports 0/0 tokens.
+    completionsRequest.stream_options = { include_usage: true };
     options?.onRequest?.(completionsRequest);
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
@@ -194,6 +203,8 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
       const sseParser = new SSELineParser();
       let accumulated = '';
       let finishReason = 'stop';
+      let sawTerminalEvent = false;
+      let streamUsage: CompletionsResponse['usage'] | undefined;
 
       // Post-facto truncation of the adapter's own eotToken.
       // The adapter serializes the prompt with this.eotToken and sends it as an
@@ -207,53 +218,94 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
       let emittedLen = 0;
       let eotFound = false;
 
-      streamLoop:
+      // One frame handler for both the streamed lines and the EOF flush — the
+      // trailing buffer carries real terminal frames, not leftovers. `eotFound`
+      // is the stop signal each caller checks; it replaces the labelled break
+      // this body used while it was inline.
+      const processDataLine = (data: string): void => {
+        if (data === '[DONE]') {
+          sawTerminalEvent = true;
+          return;
+        }
+
+        // Parse first; only JSON noise is ignorable. Everything after the
+        // parse must NOT be swallowed by the catch below.
+        let parsed: Record<string, any>;
+        try {
+          parsed = JSON.parse(data);
+        } catch {
+          return; // Ignore parse errors (partial/keep-alive lines)
+        }
+
+        throwOnStreamErrorFrame(parsed, this.name, completionsRequest);
+
+        try {
+          const text = parsed.choices?.[0]?.text;
+
+          if (text) {
+            accumulated += text;
+            if (eot) {
+              const idx = accumulated.indexOf(eot);
+              if (idx !== -1) {
+                // Truncate at the token, flush the un-emitted prefix, stop
+                accumulated = accumulated.slice(0, idx);
+                if (accumulated.length > emittedLen) {
+                  callbacks.onChunk(accumulated.slice(emittedLen));
+                }
+                emittedLen = accumulated.length;
+                eotFound = true;
+                // The adapter's own end-of-turn token IS a terminal
+                // observation: the turn ended where this layer said it ends.
+                sawTerminalEvent = true;
+                finishReason = 'stop';
+                return;
+              }
+              // Emit all but a held-back tail that could be a partial token
+              const safeLen = Math.max(emittedLen, accumulated.length - (eot.length - 1));
+              if (safeLen > emittedLen) {
+                callbacks.onChunk(accumulated.slice(emittedLen, safeLen));
+                emittedLen = safeLen;
+              }
+            } else {
+              callbacks.onChunk(text);
+            }
+          }
+
+          if (parsed.choices?.[0]?.finish_reason) {
+            finishReason = parsed.choices[0].finish_reason;
+            sawTerminalEvent = true;
+          }
+
+          // Usage rides the final chunk when stream_options.include_usage is set
+          if (parsed.usage) {
+            streamUsage = parsed.usage;
+          }
+        } catch {
+          // Ignore parse errors in stream
+        }
+      };
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
         const chunk = decoder.decode(value, { stream: true });
-        const dataLines = sseParser.feed(chunk);
+        for (const data of sseParser.feed(chunk)) {
+          processDataLine(data);
+          if (eotFound) break;
+        }
+        if (eotFound) break;
+      }
 
-        for (const data of dataLines) {
-          if (data === '[DONE]') continue;
-
-          try {
-            const parsed = JSON.parse(data);
-            const text = parsed.choices?.[0]?.text;
-
-            if (text) {
-              accumulated += text;
-              if (eot) {
-                const idx = accumulated.indexOf(eot);
-                if (idx !== -1) {
-                  // Truncate at the token, flush the un-emitted prefix, stop
-                  accumulated = accumulated.slice(0, idx);
-                  if (accumulated.length > emittedLen) {
-                    callbacks.onChunk(accumulated.slice(emittedLen));
-                  }
-                  emittedLen = accumulated.length;
-                  eotFound = true;
-                  finishReason = 'stop';
-                  break streamLoop;
-                }
-                // Emit all but a held-back tail that could be a partial token
-                const safeLen = Math.max(emittedLen, accumulated.length - (eot.length - 1));
-                if (safeLen > emittedLen) {
-                  callbacks.onChunk(accumulated.slice(emittedLen, safeLen));
-                  emittedLen = safeLen;
-                }
-              } else {
-                callbacks.onChunk(text);
-              }
-            }
-
-            if (parsed.choices?.[0]?.finish_reason) {
-              finishReason = parsed.choices[0].finish_reason;
-            }
-          } catch {
-            // Ignore parse errors in stream
-          }
+      // A final `data:` line that arrived without its trailing newline is still
+      // buffered here. Servers and proxies do close right after writing the
+      // last event, so dropping it would report a finished turn as a dropped
+      // connection at the guard below. A stream already ended by the eotToken
+      // has nothing left to read.
+      if (!eotFound) {
+        for (const data of sseParser.flush()) {
+          processDataLine(data);
+          if (eotFound) break;
         }
       }
 
@@ -265,7 +317,9 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
         try { await reader.cancel(); } catch { /* stream already closed */ }
       }
 
-      return this.buildStreamedResponse(accumulated, finishReason, request.model, completionsRequest);
+      assertTerminalEventObserved(sawTerminalEvent, this.name, completionsRequest);
+
+      return this.buildStreamedResponse(accumulated, finishReason, request.model, streamUsage, completionsRequest);
 
     } catch (error) {
       throw this.handleError(error, completionsRequest);
@@ -495,6 +549,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
     accumulated: string,
     finishReason: string,
     requestedModel: string,
+    streamUsage?: CompletionsResponse['usage'],
     rawRequest?: unknown
   ): ProviderResponse {
     return {
@@ -502,12 +557,14 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
       stopReason: this.mapFinishReason(finishReason),
       stopSequence: undefined,
       usage: {
-        inputTokens: 0, // Not available in streaming
-        outputTokens: 0,
+        // Zeros only as the genuinely-absent fallback: an endpoint that
+        // ignores stream_options sends no usage frame.
+        inputTokens: streamUsage?.prompt_tokens ?? 0,
+        outputTokens: streamUsage?.completion_tokens ?? 0,
       },
       model: requestedModel,
       rawRequest,
-      raw: { text: accumulated, finish_reason: finishReason },
+      raw: { text: accumulated, finish_reason: finishReason, usage: streamUsage },
     };
   }
 
@@ -532,6 +589,10 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
   }
 
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
+    // Already-classified failures (e.g. the stream-integrity guards) keep
+    // their type and retryability instead of being re-derived from a string.
+    if (error instanceof MembraneError) return error;
+
     if (error instanceof Error) {
       const message = error.message;
 

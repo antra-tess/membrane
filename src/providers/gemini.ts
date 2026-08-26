@@ -28,7 +28,7 @@ import {
   abortError,
   networkError,
 } from '../types/index.js';
-import { createCombinedSignal } from './utils.js';
+import { createCombinedSignal, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
 
 // ============================================================================
 // Gemini API Types
@@ -188,10 +188,57 @@ export class GeminiAdapter implements ProviderAdapter {
       const decoder = new TextDecoder();
       let accumulated = '';
       let finishReason = 'STOP';
+      let sawTerminalEvent = false;
       let toolCalls: { name: string; args: Record<string, unknown> }[] = [];
       let images: { data: string; mimeType: string }[] = [];
       let lastUsage: GeminiResponse['usageMetadata'] | undefined;
       let buffer = '';
+
+      // One frame handler for both the streaming lines and the trailing
+      // buffer — the two used to carry byte-identical copies of this logic,
+      // so any fix (error frames, terminal observation) had to be made twice.
+      const processDataLine = (dataLine: string): void => {
+        let parsed: GeminiResponse;
+        try {
+          parsed = JSON.parse(dataLine) as GeminiResponse;
+        } catch {
+          return; // Ignore parse errors in stream chunks
+        }
+
+        throwOnStreamErrorFrame(parsed, 'Gemini', geminiRequest);
+
+        const candidate = parsed.candidates?.[0];
+
+        if (candidate?.content?.parts) {
+          for (const part of candidate.content.parts) {
+            if (part.text) {
+              accumulated += part.text;
+              callbacks.onChunk(part.text);
+            }
+            if (part.inlineData) {
+              images.push({
+                data: part.inlineData.data,
+                mimeType: part.inlineData.mimeType,
+              });
+            }
+            if (part.functionCall) {
+              toolCalls.push({
+                name: part.functionCall.name,
+                args: part.functionCall.args,
+              });
+            }
+          }
+        }
+
+        if (candidate?.finishReason) {
+          finishReason = candidate.finishReason;
+          sawTerminalEvent = true;
+        }
+
+        if (parsed.usageMetadata) {
+          lastUsage = parsed.usageMetadata;
+        }
+      };
 
       while (true) {
         const { done, value } = await reader.read();
@@ -206,42 +253,7 @@ export class GeminiAdapter implements ProviderAdapter {
           if (!line.startsWith('data: ')) continue;
           const data = line.slice(6).trim();
           if (!data || data === '[DONE]') continue;
-
-          try {
-            const parsed = JSON.parse(data) as GeminiResponse;
-            const candidate = parsed.candidates?.[0];
-
-            if (candidate?.content?.parts) {
-              for (const part of candidate.content.parts) {
-                if (part.text) {
-                  accumulated += part.text;
-                  callbacks.onChunk(part.text);
-                }
-                if (part.inlineData) {
-                  images.push({
-                    data: part.inlineData.data,
-                    mimeType: part.inlineData.mimeType,
-                  });
-                }
-                if (part.functionCall) {
-                  toolCalls.push({
-                    name: part.functionCall.name,
-                    args: part.functionCall.args,
-                  });
-                }
-              }
-            }
-
-            if (candidate?.finishReason) {
-              finishReason = candidate.finishReason;
-            }
-
-            if (parsed.usageMetadata) {
-              lastUsage = parsed.usageMetadata;
-            }
-          } catch {
-            // Ignore parse errors in stream chunks
-          }
+          processDataLine(data);
         }
       }
 
@@ -250,43 +262,11 @@ export class GeminiAdapter implements ProviderAdapter {
         const remaining = buffer.trim();
         const dataLine = remaining.startsWith('data: ') ? remaining.slice(6).trim() : remaining;
         if (dataLine && dataLine !== '[DONE]') {
-          try {
-            const parsed = JSON.parse(dataLine) as GeminiResponse;
-            const candidate = parsed.candidates?.[0];
-
-            if (candidate?.content?.parts) {
-              for (const part of candidate.content.parts) {
-                if (part.text) {
-                  accumulated += part.text;
-                  callbacks.onChunk(part.text);
-                }
-                if (part.inlineData) {
-                  images.push({
-                    data: part.inlineData.data,
-                    mimeType: part.inlineData.mimeType,
-                  });
-                }
-                if (part.functionCall) {
-                  toolCalls.push({
-                    name: part.functionCall.name,
-                    args: part.functionCall.args,
-                  });
-                }
-              }
-            }
-
-            if (candidate?.finishReason) {
-              finishReason = candidate.finishReason;
-            }
-
-            if (parsed.usageMetadata) {
-              lastUsage = parsed.usageMetadata;
-            }
-          } catch {
-            // Final buffer wasn't valid JSON — nothing to do
-          }
+          processDataLine(dataLine);
         }
       }
+
+      assertTerminalEventObserved(sawTerminalEvent, 'Gemini', geminiRequest);
 
       return {
         content: this.buildContentBlocks(accumulated, toolCalls, images),

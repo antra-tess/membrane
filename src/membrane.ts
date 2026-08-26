@@ -1603,6 +1603,9 @@ export class Membrane {
             id: item.id,
             name: unsanitizeToolName(item.name),
             input: item.input,
+            // Arguments that never parsed: carry the marker through so a
+            // consumer can refuse the block instead of trusting `input`.
+            ...(item.unparseableInput !== undefined ? { unparseableInput: item.unparseableInput } : {}),
             ...(item.rawItem ? { rawItem: item.rawItem } : {}),
           });
         } else if (item.type === 'thinking') {

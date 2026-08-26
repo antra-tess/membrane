@@ -20,7 +20,7 @@ import {
   serverError,
   abortError,
 } from '../types/index.js';
-import { createCombinedSignal } from './utils.js';
+import { createCombinedSignal, assertTerminalEventObserved } from './utils.js';
 import {
   INTERLEAVED_THINKING_BETA,
   needsInterleavedThinkingBeta,
@@ -610,6 +610,7 @@ export class BedrockAdapter implements ProviderAdapter {
     let cacheCreationTokens: number | undefined;
     let cacheReadTokens: number | undefined;
     let stopReason: string = 'end_turn';
+    let sawTerminalEvent = false;
     let stopSequence: string | undefined;
     let fullText = '';
 
@@ -782,6 +783,7 @@ export class BedrockAdapter implements ProviderAdapter {
                   }
                   callbacks.onContentBlock?.(blockIdx, contentBlocks[blockIdx]);
                 } else if (eventData.type === 'message_delta') {
+                  sawTerminalEvent = true;
                   if (eventData.usage) {
                     outputTokens = eventData.usage.output_tokens;
                     // message_delta carries cumulative cache metrics — use as
@@ -832,6 +834,11 @@ export class BedrockAdapter implements ProviderAdapter {
         'Bedrock returned empty response: no content blocks, 0 input/output tokens. This may indicate a transient service issue.'
       );
     }
+
+    // The empty-response guard above only catches a stream that produced
+    // NOTHING; a stream truncated after any content passed it and was
+    // reported as a clean end_turn. message_delta is the terminal event.
+    assertTerminalEventObserved(sawTerminalEvent, 'Bedrock', { modelId, ...request });
 
     // Build response from accumulated data
     finalMessage = {
@@ -917,6 +924,10 @@ export class BedrockAdapter implements ProviderAdapter {
   }
 
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
+    // Already-classified failures (e.g. the stream-integrity guards) keep
+    // their type and retryability instead of being re-derived from a string.
+    if (error instanceof MembraneError) return error;
+
     if (error instanceof BedrockError) {
       const status = error.status;
       const message = error.message;
