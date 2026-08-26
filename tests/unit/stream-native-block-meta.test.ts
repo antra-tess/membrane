@@ -20,6 +20,7 @@ import type {
   ProviderRequest,
   ProviderResponse,
   StreamCallbacks,
+  StreamEvent,
   ContentBlock,
   ChunkMeta,
   BlockEvent,
@@ -116,5 +117,65 @@ describe('stream() native path: chunk metadata follows the provider block type (
     expect(updates.map(([i, b]) => [i, (b as { type: string }).type])).toEqual([
       [0, 'thinking'], [0, 'thinking'], [1, 'text'], [1, 'text'],
     ]);
+  });
+});
+
+/**
+ * The OpenAI Responses adapter fires `onContentBlock` ONCE per block, already
+ * finalised, after the whole stream has been consumed (openai-responses-api.ts:
+ * `parsed.content.forEach((block, index) => callbacks.onContentBlock?.(index, block))`).
+ * There is no second callback to signal completion, so completion is
+ * synthesised when the provider stream returns (#63 review, P1).
+ */
+class SingleCallbackAdapter implements ProviderAdapter {
+  readonly name = 'single-callback';
+  constructor(private chunks: string[], private content: ProviderResponse['content']) {}
+  supportsModel(): boolean { return true; }
+  async complete(): Promise<ProviderResponse> { throw new Error('not used'); }
+  async stream(_request: ProviderRequest, callbacks: StreamCallbacks): Promise<ProviderResponse> {
+    for (const chunk of this.chunks) callbacks.onChunk(chunk);
+    (this.content as unknown[]).forEach((block, index) => callbacks.onContentBlock?.(index, block));
+    return { content: this.content, stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 10 }, raw: {} };
+  }
+}
+
+const RESPONSES_STYLE_CONTENT = [
+  { type: 'thinking', thinking: 'let me reason' },
+  { type: 'text', text: 'Answer' },
+  { type: 'tool_use', id: 'fc_1', name: 'noop', input: { a: 1 } },
+] as unknown as ProviderResponse['content'];
+
+describe('single-callback adapters (OpenAI Responses style) still get a complete block lifecycle', () => {
+  it('stream(): every started block is completed, with its finalised payload', async () => {
+    const membrane = new Membrane(new SingleCallbackAdapter(['Answer'], RESPONSES_STYLE_CONTENT));
+    const events: BlockEvent[] = [];
+    await membrane.stream(nativeRequest(), { onBlock: (e) => events.push(e) });
+
+    const starts = events.filter((e) => e.event === 'block_start').map((e) => [e.index, e.block.type]);
+    const completes = events.filter((e) => e.event === 'block_complete');
+    expect(starts).toEqual([[0, 'thinking'], [1, 'text'], [2, 'tool_call']]);
+    expect(completes.map((e) => [e.index, e.block.type])).toEqual([[0, 'thinking'], [1, 'text'], [2, 'tool_call']]);
+    expect(completes[0].block.content).toBe('let me reason');
+    expect(completes[1].block.content).toBe('Answer');
+    expect(completes[2].block).toMatchObject({ toolId: 'fc_1', toolName: 'noop', input: { a: 1 } });
+  });
+
+  it('streamYielding(): the same completion is synthesised on the yielding path', async () => {
+    const membrane = new Membrane(new SingleCallbackAdapter(['Answer'], RESPONSES_STYLE_CONTENT));
+    const events: StreamEvent[] = [];
+    for await (const event of membrane.streamYielding(nativeRequest())) events.push(event);
+
+    const blocks = events.filter((e) => e.type === 'block').map((e) => (e as { event: BlockEvent }).event);
+    expect(blocks.filter((e) => e.event === 'block_start').length).toBe(3);
+    const completes = blocks.filter((e) => e.event === 'block_complete');
+    expect(completes.map((e) => [e.index, e.block.type])).toEqual([[0, 'thinking'], [1, 'text'], [2, 'tool_call']]);
+    expect(completes[0].block.content).toBe('let me reason');
+  });
+
+  it('paired-callback adapters are unaffected: flush is a no-op (no duplicate completions)', async () => {
+    const membrane = new Membrane(new ScriptedAdapter(THINKING_THEN_TEXT, FINAL_CONTENT));
+    const events: BlockEvent[] = [];
+    await membrane.stream(nativeRequest(), { onBlock: (e) => events.push(e) });
+    expect(events.filter((e) => e.event === 'block_complete').length).toBe(2);
   });
 });
