@@ -151,6 +151,30 @@ describe('floating cache marker', () => {
     expect(warn).toHaveBeenCalledTimes(1);
   });
 
+  it('warns again after the rate-limit interval instead of latching for the process lifetime', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const clock = vi.spyOn(Date, 'now');
+    clock.mockReturnValue(1_000_000);
+
+    const messages = turn(3);
+    for (const msg of messages) {
+      if ((msg.content[0] as any).type === 'tool_result') (msg as any).cacheBreakpoint = true;
+    }
+    const membrane = new Membrane({ name: 'anthropic' } as any);
+
+    build(makeRequest(), messages, true, membrane);
+    build(makeRequest(), messages, true, membrane);
+    expect(warn).toHaveBeenCalledTimes(1);
+
+    // A long-lived Membrane must not go permanently quiet about an
+    // over-budget wire: past the interval the condition reports again, and
+    // says how many occurrences it swallowed meanwhile.
+    clock.mockReturnValue(1_000_000 + 61_000);
+    build(makeRequest(), messages, true, membrane);
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(String(warn.mock.calls[1]![0])).toContain('1 further occurrences suppressed');
+  });
+
   it('floats from the residuum left after the tools/system fallback on markerless requests', () => {
     const pr = build(makeRequest(), turn(2, false), true);
     const m = markers(pr);

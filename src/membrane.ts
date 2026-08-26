@@ -27,6 +27,18 @@ import type {
 } from './types/index.js';
 import { lastCacheableBlockIndex } from './formatters/native.js';
 import {
+  sameThinkingText,
+  findSpanningProviderRun,
+  thinkingCarrierKey,
+  stripThinkingForPrefill,
+} from './utils/thinking-carriers.js';
+import {
+  countWireCacheMarkers,
+  clampCacheMarkers,
+  ownSystemBlocks,
+  MAX_CACHE_BREAKPOINTS,
+} from './utils/cache-marker-budget.js';
+import {
   DEFAULT_RETRY_CONFIG,
   MembraneError,
   classifyError,
@@ -54,7 +66,11 @@ import type {
 } from './types/yielding-stream.js';
 import type { PrefillFormatter, StreamParser } from './formatters/types.js';
 import { AnthropicXmlFormatter } from './formatters/anthropic-xml.js';
-import { normalizeToolPairs, mergeConsecutiveRoles } from './formatters/normalize-tool-pairs.js';
+import {
+  normalizeToolPairs,
+  mergeConsecutiveRoles,
+  PREFIX_REWRITING_NORMALIZE_EVENT_KINDS,
+} from './formatters/normalize-tool-pairs.js';
 import { YieldingStreamImpl } from './yielding-stream.js';
 import { calculateCost } from './utils/cost.js';
 import {
@@ -126,6 +142,10 @@ export class Membrane {
         // Cast back to the local provider-request shape: the hook returns
         // `unknown` deliberately, and we acknowledge the cast at the boundary.
         const finalRequest = (await this.applyBeforeRequestHook(request, providerRequest)) as typeof providerRequest;
+
+        // Last exit before the adapter: the only place that sees EVERY
+        // contribution (builder, formatter, passthrough, float, hook).
+        clampCacheMarkers(finalRequest, 'complete');
 
         const providerResponse = await this.adapter.complete(finalRequest, {
           signal: options.signal,
@@ -1058,6 +1078,7 @@ export class Membrane {
     // Build messages array that we'll update with tool results
     let messages = [...request.messages];
     let allContentBlocks: ContentBlock[] = [];
+    let markersInLastRequest = 0;
 
     try {
       // Tool execution loop
@@ -1093,6 +1114,14 @@ export class Membrane {
             onRequest: (req) => {
               rawRequest = req;
               onRequest?.(req);
+            },
+            // Telemetry reports what this request actually SHIPPED with —
+            // builder breakpoints, stale passthrough, fallback, float, plus
+            // whatever the beforeRequest hook and the wire clamp did after
+            // the build. Both native paths used to hardcode 0, and counting
+            // at build time reported a number no request ever had.
+            onWireCacheMarkers: (markerCount) => {
+              markersInLastRequest = markerCount;
             },
           }
         );
@@ -1228,7 +1257,7 @@ export class Membrane {
             provider: this.adapter.name,
           },
           cache: {
-            markersInRequest: 0,
+            markersInRequest: markersInLastRequest,
             tokensCreated: totalUsage.cacheCreationTokens ?? 0,
             tokensRead: totalUsage.cacheReadTokens ?? 0,
             hitRatio: this.calculateCacheHitRatio(totalUsage),
@@ -1255,8 +1284,37 @@ export class Membrane {
     }
   }
 
-  /** See the floating-cache-marker block in buildNativeToolRequest. */
-  private floatBudgetWarned = false;
+  /**
+   * Rate-limit state for the float's budget warning. See the
+   * floating-cache-marker block in buildNativeToolRequest.
+   *
+   * A once-per-instance latch made the ONLY observable of an over-budget wire
+   * go quiet for the life of the process: a long-lived Membrane warns for the
+   * first agent that trips it and never again, so the condition looks like it
+   * healed. Warn on the first occurrence, then at most once per interval,
+   * carrying the count of what was suppressed in between.
+   */
+  private floatBudgetWarnState = { lastWarnedAtMs: 0, suppressedSinceWarn: 0 };
+  private static readonly FLOAT_BUDGET_WARN_INTERVAL_MS = 60_000;
+
+  private warnFloatBudgetExhausted(wireMarkers: number): void {
+    const now = Date.now();
+    const state = this.floatBudgetWarnState;
+    const elapsed = now - state.lastWarnedAtMs;
+    if (state.lastWarnedAtMs !== 0 && elapsed < Membrane.FLOAT_BUDGET_WARN_INTERVAL_MS) {
+      state.suppressedSinceWarn++;
+      return;
+    }
+    const suppressed = state.suppressedSinceWarn;
+    state.lastWarnedAtMs = now;
+    state.suppressedSinceWarn = 0;
+    console.warn(
+      `[membrane] floating cache marker withheld: upstream markers already ` +
+      `occupy all ${MAX_CACHE_BREAKPOINTS} cache_control slots (${wireMarkers} on the wire). ` +
+      `Tool-round suffixes will not cache incrementally.` +
+      (suppressed > 0 ? ` (${suppressed} further occurrences suppressed since the last warning.)` : '')
+    );
+  }
 
   /**
    * Build a provider request with native tool support.
@@ -1297,11 +1355,13 @@ export class Membrane {
     // Anthropic allows at most 4 cache_control breakpoints per request. The
     // message breakpoints are the valuable ones (they cache the longest prefixes,
     // and every one already includes tools+system at the front of the request).
-    // So tools/system get a breakpoint only as a FALLBACK — when no message
-    // breakpoint was marked — otherwise they're redundant and would push the
-    // total past 4, which the API hard-rejects (the agent goes unresponsive).
-    let messageBreakpoints = 0;
-
+    // So tools/system get a breakpoint only as a FALLBACK — when no marker
+    // exists anywhere on the wire — otherwise they're redundant and would push
+    // the total past 4, which the API hard-rejects (the agent goes
+    // unresponsive). The fallback gate reads a RECOUNT of the built artifacts
+    // (see below), never a running tally: a running tally cannot see a
+    // caller-marked system block, and double-counts a message breakpoint that
+    // lands on a block already carrying stale cache_control.
     for (const msg of messages) {
       const isAssistant = msg.participant === assistantName;
       const role = isAssistant ? 'assistant' : 'user';
@@ -1322,14 +1382,13 @@ export class Membrane {
           }
           const textBlock: Record<string, unknown> = { type: 'text', text };
           if ((block as any).cache_control) {
-            textBlock.cache_control = (block as any).cache_control;
             // A block-level passthrough occupies one of the 4 breakpoint slots
-            // exactly like a marked message — count it, so the tools/system
-            // fallback below doesn't stack more on top. (Imported/seeded
-            // conversations can carry stale request-time cache_control on
-            // stored blocks — first seen wedging Sill 2026-07-25: 3 cm markers
-            // + 2 stale Arc-export blocks = 5 → hard 400 on every inference.)
-            messageBreakpoints++;
+            // exactly like a marked message; the recount below sees it.
+            // (Imported/seeded conversations carry stale request-time
+            // cache_control on stored blocks — first seen wedging Sill
+            // 2026-07-25: 3 cm markers + 2 stale Arc-export blocks = 5 → hard
+            // 400 on every inference.)
+            textBlock.cache_control = (block as any).cache_control;
           }
           content.push(textBlock);
         } else if (block.type === 'tool_use') {
@@ -1401,7 +1460,6 @@ export class Membrane {
         const bpIdx = lastCacheableBlockIndex(content as Array<Record<string, unknown>>);
         if (bpIdx >= 0) {
           content[bpIdx].cache_control = cacheControl;
-          messageBreakpoints++;
         }
       }
 
@@ -1432,13 +1490,31 @@ export class Membrane {
     // past one. `synthetic_pending_result` (not the downstream
     // cache_suppressed_for_synthetic, which only fires when a marker was
     // actually stripped) is the root condition.
-    let pendingResultSynthesized = false;
+    // Every repair that REWRITES prefix bytes stands the float down, not just
+    // the synthetic [pending] result: a textified orphan tool_result is
+    // rewritten the same way when its real pairing arrives, so caching at or
+    // past one poisons the prefix identically. The kinds live in one exported
+    // set so a normalizer that grows a new prefix-rewriting repair cannot
+    // silently escape this guard.
+    let prefixRewritten = false;
     const normalized = normalizeToolPairs(providerMessages, {
       onEvent: (e) => {
-        if (e.kind === 'synthetic_pending_result') pendingResultSynthesized = true;
+        if (PREFIX_REWRITING_NORMALIZE_EVENT_KINDS.has(e.kind)) prefixRewritten = true;
       },
     });
     const mergedMessages = mergeConsecutiveRoles(normalized.messages);
+
+    // ONE recount of the constructed wire artifacts, taken BEFORE the
+    // tools/system fallback decision so the fallback and the float share a
+    // single truth. Counted post-normalize, so phase-5.5 cache suppression is
+    // already reflected. `request.system` is the caller's own system content:
+    // it explicitly accepts pre-marked blocks, and those are real wire markers
+    // that no running tally ever saw (three of them plus both fallbacks = 5 on
+    // the wire = a 400 on every inference of that config).
+    const upstreamWireMarkers = countWireCacheMarkers({
+      messages: mergedMessages,
+      system: request.system,
+    });
 
     // Convert tools to provider format.
     // Native tool names must match ^[a-zA-Z0-9_-]{1,128}$ — sanitize colons
@@ -1451,7 +1527,7 @@ export class Membrane {
       };
       // Cache the tool list (last tool) only as a fallback — a marked message
       // breakpoint already caches the tools as part of its prefix.
-      if (cacheControl && messageBreakpoints === 0 && request.tools && idx === request.tools.length - 1) {
+      if (cacheControl && upstreamWireMarkers === 0 && request.tools && idx === request.tools.length - 1) {
         t.cache_control = cacheControl;
       }
       return t;
@@ -1460,10 +1536,10 @@ export class Membrane {
     // Wrap system prompt with cache_control only as a fallback (no message
     // breakpoint marked); otherwise a message breakpoint already caches
     // tools+system as part of its prefix.
-    let system: unknown = request.system;
-    if (cacheControl && messageBreakpoints === 0 && typeof system === 'string' && system.length > 0) {
+    let system: unknown = ownSystemBlocks(request.system);
+    if (cacheControl && upstreamWireMarkers === 0 && typeof system === 'string' && system.length > 0) {
       system = [{ type: 'text', text: system, cache_control: cacheControl }];
-    } else if (cacheControl && messageBreakpoints === 0 && Array.isArray(system) && system.length > 0) {
+    } else if (cacheControl && upstreamWireMarkers === 0 && Array.isArray(system) && system.length > 0) {
       const blocks = system as Record<string, unknown>[];
       system = blocks.map((block, idx) =>
         idx === blocks.length - 1 ? { ...block, cache_control: cacheControl } : block
@@ -1502,39 +1578,13 @@ export class Membrane {
     // ------------------------------------------------------------------
     const floatingEnabled =
       request.floatingCacheMarker ?? this.config.defaultFloatingCacheMarker ?? true;
-    if (toolLoopRebuild && floatingEnabled && cacheControl && !pendingResultSynthesized) {
-      // Residuum from a RECOUNT of the constructed wire artifacts, not the
-      // running messageBreakpoints tally — the tally diverges from the wire
-      // in both directions (mirrors NativeFormatter's recount, same bug
-      // class as the Sill 2026-07-25 wedge): a message-level breakpoint
-      // landing on a block already carrying stale cache_control is one
-      // physical marker counted twice, and a pre-marked system block is a
-      // real wire marker the tally never sees. Counted post-fallback and
-      // post-normalize, so fallback spend and phase-5.5 suppression are
-      // both reflected.
-      let wireMarkers = 0;
-      for (const m of mergedMessages) {
-        if (!Array.isArray(m.content)) continue;
-        for (const b of m.content as Array<Record<string, unknown>>) {
-          if (b.cache_control) wireMarkers++;
-        }
-      }
-      if (tools) for (const t of tools) { if (t.cache_control) wireMarkers++; }
-      if (Array.isArray(system)) {
-        for (const b of system as Array<Record<string, unknown>>) {
-          if (b.cache_control) wireMarkers++;
-        }
-      }
-      let residuum = 4 - wireMarkers;
+    if (toolLoopRebuild && floatingEnabled && cacheControl && !prefixRewritten) {
+      // Same recount as the fallback gate, re-taken POST-fallback so the
+      // fallback's own spend is inside the residuum.
+      const wireMarkers = countWireCacheMarkers({ messages: mergedMessages, system, tools });
+      let residuum = MAX_CACHE_BREAKPOINTS - wireMarkers;
       if (residuum <= 0) {
-        if (!this.floatBudgetWarned) {
-          this.floatBudgetWarned = true;
-          console.warn(
-            `[membrane] floating cache marker withheld: upstream markers already ` +
-            `occupy all 4 cache_control slots (${wireMarkers} on the wire). ` +
-            `Tool-round suffixes will not cache incrementally.`
-          );
-        }
+        this.warnFloatBudgetExhausted(wireMarkers);
       } else {
         // Newest message first; then the previous round's endpoint (two
         // wire messages back: [..., prevResults, assistant, results]).
@@ -1670,10 +1720,32 @@ export class Membrane {
 
   /**
    * Merge provider thinking signatures into parser-derived thinking blocks
-   * (matched in stream order), and prepend any leftover provider blocks —
-   * signature-only thinking (display:'omitted') never appears in the text
-   * stream, so the parser produces no block for it. redacted_thinking
-   * blocks are always prepended verbatim.
+   * and prepend any leftover provider blocks — signature-only thinking
+   * (display:'omitted') never appears in the text stream, so the parser
+   * produces no block for it. redacted_thinking blocks are always prepended
+   * verbatim.
+   *
+   * Pairing is by CONTENT IDENTITY, never by index. The two lists are
+   * differently shaped whenever the provider emits a block the parser cannot
+   * see (signature-only), the parser emits a block the provider never
+   * produced (the XML path's literal `Claude: <thinking>` prefill turns
+   * VISIBLE text into a thinking block), or one provider block spans several
+   * (auto-continuation: capture runs per round while the parser sees the
+   * CONCATENATED accumulation). Index-zipping crosses the lists in all three
+   * shapes and stamps a signature onto content that never produced it —
+   * which round-trips into the consumer's stored history and fails Anthropic
+   * signature validation on the next turn.
+   *
+   * The three rules, in order:
+   *   1. identity — a provider block pairs with the parsed block whose
+   *      thinking text is the same; empty-thinking (signature-only) blocks
+   *      are never text-match candidates and are prepend-only.
+   *   2. span — a parsed block that reconstructs as the concatenation of a
+   *      RUN of consecutive unpaired provider blocks is REPLACED in place by
+   *      those originals, so the spanning block never wears a fragment's
+   *      signature and no reasoning is sent twice.
+   *   3. leftover — everything still unpaired is prepended, de-duplicated
+   *      against what `content` already carries (and against itself).
    *
    * Mutates `content` in place. Shared by the XML stream paths
    * (streamWithXmlTools and runXmlToolsYielding).
@@ -1684,25 +1756,74 @@ export class Membrane {
   ): void {
     if (providerThinkingBlocks.length === 0) return;
 
-    const parsedThinking = content.filter(
+    const providerThinking = providerThinkingBlocks.filter(
       (b) => b.type === 'thinking'
-    ) as Array<{ type: 'thinking'; thinking: string; signature?: string }>;
-
-    const providerThinking = providerThinkingBlocks.filter((b) => b.type === 'thinking');
+    ) as Array<{ type: 'thinking'; thinking?: string; signature?: string }>;
     const redacted = providerThinkingBlocks.filter((b) => b.type === 'redacted_thinking');
 
-    const matched = Math.min(providerThinking.length, parsedThinking.length);
-    for (let i = 0; i < matched; i++) {
-      const sig = (providerThinking[i] as { signature?: string }).signature;
-      if (sig) {
-        parsedThinking[i]!.signature = sig;
-      }
+    const pairedProviderBlocks = new Set<number>();
+    const claimedParsedIndices = new Set<number>();
+    const parsedThinkingIndices = () =>
+      content.reduce<number[]>((acc, block, index) => {
+        if (block.type === 'thinking') acc.push(index);
+        return acc;
+      }, []);
+
+    for (let p = 0; p < providerThinking.length; p++) {
+      const providerText = providerThinking[p]!.thinking ?? '';
+      if (providerText === '') continue;
+      const match = parsedThinkingIndices().find(
+        (index) =>
+          !claimedParsedIndices.has(index) &&
+          sameThinkingText((content[index] as { thinking?: string }).thinking ?? '', providerText)
+      );
+      if (match === undefined) continue;
+      const signature = providerThinking[p]!.signature;
+      if (signature) (content[match] as { signature?: string }).signature = signature;
+      claimedParsedIndices.add(match);
+      pairedProviderBlocks.add(p);
     }
 
-    const leftover = providerThinking.slice(matched);
-    if (leftover.length > 0 || redacted.length > 0) {
-      content.unshift(...leftover, ...redacted);
+    for (const parsedIndex of parsedThinkingIndices().reverse()) {
+      if (claimedParsedIndices.has(parsedIndex)) continue;
+      const parsedText = (content[parsedIndex] as { thinking?: string }).thinking ?? '';
+      if (parsedText === '') continue;
+      const run = findSpanningProviderRun(providerThinking, pairedProviderBlocks, parsedText);
+      if (!run) continue;
+      content.splice(
+        parsedIndex,
+        1,
+        ...run.map((p) => {
+          pairedProviderBlocks.add(p);
+          const block = providerThinking[p]!;
+          return {
+            type: 'thinking',
+            thinking: block.thinking ?? '',
+            ...(block.signature ? { signature: block.signature } : {}),
+          } as ContentBlock;
+        })
+      );
+      claimedParsedIndices.add(parsedIndex);
     }
+
+    const seen = new Set(content.map((block) => thinkingCarrierKey(block)));
+    const leftover: ContentBlock[] = [];
+    for (let p = 0; p < providerThinking.length; p++) {
+      if (pairedProviderBlocks.has(p)) continue;
+      const block = providerThinking[p]! as unknown as ContentBlock;
+      const key = thinkingCarrierKey(block);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      leftover.push(block);
+    }
+    for (const block of redacted) {
+      const key = thinkingCarrierKey(block);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      leftover.push(block);
+    }
+
+    if (leftover.length > 0) content.unshift(...leftover);
   }
 
   // ==========================================================================
@@ -1845,7 +1966,9 @@ export class Membrane {
     const providerRequest = {
       ...this.getBaseProviderParams(request.config),
       messages: buildResult.messages,
-      system: buildResult.systemContent,
+      // Owned, not aliased: the wire clamp strips markers in place, and a
+      // formatter may pass the caller's own system array straight through.
+      system: ownSystemBlocks(buildResult.systemContent),
       stopSequences: buildResult.stopSequences,
       tools: buildResult.nativeTools,
       extra: {
@@ -1859,8 +1982,8 @@ export class Membrane {
     // literal `<thinking>` text prefix instead of the API feature — drop the
     // API param when the built request actually ends in an assistant prefill.
     // Chat-style builds (no prefill) keep it.
-    if (buildResult.assistantPrefill && providerRequest.thinking) {
-      delete providerRequest.thinking;
+    if (buildResult.assistantPrefill) {
+      stripThinkingForPrefill(providerRequest);
     }
 
     return { providerRequest, prefillResult: buildResult };
@@ -1902,6 +2025,18 @@ export class Membrane {
        * somewhere upstream.
        */
       onRetrying?: (info: { attempt: number; maxAttempts: number; category?: string }) => void;
+      /**
+       * Receives the number of cache_control markers the request ACTUALLY
+       * ships with, taken from the clamp's own tally below — i.e. after the
+       * `beforeRequest` hook has added or removed markers of its own and
+       * after everything past the 4-breakpoint budget has been dropped.
+       *
+       * Telemetry that counts the request at BUILD time reports a number no
+       * request ever had (a hook placing 7 markers on a wire that carries 4
+       * was reported as the builder's 1), which defeats the audit the count
+       * exists for. This is the only count that describes the wire.
+       */
+      onWireCacheMarkers?: (markerCount: number) => void;
     }
   ) {
     // Strip `normalizedRequest` before forwarding to the adapter — it's
@@ -1909,8 +2044,16 @@ export class Membrane {
     // compatibility won't catch the excess field (checked only on object
     // literals, not on variables). Leaving it in would silently leak the
     // normalized form into every adapter's options.
-    const { normalizedRequest, refusalRetries, onRetrying, ...adapterOptions } = options;
+    const { normalizedRequest, refusalRetries, onRetrying, onWireCacheMarkers, ...adapterOptions } = options;
     const finalRequest = (await this.applyBeforeRequestHook(normalizedRequest, request)) as typeof request;
+
+    // Last exit before the adapter: the only place that sees EVERY
+    // contribution (builder, formatter, passthrough, float, hook). Every
+    // streaming path — stream(), streamYielding(), both tool loops — funnels
+    // through here, so this is the one clamp they all get, and its tally is
+    // therefore the only count that describes the wire.
+    const clampOutcome = clampCacheMarkers(finalRequest, 'streamOnce');
+    onWireCacheMarkers?.(clampOutcome.total);
 
     // Retries are only safe when the caller can discard the abandoned
     // attempt, so they require BOTH a budget and an onRetrying hook.
@@ -1952,24 +2095,20 @@ export class Membrane {
       messages.push({ role: 'assistant', content: trimmedAccumulated });
     }
     
-    return {
+    return stripThinkingForPrefill({
       ...this.getBaseProviderParams(originalRequest.config),
       // Continuations always end in an assistant prefill — the API rejects
       // extended thinking combined with prefill, so never send the param here
       thinking: undefined,
       messages,
-      system: prefillResult.systemContent
-        ? (Array.isArray(prefillResult.systemContent) && prefillResult.systemContent.length > 0
-          ? prefillResult.systemContent
-          : prefillResult.systemContent)
-        : undefined,
+      system: ownSystemBlocks(prefillResult.systemContent) ?? undefined,
       stopSequences: prefillResult.stopSequences,
       extra: {
         ...originalRequest.providerParams,
         // Pre-serialized prompt for completions adapters — skip re-serialization
         prompt: trimmedAccumulated,
       },
-    };
+    });
   }
 
   /**
@@ -2025,20 +2164,19 @@ export class Membrane {
       messages.push(...splitTurnMessages);
     }
 
-    return {
+    return stripThinkingForPrefill({
       ...this.getBaseProviderParams(originalRequest.config),
       // Continuations always end in an assistant prefill — the API rejects
       // extended thinking combined with prefill, so never send the param here
       thinking: undefined,
       messages,
-      system: prefillResult.systemContent
-        ? (Array.isArray(prefillResult.systemContent) && prefillResult.systemContent.length > 0
-          ? prefillResult.systemContent
-          : prefillResult.systemContent)
-        : undefined,
+      system: ownSystemBlocks(prefillResult.systemContent) ?? undefined,
       stopSequences: prefillResult.stopSequences,
-      extra: originalRequest.providerParams,
-    };
+      // Copied, not aliased: the guard below deletes the smuggled thinking
+      // config, and mutating the caller's own providerParams object would
+      // silently disable thinking on their NEXT (non-prefill) request.
+      extra: { ...originalRequest.providerParams },
+    });
   }
 
   private transformResponse(
@@ -3137,6 +3275,7 @@ export class Membrane {
 
     let messages = [...request.messages];
     let allContentBlocks: ContentBlock[] = [];
+    let markersInLastRequest = 0;
 
     try {
       // Tool execution loop
@@ -3240,6 +3379,14 @@ export class Membrane {
             idleTimeoutMs: options.idleTimeoutMs,
             normalizedRequest: request,
             onRequest: (req: unknown) => { rawRequest = req; },
+            // Telemetry reports what this request actually SHIPPED with —
+            // builder breakpoints, stale passthrough, fallback, float, plus
+            // whatever the beforeRequest hook and the wire clamp did after
+            // the build. Both native paths used to hardcode 0, and counting
+            // at build time reported a number no request ever had.
+            onWireCacheMarkers: (markerCount: number) => {
+              markersInLastRequest = markerCount;
+            },
             refusalRetries: options.refusalRetries,
             // Discard the refused attempt: roll the accumulators back to
             // where this attempt began and tell the consumer to drop what it
@@ -3405,7 +3552,7 @@ export class Membrane {
             provider: this.adapter.name,
           },
           cache: {
-            markersInRequest: 0,
+            markersInRequest: markersInLastRequest,
             tokensCreated: totalUsage.cacheCreationTokens ?? 0,
             tokensRead: totalUsage.cacheReadTokens ?? 0,
             hitRatio: this.calculateCacheHitRatio(totalUsage),
