@@ -14,6 +14,9 @@
   JSON-parsed as before, now with a loud `console.warn` naming the tool, the
   parameter and the declared type when the text does not parse (the raw text is
   passed through unchanged) or parses to a different JSON kind than declared.
+  The diagnostic names those coordinates ONLY and never the argument value:
+  tool inputs routinely carry credentials, tokens and private document text,
+  and this path fires exactly when a model formats such a value oddly.
   Large integers still stay strings so snowflake ids keep their precision.
 - **Every spelling of a declaration is honoured, not just
   `properties[param].type`.** A parameter declared as a type array
@@ -40,6 +43,16 @@
   root-level union previously vanished from the XML instructions; they now
   render from the same first-wins property collection the parser uses. This
   changes instruction bytes for those previously broken schemas.
+- The XML tool instructions now derive `required="true"` with root-combinator
+  semantics too, from the same schema the parameters themselves come from: a
+  key declared and required inside a root `allOf` branch, or required by every
+  `oneOf`/`anyOf` alternative, renders required, while a key required by only
+  SOME alternatives stays optional. Requiredness consulted root `required`
+  alone, so a parameter carried only by a root union rendered optional however
+  its variant declared it — the model was told an argument it must send is
+  optional. The Anthropic wire's own required merge
+  (`flattenRootSchemaUnion`) runs through that same single derivation, so the
+  native and XML surfaces cannot drift apart.
 - Parameters with no declared schema keep the previous guess exactly, so
   callers that do not pass `tools` see no change. Schemas reach the parser
   through the new optional `tools` argument on `parseToolCalls`,

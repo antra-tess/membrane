@@ -48,6 +48,21 @@ function captureWarnings<T>(body: () => T): { result: T; messages: string[] } {
   }
 }
 
+function renderedTools(tool: ToolDefinition): string {
+  const formatter = new AnthropicXmlFormatter();
+  const messages: NormalizedMessage[] = [
+    { participant: 'zz-user', content: [{ type: 'text', text: 'zz-render-request' }] },
+    { participant: 'zz-bot', content: [] },
+  ];
+  const result = formatter.buildMessages(messages, {
+    assistantParticipant: 'zz-bot',
+    tools: [tool],
+  });
+  return result.messages
+    .map(m => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content)))
+    .join('\n');
+}
+
 describe('type declared as an array', () => {
   it('resolves ["string","null"] to string and keeps the raw, untrimmed text', () => {
     const tool = toolWith('zz_nullable_string_tool', {
@@ -269,22 +284,49 @@ describe('parameters with no declaration at all', () => {
   });
 });
 
-describe('tool instructions rendered from the same resolution', () => {
-  function renderedTools(tool: ToolDefinition): string {
-    const formatter = new AnthropicXmlFormatter();
-    const messages: NormalizedMessage[] = [
-      { participant: 'zz-user', content: [{ type: 'text', text: 'zz-render-request' }] },
-      { participant: 'zz-bot', content: [] },
-    ];
-    const result = formatter.buildMessages(messages, {
-      assistantParticipant: 'zz-bot',
-      tools: [tool],
-    });
-    return result.messages
-      .map(m => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content)))
-      .join('\n');
-  }
+describe('schema-mismatch diagnostics name coordinates, never argument content', () => {
+  // Tool arguments routinely carry credentials, tokens and private documents,
+  // and the mismatch path fires exactly when a model formats such a value
+  // oddly. BOTH warn paths of a JSON-shaped declaration are covered here:
+  // (a) text that is not valid JSON at all, (b) valid JSON of the wrong kind.
+  const zzSecret = 'zz-secret-token-8f3a1c';
 
+  it('omits the value when the text does not parse as JSON', () => {
+    const tool = toolWith('zz_mismatch_unparseable_tool', {
+      type: 'object',
+      properties: { fld1: { type: 'object' } },
+    });
+    const { result, messages } = captureWarnings(() =>
+      parseParam(tool, 'fld1', `{${zzSecret} not json`)
+    );
+    expect(result).toBe(`{${zzSecret} not json`);
+    expect(messages).toHaveLength(1);
+    expect(messages.join('\n')).not.toContain(zzSecret);
+    expect(messages[0]).toContain('zz_mismatch_unparseable_tool');
+    expect(messages[0]).toContain('fld1');
+    expect(messages[0]).toContain('object');
+    expect(messages[0]).toContain('passing the raw text through');
+  });
+
+  it('omits the value when the text parses to a different JSON kind', () => {
+    const tool = toolWith('zz_mismatch_wrongkind_tool', {
+      type: 'object',
+      properties: { fld1: { type: 'object' } },
+    });
+    const { result, messages } = captureWarnings(() =>
+      parseParam(tool, 'fld1', JSON.stringify(zzSecret))
+    );
+    expect(result).toBe(zzSecret);
+    expect(messages).toHaveLength(1);
+    expect(messages.join('\n')).not.toContain(zzSecret);
+    expect(messages[0]).toContain('zz_mismatch_wrongkind_tool');
+    expect(messages[0]).toContain('fld1');
+    expect(messages[0]).toContain('object');
+    expect(messages[0]).toContain('parsed as string');
+  });
+});
+
+describe('tool instructions rendered from the same resolution', () => {
   it('states the resolved type for an indirect form instead of type="undefined"', () => {
     const doc = renderedTools(
       toolWith('zz_prompt_ref_tool', {
@@ -318,6 +360,71 @@ describe('tool instructions rendered from the same resolution', () => {
         ],
       })
     );
-    expect(doc).toContain('<parameter name="fld1" type="string">');
+    // The lone alternative applies to every valid instance, so its required
+    // list IS the effective one.
+    expect(doc).toContain('<parameter name="fld1" type="string" required="true">');
+  });
+});
+
+describe('effective requiredness across root combinators', () => {
+  it('marks a key required by an allOf branch, alongside root required', () => {
+    const doc = renderedTools(
+      toolWith('zz_prompt_allof_required_tool', {
+        type: 'object',
+        properties: { fld1: { type: 'string' } },
+        required: ['fld1'],
+        allOf: [
+          { type: 'object', properties: { fld2: { type: 'integer' } }, required: ['fld2'] },
+          { type: 'object', properties: { fld3: { type: 'boolean' } } },
+        ],
+      })
+    );
+    expect(doc).toContain('<parameter name="fld1" type="string" required="true">');
+    expect(doc).toContain('<parameter name="fld2" type="integer" required="true">');
+    expect(doc).toContain('<parameter name="fld3" type="boolean">');
+  });
+
+  it('marks a key required by EVERY anyOf alternative', () => {
+    const doc = renderedTools(
+      toolWith('zz_prompt_anyof_required_tool', {
+        type: 'object',
+        anyOf: [
+          {
+            type: 'object',
+            properties: { fld1: { type: 'string' }, fld2: { type: 'integer' } },
+            required: ['fld1', 'fld2'],
+          },
+          {
+            type: 'object',
+            properties: { fld1: { type: 'string' }, fld3: { type: 'boolean' } },
+            required: ['fld1'],
+          },
+        ],
+      })
+    );
+    expect(doc).toContain('<parameter name="fld1" type="string" required="true">');
+  });
+
+  it('leaves a key required by only SOME alternatives optional', () => {
+    const doc = renderedTools(
+      toolWith('zz_prompt_oneof_partial_tool', {
+        type: 'object',
+        oneOf: [
+          {
+            type: 'object',
+            properties: { fld1: { type: 'string' }, fld2: { type: 'integer' } },
+            required: ['fld1', 'fld2'],
+          },
+          {
+            type: 'object',
+            properties: { fld1: { type: 'string' }, fld2: { type: 'integer' } },
+            required: ['fld1'],
+          },
+        ],
+      })
+    );
+    expect(doc).toContain('<parameter name="fld1" type="string" required="true">');
+    expect(doc).toContain('<parameter name="fld2" type="integer">');
+    expect(doc).not.toContain('<parameter name="fld2" type="integer" required="true">');
   });
 });

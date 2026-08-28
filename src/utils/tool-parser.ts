@@ -55,13 +55,16 @@ const MAX_SCHEMA_RESOLUTION_DEPTH = 3;
 /**
  * Root-level combinator keys, in the order their variants are consulted.
  *
- * The order and the first-wins collision rule below deliberately MIRROR
  * `flattenRootSchemaUnion` (src/providers/anthropic-tool-schema.ts), which
- * merges the same root unions for the Anthropic wire. The parser and XML
- * instruction renderer both consume the collector below, so one order and one
- * collision rule govern all three surfaces.
+ * merges the same root unions for the Anthropic wire, IMPORTS this list rather
+ * than keeping a copy of it, and derives its `required` through
+ * `effectiveRequiredKeys` below. With the parser and the XML instruction
+ * renderer consuming the two collectors below, one key order, one first-wins
+ * collision rule and one requiredness law govern every surface.
  */
-const ROOT_UNION_KEYS = ['oneOf', 'anyOf', 'allOf'] as const;
+export const ROOT_UNION_KEYS = ['oneOf', 'anyOf', 'allOf'] as const;
+
+export type RootUnionKey = (typeof ROOT_UNION_KEYS)[number];
 
 type ToolInputSchema = ToolDefinition['inputSchema'];
 
@@ -143,6 +146,62 @@ export function collectDeclaredParameters(
   return declaredParameters;
 }
 
+/** Schema lists arrive from producers unvalidated: keep the string members. */
+function stringMembers(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string')
+    : [];
+}
+
+/**
+ * The keys a valid instance MUST carry, given a root `required` and the root
+ * combinators around it.
+ *
+ * Requiredness follows the combinator's own semantics: every `allOf` branch
+ * applies to the same instance, so their required lists UNION; `oneOf`/`anyOf`
+ * variants are alternatives, so only a key required by EVERY alternative is
+ * unconditionally required — an INTERSECTION. Sibling combinators must all
+ * hold at once, so their results union together with root `required`.
+ *
+ * MIRROR: `flattenRootSchemaUnion` (src/providers/anthropic-tool-schema.ts)
+ * derives the Anthropic wire's `required` through this same function, and
+ * `collectRequiredParameters` below feeds the XML instruction renderer. The
+ * requiredness a model is told and the requiredness the wire carries are one
+ * derivation on two surfaces, exactly as `collectDeclaredParameters` governs
+ * which parameters exist at all.
+ */
+export function effectiveRequiredKeys(
+  rootRequired: unknown,
+  combinators: ReadonlyArray<{
+    key: RootUnionKey;
+    variants: ReadonlyArray<{ required?: unknown }>;
+  }>
+): string[] {
+  const requiredPerCombinator = combinators.flatMap(({ key, variants }) => {
+    const variantRequired = variants.map(variant => stringMembers(variant.required));
+    if (key === 'allOf') return variantRequired.flat();
+    return variantRequired.reduce(
+      (sharedKeys, variantKeys) => sharedKeys.filter(name => variantKeys.includes(name)),
+      variantRequired[0] ?? []
+    );
+  });
+  return [...new Set([...stringMembers(rootRequired), ...requiredPerCombinator])];
+}
+
+/**
+ * Effective required keys of one tool's input schema — the requiredness twin
+ * of {@link collectDeclaredParameters}, which collects the same schema's
+ * parameters across the same root combinators.
+ */
+export function collectRequiredParameters(root: ToolInputSchema): Set<string> {
+  return new Set(
+    effectiveRequiredKeys(
+      root.required,
+      ROOT_UNION_KEYS.map(key => ({ key, variants: root[key] ?? [] }))
+    )
+  );
+}
+
 /** One warn per tool/parameter, so a repeated parse names the bound once. */
 const warnedUnresolvedForms = new Set<string>();
 
@@ -198,17 +257,24 @@ function matchesDeclaredType(value: unknown, declaredType: string): boolean {
   return jsonKindOf(value) === declaredType;
 }
 
+/**
+ * The mismatch diagnostic names COORDINATES ONLY — tool, parameter, declared
+ * type, and what the value did — and never the value itself. Tool arguments
+ * routinely carry credentials, tokens and private documents, and this path
+ * fires exactly when a model formats such a value oddly, so echoing it would
+ * copy secrets into stderr and any durable log downstream of it. The
+ * coordinates are what a maintainer reproduces from locally.
+ */
 function warnParamType(
   toolName: string,
   paramName: string,
   declaredType: string,
-  detail: string,
-  rawValue: string
+  detail: string
 ): void {
-  const preview = rawValue.length > 120 ? `${rawValue.slice(0, 120)}…` : rawValue;
   console.warn(
     `[membrane:tool-parser] tool "${toolName}" parameter "${paramName}" declares type ` +
-      `"${declaredType}" but ${detail}. Raw value: ${JSON.stringify(preview)}`
+      `"${declaredType}" but ${detail} (the value itself is not logged: tool arguments ` +
+      'can carry secrets).'
   );
 }
 
@@ -264,8 +330,7 @@ function parseParamValue(
         context!.toolName,
         context!.paramName,
         declaredType,
-        'the value is not valid JSON; passing the raw text through',
-        value
+        'the value is not valid JSON; passing the raw text through'
       );
       return value;
     }
@@ -274,8 +339,7 @@ function parseParamValue(
         context!.toolName,
         context!.paramName,
         declaredType,
-        `the value parsed as ${jsonKindOf(parsed)}`,
-        value
+        `the value parsed as ${jsonKindOf(parsed)}`
       );
     }
     return parsed;
