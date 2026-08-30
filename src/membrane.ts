@@ -2153,6 +2153,7 @@ export class Membrane {
       thinking: request.config.thinking,
       systemPrompt: request.system,
       promptCaching: request.promptCaching ?? this.config.defaultPromptCaching ?? true, // Default true for backward compat
+      cacheMarkers: request.cacheMarkers ?? 'membrane-system',
       cacheTtl: request.cacheTtl,
       additionalStopSequences,
       maxParticipantsForStop,

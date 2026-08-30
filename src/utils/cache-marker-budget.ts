@@ -150,6 +150,35 @@ export function countWireCacheMarkers(surfaces: WireCacheSurfaces): number {
 }
 
 /**
+ * Validate a caller-owned marker layout without changing it.
+ *
+ * In `cm-owned` mode the caller has deliberately allocated the complete
+ * breakpoint set. Silently stripping or reordering those markers would make
+ * the cache receipt describe a request that was never sent, so invalid
+ * layouts fail before submission instead of using the legacy repair clamp.
+ */
+export function assertCacheMarkersWithinLimit(
+  surfaces: WireCacheSurfaces,
+  site: string
+): number {
+  const marked = collectMarkedBlocks(surfaces);
+  const invalidThinking = marked.filter(
+    (block) => block.type === 'thinking' || block.type === 'redacted_thinking'
+  ).length;
+  if (invalidThinking > 0) {
+    throw new Error(
+      `${site}: caller-owned cache_control cannot be attached to thinking/redacted_thinking blocks`
+    );
+  }
+  if (marked.length > MAX_CACHE_BREAKPOINTS) {
+    throw new Error(
+      `${site}: cache_control limit exceeded: ${marked.length} markers (maximum ${MAX_CACHE_BREAKPOINTS})`
+    );
+  }
+  return marked.length;
+}
+
+/**
  * Bring a request inside the breakpoint budget, in place, at the last exit
  * before the adapter call. Two repairs, both loud:
  *

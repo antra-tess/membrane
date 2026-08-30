@@ -34,7 +34,7 @@ import {
   type ToolDefinitionForPrompt,
 } from '../utils/tool-parser.js';
 import { IncrementalXmlParser } from '../utils/stream-parser.js';
-import { clampCacheMarkers } from '../utils/cache-marker-budget.js';
+import { assertCacheMarkersWithinLimit, clampCacheMarkers } from '../utils/cache-marker-budget.js';
 import { lastCacheableBlockIndex } from './native.js';
 import { isAcceptedImageMediaType, strippedImagePlaceholder } from '../utils/image-media.js';
 
@@ -149,6 +149,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
       thinking,
       systemPrompt,
       promptCaching = false,
+      cacheMarkers = 'membrane-system',
       cacheTtl,
       contextPrefix,
       prefillUserMessage,
@@ -233,7 +234,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
       systemContent = systemBlocks;
     } else if (systemText) {
       const systemBlock: Record<string, unknown> = { type: 'text', text: systemText };
-      if (promptCaching) {
+      if (promptCaching && cacheMarkers === 'membrane-system') {
         systemBlock.cache_control = cacheControl;
       }
       systemContent = [systemBlock];
@@ -242,7 +243,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     // Add context prefix as first cached assistant message (for simulacrum seeding)
     if (contextPrefix) {
       const prefixBlock: Record<string, unknown> = { type: 'text', text: contextPrefix };
-      if (promptCaching) {
+      if (promptCaching && cacheMarkers === 'membrane-system') {
         prefixBlock.cache_control = cacheControl;
       }
       providerMessages.push({
@@ -425,7 +426,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
           type: 'text',
           text: 'The assistant is in CLI simulation mode, and responds to the user\'s CLI commands only with the output of the command.',
         };
-        if (promptCaching) {
+        if (promptCaching && cacheMarkers === 'membrane-system') {
           cliSystemBlock.cache_control = cacheControl;
         }
         systemContent = [cliSystemBlock];
@@ -457,10 +458,10 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     // limit, which rejects the request outright. Clamping here, once, on the
     // finished artifacts is the only count that can see all five sites; the
     // reported tally is that same recount, so it can never drift from the wire.
-    const budget = clampCacheMarkers(
-      { messages: providerMessages, system: systemContent, tools: nativeTools },
-      'anthropic-xml'
-    );
+    const cacheSurfaces = { messages: providerMessages, system: systemContent, tools: nativeTools };
+    const budget = cacheMarkers === 'cm-owned'
+      ? { total: assertCacheMarkersWithinLimit(cacheSurfaces, 'anthropic-xml') }
+      : clampCacheMarkers(cacheSurfaces, 'anthropic-xml');
 
     return {
       messages: providerMessages,

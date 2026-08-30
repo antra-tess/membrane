@@ -68,6 +68,9 @@ export interface BuildOptions {
   /** Enable prompt caching (Anthropic-specific) */
   promptCaching?: boolean;
 
+  /** See NormalizedRequest.cacheMarkers. */
+  cacheMarkers?: 'membrane-system' | 'cm-owned';
+
   /** Cache TTL for Anthropic prompt caching - '5m' (default) or '1h' for extended */
   cacheTtl?: '5m' | '1h';
 

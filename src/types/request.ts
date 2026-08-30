@@ -152,6 +152,10 @@ export interface NormalizedRequest {
    */
   promptCaching?: boolean;
 
+  /** Marker ownership policy. `cm-owned` disables every formatter-generated
+   * system/context-prefix marker; only normalized message breakpoints survive. */
+  cacheMarkers?: 'membrane-system' | 'cm-owned';
+
   /**
    * Cache TTL for Anthropic prompt caching.
    * '5m' (default) = 5 minute TTL

@@ -30,6 +30,7 @@ import type {
 } from './types.js';
 import { normalizeToolPairs, mergeConsecutiveRoles } from './normalize-tool-pairs.js';
 import { isAcceptedImageMediaType, strippedImagePlaceholder } from '../utils/image-media.js';
+import { assertCacheMarkersWithinLimit } from '../utils/cache-marker-budget.js';
 
 /** Index of the last content block that can carry cache_control. Anthropic
  *  rejects cache_control on thinking / redacted_thinking blocks, so a cache
@@ -184,6 +185,7 @@ export class NativeFormatter implements PrefillFormatter {
       tools,
       systemPrompt,
       promptCaching = false,
+      cacheMarkers = 'membrane-system',
       cacheTtl,
       hasCacheMarker,
       contextPrefix,
@@ -209,7 +211,7 @@ export class NativeFormatter implements PrefillFormatter {
     // Add context prefix as first assistant message (for simulacrum seeding)
     if (contextPrefix) {
       const prefixBlock: Record<string, unknown> = { type: 'text', text: contextPrefix };
-      if (promptCaching && cacheControl) {
+      if (promptCaching && cacheControl && cacheMarkers === 'membrane-system') {
         prefixBlock.cache_control = cacheControl;
         markedBreakpoints++;
       }
@@ -247,6 +249,13 @@ export class NativeFormatter implements PrefillFormatter {
       const content = this.convertContent(message.content, message.participant, {
         includeNames: participantMode === 'multiuser' && !isAssistant,
       });
+
+      if (
+        cacheMarkers === 'cm-owned' &&
+        content.some((block) => Boolean((block as Record<string, unknown>).cache_control))
+      ) {
+        throw new Error('cm-owned cache markers reject imported block-level cache_control');
+      }
 
       if (content.length === 0) {
         continue; // Skip empty messages
@@ -302,7 +311,13 @@ export class NativeFormatter implements PrefillFormatter {
     // Build system content. Cache the system block only as a fallback — when no
     // message breakpoint was marked (see note above; otherwise a message
     // breakpoint already caches tools+system as part of its prefix).
-    const cacheSystem = cacheControl && markedBreakpoints === 0 ? cacheControl : undefined;
+    if (markedBreakpoints > 4) {
+      throw new Error(`cache_control limit exceeded: ${markedBreakpoints} markers (maximum 4)`);
+    }
+    const cacheSystem =
+      cacheMarkers === 'membrane-system' && cacheControl && markedBreakpoints === 0
+        ? cacheControl
+        : undefined;
     let systemContent: unknown;
     if (typeof systemPrompt === 'string') {
       if (cacheSystem) {
@@ -327,6 +342,12 @@ export class NativeFormatter implements PrefillFormatter {
 
     // Native tools
     const nativeTools = tools?.length ? this.convertToNativeTools(tools) : undefined;
+    if (cacheMarkers === 'cm-owned') {
+      assertCacheMarkersWithinLimit(
+        { messages: mergedMessages, system: systemContent, tools: nativeTools },
+        'native'
+      );
+    }
 
     return {
       messages: mergedMessages,
