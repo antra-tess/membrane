@@ -37,3 +37,9 @@ export type {
   KeepaliveLane,
   KeepaliveSend,
 } from './cache-keepalive.js';
+
+export {
+  computeCacheWireReceipt,
+  type CacheWireReceipt,
+  type CacheWireMarkerReceipt,
+} from './cache-wire-receipt.js';

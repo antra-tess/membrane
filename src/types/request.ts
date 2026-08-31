@@ -112,6 +112,9 @@ export type ToolMode =
 // ============================================================================
 
 export interface NormalizedRequest {
+  /** Receives the exact post-format/post-hook cache receipt immediately before
+   * network submission. Observability only; never forwarded to providers. */
+  onCacheWireReceipt?: (receipt: import('../cache-wire-receipt.js').CacheWireReceipt) => void;
   /**
    * Explicitly own the loss of old inline images when the serialized request
    * exceeds the API byte cap: oldest images are replaced with loud

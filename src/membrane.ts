@@ -51,6 +51,7 @@ import {
   unsupportedError,
 } from './types/index.js';
 import type { BuildResult } from './formatters/types.js';
+import { computeCacheWireReceipt } from './cache-wire-receipt.js';
 import {
   parseToolCalls,
   formatToolResults,
@@ -244,6 +245,7 @@ export class Membrane {
         // Cast back to the local provider-request shape: the hook returns
         // `unknown` deliberately, and we acknowledge the cast at the boundary.
         const finalRequest = (await this.applyBeforeRequestHook(request, providerRequest)) as typeof providerRequest;
+        request.onCacheWireReceipt?.(computeCacheWireReceipt(finalRequest));
 
         // Last exit before the adapter: the only place that sees EVERY
         // contribution (builder, formatter, passthrough, float, hook).
@@ -2261,6 +2263,7 @@ export class Membrane {
     // normalized form into every adapter's options.
     const { normalizedRequest, refusalRetries, onRetrying, onWireCacheMarkers, ...adapterOptions } = options;
     const finalRequest = (await this.applyBeforeRequestHook(normalizedRequest, request)) as typeof request;
+    normalizedRequest.onCacheWireReceipt?.(computeCacheWireReceipt(finalRequest));
 
     // Last exit before the adapter: the only place that sees EVERY
     // contribution (builder, formatter, passthrough, float, hook). Every
