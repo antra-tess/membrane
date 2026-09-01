@@ -146,6 +146,18 @@ export interface AnthropicAdapterConfig {
 
   /** Default headers to include with Anthropic requests */
   defaultHeaders?: ClientOptions['defaultHeaders'];
+
+  /**
+   * Live per-request headers, evaluated at request time — for values that
+   * change between calls (e.g. household telemetry stamps such as
+   * `x-gate-debt-chunks`, read by an inference gateway and stripped there
+   * before the vendor ever sees them). Merged over the per-request beta
+   * headers for the OUTGOING request only; cache-keepalive replays
+   * deliberately resend their recorded headers, so a telemetry stamp is
+   * never replayed stale — an unstamped touch is honest, a stale stamp lies.
+   * null/undefined/'' values are dropped.
+   */
+  dynamicHeaders?: () => Record<string, string | number | null | undefined>;
   
   /** Default max tokens */
   defaultMaxTokens?: number;
@@ -183,6 +195,8 @@ export class AnthropicAdapter implements ProviderAdapter {
   private defaultBeta: string | undefined;
   /** Holds idle agents' cached prefixes warm; undefined when disabled. */
   readonly cacheKeepalive: CacheKeepalive | undefined;
+  /** Live per-request header source (see AnthropicAdapterConfig.dynamicHeaders). */
+  private readonly dynamicHeaders?: () => Record<string, string | number | null | undefined>;
 
   constructor(config: AnthropicAdapterConfig = {}) {
     const clientOptions: ClientOptions = {
@@ -190,6 +204,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       defaultHeaders: config.defaultHeaders,
     };
     this.defaultBeta = extractBetaHeader(config.defaultHeaders);
+    this.dynamicHeaders = config.dynamicHeaders;
 
     if (config.authToken !== undefined) {
       clientOptions.authToken = config.authToken;
@@ -235,7 +250,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     try {
       const response = await this.client.messages.create(fullRequest, {
         signal: options?.signal,
-        headers,
+        headers: this.liveHeaders(headers),
       });
 
       return this.parseResponse(response, fullRequest);
@@ -308,7 +323,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     try {
       const stream = await this.client.messages.stream(anthropicRequest, {
         signal: idleAbort.signal,
-        headers: this.betaHeaders(request),
+        headers: this.liveHeaders(this.betaHeaders(request)),
       });
 
       // Accumulate response metadata from SSE events directly, so we can
@@ -555,6 +570,19 @@ export class AnthropicAdapter implements ProviderAdapter {
    *  the SDK replaces same-key defaults instead of merging, and the API
    *  accepts comma-separated betas. Undefined when nothing to add, so the
    *  defaults apply untouched. */
+  /** Base headers + the live dynamicHeaders stamp. Request time only: the
+   *  keepalive recorder receives the base headers BEFORE this merge, so
+   *  replayed touches never carry a stale telemetry value. */
+  private liveHeaders(base: Record<string, string> | undefined): Record<string, string> | undefined {
+    const dyn = this.dynamicHeaders?.();
+    if (!dyn) return base;
+    const out: Record<string, string> = { ...(base ?? {}) };
+    for (const [k, v] of Object.entries(dyn)) {
+      if (v !== null && v !== undefined && v !== '') out[k] = String(v);
+    }
+    return Object.keys(out).length ? out : undefined;
+  }
+
   private betaHeaders(request: ProviderRequest): Record<string, string> | undefined {
     if (!thinkingEnabled(request) || !needsInterleavedThinkingBeta(request.model)) {
       return undefined;
