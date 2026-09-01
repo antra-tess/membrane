@@ -1,1 +1,0 @@
-- Membrane logs a warning when a tool block had to be re-anchored past a second `<function_calls>` opener. The repair is silent by construction; the warning is how an operator learns that a truncated block is sitting in a stored conversation's assistant text, where it will keep being repaired on every later compile.
