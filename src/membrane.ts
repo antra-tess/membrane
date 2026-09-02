@@ -35,6 +35,7 @@ import {
   stripThinkingForPrefill,
 } from './utils/thinking-carriers.js';
 import {
+  assertCacheMarkersWithinLimit,
   countWireCacheMarkers,
   clampCacheMarkers,
   ownSystemBlocks,
@@ -245,11 +246,15 @@ export class Membrane {
         // Cast back to the local provider-request shape: the hook returns
         // `unknown` deliberately, and we acknowledge the cast at the boundary.
         const finalRequest = (await this.applyBeforeRequestHook(request, providerRequest)) as typeof providerRequest;
-        request.onCacheWireReceipt?.(computeCacheWireReceipt(finalRequest));
 
         // Last exit before the adapter: the only place that sees EVERY
         // contribution (builder, formatter, passthrough, float, hook).
-        clampCacheMarkers(finalRequest, 'complete');
+        if (request.cacheMarkers === 'cm-owned') {
+          assertCacheMarkersWithinLimit(finalRequest, 'complete');
+        } else {
+          clampCacheMarkers(finalRequest, 'complete');
+        }
+        request.onCacheWireReceipt?.(computeCacheWireReceipt(finalRequest));
 
         const rawProviderResponse = await this.adapter.complete(finalRequest, {
           signal: options.signal,
@@ -2263,15 +2268,17 @@ export class Membrane {
     // normalized form into every adapter's options.
     const { normalizedRequest, refusalRetries, onRetrying, onWireCacheMarkers, ...adapterOptions } = options;
     const finalRequest = (await this.applyBeforeRequestHook(normalizedRequest, request)) as typeof request;
-    normalizedRequest.onCacheWireReceipt?.(computeCacheWireReceipt(finalRequest));
 
     // Last exit before the adapter: the only place that sees EVERY
     // contribution (builder, formatter, passthrough, float, hook). Every
     // streaming path — stream(), streamYielding(), both tool loops — funnels
     // through here, so this is the one clamp they all get, and its tally is
     // therefore the only count that describes the wire.
-    const clampOutcome = clampCacheMarkers(finalRequest, 'streamOnce');
-    onWireCacheMarkers?.(clampOutcome.total);
+    const markerCount = normalizedRequest.cacheMarkers === 'cm-owned'
+      ? assertCacheMarkersWithinLimit(finalRequest, 'streamOnce')
+      : clampCacheMarkers(finalRequest, 'streamOnce').total;
+    normalizedRequest.onCacheWireReceipt?.(computeCacheWireReceipt(finalRequest));
+    onWireCacheMarkers?.(markerCount);
 
     // Retries are only safe when the caller can discard the abandoned
     // attempt, so they require BOTH a budget and an onRetrying hook.

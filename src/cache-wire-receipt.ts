@@ -19,10 +19,10 @@ export function computeCacheWireReceipt(rawRequest: unknown): CacheWireReceipt {
   const prefix: unknown[] = [];
   const markers: CacheWireMarkerReceipt[] = [];
   let chars = 0;
-  for (const block of blocks) {
-    prefix.push(block);
-    chars += stableStringify(block).length;
-    if (hasCacheControl(block)) {
+  for (const unit of blocks) {
+    prefix.push(unit.identity);
+    chars += unit.estimatedChars;
+    if (unit.marked) {
       markers.push({
         ordinal: markers.length,
         prefixHash: sha(stableStringify(prefix)),
@@ -33,23 +33,76 @@ export function computeCacheWireReceipt(rawRequest: unknown): CacheWireReceipt {
   return { requestHash, markers };
 }
 
-function flattenWireBlocks(rawRequest: unknown): unknown[] {
-  if (!rawRequest || typeof rawRequest !== 'object') return [rawRequest];
+interface ReceiptUnit {
+  identity: unknown;
+  marked: boolean;
+  estimatedChars: number;
+}
+
+function flattenWireBlocks(rawRequest: unknown): ReceiptUnit[] {
+  if (!rawRequest || typeof rawRequest !== 'object') {
+    return [{ identity: rawRequest, marked: false, estimatedChars: stableStringify(rawRequest).length }];
+  }
   const request = rawRequest as Record<string, unknown>;
-  const out: unknown[] = [];
-  if (request.tools !== undefined) out.push({ tools: request.tools });
+  const out: ReceiptUnit[] = [];
+  if (Array.isArray(request.tools)) {
+    request.tools.forEach((tool, index) => out.push({
+      identity: { surface: 'tool', index, tool },
+      marked: hasCacheControl(tool),
+      estimatedChars: stableStringify(tool).length,
+    }));
+  } else if (request.tools !== undefined) {
+    out.push({
+      identity: { surface: 'tools', value: request.tools },
+      marked: hasCacheControl(request.tools),
+      estimatedChars: stableStringify(request.tools).length,
+    });
+  }
   if (request.system !== undefined) {
     const system = request.system;
-    if (Array.isArray(system)) out.push(...system);
-    else out.push({ system });
+    if (Array.isArray(system)) {
+      system.forEach((block, index) => out.push({
+        identity: { surface: 'system', index, block },
+        marked: hasCacheControl(block),
+        estimatedChars: stableStringify(block).length,
+      }));
+    } else {
+      out.push({
+        identity: { surface: 'system', value: system },
+        marked: hasCacheControl(system),
+        estimatedChars: stableStringify(system).length,
+      });
+    }
   }
   if (Array.isArray(request.messages)) {
-    for (const message of request.messages) {
-      if (!message || typeof message !== 'object') { out.push(message); continue; }
+    request.messages.forEach((message, messageIndex) => {
+      if (!message || typeof message !== 'object') {
+        out.push({
+          identity: { surface: 'message', messageIndex, value: message },
+          marked: false,
+          estimatedChars: stableStringify(message).length,
+        });
+        return;
+      }
+      const record = message as Record<string, unknown>;
       const content = (message as Record<string, unknown>).content;
-      if (Array.isArray(content)) out.push(...content);
-      else out.push(message);
-    }
+      if (Array.isArray(content)) {
+        content.forEach((block, blockIndex) => out.push({
+          identity: {
+            surface: 'message-block', messageIndex, blockIndex,
+            role: record.role, block,
+          },
+          marked: hasCacheControl(block),
+          estimatedChars: stableStringify({ role: record.role, content: [block] }).length,
+        }));
+      } else {
+        out.push({
+          identity: { surface: 'message', messageIndex, role: record.role, content },
+          marked: hasCacheControl(message),
+          estimatedChars: stableStringify(message).length,
+        });
+      }
+    });
   }
   return out;
 }

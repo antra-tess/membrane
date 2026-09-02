@@ -28,4 +28,24 @@ describe('cache wire receipt', () => {
     const b = computeCacheWireReceipt({ system: 'b', messages: [] });
     expect(a.requestHash).not.toBe(b.requestHash);
   });
+
+  it('receipts tool breakpoints instead of hiding them inside the tools array', () => {
+    const receipt = computeCacheWireReceipt({
+      tools: [
+        { name: 'a', input_schema: { type: 'object' } },
+        { name: 'b', input_schema: { type: 'object' }, cache_control: { type: 'ephemeral' } },
+      ],
+      messages: [],
+    });
+    expect(receipt.markers).toHaveLength(1);
+  });
+
+  it('includes message role and envelope identity in marked-prefix hashes', () => {
+    const block = { type: 'text', text: 'same', cache_control: { type: 'ephemeral' } };
+    const user = computeCacheWireReceipt({ messages: [{ role: 'user', content: [block] }] });
+    const assistant = computeCacheWireReceipt({ messages: [{ role: 'assistant', content: [block] }] });
+    expect(user.markers).toHaveLength(1);
+    expect(assistant.markers).toHaveLength(1);
+    expect(user.markers[0]!.prefixHash).not.toBe(assistant.markers[0]!.prefixHash);
+  });
 });

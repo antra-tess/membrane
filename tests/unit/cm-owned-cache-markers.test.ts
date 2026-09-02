@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { NativeFormatter } from '../../src/formatters/native.js';
 import { AnthropicXmlFormatter } from '../../src/formatters/anthropic-xml.js';
+import { Membrane } from '../../src/membrane.js';
+import { MockAdapter } from '../../src/providers/mock.js';
 import type { BuildResult } from '../../src/formatters/types.js';
 import type { NormalizedMessage } from '../../src/types/index.js';
 
@@ -62,5 +64,55 @@ describe('cm-owned cache marker contract', () => {
       }],
     }];
     expect(() => build(formatter, messages)).toThrow(/imported block-level/);
+  });
+
+  it('fails closed when a final hook adds a fifth caller-owned marker', async () => {
+    let receiptCalls = 0;
+    const membrane = new Membrane(new MockAdapter(), {
+      formatter: new NativeFormatter(),
+      hooks: {
+        beforeRequest: (_normalized, raw) => ({
+          ...(raw as Record<string, unknown>),
+          system: [{
+            type: 'text', text: 'hook marker',
+            cache_control: { type: 'ephemeral' },
+          }],
+        }),
+      },
+    });
+    await expect(membrane.complete({
+      messages: markedMessages(4),
+      config: { model: 'test-model', maxTokens: 10 },
+      promptCaching: true,
+      cacheMarkers: 'cm-owned',
+      assistantParticipant: 'Claude',
+      onCacheWireReceipt: () => { receiptCalls++; },
+    })).rejects.toThrow(/maximum 4/);
+    expect(receiptCalls).toBe(0);
+  });
+
+  it('fails closed on a hook-added thinking marker in the streaming path', async () => {
+    const membrane = new Membrane(new MockAdapter(), {
+      formatter: new NativeFormatter(),
+      hooks: {
+        beforeRequest: (_normalized, raw) => ({
+          ...(raw as Record<string, unknown>),
+          messages: [{
+            role: 'user',
+            content: [{
+              type: 'thinking', thinking: 'hidden', signature: 'sig',
+              cache_control: { type: 'ephemeral' },
+            }],
+          }],
+        }),
+      },
+    });
+    await expect(membrane.stream({
+      messages: markedMessages(1),
+      config: { model: 'test-model', maxTokens: 10 },
+      promptCaching: true,
+      cacheMarkers: 'cm-owned',
+      assistantParticipant: 'Claude',
+    }, { onChunk: () => {} })).rejects.toThrow(/thinking\/redacted_thinking/);
   });
 });
