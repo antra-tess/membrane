@@ -34,6 +34,8 @@
  * for Anthropic and are left untouched; only the root is rewritten.
  */
 
+import { ROOT_UNION_KEYS, effectiveRequiredKeys } from '../utils/tool-parser.js';
+
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -50,8 +52,6 @@ function stringRequired(value: unknown): string[] {
     ? value.filter((entry): entry is string => typeof entry === 'string')
     : [];
 }
-
-const ROOT_UNION_KEYS = ['oneOf', 'anyOf', 'allOf'] as const;
 
 /** Max length of the description we synthesize on the fallback path. */
 const MAX_FALLBACK_DESCRIPTION = 4000;
@@ -106,22 +106,15 @@ export function flattenRootSchemaUnion(schema: unknown): unknown {
       }
     }
 
-    // Per-combinator required semantics: `allOf` unions its variants' required
-    // lists (every variant applies); `oneOf`/`anyOf` keep only keys required by
-    // every variant (alternatives). Across combinators they all apply at once,
-    // so the effective required set is the union of the per-combinator results.
-    const mergedRequired = combinators.flatMap(({ key, variants }) => {
-      const variantRequired = variants.map((variant) => stringRequired(variant.required));
-      return key === 'allOf'
-        ? [...new Set(variantRequired.flat())]
-        : variantRequired.reduce(
-            (acc, req) => acc.filter((k) => req.includes(k)),
-            variantRequired[0] ?? [],
-          );
-    });
-    const required = [
-      ...new Set([...stringRequired(rest.required), ...mergedRequired]),
-    ].filter((key) => key in properties);
+    // Per-combinator required semantics (`allOf` unions, `oneOf`/`anyOf`
+    // intersect) come from `effectiveRequiredKeys`, the one derivation the XML
+    // instruction renderer also reads through `collectRequiredParameters`:
+    // what the wire declares required and what the model is told is required
+    // cannot drift. A required key with no merged property is dropped, since
+    // this schema's `required` may only name properties it carries.
+    const required = effectiveRequiredKeys(rest.required, combinators).filter(
+      (key) => key in properties,
+    );
 
     const {
       properties: _properties,

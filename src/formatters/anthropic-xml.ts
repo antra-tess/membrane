@@ -31,6 +31,9 @@ import {
   formatToolResults as formatToolResultsXml,
   parseAccumulatedIntoBlocks,
   formatToolDefinitions,
+  collectDeclaredParameters,
+  collectRequiredParameters,
+  resolveDeclaredType,
   type ToolDefinitionForPrompt,
 } from '../utils/tool-parser.js';
 import { IncrementalXmlParser } from '../utils/stream-parser.js';
@@ -491,8 +494,8 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     return new IncrementalXmlParser();
   }
 
-  parseToolCalls(content: string): ToolCall[] {
-    const result = parseToolCallsXml(content);
+  parseToolCalls(content: string, tools?: ToolDefinition[]): ToolCall[] {
+    const result = parseToolCallsXml(content, tools ? { tools } : undefined);
     return result?.calls ?? [];
   }
 
@@ -500,8 +503,8 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     return /<(antml:)?function_calls>/.test(content);
   }
 
-  parseContentBlocks(content: string): ContentBlock[] {
-    const { blocks } = parseAccumulatedIntoBlocks(content);
+  parseContentBlocks(content: string, tools?: ToolDefinition[]): ContentBlock[] {
+    const { blocks } = parseAccumulatedIntoBlocks(content, tools ? { tools } : undefined);
     return blocks;
   }
 
@@ -651,23 +654,33 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
   }
 
   private formatToolDefinitionsXml(tools: ToolDefinition[]): string {
-    const toolsForPrompt: ToolDefinitionForPrompt[] = tools.map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.inputSchema.properties
-        ? Object.fromEntries(
-            Object.entries(tool.inputSchema.properties).map(([name, schema]) => [
-              name,
-              {
-                type: schema.type,
-                description: schema.description,
-                required: tool.inputSchema.required?.includes(name),
-                enum: schema.enum,
-              },
-            ])
-          )
-        : {},
-    }));
+    const toolsForPrompt: ToolDefinitionForPrompt[] = tools.map((tool) => {
+      // Requiredness is derived with combinator semantics, from the same
+      // schema the parameters themselves are collected from: a key declared
+      // and required only inside a root `allOf` branch, or required by every
+      // `oneOf`/`anyOf` alternative, is required here too. Root `required`
+      // alone used to decide it, so every root-union parameter rendered
+      // optional no matter what its variant declared.
+      const requiredParameters = collectRequiredParameters(tool.inputSchema);
+      return {
+        name: tool.name,
+        description: tool.description,
+        parameters: Object.fromEntries(
+          Object.entries(collectDeclaredParameters(tool.inputSchema)).map(([name, schema]) => [
+            name,
+            {
+              // The SAME resolution the parser applies, so what the model is
+              // told a parameter is and what the parser decides it is cannot
+              // drift: one derivation, two surfaces.
+              type: resolveDeclaredType(schema, tool.inputSchema),
+              description: schema.description,
+              required: requiredParameters.has(name),
+              enum: schema.enum,
+            },
+          ])
+        ),
+      };
+    });
 
     return formatToolDefinitions(toolsForPrompt);
   }
