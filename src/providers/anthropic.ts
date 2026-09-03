@@ -130,6 +130,18 @@ export function thinkingEnabled(request: ProviderRequest): boolean {
 // Adapter Configuration
 // ============================================================================
 
+/**
+ * What the dynamicHeaders callback is told about the request it stamps.
+ * `lane` names the transport shape: 'stream' is the conversational turn loop,
+ * 'complete' the non-streamed lane (compression, side-calls, keepalive
+ * touches). A stamp that describes WHY the agent's turn fired belongs on the
+ * stream lane only — a compression call running in the background is not the
+ * turn, and stamping it with the turn's cause would lie to the ledger.
+ */
+export interface DynamicHeadersContext {
+  lane: 'stream' | 'complete';
+}
+
 export interface AnthropicAdapterConfig {
   /** API key (defaults to ANTHROPIC_API_KEY env var) */
   apiKey?: string | null;
@@ -157,7 +169,7 @@ export interface AnthropicAdapterConfig {
    * never replayed stale — an unstamped touch is honest, a stale stamp lies.
    * null/undefined/'' values are dropped.
    */
-  dynamicHeaders?: () => Record<string, string | number | null | undefined>;
+  dynamicHeaders?: (ctx?: DynamicHeadersContext) => Record<string, string | number | null | undefined>;
   
   /** Default max tokens */
   defaultMaxTokens?: number;
@@ -196,7 +208,7 @@ export class AnthropicAdapter implements ProviderAdapter {
   /** Holds idle agents' cached prefixes warm; undefined when disabled. */
   readonly cacheKeepalive: CacheKeepalive | undefined;
   /** Live per-request header source (see AnthropicAdapterConfig.dynamicHeaders). */
-  private readonly dynamicHeaders?: () => Record<string, string | number | null | undefined>;
+  private readonly dynamicHeaders?: (ctx?: DynamicHeadersContext) => Record<string, string | number | null | undefined>;
 
   constructor(config: AnthropicAdapterConfig = {}) {
     const clientOptions: ClientOptions = {
@@ -250,7 +262,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     try {
       const response = await this.client.messages.create(fullRequest, {
         signal: options?.signal,
-        headers: this.liveHeaders(headers),
+        headers: this.liveHeaders(headers, 'complete'),
       });
 
       return this.parseResponse(response, fullRequest);
@@ -323,7 +335,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     try {
       const stream = await this.client.messages.stream(anthropicRequest, {
         signal: idleAbort.signal,
-        headers: this.liveHeaders(this.betaHeaders(request)),
+        headers: this.liveHeaders(this.betaHeaders(request), 'stream'),
       });
 
       // Accumulate response metadata from SSE events directly, so we can
@@ -573,8 +585,8 @@ export class AnthropicAdapter implements ProviderAdapter {
   /** Base headers + the live dynamicHeaders stamp. Request time only: the
    *  keepalive recorder receives the base headers BEFORE this merge, so
    *  replayed touches never carry a stale telemetry value. */
-  private liveHeaders(base: Record<string, string> | undefined): Record<string, string> | undefined {
-    const dyn = this.dynamicHeaders?.();
+  private liveHeaders(base: Record<string, string> | undefined, lane: DynamicHeadersContext['lane']): Record<string, string> | undefined {
+    const dyn = this.dynamicHeaders?.({ lane });
     if (!dyn) return base;
     const out: Record<string, string> = { ...(base ?? {}) };
     for (const [k, v] of Object.entries(dyn)) {

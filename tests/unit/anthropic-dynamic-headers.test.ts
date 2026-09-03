@@ -40,6 +40,14 @@ function adapterWith(dynamicHeaders?: () => Record<string, string | number | nul
 }
 
 describe('AnthropicAdapter dynamicHeaders', () => {
+  it('tells the callback which lane it is stamping (complete vs stream)', async () => {
+    const lanes: unknown[] = [];
+    const { adapter, create } = adapterWith(((ctx?: { lane: string }) => { lanes.push(ctx?.lane); return { 'x-lane': ctx?.lane ?? null }; }) as any);
+    await adapter.complete(REQUEST);
+    expect(lanes).toEqual(['complete']);
+    expect(create.mock.calls[0][1].headers).toEqual({ 'x-lane': 'complete' });
+  });
+
   it('stamps the outgoing request and re-evaluates per call', async () => {
     let debt = 3;
     const { adapter, create } = adapterWith(() => ({ 'x-gate-debt-chunks': debt }));
