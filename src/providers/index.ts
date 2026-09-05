@@ -7,6 +7,7 @@ export {
   toAnthropicContent,
   fromAnthropicContent,
   type AnthropicAdapterConfig,
+  type DynamicHeadersContext,
 } from './anthropic.js';
 
 export { flattenRootSchemaUnion } from './anthropic-tool-schema.js';
