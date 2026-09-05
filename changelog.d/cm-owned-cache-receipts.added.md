@@ -1,1 +1,0 @@
-- Add caller-owned prompt-cache marker mode with fail-closed four-breakpoint validation and exact post-format cache-wire receipts; preserve all four markers through native, XML, and Bedrock request paths.

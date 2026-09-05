@@ -12,6 +12,18 @@ Releases up to and including 0.5.75 predate this file; for their contents see
 
 ## Unreleased
 
+## 0.5.82 — 2026-09-05
+
+### Added
+
+- Add caller-owned prompt-cache marker mode with fail-closed four-breakpoint validation and exact post-format cache-wire receipts; preserve all four markers through native, XML, and Bedrock request paths.
+
+### Changed
+
+- `dynamicHeaders` receives `{ lane: 'stream' | 'complete' }` so a host can
+  withhold turn-describing stamps from background calls; zero-argument
+  callbacks keep working, `DynamicHeadersContext` is exported (#67).
+
 ## 0.5.81 — 2026-09-01
 
 ### Breaking
