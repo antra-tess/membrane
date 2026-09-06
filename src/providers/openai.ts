@@ -114,12 +114,13 @@ export interface OpenAIAdapterConfig {
 
 /**
  * Major version of a first-party GPT chat model id (`gpt-5` → 5,
- * `gpt-5.4-mini` → 5, `gpt-6-astra` → 6). `gpt-4o` / `gpt-4.1` → 4; anything
- * that is not `gpt-<digits>` followed by `.`, `-` or end of string (o-series,
- * chatgpt-*, third-party ids) → undefined.
+ * `gpt-5.4-mini` → 5, `gpt-6-astra` → 6, `gpt-4o` / `gpt-4.1` → 4). Leading
+ * digits only, no delimiter required, so a digit-plus-letter name (`gpt-4o`,
+ * a future `gpt-6o`) is classified by its generation too. Anything not
+ * `gpt-<digits>` (o-series, chatgpt-*, third-party ids) → undefined.
  */
 function gptGeneration(model: string): number | undefined {
-  const m = /^gpt-(\d+)(?:[.-]|$)/.exec(model);
+  const m = /^gpt-(\d+)/.exec(model);
   return m ? Number(m[1]) : undefined;
 }
 

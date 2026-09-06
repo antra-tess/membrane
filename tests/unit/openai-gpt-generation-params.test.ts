@@ -34,7 +34,7 @@ async function bodyFor(model: string) {
 }
 
 describe('OpenAIAdapter parameter surface by GPT generation', () => {
-  it.each(['gpt-6-astra', 'gpt-6', 'gpt-5', 'gpt-5.6-sol', 'gpt-5-mini', 'gpt-7-zz'])(
+  it.each(['gpt-6-astra', 'gpt-6', 'gpt-6o', 'gpt-5', 'gpt-5.6-sol', 'gpt-5-mini', 'gpt-7-zz'])(
     '%s sends max_completion_tokens and drops temperature/top_p/stop',
     async (model) => {
       const body = await bodyFor(model);
