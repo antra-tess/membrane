@@ -103,6 +103,10 @@ const PRICING_TABLE: Array<{ prefix: string; pricing: ModelPricing }> = [
   // away before pricing, so cacheReadPerMillion is applied to a disjoint count.
   // --------------------------------------------------------------------------
   {
+    prefix: 'gpt-6-astra',
+    pricing: { inputPerMillion: 10, outputPerMillion: 50, cacheReadPerMillion: 1.00, currency: 'USD', asOf: '2026-09-06' },
+  },
+  {
     prefix: 'gpt-5.6-sol',
     pricing: { inputPerMillion: 4, outputPerMillion: 20, cacheReadPerMillion: 0.40, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
   },

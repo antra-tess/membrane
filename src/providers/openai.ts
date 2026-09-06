@@ -113,11 +113,34 @@ export interface OpenAIAdapterConfig {
 // ============================================================================
 
 /**
+ * Major version of a first-party GPT chat model id (`gpt-5` → 5,
+ * `gpt-5.4-mini` → 5, `gpt-6-astra` → 6). `gpt-4o` / `gpt-4.1` → 4; anything
+ * that is not `gpt-<digits>` followed by `.`, `-` or end of string (o-series,
+ * chatgpt-*, third-party ids) → undefined.
+ */
+function gptGeneration(model: string): number | undefined {
+  const m = /^gpt-(\d+)(?:[.-]|$)/.exec(model);
+  return m ? Number(m[1]) : undefined;
+}
+
+/**
+ * GPT-5 and every later generation share the reasoning-model parameter
+ * surface (max_completion_tokens, default-only temperature/top_p, no stop).
+ * Matched by generation rather than by listing each release so a new one
+ * (gpt-6-astra, 2026-09) does not fall through to the legacy parameters and
+ * 400 at the wire: "Unsupported parameter: 'max_tokens' is not supported with
+ * this model. Use 'max_completion_tokens' instead."
+ */
+function isReasoningGenerationGpt(model: string): boolean {
+  const gen = gptGeneration(model);
+  return gen !== undefined && gen >= 5;
+}
+
+/**
  * Models that require max_completion_tokens instead of max_tokens
+ * (in addition to every GPT-5+ generation model, see isReasoningGenerationGpt)
  */
 const COMPLETION_TOKENS_MODELS = [
-  'gpt-5',
-  'gpt-5-mini',
   'o1',
   'o1-mini',
   'o1-preview',
@@ -130,15 +153,14 @@ const COMPLETION_TOKENS_MODELS = [
  * Check if a model requires max_completion_tokens parameter
  */
 function requiresCompletionTokens(model: string): boolean {
-  return COMPLETION_TOKENS_MODELS.some(prefix => model.startsWith(prefix));
+  return isReasoningGenerationGpt(model) || COMPLETION_TOKENS_MODELS.some(prefix => model.startsWith(prefix));
 }
 
 /**
  * Models that don't support custom temperature (only default 1.0)
  */
 const NO_TEMPERATURE_MODELS = [
-  'gpt-5',       // Base GPT-5 models
-  'gpt-5-mini',
+  // GPT-5+ generations are covered by isReasoningGenerationGpt
   'o1',          // Reasoning models
   'o1-mini',
   'o1-preview',
@@ -151,7 +173,7 @@ const NO_TEMPERATURE_MODELS = [
  * Check if a model doesn't support custom temperature
  */
 function noTemperatureSupport(model: string): boolean {
-  return NO_TEMPERATURE_MODELS.some(prefix => model.startsWith(prefix));
+  return isReasoningGenerationGpt(model) || NO_TEMPERATURE_MODELS.some(prefix => model.startsWith(prefix));
 }
 
 /**
@@ -164,12 +186,7 @@ function noTemperatureSupport(model: string): boolean {
  * included here as they use a different API path entirely.
  */
 const NO_STOP_MODELS = [
-  // GPT-5.x chat models (all variants)
-  'gpt-5',
-  'gpt-5-mini',
-  'gpt-5-nano',
-  'gpt-5.1',
-  'gpt-5.2',
+  // GPT-5+ chat models (all variants) are covered by isReasoningGenerationGpt
   // Reasoning models that still don't support stop
   'o3',          // o3 (full) doesn't support stop, but o3-mini does!
   'o4-mini',
@@ -179,7 +196,7 @@ const NO_STOP_MODELS = [
  * Check if a model doesn't support stop sequences
  */
 function noStopSupport(model: string): boolean {
-  return NO_STOP_MODELS.some(prefix => model.startsWith(prefix));
+  return isReasoningGenerationGpt(model) || NO_STOP_MODELS.some(prefix => model.startsWith(prefix));
 }
 
 // ============================================================================
