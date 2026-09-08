@@ -307,6 +307,8 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
   /**
    * Collect every base64 image in the conversation, in order, remembering
    * which message/block it came from so the transcript can reference it.
+   * Both `image` blocks and `generated_image` blocks (this adapter's own
+   * earlier outputs, when a consumer carries them forward as-is) count.
    */
   private collectImages(request: ProviderRequest): ImageRef[] {
     const refs: ImageRef[] = [];
@@ -315,11 +317,18 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
     (request.messages as any[]).forEach((msg, msgIndex) => {
       if (!Array.isArray(msg.content)) return;
       msg.content.forEach((block: any, blockIndex: number) => {
-        if (block?.type !== 'image') return;
-        const source = block.source;
-        if (source?.type === 'base64' && source.data) {
-          const mimeType = source.media_type ?? source.mediaType ?? 'image/png';
-          refs.push({ dataUrl: `data:${mimeType};base64,${source.data}`, msgIndex, blockIndex });
+        if (block?.type === 'image') {
+          const source = block.source;
+          if (source?.type === 'base64' && source.data) {
+            const mimeType = source.media_type ?? source.mediaType ?? 'image/png';
+            refs.push({ dataUrl: `data:${mimeType};base64,${source.data}`, msgIndex, blockIndex });
+          }
+        } else if (block?.type === 'generated_image' && typeof block.data === 'string' && block.data) {
+          // A previous output of this adapter carried forward verbatim in
+          // history (consumers that keep ProviderResponse content rather
+          // than rebuilding from a channel). It is an image like any other.
+          const mimeType = block.mimeType ?? 'image/png';
+          refs.push({ dataUrl: `data:${mimeType};base64,${block.data}`, msgIndex, blockIndex });
         }
       });
     });
@@ -481,7 +490,7 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
         msg.content.forEach((block: any, blockIndex: number) => {
           if (block?.type === 'text' && block.text) {
             lines.push(block.text);
-          } else if (block?.type === 'image') {
+          } else if (block?.type === 'image' || block?.type === 'generated_image') {
             const n = attachedIndex.get(`${msgIndex}:${blockIndex}`);
             lines.push(n !== undefined ? `[Image ${n}]` : '[Image omitted]');
           }

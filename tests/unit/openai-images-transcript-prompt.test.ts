@@ -132,6 +132,30 @@ describe('OpenAIResponsesAdapter promptFormat', () => {
     expect(Buffer.from(await blobs[1]!.arrayBuffer()).toString('base64')).toBe('2222');
   });
 
+  it('attaches and references a prior output carried forward as a generated_image block', async () => {
+    const messages = [
+      { role: 'user', content: [{ type: 'text', text: 'alice: draw a red teapot' }] },
+      // This adapter's own earlier ProviderResponse content, kept verbatim.
+      { role: 'assistant', content: [{ type: 'generated_image', data: 'GGGG', mimeType: 'image/png' }] },
+      { role: 'user', content: [{ type: 'text', text: 'bob: make it blue' }] },
+    ];
+
+    const transcript = new OpenAIResponsesAdapter({ apiKey: 'sk-test', promptFormat: 'transcript', transcriptPreamble: '' });
+    const t = await capture(transcript, request(messages));
+    expect(t.url).toMatch(/images\/edits$/);
+    expect(t.images).toBe(1);
+    expect(t.prompt).toBe('### User\nalice: draw a red teapot\n\n### Assistant\n[Image 1]\n\n### User\nbob: make it blue\n\n### Assistant');
+
+    const legacyFetch = vi.fn().mockResolvedValue(imagesResponse());
+    vi.stubGlobal('fetch', legacyFetch);
+    await new OpenAIResponsesAdapter({ apiKey: 'sk-test' }).complete(request(messages));
+    const [url, init] = legacyFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toMatch(/images\/edits$/);
+    const blobs = (init.body as FormData).getAll('image[]') as Blob[];
+    expect(blobs.length).toBe(1);
+    expect(Buffer.from(await blobs[0]!.arrayBuffer()).toString('base64')).toBe('GGGG');
+  });
+
   it('clamps maxInputImages to the API cap of 16', async () => {
     const adapter = new OpenAIResponsesAdapter({ apiKey: 'sk-test', promptFormat: 'transcript', maxInputImages: 99 });
     const messages = Array.from({ length: 20 }, (_, i) => ({ role: 'user', content: [img(`${i}`.padStart(4, 'A'))] }));
