@@ -6,13 +6,26 @@
 // Tool Definition
 // ============================================================================
 
+/**
+ * One JSON Schema node inside a tool's inputSchema.
+ *
+ * `type` is optional and may be an array because JSON Schema spells the same
+ * declaration several ways: `{type:'string'}`, `{type:['string','null']}`,
+ * `{anyOf:[{type:'string'},{type:'null'}]}` and `{$ref:'#/$defs/X'}` all
+ * declare a parameter. resolveDeclaredType in utils/tool-parser.ts collapses
+ * these to a single type name where one exists.
+ */
 export interface ToolParameter {
-  type: string;
+  type?: string | string[];
   description?: string;
   enum?: string[];
   items?: ToolParameter;
   properties?: Record<string, ToolParameter>;
   required?: string[];
+  anyOf?: ToolParameter[];
+  oneOf?: ToolParameter[];
+  allOf?: ToolParameter[];
+  $ref?: string;
 }
 
 export interface ToolDefinition {
@@ -22,6 +35,13 @@ export interface ToolDefinition {
     type: 'object';
     properties?: Record<string, ToolParameter>;
     required?: string[];
+    /** Root-level unions: the params live inside the variants, not in `properties`. */
+    anyOf?: ToolParameter[];
+    oneOf?: ToolParameter[];
+    allOf?: ToolParameter[];
+    /** `$ref` targets, both spellings. */
+    definitions?: Record<string, ToolParameter>;
+    $defs?: Record<string, ToolParameter>;
   };
 }
 
