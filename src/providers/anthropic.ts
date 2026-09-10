@@ -24,6 +24,7 @@ import {
 } from '../types/index.js';
 import { flattenRootSchemaUnion } from './anthropic-tool-schema.js';
 import { assertTerminalEventObserved } from './utils.js';
+import { fetchWithCredentials, type CredentialContext, type CredentialResolver } from './credentials.js';
 import { CacheKeepalive, type CacheKeepaliveConfig } from '../cache-keepalive.js';
 
 // ============================================================================
@@ -151,7 +152,12 @@ export interface AnthropicAdapterConfig {
    * is allowed to resolve environment auth). If explicitly provided, API-key
    * auth is disabled so requests do not send both auth schemes.
    */
-  authToken?: string | null;
+  authToken?: string | null | ((context: CredentialContext) => string | Promise<string>);
+
+  /** Resolve a bearer token and associated headers per HTTP attempt. Takes
+   * precedence over authToken/apiKey; refreshed once after HTTP 401. Applies
+   * to complete, stream, and cache-keepalive requests. */
+  credentials?: CredentialResolver;
   
   /** Base URL override */
   baseURL?: string;
@@ -218,8 +224,29 @@ export class AnthropicAdapter implements ProviderAdapter {
     this.defaultBeta = extractBetaHeader(config.defaultHeaders);
     this.dynamicHeaders = config.dynamicHeaders;
 
-    if (config.authToken !== undefined) {
-      clientOptions.authToken = config.authToken;
+    const authToken = config.authToken;
+    const credentials: CredentialResolver | undefined = config.credentials ?? (typeof authToken === 'function'
+      ? async (context: CredentialContext) => ({ token: await authToken(context) })
+      : undefined);
+    if (credentials) {
+      // Satisfy SDK auth validation without freezing a real credential. The
+      // fetch seam replaces this placeholder before every network attempt,
+      // including the SDK's stream and cache-keepalive transports.
+      clientOptions.authToken = 'membrane-resolved-at-request-time';
+      clientOptions.apiKey = null;
+      clientOptions.fetch = (input, init) => {
+        const headers = new Headers(init?.headers);
+        headers.delete('x-api-key');
+        return fetchWithCredentials(input, { ...init, headers }, async context => {
+          const credential = await credentials(context);
+          // A resolver/default/dynamic header must not re-enable API-key auth.
+          const resolvedHeaders = new Headers(credential.headers);
+          resolvedHeaders.delete('x-api-key');
+          return { ...credential, headers: Object.fromEntries(resolvedHeaders) };
+        });
+      };
+    } else if (authToken !== undefined) {
+      clientOptions.authToken = authToken as string | null;
       clientOptions.apiKey = null;
     } else {
       clientOptions.apiKey = config.apiKey;
