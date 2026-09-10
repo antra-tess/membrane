@@ -385,3 +385,25 @@ test('does not retry a static API key', async () => {
   await expect(new OpenAIResponsesAPIAdapter({ apiKey: 'sk-test' }).complete(request())).rejects.toMatchObject({ type: 'auth' });
   expect(calls).toBe(1);
 });
+
+test('replays historical encrypted reasoning through the formatter with a required summary', async () => {
+  let input: unknown;
+  globalThis.fetch = async (_url, init) => {
+    input = JSON.parse(String(init?.body)).input;
+    return completedResponse();
+  };
+  const membrane = new Membrane(new OpenAIResponsesAPIAdapter({
+    mode: 'subscription', credentials: () => ({ token: 'fixture' }),
+  }), { formatter: new OpenAIResponsesFormatter(), assistantParticipant: 'assistant' });
+  await membrane.complete({
+    messages: [
+      { participant: 'user', content: [{ type: 'text', text: 'Continue' }] },
+      { participant: 'assistant', content: [{ type: 'redacted_thinking', data: 'historic-cipher' }] },
+      { participant: 'user', content: [{ type: 'text', text: 'What next?' }] },
+    ],
+    config: { model: 'gpt-5.4', maxTokens: 64 },
+  });
+  expect(input).toEqual(expect.arrayContaining([
+    { type: 'reasoning', encrypted_content: 'historic-cipher', summary: [] },
+  ]));
+});
