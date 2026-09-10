@@ -1,1 +1,2 @@
 - Add ChatGPT subscription mode to `OpenAIResponsesAPIAdapter`, with per-request credentials, one refresh after HTTP 401, Fast mode, maintenance-input conversion, and shared Responses streaming and usage normalization. Login and token persistence remain application responsibilities.
+- Include the required empty reasoning summary when formatting encrypted-reasoning blocks without a provider-native item, so historical reasoning can be replayed through Responses.
