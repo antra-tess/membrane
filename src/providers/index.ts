@@ -72,3 +72,5 @@ export {
   type OpenAIResponsesInputItem,
   type OpenAIResponsesOutputItem,
 } from './openai-responses-api.js';
+
+export type { CredentialContext, CredentialResolver, ResolvedCredential } from './credentials.js';

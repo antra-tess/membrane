@@ -167,10 +167,10 @@ describe('OpenAIResponsesAPIAdapter', () => {
     expect(fetchMock).toHaveBeenCalledOnce();
     expect(fetchMock.mock.calls[0]?.[0]).toBe('https://api.openai.com/v1/responses');
     const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
-    expect(init.headers).toMatchObject({
-      Authorization: 'Bearer sk-test',
-      'OpenAI-Organization': 'org_test',
-      'OpenAI-Project': 'proj_test',
+    expect(Object.fromEntries(new Headers(init.headers))).toMatchObject({
+      authorization: 'Bearer sk-test',
+      'openai-organization': 'org_test',
+      'openai-project': 'proj_test',
     });
 
     const body = JSON.parse(String(init.body));

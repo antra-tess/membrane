@@ -1,0 +1,1 @@
+- Add ChatGPT subscription mode to `OpenAIResponsesAPIAdapter`, with per-request credentials, one refresh after HTTP 401, Fast mode, maintenance-input conversion, and shared Responses streaming and usage normalization. Login and token persistence remain application responsibilities.
