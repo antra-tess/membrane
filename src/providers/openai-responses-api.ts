@@ -9,6 +9,9 @@
  * exposes the response's ordered output array verbatim for the next turn.
  */
 
+import { normalizeResponsesInput } from './responses-input.js';
+import { fetchWithCredentials, type CredentialResolver } from './credentials.js';
+
 import type {
   ContentBlock,
   ProviderAdapter,
@@ -114,7 +117,16 @@ export interface OpenAIResponsesAPIProviderResponse extends Omit<ProviderRespons
 export interface OpenAIResponsesAPIAdapterConfig {
   /** API key (defaults to OPENAI_API_KEY). */
   apiKey?: string;
-  /** API base URL (default: https://api.openai.com/v1). */
+  /** Resolve a bearer token and associated headers for each request/401 retry.
+   * Overrides apiKey; acquiring and persisting credentials belongs to the caller. */
+  credentials?: CredentialResolver;
+  /** ChatGPT subscription transport requires credentials and always uses SSE. */
+  mode?: 'api' | 'subscription';
+  /** Request priority service in subscription mode (default: false). */
+  fastMode?: boolean;
+  /** Called once if a subscription response reports a non-priority tier. */
+  onFastModeFallback?: (serviceTier: string) => void;
+  /** API base URL (defaults to the selected mode's endpoint). */
   baseURL?: string;
   /** Optional OpenAI organization ID. */
   organization?: string;
@@ -144,6 +156,11 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
   readonly usageCacheConvention = 'cache-inclusive' as const;
 
   private readonly apiKey: string;
+  private readonly credentials?: CredentialResolver;
+  private readonly subscription: boolean;
+  private fastMode: boolean;
+  private readonly onFastModeFallback?: (serviceTier: string) => void;
+  private warnedFastFallback = false;
   private readonly baseURL: string;
   private readonly organization?: string;
   private readonly project?: string;
@@ -151,39 +168,50 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
   private readonly extraHeaders: Record<string, string>;
 
   constructor(config: OpenAIResponsesAPIAdapterConfig = {}) {
+    this.subscription = config.mode === 'subscription';
+    this.credentials = config.credentials;
+    if (this.subscription && !this.credentials) {
+      throw new Error('Subscription mode requires a credential resolver');
+    }
+    this.fastMode = config.fastMode ?? false;
+    this.onFastModeFallback = config.onFastModeFallback;
     this.apiKey = config.apiKey ?? process.env.OPENAI_API_KEY ?? '';
-    this.baseURL = (config.baseURL ?? 'https://api.openai.com/v1').replace(/\/$/, '');
+    this.baseURL = (config.baseURL ?? (this.subscription ? 'https://chatgpt.com/backend-api/codex' : 'https://api.openai.com/v1')).replace(/\/$/, '');
     this.organization = config.organization;
     this.project = config.project;
     this.defaultMaxTokens = config.defaultMaxTokens ?? 4096;
     this.extraHeaders = config.extraHeaders ?? {};
 
-    if (!this.apiKey) {
+    if (!this.apiKey && !this.credentials) {
       throw new Error('OpenAI API key not provided');
     }
   }
 
-  supportsModel(_modelId: string): boolean {
-    return true;
+  supportsModel(modelId: string): boolean {
+    return !this.subscription || modelId.startsWith('gpt-') || modelId.includes('codex');
+  }
+
+  isFastMode(): boolean {
+    return this.fastMode;
+  }
+
+  setFastMode(enabled: boolean): void {
+    this.fastMode = enabled;
   }
 
   async complete(
     request: ProviderRequest,
     options?: ProviderRequestOptions
   ): Promise<OpenAIResponsesAPIProviderResponse> {
+    if (this.subscription) return this.stream(request, { onChunk: () => {} }, options);
     const responsesRequest = this.buildRequest(request);
     options?.onRequest?.(responsesRequest);
 
     const { signal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
-      const response = await fetch(`${this.baseURL}/responses`, {
-        method: 'POST',
-        headers: this.getHeaders(),
-        body: JSON.stringify(responsesRequest),
-        signal,
-      });
+      const response = await this.fetchResponse(responsesRequest, signal);
 
-      await this.assertSuccessfulHTTPResponse(response);
+      await this.assertSuccessfulHTTPResponse(response, responsesRequest);
       const data = (await response.json()) as OpenAIResponsesAPIResponse;
       this.assertSuccessfulAPIResponse(data, responsesRequest, 'response error');
       return this.parseResponse(data, request.model, responsesRequest);
@@ -205,19 +233,14 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
 
     const { signal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
-      const response = await fetch(`${this.baseURL}/responses`, {
-        method: 'POST',
-        headers: this.getHeaders(),
-        body: JSON.stringify(responsesRequest),
-        signal,
-      });
+      const response = await this.fetchResponse(responsesRequest, signal);
 
-      await this.assertSuccessfulHTTPResponse(response);
+      await this.assertSuccessfulHTTPResponse(response, responsesRequest);
       const reader = response.body?.getReader();
       if (!reader) throw new Error('OpenAI Responses API returned no response body');
 
       const decoder = new TextDecoder();
-      const parser = new SSELineParser();
+      const parser = new SSELineParser({ multiline: true });
       const events: unknown[] = [];
       const output: OpenAIResponsesOutputItem[] = [];
       let terminalResponse: OpenAIResponsesAPIResponse | undefined;
@@ -266,22 +289,27 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
           // provider classification, so only code and message are handed over.
           // The payload object is always present, so this always throws.
           throwOnStreamErrorFrame(
-            { error: { code: event.code, message: event.message ?? 'Streaming request failed' } },
+            { error: event.error ?? { code: event.code, message: event.message ?? 'Streaming request failed' } },
             'OpenAI Responses API',
             responsesRequest
           );
         }
       };
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        for (const data of parser.feed(decoder.decode(value, { stream: true }))) {
-          processData(data);
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          for (const data of parser.feed(decoder.decode(value, { stream: true }))) {
+            processData(data);
+          }
         }
+        for (const data of parser.feed(decoder.decode())) processData(data);
+        for (const data of parser.flush()) processData(data);
+      } finally {
+        await reader.cancel().catch(() => {});
+        reader.releaseLock();
       }
-      for (const data of parser.feed(decoder.decode())) processData(data);
-      for (const data of parser.flush()) processData(data);
 
       // A well-formed stream always ends with a terminal event
       // (response.completed / response.incomplete; response.failed and error
@@ -300,6 +328,18 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
 
       this.assertSuccessfulAPIResponse(terminalResponse, responsesRequest);
 
+      // Codex may deliver authoritative items only via output_item.done.
+      // A non-empty terminal output remains authoritative when supplied.
+      if (!terminalResponse.output?.length) {
+        terminalResponse = { ...terminalResponse, output: output.filter(Boolean) };
+      }
+      const returnedTier = terminalResponse.service_tier;
+      if (this.subscription && responsesRequest.service_tier === 'priority' &&
+          typeof returnedTier === 'string' && returnedTier && returnedTier !== 'priority' &&
+          !this.warnedFastFallback) {
+        this.warnedFastFallback = true;
+        this.onFastModeFallback?.(returnedTier);
+      }
       const parsed = this.parseResponse(terminalResponse, request.model, responsesRequest);
       parsed.content.forEach((block, index) => callbacks.onContentBlock?.(index, block));
       return parsed;
@@ -314,14 +354,21 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
   // Request construction
   // --------------------------------------------------------------------------
 
-  private getHeaders(): Record<string, string> {
-    return {
-      Authorization: `Bearer ${this.apiKey}`,
-      'Content-Type': 'application/json',
-      ...(this.organization ? { 'OpenAI-Organization': this.organization } : {}),
-      ...(this.project ? { 'OpenAI-Project': this.project } : {}),
-      ...this.extraHeaders,
-    };
+  private async fetchResponse(
+    request: OpenAIResponsesAPIRequest,
+    signal?: AbortSignal,
+  ): Promise<Response> {
+    return fetchWithCredentials(`${this.baseURL}/responses`, {
+      method: 'POST',
+      body: JSON.stringify(request),
+      signal,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(this.organization ? { 'OpenAI-Organization': this.organization } : {}),
+        ...(this.project ? { 'OpenAI-Project': this.project } : {}),
+        ...this.extraHeaders,
+      },
+    }, this.credentials ?? { token: this.apiKey });
   }
 
   private buildRequest(request: ProviderRequest): OpenAIResponsesAPIRequest {
@@ -366,9 +413,18 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
 
     // These invariants define the adapter's stateless native-item contract and
     // cannot be overridden through provider params.
-    responsesRequest.input = request.messages as OpenAIResponsesInputItem[];
+    responsesRequest.input = this.subscription
+      ? normalizeResponsesInput(request.messages)
+      : request.messages as OpenAIResponsesInputItem[];
     responsesRequest.store = false;
     responsesRequest.include = this.mergeEncryptedReasoningInclude(responsesRequest.include);
+    if (this.subscription) {
+      for (const key of ['temperature', 'top_p', 'top_k', 'max_output_tokens', 'max_tokens', 'max_completion_tokens']) {
+        delete responsesRequest[key];
+      }
+      if (this.fastMode) responsesRequest.service_tier = 'priority';
+      else delete responsesRequest.service_tier;
+    }
     return responsesRequest;
   }
 
@@ -605,10 +661,27 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
   // Errors
   // --------------------------------------------------------------------------
 
-  private async assertSuccessfulHTTPResponse(response: Response): Promise<void> {
+  private async assertSuccessfulHTTPResponse(response: Response, rawRequest: unknown): Promise<void> {
     if (response.ok) return;
-    const errorText = await response.text();
-    throw new Error(`OpenAI Responses API error: ${response.status} ${errorText}`);
+    const detail = await response.text();
+    const message = `OpenAI Responses API error: ${response.status} ${detail}`;
+    const status = response.status;
+    if (status === 401 || status === 403) {
+      throw new MembraneError({ type: 'auth', message, retryable: false, httpStatus: status, rawError: detail, rawRequest });
+    }
+    if (status === 429) {
+      const retryAfter = response.headers.get('retry-after');
+      const seconds = retryAfter == null ? NaN : Number(retryAfter);
+      const date = retryAfter == null ? NaN : Date.parse(retryAfter);
+      const delay = Number.isFinite(seconds) ? Math.max(0, seconds * 1000)
+        : Number.isFinite(date) ? Math.max(0, date - Date.now()) : undefined;
+      throw rateLimitError(message, delay, detail, rawRequest);
+    }
+    if (status >= 500) throw serverError(message, status, detail, rawRequest);
+    if (status === 400 && /context_length|maximum context|token limit|too long/i.test(detail)) {
+      throw contextLengthError(message, detail, rawRequest);
+    }
+    throw new MembraneError({ type: 'invalid_request', message, retryable: false, httpStatus: status, rawError: detail, rawRequest });
   }
 
   /**
