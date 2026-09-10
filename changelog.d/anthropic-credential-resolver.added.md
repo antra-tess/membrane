@@ -1,0 +1,1 @@
+- Allow `AnthropicAdapter` to resolve rotating bearer credentials per request through `credentials` or an `authToken` callback, with one forced refresh after HTTP 401. The shared seam covers complete, streaming, and cache-keepalive requests without freezing a token in the SDK client.
