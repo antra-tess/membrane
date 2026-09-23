@@ -163,7 +163,14 @@ describe('single-callback adapters (OpenAI Responses style) still get a complete
   it('streamYielding(): the same completion is synthesised on the yielding path', async () => {
     const membrane = new Membrane(new SingleCallbackAdapter(['Answer'], RESPONSES_STYLE_CONTENT));
     const events: StreamEvent[] = [];
-    for await (const event of membrane.streamYielding(nativeRequest())) events.push(event);
+    // The fixture ends in a complete tool_use block, which is dispatched even
+    // under its 'end_turn' stop reason (see end-turn-tool-calls.test.ts). The
+    // round's block events precede the tool-calls yield, so stop there rather
+    // than answer the call.
+    for await (const event of membrane.streamYielding(nativeRequest())) {
+      events.push(event);
+      if (event.type === 'tool-calls') break;
+    }
 
     const blocks = events.filter((e) => e.type === 'block').map((e) => (e as { event: BlockEvent }).event);
     expect(blocks.filter((e) => e.event === 'block_start').length).toBe(3);
