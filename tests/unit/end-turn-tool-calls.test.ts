@@ -7,6 +7,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
+import { parseToolArguments } from '../../src/providers/utils.js';
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -103,6 +104,36 @@ describe('native tool dispatch vs stop_reason', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       expect(await dispatchedCalls(toolResponse('end_turn', { unparseableInput: '{"content":"hel' }))).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe('parseToolArguments (OpenAI-family adapters)', () => {
+  it('marks malformed argument JSON instead of passing it off as an empty call', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(parseToolArguments('{"content":"hel')).toEqual({ input: {}, unparseableInput: '{"content":"hel' });
+    } finally {
+      warn.mockRestore();
+    }
+    expect(parseToolArguments('{"content":"hello"}')).toEqual({ input: { content: 'hello' } });
+    expect(parseToolArguments('')).toEqual({ input: {} });
+    expect(parseToolArguments(undefined)).toEqual({ input: {} });
+  });
+
+  it('a malformed call from such an adapter is not rescued under end_turn', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const fields = parseToolArguments('{"content":"hel');
+      const response = {
+        content: [{ type: 'tool_use', id: 'call_1', name: 'zz_send', ...fields }],
+        stopReason: 'end_turn',
+        usage: { inputTokens: 2, outputTokens: 10 },
+        raw: {},
+      } as unknown as ProviderResponse;
+      expect(await dispatchedCalls(response)).toEqual([]);
     } finally {
       warn.mockRestore();
     }
