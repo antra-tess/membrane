@@ -51,7 +51,24 @@ interface OpenAIMessage {
    *  channel from `content`). Captured into a thinking block, and re-sent on
    *  prior assistant turns to preserve chain-of-thought. */
   reasoning?: string;
+  /** Same trace under the DeepSeek spelling, used e.g. by Xiaomi's official
+   *  MiMo API in both messages and stream deltas. Read as an alias of
+   *  `reasoning`; `reasoning` wins when a backend sends both. */
+  reasoning_content?: string;
   reasoning_details?: unknown;
+}
+
+/**
+ * The reasoning trace of a message or stream delta, under either spelling.
+ * `reasoning` wins unless it is blank while `reasoning_content` has substance —
+ * a whitespace-only `reasoning` must not hide the real trace. Whitespace is not
+ * trimmed away otherwise: a lone ' ' or '\n' stream delta is part of the trace.
+ */
+function reasoningOf(m: { reasoning?: unknown; reasoning_content?: unknown } | undefined): string | undefined {
+  const reasoning = typeof m?.reasoning === 'string' ? m.reasoning : undefined;
+  const alias = typeof m?.reasoning_content === 'string' ? m.reasoning_content : undefined;
+  if (reasoning && (reasoning.trim() || !alias?.trim())) return reasoning;
+  return alias ?? reasoning;
 }
 
 /**
@@ -242,9 +259,11 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
             callbacks.onChunk(delta.content);
           }
 
-          // Reasoning-model trace arrives on its own channel (not `content`).
-          if (typeof delta?.reasoning === 'string') {
-            reasoning += delta.reasoning;
+          // Reasoning-model trace arrives on its own channel (not `content`),
+          // as `reasoning` or `reasoning_content` depending on the backend.
+          const reasoningDelta = reasoningOf(delta);
+          if (reasoningDelta !== undefined) {
+            reasoning += reasoningDelta;
           }
 
           // Handle streaming tool calls
@@ -593,7 +612,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     const content: ContentBlock[] = [];
 
     // Reasoning trace first (mirrors Anthropic thinking-block ordering).
-    const reasoning = (message as OpenAIMessage).reasoning;
+    const reasoning = reasoningOf(message);
     if (typeof reasoning === 'string' && reasoning.trim()) {
       content.push({ type: 'thinking', thinking: reasoning } as ContentBlock);
     }
@@ -756,7 +775,7 @@ export function toOpenAIMessages(
 export function fromOpenAIMessage(message: OpenAIMessage): ContentBlock[] {
   const result: ContentBlock[] = [];
 
-  const reasoning = message.reasoning;
+  const reasoning = reasoningOf(message);
   if (typeof reasoning === 'string' && reasoning.trim()) {
     result.push({ type: 'thinking', thinking: reasoning } as ContentBlock);
   }
