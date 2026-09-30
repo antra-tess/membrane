@@ -291,6 +291,9 @@ export function createCombinedSignal(
  */
 export class SSELineParser {
   private buffer: string = '';
+  private data: string[] = [];
+
+  constructor(private readonly options: { multiline?: boolean } = {}) {}
 
   /**
    * Feed a raw chunk from the stream reader and get back complete SSE data lines.
@@ -305,6 +308,10 @@ export class SSELineParser {
     this.buffer = lines.pop() || '';
 
     for (const line of lines) {
+      if (this.options.multiline) {
+        this.processEventLine(line.replace(/\r$/, ''), results);
+        continue;
+      }
       const trimmed = line.trim();
       if (trimmed.startsWith('data: ')) {
         results.push(trimmed.slice(6));
@@ -315,10 +322,24 @@ export class SSELineParser {
     return results;
   }
 
-  /**
-   * Flush any remaining buffered content (call when stream ends).
-   */
+  private processEventLine(line: string, results: string[]): void {
+    if (line === '') {
+      if (this.data.length) results.push(this.data.join('\n'));
+      this.data = [];
+    } else if (line.startsWith('data:')) {
+      this.data.push(line.slice(5).replace(/^ /, ''));
+    }
+  }
+
+  /** Flush any remaining event/tail when the stream ends. */
   flush(): string[] {
+    if (this.options.multiline) {
+      const results: string[] = [];
+      if (this.buffer) this.processEventLine(this.buffer.replace(/\r$/, ''), results);
+      this.buffer = '';
+      this.processEventLine('', results);
+      return results;
+    }
     if (!this.buffer.trim()) return [];
     const trimmed = this.buffer.trim();
     this.buffer = '';

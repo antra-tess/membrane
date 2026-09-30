@@ -207,6 +207,11 @@ export interface ProviderAdapter {
    */
   usageCacheConvention?: UsageCacheConvention;
 
+  /** Whether this transport requires the configured Responses formatter.
+   * False permits generic per-request formatter overrides (e.g. named
+   * maintenance messages). Wrappers must forward this capability. */
+  readonly requiresNativeResponsesInput?: boolean;
+
   /** Check if this adapter handles a model */
   supportsModel(modelId: string): boolean;
   

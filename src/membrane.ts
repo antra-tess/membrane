@@ -35,6 +35,7 @@ import {
   stripThinkingForPrefill,
 } from './utils/thinking-carriers.js';
 import {
+  assertCacheMarkersWithinLimit,
   countWireCacheMarkers,
   clampCacheMarkers,
   ownSystemBlocks,
@@ -51,6 +52,7 @@ import {
   unsupportedError,
 } from './types/index.js';
 import type { BuildResult } from './formatters/types.js';
+import { computeCacheWireReceipt } from './cache-wire-receipt.js';
 import {
   parseToolCalls,
   formatToolResults,
@@ -247,7 +249,12 @@ export class Membrane {
 
         // Last exit before the adapter: the only place that sees EVERY
         // contribution (builder, formatter, passthrough, float, hook).
-        clampCacheMarkers(finalRequest, 'complete');
+        if (request.cacheMarkers === 'cm-owned') {
+          assertCacheMarkersWithinLimit(finalRequest, 'complete');
+        } else {
+          clampCacheMarkers(finalRequest, 'complete');
+        }
+        request.onCacheWireReceipt?.(computeCacheWireReceipt(finalRequest));
 
         const rawProviderResponse = await this.adapter.complete(finalRequest, {
           signal: options.signal,
@@ -521,7 +528,9 @@ export class Membrane {
    * item array, and a generic override (for example Context Manager's
    * NativeFormatter) produces Anthropic-style `{ role, content: [{ type:
    * 'text' }] }` envelopes the Responses API rejects before inference — so a
-   * configured Responses formatter stays authoritative there.
+   * configured Responses formatter stays authoritative there. Subscription
+   * mode accepts normalized envelopes, so its capability allows the override
+   * (including participant labels supplied by maintenance formatters).
    *
    * The exception is why this selection is a method rather than a `??` at each
    * call site: while it lived inside transformRequest alone, the BUILD honored
@@ -530,7 +539,9 @@ export class Membrane {
    * Every entry point selects once, here, and threads the result.
    */
   private resolveActiveFormatter(requestFormatter?: PrefillFormatter): PrefillFormatter {
-    if (this.adapter.name === 'openai-responses-api' && this.formatter.name === 'openai-responses') {
+    const requiresNativeInput = this.adapter.requiresNativeResponsesInput
+      ?? this.adapter.name === 'openai-responses-api';
+    if (requiresNativeInput && this.formatter.name === 'openai-responses') {
       return this.formatter;
     }
     return requestFormatter ?? this.formatter;
@@ -2154,6 +2165,7 @@ export class Membrane {
       thinking: request.config.thinking,
       systemPrompt: request.system,
       promptCaching: request.promptCaching ?? this.config.defaultPromptCaching ?? true, // Default true for backward compat
+      cacheMarkers: request.cacheMarkers ?? 'membrane-system',
       cacheTtl: request.cacheTtl,
       additionalStopSequences,
       maxParticipantsForStop,
@@ -2267,8 +2279,11 @@ export class Membrane {
     // streaming path — stream(), streamYielding(), both tool loops — funnels
     // through here, so this is the one clamp they all get, and its tally is
     // therefore the only count that describes the wire.
-    const clampOutcome = clampCacheMarkers(finalRequest, 'streamOnce');
-    onWireCacheMarkers?.(clampOutcome.total);
+    const markerCount = normalizedRequest.cacheMarkers === 'cm-owned'
+      ? assertCacheMarkersWithinLimit(finalRequest, 'streamOnce')
+      : clampCacheMarkers(finalRequest, 'streamOnce').total;
+    normalizedRequest.onCacheWireReceipt?.(computeCacheWireReceipt(finalRequest));
+    onWireCacheMarkers?.(markerCount);
 
     // Retries are only safe when the caller can discard the abandoned
     // attempt, so they require BOTH a budget and an onRetrying hook.

@@ -24,6 +24,7 @@ import {
 } from '../types/index.js';
 import { flattenRootSchemaUnion } from './anthropic-tool-schema.js';
 import { assertTerminalEventObserved } from './utils.js';
+import { fetchWithCredentials, validateCredential, type CredentialContext, type CredentialResolver } from './credentials.js';
 import { CacheKeepalive, type CacheKeepaliveConfig } from '../cache-keepalive.js';
 
 // ============================================================================
@@ -130,6 +131,18 @@ export function thinkingEnabled(request: ProviderRequest): boolean {
 // Adapter Configuration
 // ============================================================================
 
+/**
+ * What the dynamicHeaders callback is told about the request it stamps.
+ * `lane` names the transport shape: 'stream' is the conversational turn loop,
+ * 'complete' the non-streamed lane (compression, side-calls, keepalive
+ * touches). A stamp that describes WHY the agent's turn fired belongs on the
+ * stream lane only — a compression call running in the background is not the
+ * turn, and stamping it with the turn's cause would lie to the ledger.
+ */
+export interface DynamicHeadersContext {
+  lane: 'stream' | 'complete';
+}
+
 export interface AnthropicAdapterConfig {
   /** API key (defaults to ANTHROPIC_API_KEY env var) */
   apiKey?: string | null;
@@ -139,13 +152,30 @@ export interface AnthropicAdapterConfig {
    * is allowed to resolve environment auth). If explicitly provided, API-key
    * auth is disabled so requests do not send both auth schemes.
    */
-  authToken?: string | null;
+  authToken?: string | null | ((context: CredentialContext) => string | Promise<string>);
+
+  /** Resolve a bearer token and associated headers per HTTP attempt. Takes
+   * precedence over authToken/apiKey; refreshed once after HTTP 401. Applies
+   * to complete, stream, and cache-keepalive requests. */
+  credentials?: CredentialResolver;
   
   /** Base URL override */
   baseURL?: string;
 
   /** Default headers to include with Anthropic requests */
   defaultHeaders?: ClientOptions['defaultHeaders'];
+
+  /**
+   * Live per-request headers, evaluated at request time — for values that
+   * change between calls (e.g. household telemetry stamps such as
+   * `x-gate-debt-chunks`, read by an inference gateway and stripped there
+   * before the vendor ever sees them). Merged over the per-request beta
+   * headers for the OUTGOING request only; cache-keepalive replays
+   * deliberately resend their recorded headers, so a telemetry stamp is
+   * never replayed stale — an unstamped touch is honest, a stale stamp lies.
+   * null/undefined/'' values are dropped.
+   */
+  dynamicHeaders?: (ctx?: DynamicHeadersContext) => Record<string, string | number | null | undefined>;
   
   /** Default max tokens */
   defaultMaxTokens?: number;
@@ -175,6 +205,7 @@ export class AnthropicAdapter implements ProviderAdapter {
    */
   readonly usageCacheConvention = 'cache-excluded' as const;
   private client: Anthropic;
+  private readonly credentials?: CredentialResolver;
   private defaultMaxTokens: number;
   /** Any anthropic-beta value from defaultHeaders (e.g. the oauth beta for
    *  subscription tokens). Per-request headers REPLACE same-key defaults in
@@ -183,6 +214,8 @@ export class AnthropicAdapter implements ProviderAdapter {
   private defaultBeta: string | undefined;
   /** Holds idle agents' cached prefixes warm; undefined when disabled. */
   readonly cacheKeepalive: CacheKeepalive | undefined;
+  /** Live per-request header source (see AnthropicAdapterConfig.dynamicHeaders). */
+  private readonly dynamicHeaders?: (ctx?: DynamicHeadersContext) => Record<string, string | number | null | undefined>;
 
   constructor(config: AnthropicAdapterConfig = {}) {
     const clientOptions: ClientOptions = {
@@ -190,9 +223,21 @@ export class AnthropicAdapter implements ProviderAdapter {
       defaultHeaders: config.defaultHeaders,
     };
     this.defaultBeta = extractBetaHeader(config.defaultHeaders);
+    this.dynamicHeaders = config.dynamicHeaders;
 
-    if (config.authToken !== undefined) {
-      clientOptions.authToken = config.authToken;
+    const authToken = config.authToken;
+    const credentials: CredentialResolver | undefined = config.credentials ?? (typeof authToken === 'function'
+      ? async (context: CredentialContext) => ({ token: await authToken(context) })
+      : undefined);
+    this.credentials = credentials;
+    if (credentials) {
+      // Satisfy SDK auth validation without freezing a real credential. The
+      // fetch seam replaces this placeholder before every network attempt,
+      // including the SDK's stream and cache-keepalive transports.
+      clientOptions.authToken = 'membrane-resolved-at-request-time';
+      clientOptions.apiKey = null;
+    } else if (authToken !== undefined) {
+      clientOptions.authToken = authToken as string | null;
       clientOptions.apiKey = null;
     } else {
       clientOptions.apiKey = config.apiKey;
@@ -207,12 +252,60 @@ export class AnthropicAdapter implements ProviderAdapter {
           // Replay path. Deliberately bypasses buildRequest(): the payload is
           // the already-built wire request from a real call, and rebuilding it
           // risks a byte diff that silently converts a 0.1x read into a 2x write.
-          async (wire, headers) => await this.client.messages.create(
-            wire as unknown as Anthropic.MessageCreateParamsNonStreaming,
-            headers ? { headers } : undefined,
+          async (wire, headers) => this.createMessage(
+            wire as unknown as Anthropic.MessageCreateParamsNonStreaming, headers,
           ),
           config.cacheKeepalive ?? {},
         );
+  }
+
+  /** One SDK operation owns its failure state: concurrent calls cannot
+   * overwrite each other's auth error or cancel each other's requests. */
+  private credentialSession(signal?: AbortSignal) {
+    const credentials = this.credentials;
+    if (!credentials) return { client: this.client, signal, failure: () => undefined };
+    const abort = new AbortController();
+    const combined = signal ? AbortSignal.any([signal, abort.signal]) : abort.signal;
+    let failure: MembraneError | undefined;
+    const client = this.client.withOptions({
+      fetch: (input, init) => {
+        const headers = new Headers(init?.headers);
+        headers.delete('x-api-key');
+        return fetchWithCredentials(input, { ...init, headers }, async context => {
+          try {
+            const credential = await credentials(context);
+            validateCredential(credential);
+            const resolvedHeaders = new Headers(credential.headers);
+            resolvedHeaders.delete('x-api-key');
+            return { ...credential, headers: Object.fromEntries(resolvedHeaders) };
+          } catch (error) {
+            if (combined.aborted) throw error;
+            failure = error instanceof MembraneError ? error : authError(
+              `Credential resolution failed: ${error instanceof Error ? error.message : String(error)}`, error,
+            );
+            // SDK 0.52 retries thrown fetch errors as connection failures.
+            // Abort this operation to bypass that loop, then restore the
+            // original error at the complete/stream/keepalive boundary.
+            abort.abort(failure);
+            throw failure;
+          }
+        });
+      },
+    });
+    return { client, signal: combined, failure: () => failure };
+  }
+
+  private async createMessage(
+    request: Anthropic.MessageCreateParamsNonStreaming,
+    headers?: Record<string, string>,
+    signal?: AbortSignal,
+  ): Promise<Anthropic.Message> {
+    const session = this.credentialSession(signal);
+    try {
+      return await session.client.messages.create(request, { headers, signal: session.signal });
+    } catch (error) {
+      throw session.failure() ?? error;
+    }
   }
 
   supportsModel(modelId: string): boolean {
@@ -233,10 +326,9 @@ export class AnthropicAdapter implements ProviderAdapter {
     );
 
     try {
-      const response = await this.client.messages.create(fullRequest, {
-        signal: options?.signal,
-        headers,
-      });
+      const response = await this.createMessage(
+        fullRequest, this.liveHeaders(headers, 'complete'), options?.signal,
+      );
 
       return this.parseResponse(response, fullRequest);
     } catch (error) {
@@ -304,11 +396,12 @@ export class AnthropicAdapter implements ProviderAdapter {
     };
 
     resetIdleTimer();
+    const session = this.credentialSession(idleAbort.signal);
 
     try {
-      const stream = await this.client.messages.stream(anthropicRequest, {
-        signal: idleAbort.signal,
-        headers: this.betaHeaders(request),
+      const stream = await session.client.messages.stream(anthropicRequest, {
+        signal: session.signal,
+        headers: this.liveHeaders(this.betaHeaders(request), 'stream'),
       });
 
       // Accumulate response metadata from SSE events directly, so we can
@@ -545,7 +638,7 @@ export class AnthropicAdapter implements ProviderAdapter {
           rawRequest: fullRequest,
         });
       }
-      throw this.handleError(error, fullRequest);
+      throw this.handleError(session.failure() ?? error, fullRequest);
     }
   }
 
@@ -555,6 +648,19 @@ export class AnthropicAdapter implements ProviderAdapter {
    *  the SDK replaces same-key defaults instead of merging, and the API
    *  accepts comma-separated betas. Undefined when nothing to add, so the
    *  defaults apply untouched. */
+  /** Base headers + the live dynamicHeaders stamp. Request time only: the
+   *  keepalive recorder receives the base headers BEFORE this merge, so
+   *  replayed touches never carry a stale telemetry value. */
+  private liveHeaders(base: Record<string, string> | undefined, lane: DynamicHeadersContext['lane']): Record<string, string> | undefined {
+    const dyn = this.dynamicHeaders?.({ lane });
+    if (!dyn) return base;
+    const out: Record<string, string> = { ...(base ?? {}) };
+    for (const [k, v] of Object.entries(dyn)) {
+      if (v !== null && v !== undefined && v !== '') out[k] = String(v);
+    }
+    return Object.keys(out).length ? out : undefined;
+  }
+
   private betaHeaders(request: ProviderRequest): Record<string, string> | undefined {
     if (!thinkingEnabled(request) || !needsInterleavedThinkingBeta(request.model)) {
       return undefined;

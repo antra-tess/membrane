@@ -196,7 +196,7 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
         });
       } else if (block.type === 'redacted_thinking') {
         flushMessage();
-        out.push({ type: 'reasoning', encrypted_content: block.data });
+        out.push({ type: 'reasoning', encrypted_content: block.data, summary: [] });
       }
     }
     flushMessage();

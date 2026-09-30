@@ -112,6 +112,9 @@ export type ToolMode =
 // ============================================================================
 
 export interface NormalizedRequest {
+  /** Receives the exact post-format/post-hook cache receipt immediately before
+   * network submission. Observability only; never forwarded to providers. */
+  onCacheWireReceipt?: (receipt: import('../cache-wire-receipt.js').CacheWireReceipt) => void;
   /**
    * Explicitly own the loss of old inline images when the serialized request
    * exceeds the API byte cap: oldest images are replaced with loud
@@ -151,6 +154,10 @@ export interface NormalizedRequest {
    * Set to false to disable cache_control markers in requests.
    */
   promptCaching?: boolean;
+
+  /** Marker ownership policy. `cm-owned` disables every formatter-generated
+   * system/context-prefix marker; only normalized message breakpoints survive. */
+  cacheMarkers?: 'membrane-system' | 'cm-owned';
 
   /**
    * Cache TTL for Anthropic prompt caching.
