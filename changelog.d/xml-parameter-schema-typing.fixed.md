@@ -1,61 +1,75 @@
-- **XML tool mode now consults the declared `inputSchema` when parsing
-  parameter values.** A parameter declared `type: "string"` keeps its raw,
-  untrimmed text. Previously every value was guessed — trimmed, then
-  `JSON.parse`d with the trimmed text as fallback — so leading and trailing
-  whitespace was destroyed with no way for the model to express it, and a
-  string argument whose text happened to be valid JSON silently arrived as an
-  object, number, boolean or `null`. **This changes the arguments exact-match
-  edit tools receive:** a value written as `"\n  indented line\n"` now arrives
-  with its newline and indentation intact where it previously arrived as
-  `"indented line"`, and a value of `{"a": 1}` for a string parameter stays the
-  string `{"a": 1}`. Tools that compensated by re-trimming, or that relied on
-  the coercion, should drop that workaround.
-- Parameters declared `object`, `array`, `number`, `integer` or `boolean` are
-  JSON-parsed as before, now with a loud `console.warn` naming the tool, the
-  parameter and the declared type when the text does not parse (the raw text is
-  passed through unchanged) or parses to a different JSON kind than declared.
-  The diagnostic names those coordinates ONLY and never the argument value:
-  tool inputs routinely carry credentials, tokens and private document text,
-  and this path fires exactly when a model formats such a value oddly.
-  Large integers still stay strings so snowflake ids keep their precision.
-- **Every spelling of a declaration is honoured, not just
-  `properties[param].type`.** A parameter declared as a type array
-  (`["string","null"]`), as an `anyOf`/`oneOf` of one type plus null, as a
-  `$ref` into the tool's own `definitions`/`$defs` (followed up to three hops,
-  cycles included), or inside a ROOT-level `oneOf`/`anyOf`/`allOf` union, now
-  resolves to its declared type and is parsed by it. Previously only a direct
-  scalar `type` counted, so all of those forms fell back to the legacy guess
-  and quietly lost whitespace or changed a JSON-looking string into an object.
-  Root-union parameters are found the way `flattenRootSchemaUnion` merges them
-  for the Anthropic wire: root `properties` first, then the variants in
-  `oneOf`, `anyOf`, `allOf` order, first declaration of a key winning.
-- A declared parameter whose schema form does not resolve to a single type
-  (a two-non-null union, a `$ref` this parser cannot follow) still gets the
-  legacy guess, now with ONE `console.warn` per tool and parameter naming the
-  unresolved form and the fallback. Parameters that are simply not declared
-  stay silent, so the diagnostic cannot turn into noise.
-- The XML tool instructions state the same resolved type, derived by the same
-  function the parser uses, so what the model is told a parameter is and what
-  the parser decides it is cannot drift. A parameter whose schema had no direct
-  scalar `type` used to render as `type="undefined"` (and a type array as
-  `type="integer,null"`); it now renders the resolved type, or omits the
-  attribute entirely when none resolves. Parameters declared only inside a
-  root-level union previously vanished from the XML instructions; they now
-  render from the same first-wins property collection the parser uses. This
-  changes instruction bytes for those previously broken schemas.
-- The XML tool instructions now derive `required="true"` with root-combinator
-  semantics too, from the same schema the parameters themselves come from: a
-  key declared and required inside a root `allOf` branch, or required by every
-  `oneOf`/`anyOf` alternative, renders required, while a key required by only
-  SOME alternatives stays optional. Requiredness consulted root `required`
-  alone, so a parameter carried only by a root union rendered optional however
-  its variant declared it — the model was told an argument it must send is
-  optional. The Anthropic wire's own required merge
-  (`flattenRootSchemaUnion`) runs through that same single derivation, so the
-  native and XML surfaces cannot drift apart.
-- Parameters with no declared schema keep the previous guess exactly, so
-  callers that do not pass `tools` see no change. Schemas reach the parser
-  through the new optional `tools` argument on `parseToolCalls`,
-  `parseAccumulatedIntoBlocks`, `PrefillFormatter.parseToolCalls` and
-  `PrefillFormatter.parseContentBlocks`; membrane threads `request.tools` into
-  every XML-mode parse site itself.
+- **XML tool mode now parses parameter values by the tool's declared
+  `inputSchema`.** Previously every value was guessed: trimmed, then
+  `JSON.parse`d with the trimmed text as fallback. Leading and trailing
+  whitespace was lost unless the model happened to write the value as a JSON
+  string literal, and a string argument whose text was valid JSON silently
+  arrived as an object, number, boolean or `null`.
+- A parameter declared `string` receives its text as written — untrimmed,
+  never JSON-parsed — except that one newline directly after the opening tag
+  and one directly before the closing tag are layout, the framing tool results
+  are written in (`<stdout>\n…\n</stdout>`). **This changes the arguments
+  string parameters receive:** an indented line written inline keeps its
+  indentation, a value laid out on its own lines arrives without the two
+  framing newlines, `{"a": 1}` stays the text `{"a": 1}`, and a value written
+  as a JSON string literal keeps its quotes. Tools that compensated by
+  re-trimming, or that relied on the coercion, should drop that workaround. A
+  value that itself begins or ends with a newline is written with one more
+  there; legacy `tool_use` blocks without `rawXml` are reconstructed that way.
+- A declaration that also admits `null` (`["string","null"]`, an
+  `anyOf`/`oneOf` with a `null` branch) receives JSON `null` for the text
+  `null`, and the XML tool instructions mark the parameter `nullable="true"`.
+  A string parameter that does not admit null receives the text `null`.
+- Parameters declared `object`, `array`, `number`, `integer`, `boolean` or
+  `null` are JSON-parsed as before, with a `console.warn` naming the tool, the
+  parameter and the declared type when the text does not parse (the raw text
+  is passed through) or parses to another JSON type. The diagnostic never
+  includes the argument value: tool inputs routinely carry credentials, tokens
+  and private document text. Integers of 16 or more digits (Discord snowflakes
+  and the like) stay text under every declaration, as on the legacy path; for
+  a declaration other than `number`/`integer` that also warns.
+- **Which declarations are read.** A parameter's type is what its declaration
+  admits: its `type` (a name or an array of names) when present; otherwise its
+  `enum`/`const` values, `anyOf`/`oneOf` (any branch), `allOf` (every branch)
+  and `$ref` into the tool's own `definitions`/`$defs` (flat names, chains of
+  any length), all together. Parameters are read from the root `properties`
+  and, when every variant of a root `oneOf`/`anyOf`/`allOf` is an object
+  schema — exactly the unions the Anthropic native wire merges — from the
+  variants: the root's own declaration and `allOf` branches all apply, while
+  the `oneOf`/`anyOf` alternatives that declare a parameter are alternatives.
+  The XML tool instructions are rendered from the same reading, so the type a
+  model is told a parameter has is the type its value is parsed by.
+- **What is not read.** A declaration that admits several types (`string` or
+  `number`; root alternatives that disagree, such as a discriminated union
+  whose alternatives declare one parameter as `string` and as `object`), none
+  (a contradiction), a name that is not a JSON Schema type, or a `$ref` that
+  cycles or points outside the tool's schema keeps the legacy guess, with one
+  `console.warn` per distinct schema form, and the instructions state no type
+  for it. A root union with a variant that is not an object schema (a `$ref`
+  variant, a string alternative) is read on neither wire: the native wire
+  falls back to a permissive schema, the XML instructions list the root's own
+  parameters, and a parameter outside them keeps the legacy guess, with one
+  warn. Keywords such as `not` and `if`/`then`/`else` are not consulted. A
+  declaration that admits any value (`{}`, a description alone) and an
+  undeclared parameter keep the legacy guess silently.
+- **XML tool instructions.** `type`, `nullable="true"` and `required="true"`
+  come from the reading above; requiredness follows root-combinator semantics
+  (root `required` and every `allOf` branch's, plus keys every
+  `oneOf`/`anyOf` alternative requires) through the derivation the native
+  `flattenRootSchemaUnion` uses. For tools without a root union whose
+  parameters all carry a direct JSON Schema `type` name, the instructions are
+  byte-identical to before. They change where the old rendering was broken:
+  `type="undefined"` for a parameter without a direct `type` (now the type
+  read, or no attribute), a type array joined with commas
+  (`type="integer,null"` is now `type="integer" nullable="true"`;
+  `type="string,number"` now has no attribute), parameters declared only
+  inside a mergeable root union (previously missing), and a type name that is
+  not a JSON Schema type (now no attribute).
+- `flattenRootSchemaUnion` merges a variant property named like an
+  `Object.prototype` member (`constructor`, `toString`) instead of dropping it,
+  and no longer keeps such a name in `required` with no property behind it.
+- Schemas reach the parser through the new optional `tools` argument on
+  `parseToolCalls`, `parseAccumulatedIntoBlocks`,
+  `PrefillFormatter.parseToolCalls` and `PrefillFormatter.parseContentBlocks`;
+  membrane threads `request.tools` into every XML-mode parse site itself.
+  Callers that pass no `tools` see no change. `toolDefinitionForPrompt` is
+  exported: a tool as the XML instructions present it, from the same reading.
