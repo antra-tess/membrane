@@ -7,7 +7,7 @@ export {
   formatToolResults,
   formatToolResult,
   formatToolDefinitions,
-  resolveDeclaredType,
+  toolDefinitionForPrompt,
   getToolInstructions,
   hasUnclosedToolBlock,
   endsWithPartialToolBlock,

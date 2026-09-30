@@ -1,5 +1,6 @@
 /**
- * Declared-type resolution for XML-mode parameters (greptile #53, tool-parser.ts:52).
+ * Declared-type resolution for XML-mode parameters (greptile #53, tool-parser.ts:52;
+ * review of 2026-09-29, findings 1, 2, 3, 5, 6 and 7).
  *
  * The schema-typed parse landed reading `properties[paramName].type` and
  * nothing else, so every OTHER spelling of the same declaration — a
@@ -9,13 +10,16 @@
  * Whitespace-sensitive and JSON-looking string arguments changed shape on the
  * way to the tool callback, silently.
  *
- * resolveDeclaredType collapses those forms to one type name; a form it cannot
- * collapse keeps the legacy guess but says so ONCE per tool/parameter, which
- * turns a silent divergence into a named bound.
+ * readToolSchema (src/utils/tool-schema.ts) reads every declaration as the set
+ * of JSON types it admits: a declaration that admits exactly one type (null
+ * aside) is parsed by it; one that admits several, none, or cannot be read
+ * keeps the legacy guess but says so ONCE per distinct schema form, which turns
+ * a silent divergence into a named bound. Schema shapes are read as data:
+ * nothing a producer sends makes reading throw.
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { parseToolCalls } from '../../src/utils/tool-parser.js';
+import { parseToolCalls, parseAccumulatedIntoBlocks } from '../../src/utils/tool-parser.js';
 import { AnthropicXmlFormatter } from '../../src/formatters/anthropic-xml.js';
 import type { ToolDefinition, NormalizedMessage } from '../../src/types/index.js';
 
@@ -127,22 +131,45 @@ describe('$ref into the tool\'s own definitions', () => {
     expect(parseParam(tool, 'fld1', '  zz-spaced-text  ')).toBe('  zz-spaced-text  ');
   });
 
-  it('gives up past the depth cap instead of following forever', () => {
+  it('follows a chain of any length: no depth budget to exhaust', () => {
+    // A three-hop cap used to be shared with union traversal, so a $ref inside a
+    // parameter anyOf inside a root variant ran out of hops and fell back.
+    const defs: Record<string, unknown> = {};
+    for (let hop = 1; hop < 12; hop++) defs[`zz${hop}`] = { $ref: `#/$defs/zz${hop + 1}` };
+    defs.zz12 = { type: 'string' };
     const tool = toolWith('zz_deep_ref_tool', {
       type: 'object',
-      properties: { fld1: { $ref: '#/$defs/zz1' } },
-      $defs: {
-        zz1: { $ref: '#/$defs/zz2' },
-        zz2: { $ref: '#/$defs/zz3' },
-        zz3: { $ref: '#/$defs/zz4' },
-        zz4: { type: 'string' },
-      },
+      oneOf: [
+        {
+          type: 'object',
+          properties: { fld1: { anyOf: [{ $ref: '#/$defs/zz1' }, { type: 'null' }] } },
+        },
+      ],
+      $defs: defs as Record<string, never>,
     });
     const { result, messages } = captureWarnings(() =>
       parseParam(tool, 'fld1', '  zz-spaced-text  ')
     );
-    expect(result).toBe('zz-spaced-text');
-    expect(messages).toHaveLength(1);
+    expect(result).toBe('  zz-spaced-text  ');
+    expect(messages).toHaveLength(0);
+  });
+
+  it('reads a definition shared along many paths once, not once per path', () => {
+    // Forty levels of two branches onto the same next definition: 2^40 paths,
+    // one definition each. Finishing at all is the assertion.
+    const defs: Record<string, unknown> = {};
+    for (let level = 0; level < 40; level++) {
+      defs[`zz${level}`] = {
+        anyOf: [{ $ref: `#/$defs/zz${level + 1}` }, { $ref: `#/$defs/zz${level + 1}` }],
+      };
+    }
+    defs.zz40 = { type: 'string' };
+    const tool = toolWith('zz_diamond_ref_tool', {
+      type: 'object',
+      properties: { fld1: { $ref: '#/$defs/zz0' } },
+      $defs: defs as Record<string, never>,
+    });
+    expect(parseParam(tool, 'fld1', '  zz-spaced-text  ')).toBe('  zz-spaced-text  ');
   });
 
   it('terminates on a $ref cycle', () => {
@@ -215,17 +242,142 @@ describe('anyOf / oneOf unions', () => {
     expect(messages[0]).toContain('anyOf');
   });
 
-  it('leaves sibling anyOf + oneOf unresolved rather than intersecting them', () => {
+  it('intersects sibling anyOf + oneOf, since both must hold', () => {
     const tool = toolWith('zz_sibling_combinator_tool', {
       type: 'object',
       properties: {
-        fld1: { anyOf: [{ type: 'string' }], oneOf: [{ type: 'string' }] },
+        fld1: {
+          anyOf: [{ type: 'string' }, { type: 'number' }],
+          oneOf: [{ type: 'string' }, { type: 'boolean' }],
+        },
       },
     });
     const { result, messages } = captureWarnings(() =>
       parseParam(tool, 'fld1', '  zz-spaced-text  ')
     );
-    expect(result).toBe('zz-spaced-text');
+    expect(result).toBe('  zz-spaced-text  ');
+    expect(messages).toHaveLength(0);
+  });
+
+  it('reads branches of ONE type as that type (literal unions)', () => {
+    // zod's union of literals: every branch is a string, so the parameter is.
+    const tool = toolWith('zz_literal_union_tool', {
+      type: 'object',
+      properties: {
+        fld1: { anyOf: [{ type: 'string', const: 'zz-a' }, { type: 'string', const: '1' }] },
+      },
+    });
+    const { result, messages } = captureWarnings(() => parseParam(tool, 'fld1', '1'));
+    expect(result).toBe('1');
+    expect(messages).toHaveLength(0);
+    expect(renderedTools(tool)).toContain('<parameter name="fld1" type="string">');
+  });
+
+  it('reads an integer branch and a number branch as number', () => {
+    const tool = toolWith('zz_numeric_union_tool', {
+      type: 'object',
+      properties: { fld1: { oneOf: [{ type: 'integer' }, { type: 'number' }] } },
+    });
+    expect(parseParam(tool, 'fld1', ' 1.5 ')).toBe(1.5);
+  });
+
+  it('intersects a parameter-level allOf', () => {
+    const tool = toolWith('zz_param_allof_tool', {
+      type: 'object',
+      properties: {
+        fld1: { allOf: [{ type: 'string' }, { minLength: 1 }] },
+        fld2: { allOf: [{ type: 'number' }, { type: 'integer' }] },
+      },
+    });
+    expect(parseParam(tool, 'fld1', '  {"ite1": 1}  ')).toBe('  {"ite1": 1}  ');
+    const { result, messages } = captureWarnings(() => parseParam(tool, 'fld2', ' 1.5 '));
+    expect(result).toBe(1.5);
+    expect(messages.join('\n')).toContain('declares type "integer"');
+  });
+});
+
+describe('nullable declarations', () => {
+  // A declaration that admits null lets the model write `null` for it. Main
+  // delivered null for these; collapsing ["string","null"] to plain string
+  // delivered the four-character text "null" instead.
+  const tool = toolWith('zz_nullable_tool', {
+    type: 'object',
+    properties: {
+      fld1: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+      fld2: { type: ['string', 'null'] },
+      fld3: { anyOf: [{ type: 'object' }, { type: 'null' }] },
+      fld4: { type: 'string' },
+      fld5: { enum: ['zz-a', 'zz-b', null] },
+    },
+  });
+
+  it('delivers null for a written null, without a warning', () => {
+    const { result, messages } = captureWarnings(() => {
+      const parsed = parseToolCalls(
+        '<function_calls>\n<invoke name="zz_nullable_tool">\n' +
+          '<parameter name="fld1">null</parameter>\n' +
+          '<parameter name="fld2">  null  </parameter>\n' +
+          '<parameter name="fld3">null</parameter>\n' +
+          '<parameter name="fld5">null</parameter>\n' +
+          '</invoke>\n</function_calls>',
+        { tools: [tool] }
+      );
+      return parsed!.calls[0]!.input;
+    });
+    expect(result).toEqual({ fld1: null, fld2: null, fld3: null, fld5: null });
+    expect(messages).toHaveLength(0);
+  });
+
+  it('keeps every other value by the non-null type', () => {
+    expect(parseParam(tool, 'fld1', '  nullish  ')).toBe('  nullish  ');
+    expect(parseParam(tool, 'fld2', '"null"')).toBe('"null"');
+    expect(parseParam(tool, 'fld3', '{"ite1": 1}')).toEqual({ ite1: 1 });
+    expect(parseParam(tool, 'fld5', 'zz-a')).toBe('zz-a');
+  });
+
+  it('keeps the text "null" for a string that does NOT admit null', () => {
+    expect(parseParam(tool, 'fld4', 'null')).toBe('null');
+  });
+
+  it('tells the model which parameters admit null', () => {
+    const doc = renderedTools(tool);
+    expect(doc).toContain('<parameter name="fld1" type="string" nullable="true">');
+    expect(doc).toContain('<parameter name="fld2" type="string" nullable="true">');
+    expect(doc).toContain('<parameter name="fld3" type="object" nullable="true">');
+    expect(doc).toContain('<parameter name="fld4" type="string">');
+  });
+});
+
+describe('enum and const without a type', () => {
+  it('reads the type of the listed values', () => {
+    const tool = toolWith('zz_untyped_enum_tool', {
+      type: 'object',
+      properties: {
+        fld1: { enum: ['1', '2'] } as never,
+        fld2: { const: 'zz-fixed' } as never,
+        fld3: { enum: [1, 2] } as never,
+      },
+    });
+    const { result, messages } = captureWarnings(() => [
+      parseParam(tool, 'fld1', '1'),
+      parseParam(tool, 'fld2', 'zz-fixed'),
+      parseParam(tool, 'fld3', ' 2 '),
+    ]);
+    // Main guessed '1' into the number 1, which no value of this enum is.
+    expect(result).toEqual(['1', 'zz-fixed', 2]);
+    expect(messages).toHaveLength(0);
+    const doc = renderedTools(tool);
+    expect(doc).toContain('<parameter name="fld1" type="string" enum="1,2">');
+    expect(doc).toContain('<parameter name="fld3" type="integer" enum="1,2">');
+  });
+
+  it('leaves values of several types unresolved', () => {
+    const tool = toolWith('zz_mixed_enum_tool', {
+      type: 'object',
+      properties: { fld1: { enum: ['zz-a', 1] } as never },
+    });
+    const { result, messages } = captureWarnings(() => parseParam(tool, 'fld1', ' 1 '));
+    expect(result).toBe(1);
     expect(messages).toHaveLength(1);
   });
 });
@@ -258,17 +410,133 @@ describe('root-level unions', () => {
     expect(parseParam(allOfTool, 'fld1', '  zz-spaced-text  ')).toBe('  zz-spaced-text  ');
   });
 
-  it('lets root properties win over a variant, then takes the FIRST variant to declare a key', () => {
-    const tool = toolWith('zz_root_collision_tool', {
+  it('types a parameter every declaring alternative agrees on', () => {
+    const tool = toolWith('zz_root_agreeing_tool', {
       type: 'object',
-      properties: { fld1: { type: 'string' } },
       oneOf: [
-        { type: 'object', properties: { fld1: { type: 'object' }, fld2: { type: 'string' } } },
-        { type: 'object', properties: { fld2: { type: 'object' } } },
+        { type: 'object', properties: { fld1: { const: 'zz-text' }, fld2: { type: 'string' } } },
+        { type: 'object', properties: { fld1: { const: 'zz-other' }, fld2: { type: 'string' } } },
       ],
     });
-    expect(parseParam(tool, 'fld1', '  {"ite1": 1}  ')).toBe('  {"ite1": 1}  ');
+    expect(parseParam(tool, 'fld1', 'zz-other')).toBe('zz-other');
     expect(parseParam(tool, 'fld2', '  {"ite1": 1}  ')).toBe('  {"ite1": 1}  ');
+  });
+
+  it('widens to null when one alternative admits it', () => {
+    const tool = toolWith('zz_root_nullable_alternative_tool', {
+      type: 'object',
+      anyOf: [
+        { type: 'object', properties: { fld1: { type: 'string' } } },
+        { type: 'object', properties: { fld1: { type: ['string', 'null'] } } },
+      ],
+    });
+    expect(parseParam(tool, 'fld1', 'null')).toBeNull();
+    expect(parseParam(tool, 'fld1', '  zz-text  ')).toBe('  zz-text  ');
+  });
+
+  describe('alternatives that disagree on a parameter', () => {
+    // A discriminated union: `kind` selects the alternative, and the two
+    // alternatives declare `fld2` with different types. Taking the FIRST
+    // alternative's declaration parsed a valid call to the second one by the
+    // first one's type. Neither type is safe to apply without choosing the
+    // alternative, so the parameter keeps the legacy guess — the values main
+    // delivered — and the instructions state no type for it.
+    const tool = toolWith('zz_root_disagreeing_tool', {
+      type: 'object',
+      oneOf: [
+        {
+          type: 'object',
+          properties: { kind: { const: 'zz-text' }, fld2: { type: 'string' } },
+          required: ['kind', 'fld2'],
+        },
+        {
+          type: 'object',
+          properties: { kind: { const: 'zz-json' }, fld2: { type: 'object' } },
+          required: ['kind', 'fld2'],
+        },
+      ],
+    });
+    const call = (kind: string, value: string) =>
+      parseToolCalls(
+        '<function_calls>\n<invoke name="zz_root_disagreeing_tool">\n' +
+          `<parameter name="kind">${kind}</parameter>\n` +
+          `<parameter name="fld2">${value}</parameter>\n` +
+          '</invoke>\n</function_calls>',
+        { tools: [tool] }
+      )!.calls[0]!.input;
+
+    it('parses a valid call to the SECOND alternative as main did', () => {
+      const { result, messages } = captureWarnings(() => call('zz-json', '{"ite1": 1}'));
+      expect(result).toEqual({ kind: 'zz-json', fld2: { ite1: 1 } });
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toContain('zz_root_disagreeing_tool');
+      expect(messages[0]).toContain('"fld2"');
+      expect(messages[0]).toContain('[{"type":"string"},{"type":"object"}]');
+    });
+
+    it('parses a valid call to the FIRST alternative as main did', () => {
+      const { result } = captureWarnings(() => call('zz-text', '  zz-plain-text  '));
+      expect(result).toEqual({ kind: 'zz-text', fld2: 'zz-plain-text' });
+    });
+
+    it('states no type for it in the instructions', () => {
+      const doc = renderedTools(tool);
+      expect(doc).toContain('<parameter name="kind" type="string" required="true">');
+      expect(doc).toContain('<parameter name="fld2" required="true">');
+    });
+  });
+
+  it('leaves a parameter the root and a variant declare differently unresolved', () => {
+    const tool = toolWith('zz_root_variant_conflict_tool', {
+      type: 'object',
+      properties: { fld1: { type: 'string' } },
+      allOf: [{ type: 'object', properties: { fld1: { type: 'object' } } }],
+    });
+    const { result, messages } = captureWarnings(() => parseParam(tool, 'fld1', ' {"ite1": 1} '));
+    expect(result).toEqual({ ite1: 1 });
+    expect(messages).toHaveLength(1);
+  });
+
+  describe('a root union whose variants are not all object schemas', () => {
+    // The native wire merges a root union only when every variant is an
+    // object schema, and otherwise falls back to a permissive object schema
+    // whose properties are the root's own. The XML surfaces read the same
+    // union the same way: variant parameters are not read, and saying
+    // otherwise (rendering one alternative's parameters as required, say)
+    // told the model something the native wire does not.
+    const tool = toolWith('zz_root_unmergeable_tool', {
+      type: 'object',
+      properties: { fld1: { type: 'string' } },
+      required: ['fld1'],
+      allOf: [
+        { type: 'object', properties: { fld2: { type: 'string' } }, required: ['fld2'] },
+        { $ref: '#/$defs/zz1' },
+      ],
+      $defs: { zz1: { type: 'object', properties: { fld3: { type: 'integer' } } } },
+    });
+
+    it('renders the root parameters only, as the native wire falls back', () => {
+      const doc = renderedTools(tool);
+      expect(doc).toContain('<parameter name="fld1" type="string" required="true">');
+      expect(doc).not.toContain('name="fld2"');
+      expect(doc).not.toContain('name="fld3"');
+    });
+
+    it('parses a variant parameter by the legacy guess, naming the unread union once', () => {
+      const { result, messages } = captureWarnings(() => [
+        parseParam(tool, 'fld2', '  zz-spaced-text  '),
+        parseParam(tool, 'fld2', '  zz-spaced-text  '),
+      ]);
+      expect(result).toEqual(['zz-spaced-text', 'zz-spaced-text']);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toContain('zz_root_unmergeable_tool');
+      expect(messages[0]).toContain('"fld2"');
+      expect(messages[0]).toContain('allOf');
+    });
+
+    it('still types the root parameters', () => {
+      expect(parseParam(tool, 'fld1', '  zz-spaced-text  ')).toBe('  zz-spaced-text  ');
+    });
   });
 });
 
@@ -281,6 +549,124 @@ describe('parameters with no declaration at all', () => {
     const { result, messages } = captureWarnings(() => parseParam(tool, 'fld9', '  42  '));
     expect(result).toBe(42);
     expect(messages).toHaveLength(0);
+  });
+
+  it('keeps the legacy guess silently for a declaration that admits any value', () => {
+    const tool = toolWith('zz_any_param_tool', {
+      type: 'object',
+      properties: { fld1: { description: 'zz-anything-goes' } },
+    });
+    const { result, messages } = captureWarnings(() => parseParam(tool, 'fld1', '  42  '));
+    expect(result).toBe(42);
+    expect(messages).toHaveLength(0);
+  });
+});
+
+describe('schema shapes are data, never structure', () => {
+  // Tool schemas arrive from producers unvalidated, and the parser runs on
+  // every model reply: nothing in a schema, and nothing a model names, may
+  // make it throw. A parameter named like an Object.prototype member used to
+  // resolve to the prototype FUNCTION, whose serialization is undefined; the
+  // diagnostic then threw on its length, once per process, aborting the
+  // inference that carried the call.
+  const agentFrameworkReadTool = toolWith('zz_read_tool', {
+    type: 'object',
+    properties: { path: { type: 'string' } },
+    required: ['path'],
+  });
+
+  for (const name of ['constructor', 'toString', 'hasOwnProperty', 'valueOf', '__defineGetter__']) {
+    it(`parses a call carrying an undeclared "${name}" parameter, silently, every time`, () => {
+      const xml =
+        '<function_calls>\n<invoke name="zz_read_tool">\n' +
+        '<parameter name="path">zz-file</parameter>\n' +
+        `<parameter name="${name}">zz-extra</parameter>\n` +
+        '</invoke>\n</function_calls>';
+      const { result, messages } = captureWarnings(() => [
+        parseToolCalls(xml, { tools: [agentFrameworkReadTool] })!.calls[0]!.input,
+        parseAccumulatedIntoBlocks(xml, { tools: [agentFrameworkReadTool] }).toolCalls[0]!.input,
+      ]);
+      for (const input of result) {
+        expect(input.path).toBe('zz-file');
+        expect(Object.getOwnPropertyDescriptor(input, name)?.value).toBe('zz-extra');
+      }
+      expect(messages).toHaveLength(0);
+    });
+  }
+
+  it('reads a parameter DECLARED with such a name like any other', () => {
+    const tool = toolWith(
+      'zz_prototype_named_tool',
+      JSON.parse(`{
+        "type": "object",
+        "properties": { "constructor": { "type": "string" } },
+        "anyOf": [{ "type": "object", "properties": { "toString": { "type": "integer" } } }]
+      }`)
+    );
+    expect(parseParam(tool, 'constructor', '  zz-spaced-text  ')).toBe('  zz-spaced-text  ');
+    expect(parseParam(tool, 'toString', ' 7 ')).toBe(7);
+    const doc = renderedTools(tool);
+    expect(doc).toContain('<parameter name="constructor" type="string">');
+    expect(doc).toContain('<parameter name="toString" type="integer">');
+  });
+
+  it('leaves a $ref naming such a member, absent from $defs, unresolved', () => {
+    const tool = toolWith('zz_prototype_ref_tool', {
+      type: 'object',
+      properties: { fld1: { $ref: '#/$defs/constructor' } },
+      $defs: {},
+    });
+    const { result, messages } = captureWarnings(() => parseParam(tool, 'fld1', '  zz-text  '));
+    expect(result).toBe('zz-text');
+    expect(messages).toHaveLength(1);
+  });
+
+  it('survives malformed schema shapes', () => {
+    const malformed: unknown[] = [
+      { type: 'object', properties: 'zz-not-an-object' },
+      { type: 'object', properties: { fld1: null } },
+      { type: 'object', properties: { fld1: { anyOf: 'zz-not-an-array' } } },
+      { type: 'object', properties: { fld1: { enum: 'zz-not-an-array' } } },
+      { type: 'object', properties: { fld1: { type: 7 } } },
+      { type: 'object', properties: { fld1: { $ref: 7 } } },
+      { type: 'object', oneOf: [null, 'zz-not-a-schema'] },
+      { type: 'object', oneOf: 'zz-not-an-array', required: 'fld1' },
+      { type: 'object', properties: { fld1: { allOf: [null, { type: 'string' }] } } },
+      null,
+      'zz-not-a-schema',
+    ];
+    for (const [index, inputSchema] of malformed.entries()) {
+      const tool = { name: `zz_malformed_${index}`, description: 'zz', inputSchema } as ToolDefinition;
+      const { result } = captureWarnings(() => parseParam(tool, 'fld1', '  42  '));
+      expect(result).toBe(42);
+      expect(() => renderedTools(tool)).not.toThrow();
+    }
+  });
+});
+
+describe('unresolved-form diagnostics are deduplicated by schema content', () => {
+  // Keyed by tool and parameter NAME alone, the first schema to warn silenced
+  // every other: two agents in one host whose servers expose the same tool
+  // name with different schemas heard only about the first.
+  it('warns once per distinct schema, not once per tool and parameter name', () => {
+    const first = toolWith('zz_shared_name_tool', {
+      type: 'object',
+      properties: { fld1: { anyOf: [{ type: 'string' }, { type: 'number' }] } },
+    });
+    const second = toolWith('zz_shared_name_tool', {
+      type: 'object',
+      properties: { fld1: { anyOf: [{ type: 'boolean' }, { type: 'array' }] } },
+    });
+    const firstAgain = toolWith('zz_shared_name_tool', JSON.parse(JSON.stringify(first.inputSchema)));
+    const { messages } = captureWarnings(() => {
+      parseParam(first, 'fld1', 'zz-text');
+      parseParam(second, 'fld1', 'zz-text');
+      parseParam(firstAgain, 'fld1', 'zz-text');
+      parseParam(second, 'fld1', 'zz-text');
+    });
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toContain('"string"');
+    expect(messages[1]).toContain('"boolean"');
   });
 });
 
@@ -336,7 +722,7 @@ describe('tool instructions rendered from the same resolution', () => {
       })
     );
     expect(doc).toContain('<parameter name="fld1" type="string">');
-    expect(doc).toContain('<parameter name="fld2" type="integer">');
+    expect(doc).toContain('<parameter name="fld2" type="integer" nullable="true">');
     expect(doc).not.toContain('type="undefined"');
   });
 

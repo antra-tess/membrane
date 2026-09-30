@@ -17,9 +17,10 @@ import type {
   ContentBlock,
   ToolResultContentBlock,
   ToolDefinition,
-  ToolParameter,
 } from '../types/index.js';
+import { createHash } from 'node:crypto';
 import { isAcceptedImageMediaType, strippedImagePlaceholder } from './image-media.js';
+import { readToolSchema, type ParameterDeclaration, type ToolSchemaReading } from './tool-schema.js';
 
 // ============================================================================
 // Helper Functions
@@ -37,224 +38,102 @@ export interface ToolParseOptions {
   tools?: ToolDefinition[];
 }
 
-/** JSON-shaped declarations: the value is JSON, not text. */
-const JSON_TYPED_PARAMS = new Set(['object', 'array', 'number', 'integer', 'boolean']);
-
 /** 16+ digits, no decimal: beyond Number.MAX_SAFE_INTEGER (Discord snowflakes). */
 const LARGE_INT_RE = /^\d{16,}$/;
 
-/** `$ref` spellings resolved against the tool's own inputSchema. */
-const REF_PREFIXES = [
-  { prefix: '#/definitions/', key: 'definitions' },
-  { prefix: '#/$defs/', key: '$defs' },
-] as const;
-
-/** Hops of `$ref`/union indirection followed before a form is called unresolved. */
-const MAX_SCHEMA_RESOLUTION_DEPTH = 3;
-
-/**
- * Root-level combinator keys, in the order their variants are consulted.
- *
- * `flattenRootSchemaUnion` (src/providers/anthropic-tool-schema.ts), which
- * merges the same root unions for the Anthropic wire, IMPORTS this list rather
- * than keeping a copy of it, and derives its `required` through
- * `effectiveRequiredKeys` below. With the parser and the XML instruction
- * renderer consuming the two collectors below, one key order, one first-wins
- * collision rule and one requiredness law govern every surface.
- */
-export const ROOT_UNION_KEYS = ['oneOf', 'anyOf', 'allOf'] as const;
-
-export type RootUnionKey = (typeof ROOT_UNION_KEYS)[number];
-
-type ToolInputSchema = ToolDefinition['inputSchema'];
-
-function refTarget(root: ToolInputSchema, ref: string): ToolParameter | undefined {
-  for (const { prefix, key } of REF_PREFIXES) {
-    if (!ref.startsWith(prefix)) continue;
-    const name = ref.slice(prefix.length);
-    // Only flat names: a deeper JSON pointer (or one carrying ~0/~1 escapes)
-    // is an unresolved form, and says so out loud rather than guessing.
-    if (name.length === 0 || name.includes('/') || name.includes('~')) return undefined;
-    return root[key]?.[name];
-  }
-  return undefined;
+/** One tool's schema, read once per invoke. */
+interface InvokeSchema {
+  toolName: string;
+  inputSchema: unknown;
+  reading: ToolSchemaReading;
 }
 
-/**
- * Collapse one JSON Schema node to the single type name it declares, or
- * `undefined` when it declares none this parser can name.
- *
- *   - `type: 'string'`               → `'string'`
- *   - `type: ['string','null']`      → `'string'` (exactly one non-null member)
- *   - `anyOf`/`oneOf`                → the one branch that resolves to a
- *                                      non-null type, when every other branch
- *                                      is null-typed
- *   - `$ref: '#/definitions/X'`      → the definition's own resolution
- *
- * Recursion is depth-capped, so a `$ref` cycle terminates as unresolved
- * instead of overflowing the stack.
- */
-export function resolveDeclaredType(
-  schema: ToolParameter | undefined,
-  root: ToolInputSchema,
-  depth: number = 0
-): string | undefined {
-  if (!schema || depth > MAX_SCHEMA_RESOLUTION_DEPTH) return undefined;
-
-  if (typeof schema.type === 'string') return schema.type;
-
-  if (Array.isArray(schema.type)) {
-    const nonNullMembers = schema.type.filter(member => member !== 'null');
-    return nonNullMembers.length === 1 ? nonNullMembers[0] : undefined;
-  }
-
-  // Sibling `anyOf` and `oneOf` must both hold, which this parser does not
-  // intersect: unresolved.
-  if (schema.anyOf && schema.oneOf) return undefined;
-  const branches = schema.anyOf ?? schema.oneOf;
-  if (branches) {
-    let resolved: string | undefined;
-    for (const branch of branches) {
-      const branchType = resolveDeclaredType(branch, root, depth + 1);
-      if (branchType === 'null') continue;
-      if (branchType === undefined || resolved !== undefined) return undefined;
-      resolved = branchType;
-    }
-    return resolved;
-  }
-
-  if (typeof schema.$ref === 'string') {
-    return resolveDeclaredType(refTarget(root, schema.$ref), root, depth + 1);
-  }
-
-  return undefined;
-}
-
-export function collectDeclaredParameters(
-  root: ToolInputSchema
-): Record<string, ToolParameter> {
-  const declaredParameters = { ...(root.properties ?? {}) };
-  for (const key of ROOT_UNION_KEYS) {
-    const variants = root[key];
-    if (!variants) continue;
-    for (const variant of variants) {
-      for (const [paramName, schema] of Object.entries(variant.properties ?? {})) {
-        if (!(paramName in declaredParameters)) declaredParameters[paramName] = schema;
-      }
-    }
-  }
-  return declaredParameters;
-}
-
-/** Schema lists arrive from producers unvalidated: keep the string members. */
-function stringMembers(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.filter((entry): entry is string => typeof entry === 'string')
-    : [];
-}
-
-/**
- * The keys a valid instance MUST carry, given a root `required` and the root
- * combinators around it.
- *
- * Requiredness follows the combinator's own semantics: every `allOf` branch
- * applies to the same instance, so their required lists UNION; `oneOf`/`anyOf`
- * variants are alternatives, so only a key required by EVERY alternative is
- * unconditionally required — an INTERSECTION. Sibling combinators must all
- * hold at once, so their results union together with root `required`.
- *
- * MIRROR: `flattenRootSchemaUnion` (src/providers/anthropic-tool-schema.ts)
- * derives the Anthropic wire's `required` through this same function, and
- * `collectRequiredParameters` below feeds the XML instruction renderer. The
- * requiredness a model is told and the requiredness the wire carries are one
- * derivation on two surfaces, exactly as `collectDeclaredParameters` governs
- * which parameters exist at all.
- */
-export function effectiveRequiredKeys(
-  rootRequired: unknown,
-  combinators: ReadonlyArray<{
-    key: RootUnionKey;
-    variants: ReadonlyArray<{ required?: unknown }>;
-  }>
-): string[] {
-  const requiredPerCombinator = combinators.flatMap(({ key, variants }) => {
-    const variantRequired = variants.map(variant => stringMembers(variant.required));
-    if (key === 'allOf') return variantRequired.flat();
-    return variantRequired.reduce(
-      (sharedKeys, variantKeys) => sharedKeys.filter(name => variantKeys.includes(name)),
-      variantRequired[0] ?? []
+function invokeSchemaFor(
+  tools: ToolDefinition[] | undefined,
+  toolName: string
+): InvokeSchema | undefined {
+  if (!Array.isArray(tools)) return undefined;
+  const tool = tools.find(candidate => candidate?.name === toolName);
+  if (!tool) return undefined;
+  const reading = readToolSchema(tool.inputSchema);
+  if (reading.failure !== undefined) {
+    warnOnce(['failure', toolName, reading.failure], () =>
+      `[membrane:tool-parser] tool "${toolName}": its input schema could not be read ` +
+        `(${reading.failure}), so every parameter of it gets legacy text parsing ` +
+        '(value trimmed, then JSON-guessed).'
     );
-  });
-  return [...new Set([...stringMembers(rootRequired), ...requiredPerCombinator])];
+    return undefined;
+  }
+  return { toolName, inputSchema: tool.inputSchema, reading };
 }
+
+// ----------------------------------------------------------------------------
+// Diagnostics
+// ----------------------------------------------------------------------------
 
 /**
- * Effective required keys of one tool's input schema — the requiredness twin
- * of {@link collectDeclaredParameters}, which collects the same schema's
- * parameters across the same root combinators.
+ * Subjects already reported, so a repeated parse names the same bound once.
+ * Keyed by CONTENT — tool, parameter and the schema form concerned — not by
+ * tool and parameter name alone: two agents in one process whose servers
+ * expose the same tool name with different schemas each hear about their own.
+ * Stored as digests and bounded in number, so neither a large schema nor a
+ * producer that mints a new schema per request can grow it without limit.
  */
-export function collectRequiredParameters(root: ToolInputSchema): Set<string> {
-  return new Set(
-    effectiveRequiredKeys(
-      root.required,
-      ROOT_UNION_KEYS.map(key => ({ key, variants: root[key] ?? [] }))
-    )
-  );
+const reportedSubjects = new Set<string>();
+const MAX_REPORTED_SUBJECTS = 1024;
+
+function stringifyForDiagnostic(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? `[${typeof value}]`;
+  } catch {
+    // A schema object carrying a cycle of its own (not a `$ref` cycle), or a BigInt.
+    return '[unserializable schema]';
+  }
 }
 
-/** One warn per tool/parameter, so a repeated parse names the bound once. */
-const warnedUnresolvedForms = new Set<string>();
+function warnOnce(subject: readonly string[], message: () => string): void {
+  const key = createHash('sha256').update(subject.join('\u0000')).digest('base64');
+  if (reportedSubjects.has(key)) return;
+  if (reportedSubjects.size >= MAX_REPORTED_SUBJECTS) reportedSubjects.clear();
+  reportedSubjects.add(key);
+  console.warn(message());
+}
 
-function warnUnresolvedSchemaForm(
+function previewOf(form: string): string {
+  return form.length > 200 ? `${form.slice(0, 200)}…` : form;
+}
+
+function warnUnresolvedDeclaration(
   toolName: string,
   paramName: string,
-  schema: ToolParameter
+  declaration: ParameterDeclaration
 ): void {
-  const key = `${toolName}\u0000${paramName}`;
-  if (warnedUnresolvedForms.has(key)) return;
-  warnedUnresolvedForms.add(key);
-  let form: string;
-  try {
-    form = JSON.stringify(schema);
-  } catch {
-    // A schema object carrying a cycle of its own (not a `$ref` cycle).
-    form = '[unserializable schema]';
-  }
-  const preview = form.length > 200 ? `${form.slice(0, 200)}…` : form;
-  console.warn(
-    `[membrane:tool-parser] tool "${toolName}" parameter "${paramName}" declares a schema ` +
-      `form this parser cannot resolve to a single type: ${preview}. Legacy text parsing ` +
-      'applies to it (value trimmed, then JSON-guessed), so whitespace-sensitive and ' +
-      'JSON-looking string arguments may change before reaching the tool.'
+  const form = stringifyForDiagnostic(
+    declaration.declaredBy.length === 1 ? declaration.declaredBy[0] : declaration.declaredBy
+  );
+  const spelled =
+    declaration.declaredBy.length === 1
+      ? `declares ${previewOf(form)}`
+      : `is declared by ${declaration.declaredBy.length} schema nodes, ${previewOf(form)}`;
+  warnOnce(['unresolved', toolName, paramName, form], () =>
+    `[membrane:tool-parser] tool "${toolName}" parameter "${paramName}" ${spelled}, which ` +
+      'this parser cannot read as a single JSON type. Legacy text parsing applies to it ' +
+      '(value trimmed, then JSON-guessed), so whitespace-sensitive and JSON-looking string ' +
+      'arguments may change before reaching the tool.'
   );
 }
 
-function declaredParamType(
-  tools: ToolDefinition[] | undefined,
-  toolName: string,
-  paramName: string
-): string | undefined {
-  if (!tools) return undefined;
-  const root = tools.find(t => t.name === toolName)?.inputSchema;
-  if (!root) return undefined;
-  // An UNDECLARED parameter keeps the legacy guess silently; only a parameter
-  // the tool does declare, in a form that will not resolve, is worth a warn.
-  const schema = collectDeclaredParameters(root)[paramName];
-  if (!schema) return undefined;
-  const resolved = resolveDeclaredType(schema, root);
-  if (resolved === undefined) warnUnresolvedSchemaForm(toolName, paramName, schema);
-  return resolved;
-}
-
-function jsonKindOf(value: unknown): string {
-  if (Array.isArray(value)) return 'array';
-  if (value === null) return 'null';
-  return typeof value;
-}
-
-function matchesDeclaredType(value: unknown, declaredType: string): boolean {
-  if (declaredType === 'integer') return typeof value === 'number' && Number.isInteger(value);
-  return jsonKindOf(value) === declaredType;
+function warnUnreadRootUnion(schema: InvokeSchema, paramName: string): void {
+  const combinators = schema.reading.unreadRootUnion.join('/');
+  warnOnce(
+    ['unread-root-union', schema.toolName, paramName, stringifyForDiagnostic(schema.inputSchema)],
+    () =>
+      `[membrane:tool-parser] tool "${schema.toolName}" parameter "${paramName}" is not among ` +
+        `the parameters read from its schema: the root ${combinators} has a variant that is ` +
+        'not an object schema, so no variant is read as parameters (the Anthropic native ' +
+        'wire falls back the same way). Legacy text parsing applies to it (value trimmed, ' +
+        'then JSON-guessed).'
+  );
 }
 
 /**
@@ -278,84 +157,115 @@ function warnParamType(
   );
 }
 
+// ----------------------------------------------------------------------------
+// Values
+// ----------------------------------------------------------------------------
+
+function jsonKindOf(value: unknown): string {
+  if (Array.isArray(value)) return 'array';
+  if (value === null) return 'null';
+  return typeof value;
+}
+
+function matchesDeclaredType(value: unknown, declaredType: string): boolean {
+  if (declaredType === 'integer') return typeof value === 'number' && Number.isInteger(value);
+  return jsonKindOf(value) === declaredType;
+}
+
 /**
- * Parse one XML parameter value.
- *
- * The wire bytes are taken as they arrive: this parser transforms no character
- * of a parameter value, so ordinary markup and entity text reach the tool
- * exactly as the model wrote them.
- *
- * What happens next depends on the DECLARED type:
- *   - `string`  → the text, RAW and UNTRIMMED. No JSON.parse, no trim:
- *                 an exact-match edit tool must be able to send leading and
- *                 trailing whitespace, and a string whose text happens to be
- *                 valid JSON must stay a string.
- *   - object/array/number/integer/boolean → JSON.parse, with a loud diagnostic
- *                 when the text does not parse (raw text passed through) or
- *                 parses to a different JSON kind than declared.
- *   - undeclared → the legacy guess: trim, then JSON.parse with the trimmed
- *                 text as fallback. Large integers stay strings so snowflake
- *                 ids keep their precision.
- *
- * "Declared" is decided by {@link resolveDeclaredType}, which reads every
- * spelling of a declaration this parser can collapse to one type name —
- * `type` scalar or array, a null-plus-one union, a `$ref`, and parameters
- * carried inside a root-level union. A declared parameter whose form does not
- * resolve falls to the legacy guess with ONE warn naming the form: the
- * divergence stays, but it stops being silent.
+ * The legacy guess, for parameters with no usable declaration: trim, then
+ * JSON.parse with the trimmed text as fallback. Large integers (Discord
+ * snowflakes and the like) lose precision as JavaScript numbers, so they stay
+ * strings.
  */
-function parseParamValue(
-  value: string,
-  context?: { toolName: string; paramName: string; tools?: ToolDefinition[] }
-): unknown {
-  const declaredType = context
-    ? declaredParamType(context.tools, context.toolName, context.paramName)
-    : undefined;
-
-  if (declaredType === 'string') {
-    return value;
-  }
-
+function guessParamValue(value: string): unknown {
   const trimmed = value.trim();
-
-  if (declaredType && JSON_TYPED_PARAMS.has(declaredType)) {
-    if ((declaredType === 'number' || declaredType === 'integer') && LARGE_INT_RE.test(trimmed)) {
-      return trimmed;
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(trimmed);
-    } catch {
-      warnParamType(
-        context!.toolName,
-        context!.paramName,
-        declaredType,
-        'the value is not valid JSON; passing the raw text through'
-      );
-      return value;
-    }
-    if (!matchesDeclaredType(parsed, declaredType)) {
-      warnParamType(
-        context!.toolName,
-        context!.paramName,
-        declaredType,
-        `the value parsed as ${jsonKindOf(parsed)}`
-      );
-    }
-    return parsed;
-  }
-
-  // Legacy guess. Large integers (Discord snowflakes and the like) lose
-  // precision as JavaScript numbers, so they stay strings.
   if (LARGE_INT_RE.test(trimmed)) {
     return trimmed;
   }
-
   try {
     return JSON.parse(trimmed);
   } catch {
     return trimmed;
   }
+}
+
+/**
+ * Parse one XML parameter value by its declaration.
+ *
+ * The wire bytes are taken as they arrive: this parser transforms no character
+ * of a parameter value, so ordinary markup and entity text reach the tool
+ * exactly as the model wrote them.
+ *
+ * What happens next depends on the parameter's declaration, as
+ * {@link readToolSchema} reads it — the same reading the XML tool
+ * instructions are rendered from:
+ *   - typed `string` → the text, RAW and UNTRIMMED. No JSON.parse, no trim:
+ *                 an exact-match edit tool must be able to send leading and
+ *                 trailing whitespace, and a string whose text happens to be
+ *                 valid JSON must stay a string.
+ *   - typed object/array/number/integer/boolean/null → JSON.parse, with a
+ *                 loud diagnostic when the text does not parse (raw text
+ *                 passed through) or parses to a different JSON kind than
+ *                 declared.
+ *   - nullable (the declaration also admits null) → the text `null`, trimmed,
+ *                 is JSON null, whatever the other type.
+ *   - untyped (`{}`), or undeclared → the legacy guess, silently.
+ *   - unresolved (the declaration constrains the type, but not to one type)
+ *                 → the legacy guess, with ONE warn per distinct schema form
+ *                 naming it: the divergence stays, but it stops being silent.
+ */
+function parseParamValue(
+  value: string,
+  paramName: string,
+  schema: InvokeSchema | undefined
+): unknown {
+  if (schema === undefined) return guessParamValue(value);
+
+  const declaration = schema.reading.parameters.get(paramName);
+  if (declaration === undefined) {
+    // An UNDECLARED parameter keeps the legacy guess silently — unless the
+    // schema has a root union this parser does not read, which may be exactly
+    // where it is declared.
+    if (schema.reading.unreadRootUnion.length > 0) warnUnreadRootUnion(schema, paramName);
+    return guessParamValue(value);
+  }
+  if (declaration.status === 'untyped') return guessParamValue(value);
+  if (declaration.status === 'unresolved' || declaration.type === undefined) {
+    warnUnresolvedDeclaration(schema.toolName, paramName, declaration);
+    return guessParamValue(value);
+  }
+
+  const declaredType = declaration.type;
+  const trimmed = value.trim();
+
+  if (declaration.nullable && trimmed === 'null') {
+    return null;
+  }
+
+  if (declaredType === 'string') {
+    return value;
+  }
+
+  if ((declaredType === 'number' || declaredType === 'integer') && LARGE_INT_RE.test(trimmed)) {
+    return trimmed;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    warnParamType(
+      schema.toolName,
+      paramName,
+      declaredType,
+      'the value is not valid JSON; passing the raw text through'
+    );
+    return value;
+  }
+  if (!matchesDeclaredType(parsed, declaredType)) {
+    warnParamType(schema.toolName, paramName, declaredType, `the value parsed as ${jsonKindOf(parsed)}`);
+  }
+  return parsed;
 }
 
 /**
@@ -374,11 +284,12 @@ function parseInvokeParameters(
   const input: Record<string, unknown> = {};
   if (invokeBody === undefined) return input;
 
+  const schema = invokeSchemaFor(tools, toolName);
   PARAMETER_REGEX.lastIndex = 0;
   let paramMatch: RegExpExecArray | null;
   while ((paramMatch = PARAMETER_REGEX.exec(invokeBody)) !== null) {
     const paramName = paramMatch[2] ?? '';
-    input[paramName] = parseParamValue(paramMatch[3] ?? '', { toolName, paramName, tools });
+    input[paramName] = parseParamValue(paramMatch[3] ?? '', paramName, schema);
   }
   return input;
 }
@@ -751,15 +662,45 @@ export interface ToolDefinitionForPrompt {
   description: string;
   parameters: Record<string, {
     /**
-     * The parameter's resolved type name, absent when its schema form does not
-     * resolve to one. Absent renders NO type attribute: the model is better
-     * served by a parameter with no stated type than by `type="undefined"`.
+     * The parameter's type name, absent when its declaration does not admit
+     * exactly one JSON type. Absent renders NO type attribute: the model is
+     * better served by a parameter with no stated type than by
+     * `type="undefined"` or a type the parser will not apply.
      */
     type?: string;
+    /** The declaration also admits null: renders `nullable="true"`. */
+    nullable?: boolean;
     description?: string;
     required?: boolean;
     enum?: string[];
   }>;
+}
+
+/**
+ * A tool definition as the XML tool instructions present it, read from its
+ * input schema by the same reading the XML parameter parser applies
+ * ({@link readToolSchema}): the type the model is told a parameter has is the
+ * type its value is parsed by, and a parameter the parser cannot type states
+ * none.
+ */
+export function toolDefinitionForPrompt(tool: ToolDefinition): ToolDefinitionForPrompt {
+  const { parameters } = readToolSchema(tool.inputSchema);
+  return {
+    name: tool.name,
+    description: tool.description,
+    parameters: Object.fromEntries(
+      [...parameters].map(([name, declaration]) => [
+        name,
+        {
+          type: declaration.type,
+          nullable: declaration.nullable || undefined,
+          description: declaration.description,
+          required: declaration.required,
+          enum: declaration.enum,
+        },
+      ])
+    ),
+  };
 }
 
 /**
@@ -776,6 +717,7 @@ export function formatToolDefinitions(tools: ToolDefinitionForPrompt[]): string 
     for (const [paramName, param] of Object.entries(tool.parameters)) {
       const attrs: string[] = [`name="${escapeXml(paramName)}"`];
       if (param.type) attrs.push(`type="${escapeXml(param.type)}"`);
+      if (param.nullable) attrs.push('nullable="true"');
       if (param.required) attrs.push('required="true"');
       if (param.enum) attrs.push(`enum="${param.enum.join(',')}"`);
       

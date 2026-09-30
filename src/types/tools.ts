@@ -12,8 +12,8 @@
  * `type` is optional and may be an array because JSON Schema spells the same
  * declaration several ways: `{type:'string'}`, `{type:['string','null']}`,
  * `{anyOf:[{type:'string'},{type:'null'}]}` and `{$ref:'#/$defs/X'}` all
- * declare a parameter. resolveDeclaredType in utils/tool-parser.ts collapses
- * these to a single type name where one exists.
+ * declare a parameter. readToolSchema in utils/tool-schema.ts reads them all
+ * as the JSON types they admit.
  */
 export interface ToolParameter {
   type?: string | string[];
