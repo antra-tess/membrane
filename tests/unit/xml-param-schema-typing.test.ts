@@ -106,6 +106,30 @@ describe('schema-typed parameter parsing', () => {
     }
   });
 
+  it('keeps an integer too large for a JavaScript number as its digits, whatever the declaration', () => {
+    // Snowflake-sized ids round when JSON.parse'd. The legacy guess and a
+    // number declaration always kept the digits; an object/array/boolean
+    // declaration JSON-parsed them into a rounded number instead.
+    const digits = '1234567890123456789';
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const input = inputOf(
+        callWith({ fld2: digits, fld3: ` ${digits} `, fld4: digits, fld5: digits }),
+        { tools }
+      );
+      expect(input).toEqual({ fld2: digits, fld3: digits, fld4: digits, fld5: digits });
+      const message = warn.mock.calls.map(c => c.join(' ')).join('\n');
+      // A mismatch for the three declarations that are not numeric...
+      expect(warn).toHaveBeenCalledTimes(3);
+      for (const name of ['fld2', 'fld4', 'fld5']) expect(message).toContain(`"${name}"`);
+      // ...and none for the number declaration, whose value this is.
+      expect(message).not.toContain('"fld3"');
+      expect(message).not.toContain(digits);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('falls back to the legacy guess when no schema is supplied', () => {
     const input = inputOf(callWith({ fld1: '  zz-spaced  ', fld3: '7' }));
     expect(input.fld1).toBe('zz-spaced');

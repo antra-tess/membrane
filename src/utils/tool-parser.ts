@@ -247,7 +247,19 @@ function parseParamValue(
     return value;
   }
 
-  if ((declaredType === 'number' || declaredType === 'integer') && LARGE_INT_RE.test(trimmed)) {
+  if (LARGE_INT_RE.test(trimmed)) {
+    // Digits past Number.MAX_SAFE_INTEGER come back rounded from JSON.parse,
+    // so they stay text, as they always have: for a number or integer
+    // declaration that is the value in the only exact form it has, and for any
+    // other declaration it is a kind mismatch on top.
+    if (declaredType !== 'number' && declaredType !== 'integer') {
+      warnParamType(
+        schema.toolName,
+        paramName,
+        declaredType,
+        'the value is an integer too large to represent exactly; passing its digits through as text'
+      );
+    }
     return trimmed;
   }
   let parsed: unknown;
