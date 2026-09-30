@@ -635,13 +635,20 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
    * Reconstruct canonical <function_calls> XML for legacy tool_use blocks
    * stored without rawXml. Lossy (whitespace, parameter order, antml:
    * prefix are gone) but consistent with the parser and the instructions.
+   *
+   * A string value that begins or ends with a newline gets one more there:
+   * the parser reads one newline on each side of a string parameter as
+   * layout, so this is how that value is written to read back as itself.
    */
   private formatLegacyToolUseXml(blocks: ToolUseContent[]): string {
     const lines = ['<function_calls>'];
     for (const block of blocks) {
       lines.push(`<invoke name="${block.name}">`);
       for (const [name, value] of Object.entries(block.input)) {
-        const text = typeof value === 'string' ? value : JSON.stringify(value);
+        const text =
+          typeof value === 'string'
+            ? `${value.startsWith('\n') ? '\n' : ''}${value}${value.endsWith('\n') ? '\n' : ''}`
+            : JSON.stringify(value);
         lines.push(`<parameter name="${name}">${text}</parameter>`);
       }
       lines.push('</invoke>');

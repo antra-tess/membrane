@@ -8,9 +8,10 @@
  * to be valid JSON.
  *
  * The fix consults the declaration at the parse site: a parameter declared
- * `string` keeps its raw, untrimmed text; JSON-shaped declarations JSON-parse
- * with a loud diagnostic on disagreement; undeclared parameters keep the legacy
- * guess exactly.
+ * `string` keeps its text untrimmed, less one layout newline on each side —
+ * the framing tool results are written in; JSON-shaped declarations
+ * JSON-parse with a loud diagnostic on disagreement; undeclared parameters
+ * keep the legacy guess exactly.
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -49,9 +50,45 @@ function inputOf(xml: string, opts?: { tools?: ToolDefinition[] }): Record<strin
 }
 
 describe('schema-typed parameter parsing', () => {
-  it('keeps a string-typed value RAW and UNTRIMMED', () => {
-    const input = inputOf(callWith({ fld1: '\n  zz-indented-line\n' }), { tools });
-    expect(input.fld1).toBe('\n  zz-indented-line\n');
+  it('keeps a string-typed value UNTRIMMED', () => {
+    const input = inputOf(callWith({ fld1: '  zz-indented-line\t ' }), { tools });
+    expect(input.fld1).toBe('  zz-indented-line\t ');
+  });
+
+  describe('one newline on each side of a string value is layout', () => {
+    // Tool results are written `<stdout>\n…\n</stdout>` and read back with one
+    // newline stripped on each side; the model reads results framed that way
+    // all day. Taking a string parameter's bytes raw handed a model that
+    // frames its values the same way an extra leading and trailing newline —
+    // a blank first line in every file it writes, an exact-match edit that
+    // starts one line early. Main trimmed all of it; raw kept all of it.
+    it('drops the framing newlines of a value written on its own lines', () => {
+      const input = inputOf(
+        callWith({ fld1: '\n#!/bin/sh\n  echo zz-indented\n' }),
+        { tools }
+      );
+      expect(input.fld1).toBe('#!/bin/sh\n  echo zz-indented');
+    });
+
+    it('keeps the indentation inside the framing', () => {
+      const input = inputOf(callWith({ fld1: '\n  zz-indented-line\n' }), { tools });
+      expect(input.fld1).toBe('  zz-indented-line');
+    });
+
+    it('reads a value written inline exactly as written', () => {
+      const input = inputOf(callWith({ fld1: 'zz-first\n  zz-second' }), { tools });
+      expect(input.fld1).toBe('zz-first\n  zz-second');
+    });
+
+    it('drops ONE newline per side, so a value that itself starts or ends with one is written with one more', () => {
+      const input = inputOf(callWith({ fld1: '\n\nzz-after-a-blank-line\n\n' }), { tools });
+      expect(input.fld1).toBe('\nzz-after-a-blank-line\n');
+    });
+
+    it('treats only a newline as framing', () => {
+      const input = inputOf(callWith({ fld1: ' \nzz-text\n ' }), { tools });
+      expect(input.fld1).toBe(' \nzz-text\n ');
+    });
   });
 
   it('never JSON-coerces a string-typed value', () => {
@@ -137,11 +174,12 @@ describe('schema-typed parameter parsing', () => {
   });
 
   it('applies the same schema treatment on the accumulated-blocks path', () => {
-    const { toolCalls } = parseAccumulatedIntoBlocks(callWith({ fld1: '\n  zz-indented-line\n' }), {
-      tools,
-    });
+    const { toolCalls } = parseAccumulatedIntoBlocks(
+      callWith({ fld1: '\n  zz-indented-line \n\n', fld3: ' 42 ' }),
+      { tools }
+    );
     expect(toolCalls).toHaveLength(1);
-    expect(toolCalls[0]!.input.fld1).toBe('\n  zz-indented-line\n');
+    expect(toolCalls[0]!.input).toEqual({ fld1: '  zz-indented-line \n', fld3: 42 });
   });
 
   it('types a re-anchored invoke against the tool it actually dispatches', () => {

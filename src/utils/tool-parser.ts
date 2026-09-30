@@ -191,6 +191,21 @@ function guessParamValue(value: string): unknown {
 }
 
 /**
+ * The layout newlines of a string parameter: ONE newline directly after the
+ * opening tag and ONE directly before the closing tag, when present. This is
+ * the convention tool results are written and read in (`<stdout>\n…\n</stdout>`,
+ * see LEGACY_RESULT_REGEX), so a value framed the way the model sees every
+ * result framed arrives as its content, and a value written inline arrives as
+ * written. A value that itself begins or ends with a newline is written with
+ * one more.
+ */
+function withoutFraming(value: string): string {
+  const start = value.startsWith('\n') ? 1 : 0;
+  const end = value.length > start && value.endsWith('\n') ? value.length - 1 : value.length;
+  return value.slice(start, end);
+}
+
+/**
  * Parse one XML parameter value by its declaration.
  *
  * The wire bytes are taken as they arrive: this parser transforms no character
@@ -200,8 +215,9 @@ function guessParamValue(value: string): unknown {
  * What happens next depends on the parameter's declaration, as
  * {@link readToolSchema} reads it — the same reading the XML tool
  * instructions are rendered from:
- *   - typed `string` → the text, RAW and UNTRIMMED. No JSON.parse, no trim:
- *                 an exact-match edit tool must be able to send leading and
+ *   - typed `string` → the text as written, less one layout newline on each
+ *                 side ({@link withoutFraming}). No JSON.parse, no trim: an
+ *                 exact-match edit tool must be able to send leading and
  *                 trailing whitespace, and a string whose text happens to be
  *                 valid JSON must stay a string.
  *   - typed object/array/number/integer/boolean/null → JSON.parse, with a
@@ -244,7 +260,7 @@ function parseParamValue(
   }
 
   if (declaredType === 'string') {
-    return value;
+    return withoutFraming(value);
   }
 
   if (LARGE_INT_RE.test(trimmed)) {

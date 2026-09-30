@@ -82,13 +82,17 @@ describe('parameter values are byte-untouched on the READ polarity', () => {
   }
 
   it('preserves leading and trailing whitespace around ordinary content', () => {
-    const padded = `\n  ${zzMarkup}  \n`;
-    expect(parsedParam(padded)).toBe(padded);
+    // One newline on each side is layout (the framing results are written
+    // in); the spaces inside it are content.
+    expect(parsedParam(`\n  ${zzMarkup}  \n`)).toBe(`  ${zzMarkup}  `);
+    expect(parsedParam(`  ${zzMarkup}  `)).toBe(`  ${zzMarkup}  `);
   });
 });
 
 describe('parameter values are byte-untouched on the WRITE polarity', () => {
-  for (const payload of zzOrdinaryPayloads) {
+  // A string beginning or ending with a newline is reconstructed with one
+  // more there, since one newline per side of a string parameter is layout.
+  for (const payload of [...zzOrdinaryPayloads, `\n${zzMarkup}\n`, 'zz-line\n', '\n']) {
     it(`writes ${JSON.stringify(payload)} to the wire raw and reads it back whole`, () => {
       const doc = renderThroughFormatter([
         { type: 'tool_use', id: 'ite1', name: 'zz_no_transform_tool', input: { fld1: payload } },
