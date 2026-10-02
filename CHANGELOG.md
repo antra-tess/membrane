@@ -12,6 +12,10 @@ Releases up to and including 0.5.75 predate this file; for their contents see
 
 ## Unreleased
 
+### Fixed
+
+- Bedrock rejects malformed consumer `anthropic_beta` values with a non-retryable `invalid_request` error, regardless of whether the interleaved-thinking beta is needed. Supply an array of strings; valid consumer arrays still pass through on non-firing models and merge without mutation when the beta is required.
+
 ## 0.5.86 — 2026-09-21
 
 ### Fixed

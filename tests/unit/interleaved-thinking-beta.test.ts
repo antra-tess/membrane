@@ -182,6 +182,45 @@ describe('BedrockAdapter anthropic_beta body field', () => {
     ).toBeUndefined();
   });
 
+  it.each([
+    ['us.anthropic.claude-sonnet-4-6-v1:0', true],
+    ['claude-opus-4-1-20250805', false],
+    ['us.anthropic.claude-3-5-sonnet-20241022-v2:0', true],
+  ])('preserves consumer betas when the gate does not fire (%s, thinking=%s)', (model, thinking) => {
+    const betas = ['some-other-beta', 'some-other-beta'];
+    const request = {
+      ...thinkingRequest(model, thinking),
+      extra: { anthropic_beta: betas },
+    };
+    expect(bedrockBody(request).anthropic_beta).toEqual(betas);
+    expect(betas).toEqual(['some-other-beta', 'some-other-beta']);
+  });
+
+  it.each(['claude-opus-4-1-20250805', 'us.anthropic.claude-sonnet-4-6-v1:0'])(
+    'rejects malformed consumer betas regardless of the gate (%s)',
+    (model) => {
+      for (const anthropic_beta of ['some-other-beta', null, 42, {}, ['valid', 42]]) {
+        const request = { ...thinkingRequest(model), extra: { anthropic_beta } };
+        expect(() => bedrockBody(request)).toThrow(/anthropic_beta.*array of strings/);
+        try {
+          bedrockBody(request);
+        } catch (error) {
+          expect(error).toMatchObject({ type: 'invalid_request', retryable: false });
+        }
+      }
+    },
+  );
+
+  it('accepts an empty consumer array and does not mutate it when adding a beta', () => {
+    const betas: string[] = [];
+    const request = {
+      ...thinkingRequest('claude-opus-4-1-20250805'),
+      extra: { anthropic_beta: betas },
+    };
+    expect(bedrockBody(request).anthropic_beta).toEqual([INTERLEAVED]);
+    expect(betas).toEqual([]);
+  });
+
   it('merges (deduped) with a consumer-supplied anthropic_beta from extra', () => {
     const request = {
       ...thinkingRequest('claude-opus-4-1-20250805'),
