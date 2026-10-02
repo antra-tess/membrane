@@ -1589,7 +1589,7 @@ export class Membrane {
           if (block.text === '') continue;
           let text = block.text;
           if (includeNamePrefix && msg.participant && !hasText) {
-            text = (activeFormatter.nameFormat ?? '{name}: ').replace('{name}', msg.participant) + text;
+            text = (activeFormatter.nameFormat ?? '{name}: ').replace('{name}', () => msg.participant) + text;
           }
           hasText = true;
           const textBlock: Record<string, unknown> = { type: 'text', text };

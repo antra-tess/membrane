@@ -440,7 +440,7 @@ export class NativeFormatter implements PrefillFormatter {
         if (block.text === '') continue;
         let text = block.text;
         if (options.includeNames && !hasText) {
-          const prefix = this.nameFormat.replace('{name}', participant);
+          const prefix = this.nameFormat.replace('{name}', () => participant);
           text = prefix + text;
         }
         hasText = true;

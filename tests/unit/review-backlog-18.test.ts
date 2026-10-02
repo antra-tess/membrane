@@ -62,6 +62,29 @@ describe('participant prefixes (#18)', () => {
     expect(messages[0].content[2]).toMatchObject({ text: 'Hello' });
   });
 
+  it.each(['formatter', 'complete', 'stream', 'yielding'] as const)('keeps replacement tokens literal on %s', async (entry) => {
+    const participant = "Bob $& $` $' $$ $1";
+    const formatter = new NativeFormatter({ nameFormat: '[{name}] ' });
+    const req = request();
+    req.messages = [{ participant, content: [{ type: 'text', text: 'Hello' }] }];
+    let wireMessages: unknown;
+    if (entry === 'formatter') {
+      wireMessages = formatter.buildMessages(req.messages, {
+        participantMode: 'multiuser', assistantParticipant: 'Claude', promptCaching: false,
+      }).messages;
+    } else {
+      const adapter = recordingAdapter();
+      const membrane = new Membrane(adapter, { formatter });
+      if (entry === 'complete') await membrane.complete(req);
+      else if (entry === 'stream') await membrane.stream(req);
+      else for await (const event of membrane.streamYielding(req)) {
+        if (event.type === 'error') throw event.error;
+      }
+      wireMessages = adapter.requests[0].messages;
+    }
+    expect(textBlocks(wireMessages).map(b => b.text)).toEqual(['[' + participant + '] Hello']);
+  });
+
   it('keeps simple-mode text unprefixed', () => {
     const built = new NativeFormatter({ nameFormat: '[{name}] ' }).buildMessages([messages[0]], {
       participantMode: 'simple', humanParticipant: 'Alice', assistantParticipant: 'Claude', promptCaching: false,
