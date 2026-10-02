@@ -132,7 +132,7 @@ export interface CacheKeepaliveConfig {
    * Invoked once on success (including ineffective responses) or failure.
    * Observer errors are isolated, and returned promises never delay the loop.
    * Skipped, expired, and disabled lineages do not make calls or receipts.
-   * Non-JSON payloads fail through onEvent before any sender invocation. */
+   * Poke serialization failures are reported through onEvent before any sender invocation. */
   onCall?: (call: KeepaliveCall) => void | Promise<void>;
 }
 
