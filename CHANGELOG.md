@@ -14,7 +14,12 @@ Releases up to and including 0.5.75 predate this file; for their contents see
 
 ### Fixed
 
-- Strip empty, whitespace-only, and non-string text blocks from Anthropic and Bedrock requests, including system and nested tool-result content, and drop messages left empty. Preserve valid text bytes, non-text blocks, and empty tool results. Native formatting now filters invalid text before adding participant names.
+- Strip empty, whitespace-only, and non-string text blocks from Anthropic and Bedrock wire requests, including system and nested tool-result content, and drop messages left empty. Preserve valid text bytes, non-text blocks, and empty tool results. Shared formatting remains unchanged for other providers.
+- Reconcile cache receipts and marker counts with the adapter's final request observation so removed blocks cannot leave phantom cache markers.
+
+### Breaking (custom provider adapters only)
+
+- **Custom provider adapters:** invoke or forward `ProviderRequestOptions.onRequest` with the final request to emit `onCacheWireReceipt`. Built-in adapters already do. An adapter that omits this observation emits no wire receipt; `details.cache.markersInRequest` falls back to the post-hook request supplied to that adapter. Request execution and the callback's receipt shape are unchanged.
 
 ## 0.5.86 — 2026-09-21
 

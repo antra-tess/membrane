@@ -90,7 +90,6 @@ import {
   strippedImagePlaceholder,
   shedImagesToFitByteBudget, assertWithinByteBudget,
 } from './utils/image-media.js';
-import { hasNonEmptyText } from './utils/empty-text.js';
 import { getDefaultPricing } from './registry/default-pricing.js';
 
 // ============================================================================
@@ -248,20 +247,19 @@ export class Membrane {
         // `unknown` deliberately, and we acknowledge the cast at the boundary.
         const finalRequest = (await this.applyBeforeRequestHook(request, providerRequest)) as typeof providerRequest;
 
-        // Last exit before the adapter: the only place that sees EVERY
-        // contribution (builder, formatter, passthrough, float, hook).
-        if (request.cacheMarkers === 'cm-owned') {
-          assertCacheMarkersWithinLimit(finalRequest, 'complete');
-        } else {
-          clampCacheMarkers(finalRequest, 'complete');
-        }
-        request.onCacheWireReceipt?.(computeCacheWireReceipt(finalRequest));
+        // Check the post-hook request before adapter conversion. Use this
+        // count as a fallback for custom adapters without onRequest.
+        let markersInRequest = request.cacheMarkers === 'cm-owned'
+          ? assertCacheMarkersWithinLimit(finalRequest, 'complete')
+          : clampCacheMarkers(finalRequest, 'complete').total;
 
         const rawProviderResponse = await this.adapter.complete(finalRequest, {
           signal: options.signal,
           timeoutMs: options.timeoutMs,
           onRequest: (req) => {
             rawRequest = req;
+            markersInRequest = countWireCacheMarkers(req as Parameters<typeof countWireCacheMarkers>[0]);
+            request.onCacheWireReceipt?.(computeCacheWireReceipt(req));
             options.onRequest?.(req);
           },
         });
@@ -281,7 +279,7 @@ export class Membrane {
         const response = this.transformResponse(
           providerResponse,
           request,
-          prefillResult,
+          { ...prefillResult, cacheMarkersApplied: markersInRequest },
           startTime,
           attempts,
           rawRequest
@@ -820,6 +818,7 @@ export class Membrane {
             // provider to wrap native thinking deltas so they don't stream as
             // visible text (see ProviderRequestOptions.wrapThinkingTags)
             wrapThinkingTags: true,
+            onWireCacheMarkers: (count) => { prefillResult.cacheMarkersApplied = count; },
             onRequest: (req) => {
               rawRequest = req;
               onRequest?.(req);
@@ -1586,7 +1585,7 @@ export class Membrane {
           // particular, zero-width rawItem carriers (opaque Responses items,
           // see parseProviderContent) must not leak here. Filter BEFORE the
           // name prefix below would make them non-empty.
-          if (!hasNonEmptyText(block.text)) continue;
+          if (block.text === '') continue;
           let text = block.text;
           if (includeNamePrefix && msg.participant) {
             text = `${msg.participant}: ${text}`;
@@ -2247,15 +2246,9 @@ export class Membrane {
        */
       onRetrying?: (info: { attempt: number; maxAttempts: number; category?: string }) => void;
       /**
-       * Receives the number of cache_control markers the request ACTUALLY
-       * ships with, taken from the clamp's own tally below — i.e. after the
-       * `beforeRequest` hook has added or removed markers of its own and
-       * after everything past the 4-breakpoint budget has been dropped.
-       *
-       * Telemetry that counts the request at BUILD time reports a number no
-       * request ever had (a hook placing 7 markers on a wire that carries 4
-       * was reported as the builder's 1), which defeats the audit the count
-       * exists for. This is the only count that describes the wire.
+       * Starts with the post-hook/post-clamp input count as a compatibility
+       * fallback, then receives the final count when the adapter reports
+       * onRequest. Callers retain the latest count for response telemetry.
        */
       onWireCacheMarkers?: (markerCount: number) => void;
     }
@@ -2274,16 +2267,22 @@ export class Membrane {
     const { normalizedRequest, refusalRetries, onRetrying, onWireCacheMarkers, ...adapterOptions } = options;
     const finalRequest = (await this.applyBeforeRequestHook(normalizedRequest, request)) as typeof request;
 
-    // Last exit before the adapter: the only place that sees EVERY
-    // contribution (builder, formatter, passthrough, float, hook). Every
-    // streaming path — stream(), streamYielding(), both tool loops — funnels
-    // through here, so this is the one clamp they all get, and its tally is
-    // therefore the only count that describes the wire.
+    // Check every streaming path's post-hook request before adapter
+    // conversion. Adapters may still alter content (including markers);
+    // reconcile against their final onRequest observation below.
     const markerCount = normalizedRequest.cacheMarkers === 'cm-owned'
       ? assertCacheMarkersWithinLimit(finalRequest, 'streamOnce')
       : clampCacheMarkers(finalRequest, 'streamOnce').total;
-    normalizedRequest.onCacheWireReceipt?.(computeCacheWireReceipt(finalRequest));
     onWireCacheMarkers?.(markerCount);
+    const observedOptions = {
+      ...adapterOptions,
+      onRequest: (wireRequest: unknown) => {
+        const wireCount = countWireCacheMarkers(wireRequest as Parameters<typeof countWireCacheMarkers>[0]);
+        normalizedRequest.onCacheWireReceipt?.(computeCacheWireReceipt(wireRequest));
+        onWireCacheMarkers?.(wireCount);
+        adapterOptions.onRequest?.(wireRequest);
+      },
+    };
 
     // Retries are only safe when the caller can discard the abandoned
     // attempt, so they require BOTH a budget and an onRetrying hook.
@@ -2296,7 +2295,7 @@ export class Membrane {
     let providerCalls = 0;
     while (true) {
       providerCalls++;
-      const rawResult = await this.adapter.stream(finalRequest, callbacks, adapterOptions);
+      const rawResult = await this.adapter.stream(finalRequest, callbacks, observedOptions);
       // Restate usage in the one convention before any accumulator, ratio or
       // price sees it — this is the only door streamed usage enters through.
       const result: ProviderResponse = {
@@ -3247,6 +3246,7 @@ export class Membrane {
             // the provider to wrap native thinking deltas so they don't
             // stream as visible text (same as streamWithXmlTools).
             wrapThinkingTags: true,
+            onWireCacheMarkers: (count) => { prefillResult.cacheMarkersApplied = count; },
             onRequest: (req: unknown) => { rawRequest = req; },
           }
         );

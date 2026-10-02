@@ -11,8 +11,8 @@ export interface CacheWireReceipt {
   markers: CacheWireMarkerReceipt[];
 }
 
-/** Hash the exact post-format/post-hook provider request and every marked
- * prefix. Token offsets are estimates; provider usage reconciles them later. */
+/** Hash the adapter's final request observation and every marked prefix.
+ * Token offsets are estimates; provider usage reconciles them later. */
 export function computeCacheWireReceipt(rawRequest: unknown): CacheWireReceipt {
   const requestHash = sha(stableStringify(rawRequest));
   const blocks = flattenWireBlocks(rawRequest);

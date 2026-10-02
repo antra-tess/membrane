@@ -112,8 +112,10 @@ export type ToolMode =
 // ============================================================================
 
 export interface NormalizedRequest {
-  /** Receives the exact post-format/post-hook cache receipt immediately before
-   * network submission. Observability only; never forwarded to providers. */
+  /** Receives a cache receipt from the adapter's final onRequest observation,
+   * after provider-specific conversion and sanitation. Observability only;
+   * never forwarded to providers. Custom adapters must call onRequest to emit
+   * a wire receipt; no receipt is fabricated when that observation is absent. */
   onCacheWireReceipt?: (receipt: import('../cache-wire-receipt.js').CacheWireReceipt) => void;
   /**
    * Explicitly own the loss of old inline images when the serialized request

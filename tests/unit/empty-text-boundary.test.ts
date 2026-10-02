@@ -150,14 +150,14 @@ describe.each(['Anthropic', 'Bedrock'])('%s empty text at the wire boundary', ki
   });
 });
 
-describe('filter before native participant prefixes', () => {
+describe('existing empty-string filters before native participant prefixes', () => {
   const messages = [
-    { participant: 'User', content: [...emptyBlocks(), text('hello')] as ContentBlock[] },
-    { participant: 'User', content: emptyBlocks() as ContentBlock[] },
-    { participant: 'Claude', content: [...emptyBlocks(), text('answer')] as ContentBlock[] },
+    { participant: 'User', content: [text(''), text('hello')] as ContentBlock[] },
+    { participant: 'User', content: [text('')] as ContentBlock[] },
+    { participant: 'Claude', content: [text(''), text('answer')] as ContentBlock[] },
   ];
 
-  it('NativeFormatter drops invalid text instead of turning it into participant labels', () => {
+  it('NativeFormatter drops empty strings instead of turning them into participant labels', () => {
     const built = new NativeFormatter().buildMessages(messages, {
       participantMode: 'multiuser', assistantParticipant: 'Claude',
     });
@@ -167,7 +167,7 @@ describe('filter before native participant prefixes', () => {
     ]);
   });
 
-  it('native tool requests drop invalid text before prefixing', () => {
+  it('native tool requests drop empty strings before prefixing', () => {
     const membrane = new Membrane(new MockAdapter());
     const request: NormalizedRequest = { messages, config: { model: 'test', maxTokens: 64 } };
     const built = (membrane as any).buildNativeToolRequest(request, messages);

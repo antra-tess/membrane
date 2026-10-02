@@ -288,7 +288,9 @@ export interface ProviderRequestOptions {
    * swallows ping keepalives (default: max(idleTimeoutMs, 600000)).
    */
   firstEventTimeoutMs?: number;
-  /** Called with the raw API request body right before fetch */
+  /** Report the final API request body immediately before sending it.
+   * Adapters and wrappers must invoke/forward this observation for Membrane
+   * to emit wire-cache receipts and final marker counts. */
   onRequest?: (rawRequest: unknown) => void;
   /**
    * Wrap native thinking deltas in <thinking>...</thinking> tags on the
