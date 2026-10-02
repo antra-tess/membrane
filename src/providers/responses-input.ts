@@ -1,4 +1,5 @@
 import type { ProviderRequest } from '../types/index.js';
+import { resolveImageMediaType } from '../utils/image-media.js';
 import type { OpenAIResponsesInputItem } from './openai-responses-api.js';
 
 type JsonObject = Record<string, unknown>;
@@ -117,8 +118,9 @@ function responsesImageUrl(block: JsonObject): string | undefined {
   if (!source) return typeof block.image_url === 'string' ? block.image_url : undefined;
   if (source.type === 'url') return asString(source.url) || undefined;
   if (source.type !== 'base64') return undefined;
-  const mediaType = asString(source.mediaType) || asString(source.media_type) || 'image/png';
   const data = asString(source.data);
+  const declared = asString(source.mediaType) || asString(source.media_type) || 'image/png';
+  const mediaType = resolveImageMediaType(data, declared);
   return data ? `data:${mediaType};base64,${data}` : undefined;
 }
 
