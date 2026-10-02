@@ -12,6 +12,10 @@ Releases up to and including 0.5.75 predate this file; for their contents see
 
 ## Unreleased
 
+### Added
+
+- Add `CacheKeepaliveConfig.onCall` receipts so applications can log background cache-refresh calls alongside foreground inference. Each logical poke reports its payload, timing, lineage, and complete terminal vendor response or error, including ineffective writes. SDK-internal retries belong to one receipt; usage comes from the terminal response. Request and success-response copies isolate observers from cached prefixes and effectiveness checks. Tested with fake timers and a mocked Anthropic transport, including an SDK retry; live provider behavior was not tested.
+
 ## 0.5.86 — 2026-09-21
 
 ### Fixed
