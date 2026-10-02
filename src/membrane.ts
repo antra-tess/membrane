@@ -90,6 +90,7 @@ import {
   strippedImagePlaceholder,
   shedImagesToFitByteBudget, assertWithinByteBudget,
 } from './utils/image-media.js';
+import { hasNonEmptyText } from './utils/empty-text.js';
 import { getDefaultPricing } from './registry/default-pricing.js';
 
 // ============================================================================
@@ -1585,7 +1586,7 @@ export class Membrane {
           // particular, zero-width rawItem carriers (opaque Responses items,
           // see parseProviderContent) must not leak here. Filter BEFORE the
           // name prefix below would make them non-empty.
-          if (block.text === '') continue;
+          if (!hasNonEmptyText(block.text)) continue;
           let text = block.text;
           if (includeNamePrefix && msg.participant) {
             text = `${msg.participant}: ${text}`;

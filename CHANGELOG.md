@@ -12,6 +12,10 @@ Releases up to and including 0.5.75 predate this file; for their contents see
 
 ## Unreleased
 
+### Fixed
+
+- Strip empty, whitespace-only, and non-string text blocks from Anthropic and Bedrock requests, including system and nested tool-result content, and drop messages left empty. Preserve valid text bytes, non-text blocks, and empty tool results. Native formatting now filters invalid text before adding participant names.
+
 ## 0.5.86 — 2026-09-21
 
 ### Fixed

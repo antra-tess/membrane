@@ -30,6 +30,7 @@ import type {
 } from './types.js';
 import { normalizeToolPairs, mergeConsecutiveRoles } from './normalize-tool-pairs.js';
 import { isAcceptedImageMediaType, strippedImagePlaceholder } from '../utils/image-media.js';
+import { hasNonEmptyText } from '../utils/empty-text.js';
 import { assertCacheMarkersWithinLimit } from '../utils/cache-marker-budget.js';
 
 /** Index of the last content block that can carry cache_control. Anthropic
@@ -432,7 +433,7 @@ export class NativeFormatter implements PrefillFormatter {
         // zero-width rawItem carriers (opaque provider-native items smuggled
         // through normalized history) must not leak here. Filter BEFORE the
         // name prefix below would make them non-empty.
-        if (block.text === '') continue;
+        if (!hasNonEmptyText(block.text)) continue;
         let text = block.text;
         if (options.includeNames) {
           const prefix = this.config.nameFormat.replace('{name}', participant);

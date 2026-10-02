@@ -20,6 +20,7 @@ import {
   serverError,
   abortError,
 } from '../types/index.js';
+import { stripEmptyTextBlocks, stripEmptyTextRequest } from '../utils/empty-text.js';
 import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, assertTerminalEventObserved } from './utils.js';
 import {
   INTERLEAVED_THINKING_BETA,
@@ -471,7 +472,7 @@ export class BedrockAdapter implements ProviderAdapter {
     if (request.system) {
       const needsFlatten = bedrockModelId?.includes('claude-3-sonnet-20240229') ?? false;
       if (needsFlatten && Array.isArray(request.system)) {
-        const blocks = request.system as Array<{ type: string; text: string }>;
+        const blocks = stripEmptyTextBlocks(request.system as Array<{ type: string; text: string }>);
         params.system = blocks.map(b => b.text).join('\n\n');
       } else if (Array.isArray(request.system)) {
         params.system = (request.system as Array<Record<string, any>>).map(
@@ -525,6 +526,7 @@ export class BedrockAdapter implements ProviderAdapter {
       params.anthropic_beta = [...new Set([...existing, INTERLEAVED_THINKING_BETA])];
     }
 
+    stripEmptyTextRequest(params);
     return params;
   }
 

@@ -3,6 +3,7 @@
  */
 
 import Anthropic, { type ClientOptions } from '@anthropic-ai/sdk';
+import { hasNonEmptyText, stripEmptyTextRequest } from '../utils/empty-text.js';
 import { assertWithinByteBudget, shedImagesToFitByteBudget } from '../utils/image-media.js';
 import type {
   ProviderAdapter,
@@ -806,6 +807,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       Object.assign(params, rest);
     }
 
+    stripEmptyTextRequest(params);
     return params;
   }
 
@@ -951,7 +953,7 @@ function toAnthropicToolResultContent(
   const out: Array<Anthropic.TextBlockParam | Anthropic.ImageBlockParam> = [];
   for (const block of blocks) {
     if (block.type === 'text') {
-      out.push({ type: 'text', text: block.text });
+      if (hasNonEmptyText(block.text)) out.push({ type: 'text', text: block.text });
     } else if (block.type === 'image') {
       if (block.source.type === 'base64') {
         out.push({
@@ -1003,7 +1005,7 @@ export function toAnthropicContent(blocks: ContentBlock[]): Anthropic.ContentBlo
       case 'text': {
         // Empty text blocks (including zero-width rawItem carriers for opaque
         // provider-native items) are rejected by the Anthropic API — drop them.
-        if (block.text === '') break;
+        if (!hasNonEmptyText(block.text)) break;
         const textBlock: any = { type: 'text', text: block.text };
         // Preserve cache_control if present
         if (block.cache_control) {
