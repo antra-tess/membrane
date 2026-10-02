@@ -165,6 +165,10 @@ export class NativeFormatter implements PrefillFormatter {
 
   private config: Required<NativeFormatterConfig>;
 
+  get nameFormat(): string {
+    return this.config.nameFormat;
+  }
+
   constructor(config: NativeFormatterConfig = {}) {
     this.config = {
       nameFormat: config.nameFormat ?? '{name}: ',
@@ -425,6 +429,7 @@ export class NativeFormatter implements PrefillFormatter {
   ): unknown[] {
     const result: unknown[] = [];
     let hasUnsupportedMedia = false;
+    let hasText = false;
 
     for (const block of content) {
       if (block.type === 'text') {
@@ -434,10 +439,11 @@ export class NativeFormatter implements PrefillFormatter {
         // name prefix below would make them non-empty.
         if (block.text === '') continue;
         let text = block.text;
-        if (options.includeNames) {
-          const prefix = this.config.nameFormat.replace('{name}', participant);
+        if (options.includeNames && !hasText) {
+          const prefix = this.nameFormat.replace('{name}', participant);
           text = prefix + text;
         }
+        hasText = true;
         const textBlock: Record<string, unknown> = { type: 'text', text };
         if (block.cache_control) {
           textBlock.cache_control = block.cache_control;

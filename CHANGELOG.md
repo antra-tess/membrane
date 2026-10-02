@@ -12,6 +12,11 @@ Releases up to and including 0.5.75 predate this file; for their contents see
 
 ## Unreleased
 
+### Fixed
+
+- Native tool streaming honors the active formatter's `nameFormat`, matching non-streaming requests. Participant names prefix only the first retained text block of each message.
+- XML continuation requests omit empty system arrays while preserving nonempty system blocks and their cache markers.
+
 ## 0.5.86 — 2026-09-21
 
 ### Fixed

@@ -106,8 +106,13 @@ export interface MediaConfig {
 
 export interface MembraneHooks {
   /**
-   * Called before sending request to provider
-   * Can modify the raw request
+   * Called before sending a provider request. Return a replacement raw request,
+   * or modify it in place and return undefined.
+   *
+   * `request` is the original normalized turn input, including on tool and
+   * automatic-continuation rounds. It does not accumulate generated content
+   * or tool results. `rawRequest` describes the current provider round; use
+   * that argument to inspect or modify the conversation actually being sent.
    */
   beforeRequest?: (
     request: NormalizedRequest,
