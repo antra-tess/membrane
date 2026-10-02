@@ -201,12 +201,11 @@ describe('BedrockAdapter anthropic_beta body field', () => {
     (model) => {
       for (const anthropic_beta of ['some-other-beta', null, 42, {}, ['valid', 42]]) {
         const request = { ...thinkingRequest(model), extra: { anthropic_beta } };
-        expect(() => bedrockBody(request)).toThrow(/anthropic_beta.*array of strings/);
-        try {
-          bedrockBody(request);
-        } catch (error) {
-          expect(error).toMatchObject({ type: 'invalid_request', retryable: false });
-        }
+        expect(() => bedrockBody(request)).toThrow(expect.objectContaining({
+          message: expect.stringMatching(/anthropic_beta.*array of strings/),
+          type: 'invalid_request',
+          retryable: false,
+        }));
       }
     },
   );
