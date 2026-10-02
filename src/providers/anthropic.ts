@@ -3,7 +3,7 @@
  */
 
 import Anthropic, { type ClientOptions } from '@anthropic-ai/sdk';
-import { assertWithinByteBudget, shedImagesToFitByteBudget } from '../utils/image-media.js';
+import { resolveImageMediaType, isAcceptedImageMediaType, assertWithinByteBudget, shedImagesToFitByteBudget } from '../utils/image-media.js';
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -686,9 +686,17 @@ export class AnthropicAdapter implements ProviderAdapter {
       return {
         ...msg,
         content: msg.content.map((block: any) => {
-          if (block.type === 'image' && block.sourceUrl !== undefined) {
+          if (block.type === 'image') {
             const { sourceUrl, ...rest } = block;
-            return rest;
+            if (block.source?.type !== 'base64') return rest;
+            const { mediaType, media_type, ...source } = block.source;
+            return {
+              ...rest,
+              source: {
+                ...source,
+                media_type: detectImageMediaType(source.data, media_type ?? mediaType),
+              },
+            };
           }
           if (block.type === 'tool_result' && Array.isArray(block.content)) {
             return {
@@ -958,7 +966,7 @@ function toAnthropicToolResultContent(
           type: 'image',
           source: {
             type: 'base64',
-            media_type: detectImageMediaType(block.source.data, block.source.mediaType as string) as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
+            media_type: detectImageMediaType(block.source.data, block.source.mediaType ?? (block.source as { media_type?: string }).media_type) as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
             data: block.source.data,
           },
         });
@@ -983,16 +991,8 @@ function toAnthropicToolResultContent(
  *  Anthropic API rejects with a 400. Trust the bytes; fall back to the declared
  *  type, then jpeg. */
 export function detectImageMediaType(data: string | undefined, fallback?: string): string {
-  try {
-    const b = Buffer.from((data || "").slice(0, 24), "base64");
-    if (b[0]===0x89&&b[1]===0x50&&b[2]===0x4e&&b[3]===0x47) return "image/png";
-    if (b[0]===0xff&&b[1]===0xd8&&b[2]===0xff) return "image/jpeg";
-    if (b[0]===0x47&&b[1]===0x49&&b[2]===0x46) return "image/gif";
-    if (b[0]===0x52&&b[1]===0x49&&b[2]===0x46) return "image/webp";
-  } catch {}
-  const f = (fallback || "").toLowerCase();
-  if (f==="image/jpeg"||f==="image/png"||f==="image/gif"||f==="image/webp") return f;
-  return "image/jpeg";
+  const mediaType = resolveImageMediaType(data, fallback);
+  return isAcceptedImageMediaType(mediaType) ? mediaType! : 'image/jpeg';
 }
 
 export function toAnthropicContent(blocks: ContentBlock[]): Anthropic.ContentBlockParam[] {
@@ -1019,7 +1019,7 @@ export function toAnthropicContent(blocks: ContentBlock[]): Anthropic.ContentBlo
             type: 'image',
             source: {
               type: 'base64',
-              media_type: detectImageMediaType(block.source.data, block.source.mediaType as string) as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
+              media_type: detectImageMediaType(block.source.data, block.source.mediaType ?? (block.source as { media_type?: string }).media_type) as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
               data: block.source.data,
             },
           });

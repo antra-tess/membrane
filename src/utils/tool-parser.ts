@@ -11,7 +11,7 @@
  */
 
 import type { ToolCall, ToolResult, ParsedToolCalls, ContentBlock, ToolResultContentBlock } from '../types/index.js';
-import { isAcceptedImageMediaType, strippedImagePlaceholder } from './image-media.js';
+import { resolveImageMediaType, isAcceptedImageMediaType, strippedImagePlaceholder } from './image-media.js';
 
 // ============================================================================
 // Helper Functions
@@ -1053,15 +1053,16 @@ export function formatToolResultsForSplitTurn(results: ToolResult[]): SplitTurnC
         if (block.type === 'text') {
           textParts.push(guardResultContent(block.text));
         } else if (block.type === 'image') {
-          if (!isAcceptedImageMediaType(block.source.mediaType)) {
-            textParts.push(strippedImagePlaceholder(block.source.mediaType).text);
+          const mediaType = resolveImageMediaType(block.source.data, block.source.mediaType);
+          if (!isAcceptedImageMediaType(mediaType)) {
+            textParts.push(strippedImagePlaceholder(mediaType).text);
           } else {
             resultHasImages = true;
             resultImages.push({
               type: 'image',
               source: {
                 type: 'base64',
-                media_type: block.source.mediaType,
+                media_type: mediaType!,
                 data: block.source.data,
               },
             });

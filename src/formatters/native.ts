@@ -29,7 +29,7 @@ import type {
   StreamEmission,
 } from './types.js';
 import { normalizeToolPairs, mergeConsecutiveRoles } from './normalize-tool-pairs.js';
-import { isAcceptedImageMediaType, strippedImagePlaceholder } from '../utils/image-media.js';
+import { resolveImageMediaType, isAcceptedImageMediaType, strippedImagePlaceholder } from '../utils/image-media.js';
 import { assertCacheMarkersWithinLimit } from '../utils/cache-marker-budget.js';
 
 /** Index of the last content block that can carry cache_control. Anthropic
@@ -409,10 +409,14 @@ export class NativeFormatter implements PrefillFormatter {
         typeof item === 'object' &&
         (item as { type?: string }).type === 'image'
       ) {
-        const src = (item as { source?: { media_type?: string } }).source;
-        if (!isAcceptedImageMediaType(src?.media_type)) {
-          return strippedImagePlaceholder(src?.media_type);
+        const src = (item as { source?: { type?: string; data?: string; mediaType?: string; media_type?: string } }).source;
+        if (src?.type === 'url') return item;
+        const mediaType = resolveImageMediaType(src?.data, src?.mediaType ?? src?.media_type);
+        if (!isAcceptedImageMediaType(mediaType)) {
+          return strippedImagePlaceholder(mediaType);
         }
+        const { mediaType: _declared, ...source } = src ?? {};
+        return { ...item, source: { ...source, media_type: mediaType } };
       }
       return item;
     });
@@ -445,16 +449,17 @@ export class NativeFormatter implements PrefillFormatter {
         result.push(textBlock);
       } else if (block.type === 'image') {
         if (block.source.type === 'base64') {
-          if (!isAcceptedImageMediaType(block.source.mediaType)) {
+          const mediaType = resolveImageMediaType(block.source.data, block.source.mediaType);
+          if (!isAcceptedImageMediaType(mediaType)) {
             // Unacceptable media type (e.g. image/svg): degrade to a text
             // placeholder instead of poisoning the whole request.
-            result.push(strippedImagePlaceholder(block.source.mediaType));
+            result.push(strippedImagePlaceholder(mediaType));
           } else {
             const imageBlock: Record<string, unknown> = {
               type: 'image',
               source: {
                 type: 'base64',
-                media_type: block.source.mediaType,
+                media_type: mediaType,
                 data: block.source.data,
               },
             };

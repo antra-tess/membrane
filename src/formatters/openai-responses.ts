@@ -23,6 +23,8 @@ import type {
   StreamParser,
 } from './types.js';
 
+import { resolveImageMediaType } from '../utils/image-media.js';
+
 export const OPENAI_RESPONSES_ITEMS_METADATA_KEY = 'openaiResponsesItems';
 
 class ResponsesPassthroughParser implements StreamParser {
@@ -176,7 +178,7 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
         const source = block.source;
         messageParts.push(source.type === 'url'
           ? { type: 'input_image', image_url: source.url }
-          : { type: 'input_image', image_url: `data:${source.mediaType};base64,${source.data}` });
+          : { type: 'input_image', image_url: `data:${resolveImageMediaType(source.data, source.mediaType)};base64,${source.data}` });
       } else if (block.type === 'tool_use') {
         flushMessage();
         out.push({

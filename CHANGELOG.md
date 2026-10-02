@@ -12,6 +12,10 @@ Releases up to and including 0.5.75 predate this file; for their contents see
 
 ## Unreleased
 
+### Fixed
+
+- Preserve normalized images in native tool-result history and resolve PNG, JPEG, GIF, and WebP media types from their bytes before applying formatter allowlists. Correct mislabeled images on native and XML request paths, native streaming, XML tool-image continuations, Anthropic requests, Responses input images, and OpenAI Images uploads. Unsupported formats still receive the existing formatter placeholders. Verified with mocked request transports and regression tests; live provider acceptance was not tested.
+
 ## 0.5.86 — 2026-09-21
 
 ### Fixed
