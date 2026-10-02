@@ -18,7 +18,7 @@ const base = { model: 'claude-sonnet-4-5', maxTokens: 64 };
 
 function makeAdapter(kind: string): any {
   return kind === 'Anthropic'
-    ? new AnthropicAdapter({ apiKey: 'test', cacheKeepalive: false })
+    ? new AnthropicAdapter({ apiKey: 'test', cacheKeepalive: { enabled: false } })
     : new BedrockAdapter({ accessKeyId: 'test', secretAccessKey: 'test', region: 'us-west-2' });
 }
 
