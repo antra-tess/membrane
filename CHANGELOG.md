@@ -12,6 +12,10 @@ Releases up to and including 0.5.75 predate this file; for their contents see
 
 ## Unreleased
 
+### Fixed
+
+- Preserve OpenRouter response images from content arrays and the separate `images` field through complete, stream, and yielding responses. Inline base64 images become normalized image sources; other URLs remain references. Streaming keeps text callbacks text-only and retains images alongside tool calls. XML streams append provider images after parsed text, matching the existing generated-image behavior.
+
 ## 0.5.86 — 2026-09-21
 
 ### Fixed
