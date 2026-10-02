@@ -73,10 +73,10 @@ export type KeepaliveCall = {
   key: string;
   /** The real request's lane whose cache lineage this poke refreshes. */
   lane: KeepaliveLane;
-  /** Unix epoch milliseconds immediately before calling the sender. */
+  /** Unix epoch milliseconds when this poke attempt began. */
   startedAt: number;
   durationMs: number;
-  /** Exact poke payload: max_tokens is 0 and stream is omitted. */
+  /** JSON wire payload sent by the poke: max_tokens is 0 and stream is omitted. */
   request: Record<string, unknown>;
 } & (
   | { outcome: 'success'; response: Record<string, unknown> & { usage?: KeepaliveUsage } }
@@ -131,7 +131,8 @@ export interface CacheKeepaliveConfig {
   /** Report background calls to the same ledger as foreground inference.
    * Invoked once on success (including ineffective responses) or failure.
    * Observer errors are isolated, and returned promises never delay the loop.
-   * Skipped, expired, and disabled lineages do not make calls or receipts. */
+   * Skipped, expired, and disabled lineages do not make calls or receipts.
+   * Non-JSON payloads fail through onEvent before any sender invocation. */
   onCall?: (call: KeepaliveCall) => void | Promise<void>;
 }
 
@@ -328,14 +329,22 @@ export class CacheKeepalive {
   }
 
   private async refresh(key: string, lin: Lineage): Promise<void> {
-    // Only max_tokens (not part of the cache key) and stream (transport) differ
-    // from the recorded request. Nothing else is touched — see file header.
-    const payload: Record<string, unknown> = { ...lin.wire, max_tokens: 0 };
-    delete payload.stream;
-
     const startedAt = Date.now();
     const idleMs = startedAt - lin.lastTouchAt;
+    let payload: Record<string, unknown> | undefined;
     try {
+      // Materialize the same JSON shape HTTP would send, once. Callable fields
+      // serialize away, and toJSON values are evaluated before both sending and
+      // observation. Re-serializing caller objects for the receipt could differ
+      // from the sent body; structuredClone on those objects can fail outright.
+      const wire: unknown = JSON.parse(JSON.stringify(lin.wire));
+      if (!wire || typeof wire !== 'object' || Array.isArray(wire)) {
+        throw new Error('Keepalive request must serialize to a JSON object');
+      }
+      // Only max_tokens (not part of the cache key) and stream (transport)
+      // differ from the recorded wire request — see file header.
+      payload = { ...wire as Record<string, unknown>, max_tokens: 0 };
+      delete payload.stream;
       const res = await this.send(payload, lin.headers);
       this.reportCall({
         key, lane: lin.lane, startedAt, durationMs: Date.now() - startedAt,
@@ -371,10 +380,12 @@ export class CacheKeepalive {
       this.emit({ type: 'refreshed', key, lane: lin.lane, readTokens: read, idleMs });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      this.reportCall({
-        key, lane: lin.lane, startedAt, durationMs: Date.now() - startedAt,
-        request: payload, outcome: 'error', error: err,
-      });
+      if (payload) {
+        this.reportCall({
+          key, lane: lin.lane, startedAt, durationMs: Date.now() - startedAt,
+          request: payload, outcome: 'error', error: err,
+        });
+      }
       this.consecutiveErrors += 1;
       this.emit({ type: 'error', key, error: message, consecutive: this.consecutiveErrors });
 

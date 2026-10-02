@@ -152,6 +152,17 @@ describe('keepalive terminal call receipts', () => {
     expect(calls).toEqual([]);
   });
 
+  it('surfaces non-JSON payload failures through lifecycle events before invoking the sender', async () => {
+    const send = vi.fn().mockResolvedValue({ usage });
+    const { ka, calls, events } = setup(send, { maxConsecutiveErrors: 1 });
+    ka.record({ ...wire(), invalidExtra: 1n }, undefined, 'stream');
+    await vi.advanceTimersByTimeAsync(200);
+    expect(send).not.toHaveBeenCalled();
+    expect(calls).toEqual([]);
+    expect(events.map(event => event.type)).toEqual(['error', 'disabled']);
+    expect(ka.getStatus()).toEqual([]);
+  });
+
   it('reports the complete lane when explicitly enabled', async () => {
     const { ka, calls } = setup(vi.fn().mockResolvedValue({ usage }), { lanes: ['complete'] });
     ka.record(wire(), undefined, 'complete');
@@ -161,6 +172,48 @@ describe('keepalive terminal call receipts', () => {
 });
 
 describe('Anthropic adapter receipt integration', () => {
+  it.each(['success', 'error'] as const)('keeps a %s receipt when JSON serialization omits callable request fields', async outcome => {
+    const calls: KeepaliveCall[] = [];
+    const requests: any[] = [];
+    const metadataToJSON = vi.fn(() => ({ user_id: 'fixture' }));
+    vi.stubGlobal('fetch', vi.fn(async (_input, init) => {
+      const body = JSON.parse(init.body);
+      requests.push(body);
+      if (body.max_tokens === 0 && outcome === 'error') {
+        return new Response(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'Rejected poke' } }), {
+          status: 400, headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({
+        id: 'response', type: 'message', role: 'assistant', model: 'claude-sonnet-4-5',
+        content: [], stop_reason: 'max_tokens', stop_sequence: null, usage,
+      }), { headers: { 'content-type': 'application/json' } });
+    }));
+    const adapter = new AnthropicAdapter({
+      apiKey: 'test-key',
+      cacheKeepalive: {
+        lanes: ['complete'], refreshAfterMs: 100, checkIntervalMs: 100, maxIdleMs: 1000,
+        onCall: call => { calls.push(call); },
+      },
+    });
+    keepalives.push(adapter.cacheKeepalive!);
+    await adapter.complete({
+      model: 'claude-sonnet-4-5', maxTokens: 1024,
+      system: wire().system, messages: wire().messages,
+      extra: { clientOnly: () => {}, metadata: { toJSON: metadataToJSON } },
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(requests).toHaveLength(2);
+    expect(requests[1]).not.toHaveProperty('clientOnly');
+    expect(requests[1].metadata).toEqual({ user_id: 'fixture' });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.outcome).toBe(outcome);
+    expect(calls[0]!.request).toEqual(requests[1]);
+    // Materialize JSON once per actual call, rather than invoking a caller's
+    // serializer again while creating the receipt.
+    expect(metadataToJSON).toHaveBeenCalledTimes(2);
+  });
+
   it('reports one terminal receipt for a poke with an SDK-internal HTTP retry', async () => {
     const calls: KeepaliveCall[] = [];
     const requests: any[] = [];
