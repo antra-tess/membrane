@@ -14,6 +14,7 @@ import type {
 } from '../types/index.js';
 import {
   MembraneError,
+  invalidRequestError,
   rateLimitError,
   contextLengthError,
   authError,
@@ -514,6 +515,16 @@ export class BedrockAdapter implements ProviderAdapter {
       Object.assign(params, rest);
     }
 
+    // Validate independently of the beta gate: a malformed caller value must
+    // neither disappear during the merge nor reach Bedrock on newer models.
+    const consumerBetas: unknown = params.anthropic_beta;
+    if (consumerBetas !== undefined && (
+      !Array.isArray(consumerBetas) ||
+      [...consumerBetas].some(beta => typeof beta !== 'string')
+    )) {
+      throw invalidRequestError('Bedrock anthropic_beta must be an array of strings.');
+    }
+
     // Interleaved thinking on pre-4.6 Claude 4: same gate as the Anthropic
     // adapter, but bedrock-runtime takes betas as the `anthropic_beta` body
     // field rather than an HTTP header. Runs after the extra-assign so a
@@ -521,7 +532,7 @@ export class BedrockAdapter implements ProviderAdapter {
     // The gate only matches Claude 4 <4.6 ids, so legacy 3.x models (which
     // reject unknown beta flags) never receive the field.
     if (thinkingEnabled(request) && needsInterleavedThinkingBeta(request.model)) {
-      const existing = Array.isArray(params.anthropic_beta) ? params.anthropic_beta : [];
+      const existing = params.anthropic_beta ?? [];
       params.anthropic_beta = [...new Set([...existing, INTERLEAVED_THINKING_BETA])];
     }
 
