@@ -260,9 +260,12 @@ export class Membrane {
         const useWireReceipt = this.adapter.cacheReceiptBasis === 'wire-request';
         let receiptEmitted = false;
         if (!useWireReceipt) request.onCacheWireReceipt?.(computeCacheWireReceipt(finalRequest));
+        const receiptGuard = useWireReceipt && request.onCacheWireReceipt
+          ? this.wireReceiptGuard(options.signal)
+          : undefined;
 
-        const rawProviderResponse = await this.adapter.complete(finalRequest, {
-          signal: options.signal,
+        const adapterCall = this.adapter.complete(finalRequest, {
+          signal: receiptGuard ? receiptGuard.signal : options.signal,
           timeoutMs: options.timeoutMs,
           onRequest: (req) => {
             rawRequest = req;
@@ -270,12 +273,13 @@ export class Membrane {
               markersInRequest = countWireCacheMarkers(req as Parameters<typeof countWireCacheMarkers>[0]);
               if (!receiptEmitted) {
                 receiptEmitted = true;
-                request.onCacheWireReceipt?.(computeCacheWireReceipt(req));
+                receiptGuard?.emit(() => request.onCacheWireReceipt?.(computeCacheWireReceipt(req)));
               }
             }
             options.onRequest?.(req);
           },
         });
+        const rawProviderResponse = receiptGuard ? await receiptGuard.settle(adapterCall) : await adapterCall;
         // Restate usage in the one convention before any ratio or price sees it.
         const providerResponse: ProviderResponse = {
           ...rawProviderResponse,
@@ -2071,6 +2075,45 @@ export class Membrane {
   // ==========================================================================
 
   /**
+   * Fail loudly when a wire-request receipt consumer throws.
+   *
+   * Wire-request receipts are emitted from inside the adapter's `onRequest`,
+   * where an adapter decorator may catch and discard whatever the hook throws
+   * (logging wrappers commonly do: "never block on caller hook"). Post-hook
+   * receipts fire before the adapter is called, so a throwing consumer stops
+   * the call before any provider request. Keep that contract for wire-request
+   * receipts too: remember the failure, abort the adapter call through its
+   * signal (adapters invoke `onRequest` before sending, so nothing goes out),
+   * and rethrow the consumer's original error once the adapter settles.
+   */
+  private wireReceiptGuard(callerSignal: AbortSignal | undefined) {
+    const controller = new AbortController();
+    const state: { failure?: { error: unknown } } = {};
+    return {
+      signal: callerSignal ? AbortSignal.any([callerSignal, controller.signal]) : controller.signal,
+      emit(send: () => void): void {
+        try {
+          send();
+        } catch (error) {
+          state.failure = { error };
+          controller.abort(error);
+          throw error;
+        }
+      },
+      async settle<T>(call: Promise<T>): Promise<T> {
+        let result: T;
+        try {
+          result = await call;
+        } catch (error) {
+          throw state.failure ? state.failure.error : error;
+        }
+        if (state.failure) throw state.failure.error;
+        return result;
+      },
+    };
+  }
+
+  /**
    * Apply the configured `beforeRequest` hook to a provider-format request.
    * Returns the (possibly modified) request, or the original if no hook is
    * configured. This is the single point that all request-build sites should
@@ -2298,8 +2341,12 @@ export class Membrane {
     const useWireReceipt = this.adapter.cacheReceiptBasis === 'wire-request';
     let receiptEmitted = false;
     if (!useWireReceipt) normalizedRequest.onCacheWireReceipt?.(computeCacheWireReceipt(finalRequest));
+    const receiptGuard = useWireReceipt && normalizedRequest.onCacheWireReceipt
+      ? this.wireReceiptGuard(adapterOptions.signal)
+      : undefined;
     const observedOptions = {
       ...adapterOptions,
+      ...(receiptGuard ? { signal: receiptGuard.signal } : {}),
       onRequest: (wireRequest: unknown) => {
         if (useWireReceipt) {
           const wireCount = countWireCacheMarkers(wireRequest as Parameters<typeof countWireCacheMarkers>[0]);
@@ -2308,7 +2355,7 @@ export class Membrane {
           // so receipt queues stay aligned with the one accepted usage event.
           if (!receiptEmitted) {
             receiptEmitted = true;
-            normalizedRequest.onCacheWireReceipt?.(computeCacheWireReceipt(wireRequest));
+            receiptGuard?.emit(() => normalizedRequest.onCacheWireReceipt?.(computeCacheWireReceipt(wireRequest)));
           }
         }
         adapterOptions.onRequest?.(wireRequest);
@@ -2326,7 +2373,8 @@ export class Membrane {
     let providerCalls = 0;
     while (true) {
       providerCalls++;
-      const rawResult = await this.adapter.stream(finalRequest, callbacks, observedOptions);
+      const streamCall = this.adapter.stream(finalRequest, callbacks, observedOptions);
+      const rawResult = receiptGuard ? await receiptGuard.settle(streamCall) : await streamCall;
       // Restate usage in the one convention before any accumulator, ratio or
       // price sees it — this is the only door streamed usage enters through.
       const result: ProviderResponse = {
