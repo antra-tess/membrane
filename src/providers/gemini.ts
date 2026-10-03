@@ -162,6 +162,7 @@ export interface GeminiAdapterConfig {
 
 export class GeminiAdapter implements ProviderAdapter {
   readonly name = 'gemini';
+  readonly toolResultImageMediaTypes: ReadonlySet<string> = GEMINI_IMAGE_MEDIA_TYPES;
 
   /**
    * NOT ESTABLISHED. Google documents `cachedContentTokenCount` but the probes
@@ -543,7 +544,7 @@ export class GeminiAdapter implements ProviderAdapter {
                   continue;
                 }
                 const mimeType = resolveImageMediaType(source.data, source.media_type ?? source.mediaType);
-                if (!mimeType || !GEMINI_IMAGE_MEDIA_TYPES.has(mimeType)) {
+                if (!mimeType || !this.toolResultImageMediaTypes.has(mimeType)) {
                   result.push('[image omitted: unsupported Gemini image media type]');
                   continue;
                 }

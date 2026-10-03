@@ -102,6 +102,7 @@ function assertMedia(c: Case, body: any, expectedResults: number, expectedImages
     expect(tools).toHaveLength(expectedResults);
     for (const msg of body.messages) {
       if (!msg.tool_calls) continue;
+      expect(msg.role).toBe('assistant');
       const start = body.messages.indexOf(msg) + 1;
       expect(body.messages.slice(start, start + msg.tool_calls.length).map((m: any) => m.tool_call_id)).toEqual(msg.tool_calls.map((t: any) => t.id));
     }
@@ -121,7 +122,7 @@ function assertMedia(c: Case, body: any, expectedResults: number, expectedImages
 
 function request(c: Case, history = true): NormalizedRequest {
   return {
-    config: { model: c.model, maxTokens: 64 }, toolMode: 'native',
+    config: { model: c.model, maxTokens: 64 }, toolMode: 'native', assistantParticipant: 'Assistant',
     tools: definitions,
     messages: [
       { participant: 'User', content: [text('look')] },
@@ -310,6 +311,58 @@ describe.each(cases)('$name tool-result image transport', c => {
     if (!c.gemini) expect(wire.includes('data:image/png;base64,' + data)).toBe(true);
   });
 
+
+  it.each(['complete', 'stream', 'yielding'])('%s history uses the transport policy for HEIC/HEIF tool images', async path => {
+    const heic = Buffer.from('\x00\x00\x00\x18ftypheic\x00\x00\x00\x00heic').toString('base64');
+    const heif = Buffer.from('\x00\x00\x00\x18ftypmif1\x00\x00\x00\x00heic').toString('base64');
+    const req = request(c);
+    req.messages[2]!.content = [
+      result('one', [text('HEIC caption'), { type: 'image', source: { type: 'base64', data: heic, mediaType: 'image/heic' } }]),
+      result('two', [text('HEIF caption'), { type: 'image', source: { type: 'base64', data: heif, mediaType: 'image/heif' } }]),
+    ] as any;
+    const before = structuredClone(req);
+    const { bodies } = stub(c);
+    const membrane = new Membrane(c.adapter(), { formatter: new NativeFormatter() });
+    if (path === 'complete') await membrane.complete(req);
+    else if (path === 'stream') await membrane.stream(req);
+    else await yielding(membrane, req);
+    const wire = JSON.stringify(bodies[0]);
+    expect(wire).toContain('HEIC caption');
+    expect(wire).toContain('HEIF caption');
+    expect(wire.includes(heic)).toBe(Boolean(c.gemini));
+    expect(wire.includes(heif)).toBe(Boolean(c.gemini));
+    if (c.gemini) {
+      expect(wire).toContain('"mimeType":"image/heic"');
+      expect(wire).toContain('"mimeType":"image/heif"');
+    }
+    expect(req).toEqual(before);
+  });
+
+  it.each(['complete', 'stream'])('%s omits local/malformed image URLs and keeps only HTTP(S) remote references', async path => {
+    const invalid = [
+      'file:///tmp/screenshot.png', 'blob:https://example.test/123', 'cid:snapshot',
+      'ftp://example.test/image.png', '/tmp/screenshot.png', 'https://', 'http://[bad',
+    ];
+    const valid = ['https://example.test/image.png?signature=a%2Fb', 'http://example.test/image.png'];
+    const { bodies, fetch } = stub(c);
+    const adapter = c.adapter();
+    for (const url of [...invalid, ...valid]) {
+      const req = { model: c.model, messages: [
+        { role: 'assistant', content: [tool('one', 'snapshot')] },
+        { role: 'user', content: [result('one', [text('caption'), { type: 'image', source: { type: 'url', url } }])] },
+      ] };
+      if (path === 'complete') await adapter.complete(req);
+      else await adapter.stream(req, { onChunk() {} });
+      const wire = JSON.stringify(bodies.at(-1));
+      expect(wire).toContain('caption');
+      const supported = !c.gemini && valid.includes(url);
+      expect(wire.includes(url)).toBe(supported);
+      if (!supported) expect(wire).toContain('image omitted');
+    }
+    // Only the completion/stream HTTP calls ran, never a fetch of tool URLs.
+    expect(fetch).toHaveBeenCalledTimes(invalid.length + valid.length);
+  });
+
   it('keeps MCP/generated-image safeguards when normalized media activates conversion', async () => {
     const { bodies } = stub(c);
     const strayData = 'UNNORMALIZED_IMAGE_BYTES_'.repeat(100);
@@ -429,5 +482,85 @@ describe('exported helper to adapter composition after image omission', () => {
       expect(JSON.stringify(wire).includes(data)).toBe(supported);
       expect(messages).toEqual(before);
     });
+  });
+});
+
+describe('combined stream content replay through exported helpers', () => {
+  const routes = [
+    { name: 'OpenAI', adapter: cases[0]!, convert: toOpenAIMessages },
+    { name: 'compatible', adapter: cases[1]!, convert: toOpenAIMessages },
+    { name: 'OpenRouter', adapter: cases[2]!, convert: toOpenRouterMessages },
+  ];
+  describe.each(routes)('$name', ({ adapter: c, convert }) => {
+    it.each([
+      ['complete', 'supported'], ['stream', 'supported'],
+      ['complete', 'omitted'], ['stream', 'omitted'],
+      ['complete', 'text'], ['stream', 'text'],
+    ] as const)('%s replays combined calls/results with %s content in call-first order', async (path, kind) => {
+      const svg = Buffer.from('<svg/>').toString('base64');
+      const output = kind === 'supported' ? [image()]
+        : kind === 'omitted' ? [{ type: 'image', source: { type: 'base64', data: svg, mediaType: 'image/svg+xml' } }]
+        : [text('plain')];
+      const { bodies } = stub(c, 1);
+      const adapter = c.adapter();
+      const response: any = await new Membrane(adapter, { formatter: new NativeFormatter() }).stream(request(c, false), {
+        onToolCalls: async calls => calls.map(call => ({ toolUseId: call.id, content: output as any })),
+      });
+      expect(response.content.filter((b: any) => b.type === 'tool_use')).toHaveLength(2);
+      expect(response.content.filter((b: any) => b.type === 'tool_result')).toHaveLength(2);
+      const messages = convert([{ role: 'assistant', content: response.content }]);
+      if (path === 'complete') await adapter.complete({ model: c.model, messages });
+      else await adapter.stream({ model: c.model, messages }, { onChunk() {} });
+      const wire = bodies.at(-1).messages;
+      const callIndex = wire.findIndex((m: any) => m.tool_calls?.length);
+      expect(callIndex).toBe(0);
+      expect(wire[callIndex].role).toBe('assistant');
+      expect(wire.slice(callIndex + 1, callIndex + 3).map((m: any) => m.role)).toEqual(['tool', 'tool']);
+      expect(wire.slice(callIndex + 1, callIndex + 3).map((m: any) => m.tool_call_id)).toEqual(wire[callIndex].tool_calls.map((t: any) => t.id));
+      expect(JSON.stringify(wire).includes(data)).toBe(kind === 'supported');
+    });
+  });
+});
+
+describe.each(cases.filter(c => c.gemini))('$name wrapper transport policy', c => {
+
+  it.each(['complete', 'stream'])('%s preserves legacy sanitation bytes for source-less image-typed tool data', async path => {
+    const legacyNotice = '[system: an image that belongs here was NOT shown to you — its media type "undefined" is not accepted by the model API (only jpeg/png/gif/webp are). You are not seeing this image. If it matters, ask for it in a supported format.]';
+    const shapes = [
+      { type: 'image', title: 'Cat', width: 640 },
+      { type: 'image', source: null },
+      { type: 'image', data: 'MCP_IMAGE_BASE64', mimeType: 'image/png' },
+    ];
+    const { bodies } = stub(c);
+    const membrane = new Membrane(c.adapter(), { formatter: new NativeFormatter() });
+    for (const shape of shapes) {
+      const req = request(c);
+      req.tools = undefined; // Exercise formatter-built streaming history too.
+      req.messages[2]!.content = [result('one', [shape]), result('two', 'plain')] as any;
+      if (path === 'complete') await membrane.complete(req);
+      else await membrane.stream(req);
+      const response = bodies.at(-1).contents.flatMap((m: any) => m.parts).find((p: any) => p.functionResponse).functionResponse;
+      expect(response.response.result).toBe(JSON.stringify([text(legacyNotice)]));
+    }
+  });
+
+  it('forwards its declared policy through a renamed wrapper to complete-history formatting', async () => {
+    const inner = c.adapter();
+    const adapter = {
+      name: 'renamed-transport',
+      toolResultImageMediaTypes: inner.toolResultImageMediaTypes,
+      supportsModel: inner.supportsModel.bind(inner),
+      complete: inner.complete.bind(inner),
+      stream: inner.stream.bind(inner),
+    };
+    const bytes = Buffer.from('\x00\x00\x00\x18ftypheic\x00\x00\x00\x00heic').toString('base64');
+    const req = request(c);
+    req.messages[2]!.content = [
+      result('one', [{ type: 'image', source: { type: 'base64', data: bytes, mediaType: 'image/heic' } }]),
+      result('two', 'plain'),
+    ] as any;
+    const { bodies } = stub(c);
+    await new Membrane(adapter, { formatter: new NativeFormatter() }).complete(req);
+    expect(JSON.stringify(bodies[0])).toContain('"data":"' + bytes + '"');
   });
 });

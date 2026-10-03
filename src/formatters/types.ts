@@ -59,6 +59,10 @@ export interface BuildOptions {
    */
   toolMode?: 'xml' | 'native';
 
+  /** Transport policy for nested native tool-result images. Defaults to
+   * JPEG/PNG/GIF/WebP. Membrane forwards ProviderAdapter's capability here. */
+  toolResultImageMediaTypes?: ReadonlySet<string>;
+
   /** Whether thinking is enabled */
   thinking?: { enabled: boolean; budgetTokens?: number };
 

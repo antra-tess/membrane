@@ -2225,6 +2225,9 @@ export class Membrane {
       // formatter's constructor-time mode alone, so request.toolMode was a
       // second, disconnected source of truth on this path.
       toolMode: this.resolveToolMode(request, activeFormatter),
+      ...(this.adapter.toolResultImageMediaTypes
+        ? { toolResultImageMediaTypes: this.adapter.toolResultImageMediaTypes }
+        : {}),
       thinking: request.config.thinking,
       systemPrompt: request.system,
       promptCaching: request.promptCaching ?? this.config.defaultPromptCaching ?? true, // Default true for backward compat

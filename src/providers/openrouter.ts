@@ -834,7 +834,8 @@ export function toOpenRouterMessages(
       }
     }
     
-    // Image-bearing results precede interloper text; image-free ordering stays byte-stable.
+    // Results precede sibling user text, but never their own assistant calls.
+    // Image-free envelopes retain their legacy ordering.
     const appendToolResults = () => {
       for (const tr of toolResults) {
         result.push({
@@ -845,7 +846,8 @@ export function toOpenRouterMessages(
       }
     };
     const hasImages = msg.content.some(block => block.type === 'tool_result' && hasToolResultImages(block.content));
-    if (hasImages) appendToolResults();
+    const resultsFirst = hasImages && msg.role === 'user' && toolCalls.length === 0;
+    if (resultsFirst) appendToolResults();
 
     // Add main message
     if (textParts.length > 0 || toolCalls.length > 0) {
@@ -858,7 +860,7 @@ export function toOpenRouterMessages(
       }
       result.push(message);
     }
-    if (!hasImages) appendToolResults();
+    if (!resultsFirst) appendToolResults();
   }
   
   return result;

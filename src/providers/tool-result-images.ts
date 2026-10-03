@@ -67,7 +67,14 @@ export function chatToolResultContent(block: any): string | ChatToolOutputPart[]
 /** Inline media is validated here because live tools bypass formatter sanitation. */
 function chatToolImageUrl(source: any): string | undefined {
   if (source?.type === 'url' && typeof source.url === 'string' && source.url) {
-    if (!/^data:/i.test(source.url)) return source.url;
+    if (!/^data:/i.test(source.url)) {
+      try {
+        const url = new URL(source.url);
+        return url.protocol === 'https:' || url.protocol === 'http:' ? source.url : undefined;
+      } catch {
+        return undefined;
+      }
+    }
     const inline = /^data:([^;,]*);base64,([\s\S]*)$/i.exec(source.url);
     return inline ? chatToolImageUrl({ type: 'base64', mediaType: inline[1], data: inline[2] }) : undefined;
   }

@@ -252,6 +252,7 @@ export class NativeFormatter implements PrefillFormatter {
       // Convert content
       const content = this.convertContent(message.content, message.participant, {
         includeNames: participantMode === 'multiuser' && !isAssistant,
+        toolResultImageMediaTypes: options.toolResultImageMediaTypes,
       });
 
       if (
@@ -405,7 +406,7 @@ export class NativeFormatter implements PrefillFormatter {
 
   /** Replace API-unacceptable image blocks nested in tool_result content with
    *  text placeholders. Non-array content passes through untouched. */
-  private static sanitizeToolResultContent(content: unknown): unknown {
+  private static sanitizeToolResultContent(content: unknown, acceptedMediaTypes?: ReadonlySet<string>): unknown {
     if (!Array.isArray(content)) return content;
     return content.map((item) => {
       if (
@@ -416,8 +417,11 @@ export class NativeFormatter implements PrefillFormatter {
         const src = (item as { source?: { type?: string; data?: string; mediaType?: string; media_type?: string } }).source;
         if (src?.type === 'url') return item;
         const mediaType = resolveImageMediaType(src?.data, src?.mediaType ?? src?.media_type);
-        if (!isAcceptedImageMediaType(mediaType)) {
-          return strippedImagePlaceholder(mediaType);
+        // Transport policy applies to normalized inline media. Keep legacy
+        // sanitation bytes for source-less image-typed tool data and MCP shapes.
+        const policy = src?.type === 'base64' && typeof src.data === 'string' ? acceptedMediaTypes : undefined;
+        if (!(policy?.has(mediaType ?? '') ?? isAcceptedImageMediaType(mediaType))) {
+          return strippedImagePlaceholder(mediaType, policy);
         }
         const { mediaType: _declared, ...source } = src ?? {};
         return { ...item, source: { ...source, media_type: mediaType } };
@@ -429,7 +433,7 @@ export class NativeFormatter implements PrefillFormatter {
   private convertContent(
     content: ContentBlock[],
     participant: string,
-    options: { includeNames: boolean }
+    options: { includeNames: boolean; toolResultImageMediaTypes?: ReadonlySet<string> }
   ): unknown[] {
     const result: unknown[] = [];
     let hasUnsupportedMedia = false;
@@ -501,7 +505,7 @@ export class NativeFormatter implements PrefillFormatter {
         result.push({
           type: 'tool_result',
           tool_use_id: block.toolUseId,
-          content: NativeFormatter.sanitizeToolResultContent(block.content),
+          content: NativeFormatter.sanitizeToolResultContent(block.content, options.toolResultImageMediaTypes),
           is_error: block.isError,
         });
       } else if (block.type === 'thinking') {

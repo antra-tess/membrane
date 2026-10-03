@@ -218,6 +218,15 @@ export interface ProviderAdapter {
    * reported through onRequest. Decorators must forward this capability. */
   readonly cacheReceiptBasis?: 'provider-request' | 'wire-request';
 
+  /**
+   * Lowercase MIME types accepted for images nested in native tool results.
+   * NativeFormatter uses this policy before the transport sees complete()
+   * history. Omit to retain its JPEG/PNG/GIF/WebP default. The adapter still
+   * validates direct requests and live tool results at its wire boundary.
+   * Wrappers must forward this capability.
+   */
+  readonly toolResultImageMediaTypes?: ReadonlySet<string>;
+
   /** Check if this adapter handles a model */
   supportsModel(modelId: string): boolean;
   
