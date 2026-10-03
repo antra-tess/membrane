@@ -31,6 +31,7 @@ import {
   networkError,
 } from '../types/index.js';
 import { safeParseJson, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
+import { chatToolResultContent, relocateToolImages } from './tool-result-images.js';
 
 // ============================================================================
 // Types
@@ -418,9 +419,9 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
 
   private convertMessages(messages: any[]): OpenAIMessage[] {
     // Use flatMap to handle one-to-many expansion (multiple tool_results → multiple messages)
-    return messages.flatMap(msg => {
+    return relocateToolImages(messages.flatMap(msg => {
       // If it's already in OpenAI format, pass through
-      if (msg.role && (typeof msg.content === 'string' || msg.content === null || msg.tool_calls)) {
+      if (msg.role && (typeof msg.content === 'string' || msg.content === null || msg.tool_calls || (msg.role === 'tool' && msg.tool_call_id))) {
         return [msg as OpenAIMessage];
       }
       
@@ -441,6 +442,8 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
             if (typeof block.thinking === 'string') {
               reasoningText += (reasoningText ? '\n' : '') + block.thinking;
             }
+          } else if (block.type === 'image_url') {
+            contentParts.push(block);
           } else if (block.type === 'image') {
             // Convert Anthropic-style image to OpenAI image_url with data URI
             if (block.source?.type === 'base64') {
@@ -469,7 +472,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
             toolResults.push({
               role: 'tool' as const,
               tool_call_id: block.tool_use_id || block.toolUseId,
-              content: typeof block.content === 'string' ? block.content : JSON.stringify(block.content),
+              content: chatToolResultContent(block),
             });
           }
         }
@@ -525,7 +528,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         role: msg.role,
         content: msg.content,
       }];
-    });
+    }));
   }
 
   private convertTools(tools: any[]): OpenAITool[] {
@@ -714,7 +717,7 @@ export function toOpenAIMessages(
   for (const msg of messages) {
     const textParts: string[] = [];
     const toolCalls: OpenAIToolCall[] = [];
-    const toolResults: { id: string; content: string }[] = [];
+    const toolResults: { id: string; content: ReturnType<typeof chatToolResultContent> }[] = [];
     let reasoningText = '';
 
     for (const block of msg.content) {
@@ -736,11 +739,20 @@ export function toOpenAIMessages(
       } else if (block.type === 'tool_result') {
         toolResults.push({
           id: block.toolUseId,
-          content: typeof block.content === 'string' ? block.content : JSON.stringify(block.content),
+          content: chatToolResultContent(block),
         });
       }
     }
     
+    // Add tool results as separate messages
+    for (const tr of toolResults) {
+      result.push({
+        role: 'tool',
+        tool_call_id: tr.id,
+        content: tr.content,
+      });
+    }
+
     // Add main message
     if (textParts.length > 0 || toolCalls.length > 0 || reasoningText) {
       const message: OpenAIMessage = {
@@ -755,18 +767,9 @@ export function toOpenAIMessages(
       }
       result.push(message);
     }
-    
-    // Add tool results as separate messages
-    for (const tr of toolResults) {
-      result.push({
-        role: 'tool',
-        tool_call_id: tr.id,
-        content: tr.content,
-      });
-    }
   }
   
-  return result;
+  return relocateToolImages(result);
 }
 
 /**

@@ -30,6 +30,7 @@ import {
   networkError,
 } from '../types/index.js';
 import { safeParseJson, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
+import { chatToolResultContent, relocateToolImages } from './tool-result-images.js';
 
 // ============================================================================
 // Types
@@ -487,9 +488,9 @@ export class OpenAIAdapter implements ProviderAdapter {
 
   private convertMessages(messages: any[]): OpenAIMessage[] {
     // Use flatMap to handle one-to-many expansion (multiple tool_results → multiple messages)
-    return messages.flatMap(msg => {
+    return relocateToolImages(messages.flatMap(msg => {
       // If it's already in OpenAI format, pass through
-      if (msg.role && (typeof msg.content === 'string' || msg.content === null || msg.tool_calls)) {
+      if (msg.role && (typeof msg.content === 'string' || msg.content === null || msg.tool_calls || (msg.role === 'tool' && msg.tool_call_id))) {
         return [msg as OpenAIMessage];
       }
       
@@ -502,6 +503,8 @@ export class OpenAIAdapter implements ProviderAdapter {
         for (const block of msg.content) {
           if (block.type === 'text') {
             contentParts.push({ type: 'text', text: block.text });
+          } else if (block.type === 'image_url') {
+            contentParts.push(block);
           } else if (block.type === 'image') {
             // Convert Anthropic-style image to OpenAI image_url with data URI
             if (block.source?.type === 'base64') {
@@ -530,7 +533,7 @@ export class OpenAIAdapter implements ProviderAdapter {
             toolResults.push({
               role: 'tool' as const,
               tool_call_id: block.tool_use_id || block.toolUseId,
-              content: typeof block.content === 'string' ? block.content : JSON.stringify(block.content),
+              content: chatToolResultContent(block),
             });
           }
         }
@@ -584,7 +587,7 @@ export class OpenAIAdapter implements ProviderAdapter {
         role: msg.role,
         content: msg.content,
       }];
-    });
+    }));
   }
 
   private convertTools(tools: any[]): OpenAITool[] {

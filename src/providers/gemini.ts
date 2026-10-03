@@ -29,6 +29,7 @@ import {
   networkError,
 } from '../types/index.js';
 import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
+import { toolOutputParts } from './tool-result-images.js';
 
 // ============================================================================
 // Gemini API Types
@@ -38,7 +39,11 @@ interface GeminiPart {
   text?: string;
   inlineData?: { mimeType: string; data: string };
   functionCall?: { name: string; args: Record<string, unknown> };
-  functionResponse?: { name: string; response: Record<string, unknown> };
+  functionResponse?: {
+    name: string;
+    response: Record<string, unknown>;
+    parts?: { inlineData: { mimeType: string; data: string } }[];
+  };
 }
 
 interface GeminiContent {
@@ -424,6 +429,15 @@ export class GeminiAdapter implements ProviderAdapter {
 
   private convertMessages(messages: any[], model?: string): GeminiContent[] {
     const contents: GeminiContent[] = [];
+    const toolNames = new Map<string, string>();
+    let pendingToolImages: GeminiPart[] = [];
+    const flushToolImages = () => {
+      if (pendingToolImages.length) {
+        contents.push({ role: 'user', parts: pendingToolImages });
+        pendingToolImages = [];
+      }
+    };
+    const nativeToolImages = model?.startsWith('gemini-3') ?? false;
 
     // Gemini 3.x requires thought_signature on image parts from model outputs.
     // Images that round-trip through Discord lose their thought_signature metadata,
@@ -434,6 +448,7 @@ export class GeminiAdapter implements ProviderAdapter {
     const useUrlForModelImages = model?.startsWith('gemini-3');
 
     for (const msg of messages) {
+      if (!Array.isArray(msg.content) || !msg.content.some((b: any) => b.type === 'tool_result')) flushToolImages();
       const role: 'user' | 'model' = msg.role === 'assistant' ? 'model' : 'user';
 
       // Simple string content
@@ -446,6 +461,7 @@ export class GeminiAdapter implements ProviderAdapter {
       if (Array.isArray(msg.content)) {
         const parts: GeminiPart[] = [];
         const toolResultParts: GeminiPart[] = [];
+        const toolImages: GeminiPart[] = [];
 
         for (const block of msg.content) {
           if (block.type === 'text') {
@@ -483,6 +499,7 @@ export class GeminiAdapter implements ProviderAdapter {
               });
             }
           } else if (block.type === 'tool_use') {
+            toolNames.set(block.id, block.name);
             parts.push({
               functionCall: {
                 name: block.name,
@@ -490,24 +507,65 @@ export class GeminiAdapter implements ProviderAdapter {
               },
             });
           } else if (block.type === 'tool_result') {
-            const resultContent = typeof block.content === 'string'
-              ? block.content
-              : JSON.stringify(block.content);
-            toolResultParts.push({
-              functionResponse: {
-                name: block.name ?? block.tool_use_id ?? 'unknown',
-                response: { result: resultContent },
-              },
-            });
+            const id = block.tool_use_id ?? block.toolUseId;
+            const name = block.name ?? toolNames.get(id) ?? id ?? 'unknown';
+            const output = toolOutputParts(block.content, block.is_error ?? block.isError);
+            const functionResponse: NonNullable<GeminiPart['functionResponse']> = {
+              name,
+              response: {},
+            };
+            if (output) {
+              // Gemini 3 binds inline media to this functionResponse. Indexed
+              // markers keep text/image ordering. Earlier models get sibling media
+              // after the complete response batch, in the same user Content.
+              const result: unknown[] = [];
+              const media: NonNullable<typeof functionResponse.parts> = [];
+              let imageIndex = 0;
+              for (const part of output) {
+                if (part.type === 'text') {
+                  result.push(part.text);
+                  continue;
+                }
+                const source = part.source;
+                if (source?.type !== 'base64' || typeof source.data !== 'string' || !source.data) {
+                  result.push('[image omitted: Gemini tool results require inline base64 image data]');
+                  continue;
+                }
+                const inlineData = {
+                  mimeType: source.media_type ?? source.mediaType ?? 'image/png',
+                  data: source.data,
+                };
+                imageIndex++;
+                if (nativeToolImages) {
+                  media.push({ inlineData });
+                  result.push('[Image ' + imageIndex + ' in function response parts.]');
+                } else {
+                  const label = 'Image ' + imageIndex + ' from tool result ' + JSON.stringify(id);
+                  result.push('[' + label + ' follows in this message.]');
+                  toolImages.push({ text: '[' + label + ']' }, { inlineData });
+                }
+              }
+              functionResponse.response = {
+                [(block.is_error ?? block.isError) ? 'error' : 'result']: result,
+              };
+              if (media.length) functionResponse.parts = media;
+            } else {
+              functionResponse.response = {
+                result: typeof block.content === 'string' ? block.content : JSON.stringify(block.content),
+              };
+            }
+            toolResultParts.push({ functionResponse });
           }
         }
 
         // Tool results go in a user message
         if (toolResultParts.length > 0) {
           contents.push({ role: 'user', parts: toolResultParts });
+          pendingToolImages.push(...toolImages);
         }
 
         if (parts.length > 0) {
+          flushToolImages();
           contents.push({ role, parts });
         }
 
@@ -521,6 +579,7 @@ export class GeminiAdapter implements ProviderAdapter {
       contents.push({ role, parts: [{ text: String(msg.content) }] });
     }
 
+    flushToolImages();
     // Gemini requires alternating user/model roles.
     // Merge consecutive same-role messages.
     return this.mergeConsecutiveRoles(contents);

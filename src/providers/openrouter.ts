@@ -24,6 +24,7 @@ import {
   networkError,
 } from '../types/index.js';
 import { safeParseJson, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
+import { chatToolResultContent } from './tool-result-images.js';
 
 // ============================================================================
 // Types
@@ -483,7 +484,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
     // Use flatMap to handle one-to-many expansion (multiple tool_results → multiple messages)
     return messages.flatMap(msg => {
       // If it's already in OpenRouter format, pass through
-      if (msg.role && (typeof msg.content === 'string' || msg.content === null || msg.tool_calls)) {
+      if (msg.role && (typeof msg.content === 'string' || msg.content === null || msg.tool_calls || (msg.role === 'tool' && msg.tool_call_id))) {
         return [msg as OpenRouterMessage];
       }
       
@@ -514,7 +515,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
             } else {
               textParts.push(block.text);
             }
-          } else if (block.type === 'image') {
+          } else if (block.type === 'image' || block.type === 'image_url') {
             hasImages = true;
             // Migrate any already-collected textParts into contentBlocks
             // (we didn't know we'd need array format until hitting an image)
@@ -523,7 +524,9 @@ export class OpenRouterAdapter implements ProviderAdapter {
             }
             textParts.length = 0;
 
-            if (block.source?.type === 'base64') {
+            if (block.type === 'image_url') {
+              contentBlocks.push(block);
+            } else if (block.source?.type === 'base64') {
               const mediaType = block.source.media_type ?? block.source.mediaType ?? 'image/png';
               contentBlocks.push({
                 type: 'image_url',
@@ -580,7 +583,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
             toolResults.push({
               role: 'tool' as const,
               tool_call_id: block.tool_use_id || block.toolUseId,
-              content: typeof block.content === 'string' ? block.content : JSON.stringify(block.content),
+              content: chatToolResultContent(block),
             });
           }
         }
@@ -807,7 +810,7 @@ export function toOpenRouterMessages(
   for (const msg of messages) {
     const textParts: string[] = [];
     const toolCalls: OpenRouterToolCall[] = [];
-    const toolResults: { id: string; content: string }[] = [];
+    const toolResults: { id: string; content: ReturnType<typeof chatToolResultContent> }[] = [];
     
     for (const block of msg.content) {
       if (block.type === 'text') {
@@ -824,11 +827,20 @@ export function toOpenRouterMessages(
       } else if (block.type === 'tool_result') {
         toolResults.push({
           id: block.toolUseId,
-          content: typeof block.content === 'string' ? block.content : JSON.stringify(block.content),
+          content: chatToolResultContent(block),
         });
       }
     }
     
+    // Add tool results as separate messages
+    for (const tr of toolResults) {
+      result.push({
+        role: 'tool',
+        tool_call_id: tr.id,
+        content: tr.content,
+      });
+    }
+
     // Add main message
     if (textParts.length > 0 || toolCalls.length > 0) {
       const message: OpenRouterMessage = {
@@ -839,15 +851,6 @@ export function toOpenRouterMessages(
         message.tool_calls = toolCalls;
       }
       result.push(message);
-    }
-    
-    // Add tool results as separate messages
-    for (const tr of toolResults) {
-      result.push({
-        role: 'tool',
-        tool_call_id: tr.id,
-        content: tr.content,
-      });
     }
   }
   
