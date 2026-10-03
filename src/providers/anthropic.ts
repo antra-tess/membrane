@@ -689,12 +689,15 @@ export class AnthropicAdapter implements ProviderAdapter {
           if (block.type === 'image') {
             const { sourceUrl, ...rest } = block;
             if (block.source?.type !== 'base64') return rest;
-            const { mediaType, media_type, ...source } = block.source;
+            // Overwrite media_type in place: a wire-shaped source keeps its key
+            // order, so an already-correct image serializes to the same bytes
+            // as before; only camelCase input gains a trailing media_type.
+            const { mediaType, ...source } = block.source;
             return {
               ...rest,
               source: {
                 ...source,
-                media_type: detectImageMediaType(source.data, media_type ?? mediaType),
+                media_type: detectImageMediaType(source.data, source.media_type ?? mediaType),
               },
             };
           }

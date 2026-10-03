@@ -237,3 +237,21 @@ describe('OpenAI image request paths', () => {
     expect(Buffer.from(await file.arrayBuffer()).toString('base64')).toBe(PNG);
   });
 });
+
+describe('review follow-ups', () => {
+  it('keeps the wire key order of an already-correct Anthropic image source', () => {
+    const adapter = new AnthropicAdapter({ apiKey: 'test-key', cacheKeepalive: { enabled: false } });
+    const block = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG } };
+    const built = (adapter as any).buildRequest({
+      model: 'claude-sonnet-4-5',
+      messages: [{ role: 'user', content: [block] }],
+    });
+    expect(JSON.stringify(built.messages[0].content[0])).toBe(JSON.stringify(block));
+  });
+
+  it('treats non-string image data or labels as unknown instead of throwing', () => {
+    expect(detectImageMediaType(42 as any, 'image/png')).toBe('image/png');
+    expect(detectImageMediaType('AAAAAAAAAAAA', 7 as any)).toBe('image/jpeg');
+    expect(detectImageMediaType({} as any, null as any)).toBe('image/jpeg');
+  });
+});
