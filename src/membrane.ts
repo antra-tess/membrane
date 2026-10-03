@@ -129,6 +129,10 @@ class NativeBlockTracker {
 
   /** Provider block callback: first sighting of an index starts it, a second completes it. */
   onProviderBlock(index: number, block: unknown): void {
+    const type = (block as { type?: string } | undefined)?.type;
+    // Images use the content-block callback and final response, not the
+    // text/thinking/tool logical-block event vocabulary.
+    if (type === 'image' || type === 'generated_image') return;
     this.lastSeen.set(index, block);
     if (!this.started.has(index)) {
       const mbType = NativeBlockTracker.mapApiBlockType((block as { type?: string } | undefined)?.type);
@@ -841,15 +845,7 @@ export class Membrane {
         // Capture non-text content blocks from provider response (e.g., generated_image from Gemini)
         // The XML parser only handles text — binary content blocks need to be preserved separately
         if (Array.isArray(streamResult.content)) {
-          for (const block of streamResult.content) {
-            if (block.type === 'generated_image') {
-              extraContentBlocks.push({
-                type: 'generated_image',
-                data: (block as any).data,
-                mimeType: (block as any).mimeType,
-              } as ContentBlock);
-            }
-          }
+          this.captureProviderImageBlocks(streamResult.content, extraContentBlocks);
           // Native thinking blocks carry the signature (encrypted full
           // reasoning) — captured so consumers can persist and round-trip
           // them for reasoning continuity.
@@ -920,7 +916,7 @@ export class Membrane {
           parser.push(closeTag);
           // Note: closing tag is structural XML, not emitted via onChunk (invisible)
 
-          const parsed = parseToolCalls(parser.getAccumulated());
+          const parsed = parseToolCalls(parser.getAccumulated(), { tools: request.tools });
 
           if (parsed && parsed.calls.length > 0) {
             // Notify about pre-tool content
@@ -1221,7 +1217,8 @@ export class Membrane {
           executedToolCalls,
           executedToolResults,
           this.abortReason(error, signal),
-          initialBlockType
+          initialBlockType,
+          request.tools
         );
       }
       // Re-throw with rawRequest attached for logging
@@ -1580,6 +1577,7 @@ export class Membrane {
       // Convert content blocks
       const content: any[] = [];
       const includeNamePrefix = !isAssistant;
+      let hasText = false;
       for (const block of msg.content) {
         if (block.type === 'text') {
           // Empty text blocks are rejected by the Anthropic API. In
@@ -1588,9 +1586,10 @@ export class Membrane {
           // name prefix below would make them non-empty.
           if (block.text === '') continue;
           let text = block.text;
-          if (includeNamePrefix && msg.participant) {
-            text = `${msg.participant}: ${text}`;
+          if (includeNamePrefix && msg.participant && !hasText) {
+            text = (activeFormatter.nameFormat ?? '{name}: ').replace('{name}', () => msg.participant) + text;
           }
+          hasText = true;
           const textBlock: Record<string, unknown> = { type: 'text', text };
           if ((block as any).cache_control) {
             // A block-level passthrough occupies one of the 4 breakpoint slots
@@ -1880,6 +1879,8 @@ export class Membrane {
         } else if (item.type === 'redacted_thinking') {
           // Pass through verbatim — carries the encrypted `data` payload
           blocks.push({ ...item } as ContentBlock);
+        } else if (item.type === 'image') {
+          blocks.push({ ...item } as ContentBlock);
         } else if (item.type === 'generated_image') {
           blocks.push({
             type: 'generated_image',
@@ -1913,6 +1914,16 @@ export class Membrane {
     }
 
     return [];
+  }
+
+  /** Retain image blocks that the XML text parser cannot represent. */
+  private captureProviderImageBlocks(providerContent: unknown, sink: ContentBlock[]): void {
+    if (!Array.isArray(providerContent)) return;
+    for (const block of providerContent) {
+      if (block?.type === 'image' || block?.type === 'generated_image') {
+        sink.push({ ...block } as ContentBlock);
+      }
+    }
   }
 
   /**
@@ -2361,7 +2372,9 @@ export class Membrane {
       // extended thinking combined with prefill, so never send the param here
       thinking: undefined,
       messages,
-      system: ownSystemBlocks(prefillResult.systemContent) ?? undefined,
+      system: Array.isArray(prefillResult.systemContent) && prefillResult.systemContent.length === 0
+        ? undefined
+        : ownSystemBlocks(prefillResult.systemContent) ?? undefined,
       stopSequences: prefillResult.stopSequences,
       extra: {
         ...originalRequest.providerParams,
@@ -2452,7 +2465,9 @@ export class Membrane {
       // extended thinking combined with prefill, so never send the param here
       thinking: undefined,
       messages,
-      system: ownSystemBlocks(prefillResult.systemContent) ?? undefined,
+      system: Array.isArray(prefillResult.systemContent) && prefillResult.systemContent.length === 0
+        ? undefined
+        : ownSystemBlocks(prefillResult.systemContent) ?? undefined,
       stopSequences: prefillResult.stopSequences,
       // Copied, not aliased: the guard below deletes the smuggled thinking
       // config, and mutating the caller's own providerParams object would
@@ -2513,6 +2528,8 @@ export class Membrane {
         } else if (block.type === 'redacted_thinking') {
           // Pass through verbatim — carries the encrypted `data` payload
           content.push({ ...(block as any) } as ContentBlock);
+        } else if (block.type === 'image') {
+          content.push({ ...block } as ContentBlock);
         } else if (block.type === 'generated_image') {
           content.push({
             type: 'generated_image',
@@ -2546,7 +2563,7 @@ export class Membrane {
     // This handles prefill mode where tools are XML in the text
     let emptyToolBlocks = 0;
     if (toolCalls.length === 0 && rawAssistantText.includes('<function_calls>')) {
-      const parsed = parseToolCalls(rawAssistantText);
+      const parsed = parseToolCalls(rawAssistantText, { tools: request.tools });
       if (parsed?.calls.length) {
         for (const tc of parsed.calls) {
           toolCalls.push(tc);
@@ -2701,7 +2718,10 @@ export class Membrane {
       // XML mode - parse accumulated text into blocks
       // If we started inside a block (from prefill), pass that context so the parser
       // can correctly handle closing tags without corresponding opening tags
-      const parseOptions = startInsideBlock ? { startInsideBlock } : undefined;
+      const parseOptions = {
+        tools: request.tools,
+        ...(startInsideBlock ? { startInsideBlock } : {}),
+      };
       const parsed = parseAccumulatedIntoBlocks(accumulated, parseOptions);
       finalContent = parsed.blocks;
       toolCalls = parsed.toolCalls.length > 0 ? parsed.toolCalls : executedToolCalls;
@@ -2954,11 +2974,15 @@ export class Membrane {
     toolCalls: ToolCall[],
     toolResults: ToolResult[],
     reason: 'user' | 'timeout' | 'error',
-    startInsideBlock: 'thinking' | 'tool_call' | 'tool_result' | null = null
+    startInsideBlock: 'thinking' | 'tool_call' | 'tool_result' | null = null,
+    tools?: ToolDefinition[]
   ): AbortedResponse {
     // Parse accumulated text into content blocks for partial content
     // If we started inside a block (from prefill), pass that context
-    const parseOptions = startInsideBlock ? { startInsideBlock } : undefined;
+    const parseOptions = {
+      tools,
+      ...(startInsideBlock ? { startInsideBlock } : {}),
+    };
     const { blocks } = parseAccumulatedIntoBlocks(accumulated, parseOptions);
 
     return {
@@ -3106,6 +3130,9 @@ export class Membrane {
     let rawRequest: unknown;
     let rawResponse: unknown;
 
+    // The text parser cannot carry images. Retain them across all rounds.
+    const extraContentBlocks: ContentBlock[] = [];
+
     // Native thinking blocks from the provider (with signatures) — merged
     // into the parser-derived content before the final response is emitted.
     // See streamWithXmlTools for the matching non-yielding logic.
@@ -3173,7 +3200,7 @@ export class Membrane {
           stream.emit({
             type: 'aborted',
             reason: 'user',
-            partialContent: parseAccumulatedIntoBlocks(newContent).blocks,
+            partialContent: parseAccumulatedIntoBlocks(newContent, { tools: request.tools }).blocks,
             rawAssistantText: newContent,
             toolCalls: executedToolCalls,
             toolResults: executedToolResults,
@@ -3263,6 +3290,8 @@ export class Membrane {
           streamResult.stopSequence = detectedStopSequence;
         }
 
+        this.captureProviderImageBlocks(streamResult.content, extraContentBlocks);
+
         // Capture native thinking blocks (with signatures) from the provider
         // response — the text parser can't see signatures, so they're merged
         // into the final response content after parsing.
@@ -3319,7 +3348,7 @@ export class Membrane {
           const closeTag = '</function_calls>';
           parser.push(closeTag);
 
-          const parsed = parseToolCalls(parser.getAccumulated());
+          const parsed = parseToolCalls(parser.getAccumulated(), { tools: request.tools });
 
           if (parsed && parsed.calls.length > 0) {
             // Emit block events for each tool call
@@ -3620,6 +3649,7 @@ export class Membrane {
       // Merge provider thinking signatures into parser-derived thinking blocks
       this.mergeProviderThinkingBlocks(response.content, providerThinkingBlocks);
 
+      response.content.push(...extraContentBlocks);
       response.details.timing.rounds = rounds;
 
       stream.emit({ type: 'complete', response });
@@ -3630,7 +3660,7 @@ export class Membrane {
         stream.emit({
           type: 'aborted',
           reason: this.abortReason(error, stream.signal),
-          partialContent: parseAccumulatedIntoBlocks(newContent).blocks,
+          partialContent: parseAccumulatedIntoBlocks(newContent, { tools: request.tools }).blocks,
           rawAssistantText: newContent,
           toolCalls: executedToolCalls,
           toolResults: executedToolResults,

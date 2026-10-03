@@ -12,9 +12,17 @@ Releases up to and including 0.5.75 predate this file; for their contents see
 
 ## Unreleased
 
+### Added
+
+- Add `CacheKeepaliveConfig.onCall` receipts so applications can log background cache-refresh calls alongside foreground inference. Each logical poke reports its payload, timing, lineage, and complete terminal vendor response or error, including ineffective writes. SDK-internal retries belong to one receipt; usage comes from the terminal response. Request and success-response copies isolate observers from cached prefixes and effectiveness checks. Tested with fake timers and a mocked Anthropic transport, including an SDK retry; live provider behavior was not tested.
+
 ### Fixed
 
 - Preserve normalized images in native tool-result history and resolve PNG, JPEG, GIF, and WebP media types from their bytes before applying formatter allowlists. Correct mislabeled images on native and XML request paths, native streaming, XML tool-image continuations, Anthropic requests, Responses input images, and OpenAI Images uploads. Unsupported formats still receive the existing formatter placeholders. Verified with mocked request transports and regression tests; live provider acceptance was not tested.
+- Bedrock rejects malformed consumer `anthropic_beta` values with a non-retryable `invalid_request` error, regardless of whether the interleaved-thinking beta is needed. Supply an array of strings; valid consumer arrays still pass through on non-firing models and merge without mutation when the beta is required.
+- Native tool streaming honors the active formatter's `nameFormat`, matching non-streaming requests. Participant names prefix only the first retained text block of each message and remain literal when they contain replacement tokens such as `$&`.
+- XML continuation requests omit empty system arrays while preserving nonempty system blocks and their cache markers.
+- Preserve OpenRouter response images from content arrays and the separate `images` field through complete, stream, and yielding responses. Inline base64 images become normalized image sources; other URLs remain references. Streaming keeps text callbacks text-only and retains images alongside tool calls. XML streams append provider images after parsed text, matching the existing generated-image behavior.
 
 ## 0.5.86 — 2026-09-21
 

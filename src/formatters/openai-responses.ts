@@ -22,6 +22,7 @@ import type {
   StreamEmission,
   StreamParser,
 } from './types.js';
+import { responsesToolOutputParts } from '../providers/responses-input.js';
 
 import { resolveImageMediaType } from '../utils/image-media.js';
 
@@ -192,9 +193,12 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
         out.push({
           type: 'function_call_output',
           call_id: block.toolUseId,
+          // Image-bearing results go out as native input_text/input_image
+          // parts (see responsesToolOutputParts); image-free ones keep the
+          // legacy string form.
           output: typeof block.content === 'string'
             ? block.content
-            : JSON.stringify(block.content),
+            : responsesToolOutputParts(block.content) ?? JSON.stringify(block.content),
         });
       } else if (block.type === 'redacted_thinking') {
         flushMessage();
