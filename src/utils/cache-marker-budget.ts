@@ -112,7 +112,8 @@ function collectMarkedBlocks(surfaces: WireCacheSurfaces): Array<Record<string, 
 }
 
 /**
- * Take ownership of a system surface before it can reach the clamp.
+ * Omit empty system arrays and take ownership of nonempty system surfaces
+ * before they can reach the clamp. All request builders use the same rule.
  *
  * `request.system` accepts caller-marked blocks, and the builders pass that
  * array through by reference when they add no marker of their own. The clamp
@@ -129,6 +130,7 @@ function collectMarkedBlocks(surfaces: WireCacheSurfaces): Array<Record<string, 
  */
 export function ownSystemBlocks(system: unknown): unknown {
   if (!Array.isArray(system)) return system;
+  if (system.length === 0) return undefined;
   return system.map((block) => copyBlockTree(block, 0));
 }
 

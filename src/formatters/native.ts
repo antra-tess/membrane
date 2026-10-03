@@ -163,15 +163,12 @@ export class NativeFormatter implements PrefillFormatter {
   readonly name = 'native';
   readonly usesPrefill = false;
 
-  private config: Required<NativeFormatterConfig>;
-
-  get nameFormat(): string {
-    return this.config.nameFormat;
-  }
+  readonly nameFormat: string;
+  private config: Required<FormatterConfig>;
 
   constructor(config: NativeFormatterConfig = {}) {
+    this.nameFormat = config.nameFormat ?? '{name}: ';
     this.config = {
-      nameFormat: config.nameFormat ?? '{name}: ',
       unsupportedMedia: config.unsupportedMedia ?? 'error',
       warnOnStrip: config.warnOnStrip ?? true,
     };
