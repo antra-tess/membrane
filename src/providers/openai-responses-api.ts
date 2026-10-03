@@ -30,7 +30,7 @@ import {
   rateLimitError,
   serverError,
 } from '../types/index.js';
-import { createCombinedSignal, SSELineParser, safeParseJson, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame } from './utils.js';
+import { createCombinedSignal, SSELineParser, parseToolArguments, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame } from './utils.js';
 
 // ============================================================================
 // Provider-native Responses API types
@@ -599,7 +599,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
           type: 'tool_use',
           id: callId,
           name: typeof item.name === 'string' ? item.name : '',
-          input: safeParseJson(typeof item.arguments === 'string' ? item.arguments : '{}'),
+          ...parseToolArguments(typeof item.arguments === 'string' ? item.arguments : '{}'),
           itemId: item.id,
           outputIndex,
           rawItem: item,

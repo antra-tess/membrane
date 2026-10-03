@@ -29,7 +29,7 @@ import {
   abortError,
   networkError,
 } from '../types/index.js';
-import { safeParseJson, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
+import { parseToolArguments, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
 
 // ============================================================================
 // Types
@@ -689,7 +689,7 @@ export class OpenAIAdapter implements ProviderAdapter {
           type: 'tool_use',
           id: tc.id,
           name: tc.function.name,
-          input: safeParseJson(tc.function.arguments),
+          ...parseToolArguments(tc.function.arguments),
         });
       }
     }
@@ -793,7 +793,7 @@ export function fromOpenAIContent(message: OpenAIMessage): ContentBlock[] {
         type: 'tool_use',
         id: tc.id,
         name: tc.function.name,
-        input: safeParseJson(tc.function.arguments),
+        ...parseToolArguments(tc.function.arguments),
       });
     }
   }

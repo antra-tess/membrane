@@ -1362,7 +1362,7 @@ export class Membrane {
           (b): b is ContentBlock & { type: 'tool_use' } => b.type === 'tool_use'
         );
 
-        if (onToolCalls && toolUseBlocks.length > 0 && lastStopReason === 'tool_use') {
+        if (onToolCalls && this.shouldRunToolCalls(lastStopReason, toolUseBlocks)) {
           // Notify about pre-tool content
           const textBlocks = responseBlocks.filter(b => b.type === 'text');
           if (onPreToolContent && textBlocks.length > 0) {
@@ -2798,6 +2798,34 @@ export class Membrane {
     return estimatedCost ? { ...discarded, estimatedCost } : discarded;
   }
 
+  /**
+   * Whether a native round's tool_use blocks should be dispatched.
+   *
+   * Normally that's exactly stop_reason 'tool_use'. But the API occasionally
+   * reports 'end_turn' for a response that ends in complete tool_use blocks
+   * (observed on claude-opus-5: thinking + one fully-formed call, well under
+   * max_tokens). Gating on stop_reason alone silently dropped those calls —
+   * the turn ended with the call written into history and never run. A call
+   * whose arguments all parsed is still run then; truncation ('max_tokens'),
+   * refusals, and anything with unparseable input are still not.
+   */
+  private shouldRunToolCalls(
+    stopReason: StopReason,
+    toolUseBlocks: Array<ContentBlock & { type: 'tool_use' }>,
+  ): boolean {
+    if (toolUseBlocks.length === 0) return false;
+    if (stopReason === 'tool_use') return true;
+    if (stopReason !== 'end_turn') return false;
+    if (toolUseBlocks.some((b) => (b as { unparseableInput?: string }).unparseableInput !== undefined)) {
+      return false;
+    }
+    console.warn(
+      `[membrane] stop_reason 'end_turn' on a response with ${toolUseBlocks.length} complete ` +
+        `tool_use block(s) (${toolUseBlocks.map((b) => b.name).join(', ')}) — dispatching them`,
+    );
+    return true;
+  }
+
   private mapStopReason(providerReason: string): StopReason {
     switch (providerReason) {
       case 'end_turn':
@@ -3807,7 +3835,7 @@ export class Membrane {
           (b): b is ContentBlock & { type: 'tool_use' } => b.type === 'tool_use'
         );
 
-        if (toolUseBlocks.length > 0 && lastStopReason === 'tool_use') {
+        if (this.shouldRunToolCalls(lastStopReason, toolUseBlocks)) {
           // Convert to normalized ToolCall[]
           const toolCalls: ToolCall[] = toolUseBlocks.map(block => ({
             id: block.id,
