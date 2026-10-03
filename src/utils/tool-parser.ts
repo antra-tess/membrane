@@ -10,30 +10,179 @@
  *   <invoke name="tool"/> or <invoke name="tool"/>
  */
 
-import type { ToolCall, ToolResult, ParsedToolCalls, ContentBlock, ToolResultContentBlock } from '../types/index.js';
+import type {
+  ToolCall,
+  ToolResult,
+  ParsedToolCalls,
+  ContentBlock,
+  ToolResultContentBlock,
+  ToolDefinition,
+} from '../types/index.js';
+import { createHash } from 'node:crypto';
 import { isAcceptedImageMediaType, strippedImagePlaceholder } from './image-media.js';
+import { readToolSchema, type ParameterDeclaration, type ToolSchemaReading } from './tool-schema.js';
 
 // ============================================================================
 // Helper Functions
 // ============================================================================
 
 /**
- * Parse a parameter value, handling JSON and large integers safely.
- * Discord snowflake IDs and similar large integers lose precision when
- * parsed as JavaScript numbers, so we keep them as strings.
+ * Parsing context shared by the XML entry points.
+ *
+ * `tools` carries the declared schemas of the round's tools. When a parameter's
+ * type is declared, the value is parsed according to that declaration instead
+ * of guessed (see {@link parseParamValue}); without it the legacy guess stands,
+ * so callers that cannot supply schemas keep their previous behaviour.
  */
-function parseParamValue(value: string): unknown {
-  const trimmed = value.trim();
+export interface ToolParseOptions {
+  tools?: ToolDefinition[];
+}
 
-  // Check if it looks like a large integer (16+ digits, no decimal)
-  // JavaScript can only safely represent integers up to 2^53 - 1 (about 9 quadrillion)
-  const looksLikeLargeInt = /^\d{16,}$/.test(trimmed);
-  if (looksLikeLargeInt) {
-    // Keep as string to preserve precision
+/** 16+ digits, no decimal: beyond Number.MAX_SAFE_INTEGER (Discord snowflakes). */
+const LARGE_INT_RE = /^\d{16,}$/;
+
+/** One tool's schema, read once per invoke. */
+interface InvokeSchema {
+  toolName: string;
+  inputSchema: unknown;
+  reading: ToolSchemaReading;
+}
+
+function invokeSchemaFor(
+  tools: ToolDefinition[] | undefined,
+  toolName: string
+): InvokeSchema | undefined {
+  if (!Array.isArray(tools)) return undefined;
+  const tool = tools.find(candidate => candidate?.name === toolName);
+  if (!tool) return undefined;
+  const reading = readToolSchema(tool.inputSchema);
+  if (reading.failure !== undefined) {
+    warnOnce(['failure', toolName, reading.failure], () =>
+      `[membrane:tool-parser] tool "${toolName}": its input schema could not be read ` +
+        `(${reading.failure}), so every parameter of it gets legacy text parsing ` +
+        '(value trimmed, then JSON-guessed).'
+    );
+    return undefined;
+  }
+  return { toolName, inputSchema: tool.inputSchema, reading };
+}
+
+// ----------------------------------------------------------------------------
+// Diagnostics
+// ----------------------------------------------------------------------------
+
+/**
+ * Subjects already reported, so a repeated parse names the same bound once.
+ * Keyed by CONTENT — tool, parameter and the schema form concerned — not by
+ * tool and parameter name alone: two agents in one process whose servers
+ * expose the same tool name with different schemas each hear about their own.
+ * Stored as digests and bounded in number, so neither a large schema nor a
+ * producer that mints a new schema per request can grow it without limit.
+ */
+const reportedSubjects = new Set<string>();
+const MAX_REPORTED_SUBJECTS = 1024;
+
+function stringifyForDiagnostic(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? `[${typeof value}]`;
+  } catch {
+    // A schema object carrying a cycle of its own (not a `$ref` cycle), or a BigInt.
+    return '[unserializable schema]';
+  }
+}
+
+function warnOnce(subject: readonly string[], message: () => string): void {
+  const key = createHash('sha256').update(subject.join('\u0000')).digest('base64');
+  if (reportedSubjects.has(key)) return;
+  if (reportedSubjects.size >= MAX_REPORTED_SUBJECTS) reportedSubjects.clear();
+  reportedSubjects.add(key);
+  console.warn(message());
+}
+
+function previewOf(form: string): string {
+  return form.length > 200 ? `${form.slice(0, 200)}…` : form;
+}
+
+function warnUnresolvedDeclaration(
+  toolName: string,
+  paramName: string,
+  declaration: ParameterDeclaration
+): void {
+  const form = stringifyForDiagnostic(
+    declaration.declaredBy.length === 1 ? declaration.declaredBy[0] : declaration.declaredBy
+  );
+  const spelled =
+    declaration.declaredBy.length === 1
+      ? `declares ${previewOf(form)}`
+      : `is declared by ${declaration.declaredBy.length} schema nodes, ${previewOf(form)}`;
+  warnOnce(['unresolved', toolName, paramName, form], () =>
+    `[membrane:tool-parser] tool "${toolName}" parameter "${paramName}" ${spelled}, which ` +
+      'this parser cannot read as a single JSON type. Legacy text parsing applies to it ' +
+      '(value trimmed, then JSON-guessed), so whitespace-sensitive and JSON-looking string ' +
+      'arguments may change before reaching the tool.'
+  );
+}
+
+function warnUnreadRootUnion(schema: InvokeSchema, paramName: string): void {
+  const combinators = schema.reading.unreadRootUnion.join('/');
+  warnOnce(
+    ['unread-root-union', schema.toolName, paramName, stringifyForDiagnostic(schema.inputSchema)],
+    () =>
+      `[membrane:tool-parser] tool "${schema.toolName}" parameter "${paramName}" is not among ` +
+        `the parameters read from its schema: the root ${combinators} has a variant that is ` +
+        'not an object schema, so no variant is read as parameters (the Anthropic native ' +
+        'wire falls back the same way). Legacy text parsing applies to it (value trimmed, ' +
+        'then JSON-guessed).'
+  );
+}
+
+/**
+ * The mismatch diagnostic names COORDINATES ONLY — tool, parameter, declared
+ * type, and what the value did — and never the value itself. Tool arguments
+ * routinely carry credentials, tokens and private documents, and this path
+ * fires exactly when a model formats such a value oddly, so echoing it would
+ * copy secrets into stderr and any durable log downstream of it. The
+ * coordinates are what a maintainer reproduces from locally.
+ */
+function warnParamType(
+  toolName: string,
+  paramName: string,
+  declaredType: string,
+  detail: string
+): void {
+  console.warn(
+    `[membrane:tool-parser] tool "${toolName}" parameter "${paramName}" declares type ` +
+      `"${declaredType}" but ${detail} (the value itself is not logged: tool arguments ` +
+      'can carry secrets).'
+  );
+}
+
+// ----------------------------------------------------------------------------
+// Values
+// ----------------------------------------------------------------------------
+
+function jsonKindOf(value: unknown): string {
+  if (Array.isArray(value)) return 'array';
+  if (value === null) return 'null';
+  return typeof value;
+}
+
+function matchesDeclaredType(value: unknown, declaredType: string): boolean {
+  if (declaredType === 'integer') return typeof value === 'number' && Number.isInteger(value);
+  return jsonKindOf(value) === declaredType;
+}
+
+/**
+ * The legacy guess, for parameters with no usable declaration: trim, then
+ * JSON.parse with the trimmed text as fallback. Large integers (Discord
+ * snowflakes and the like) lose precision as JavaScript numbers, so they stay
+ * strings.
+ */
+function guessParamValue(value: string): unknown {
+  const trimmed = value.trim();
+  if (LARGE_INT_RE.test(trimmed)) {
     return trimmed;
   }
-
-  // Try to parse as JSON
   try {
     return JSON.parse(trimmed);
   } catch {
@@ -42,17 +191,133 @@ function parseParamValue(value: string): unknown {
 }
 
 /**
+ * The layout newlines of a string parameter: ONE newline directly after the
+ * opening tag and ONE directly before the closing tag, when present. This is
+ * the convention tool results are written and read in (`<stdout>\n…\n</stdout>`,
+ * see LEGACY_RESULT_REGEX), so a value framed the way the model sees every
+ * result framed arrives as its content, and a value written inline arrives as
+ * written. A value that itself begins or ends with a newline is written with
+ * one more.
+ */
+function withoutFraming(value: string): string {
+  const start = value.startsWith('\n') ? 1 : 0;
+  const end = value.length > start && value.endsWith('\n') ? value.length - 1 : value.length;
+  return value.slice(start, end);
+}
+
+/**
+ * Parse one XML parameter value by its declaration.
+ *
+ * The wire bytes are taken as they arrive: this parser transforms no character
+ * of a parameter value, so ordinary markup and entity text reach the tool
+ * exactly as the model wrote them.
+ *
+ * What happens next depends on the parameter's declaration, as
+ * {@link readToolSchema} reads it — the same reading the XML tool
+ * instructions are rendered from:
+ *   - typed `string` → the text as written, less one layout newline on each
+ *                 side ({@link withoutFraming}). No JSON.parse, no trim: an
+ *                 exact-match edit tool must be able to send leading and
+ *                 trailing whitespace, and a string whose text happens to be
+ *                 valid JSON must stay a string.
+ *   - typed object/array/number/integer/boolean/null → JSON.parse, with a
+ *                 loud diagnostic when the text does not parse (raw text
+ *                 passed through) or parses to a different JSON kind than
+ *                 declared.
+ *   - nullable (the declaration also admits null) → the text `null`, trimmed,
+ *                 is JSON null, whatever the other type.
+ *   - untyped (`{}`), or undeclared → the legacy guess, silently.
+ *   - unresolved (the declaration constrains the type, but not to one type)
+ *                 → the legacy guess, with ONE warn per distinct schema form
+ *                 naming it: the divergence stays, but it stops being silent.
+ */
+function parseParamValue(
+  value: string,
+  paramName: string,
+  schema: InvokeSchema | undefined
+): unknown {
+  if (schema === undefined) return guessParamValue(value);
+
+  const declaration = schema.reading.parameters.get(paramName);
+  if (declaration === undefined) {
+    // An UNDECLARED parameter keeps the legacy guess silently — unless the
+    // schema has a root union this parser does not read, which may be exactly
+    // where it is declared.
+    if (schema.reading.unreadRootUnion.length > 0) warnUnreadRootUnion(schema, paramName);
+    return guessParamValue(value);
+  }
+  if (declaration.status === 'untyped') return guessParamValue(value);
+  if (declaration.status === 'unresolved' || declaration.type === undefined) {
+    warnUnresolvedDeclaration(schema.toolName, paramName, declaration);
+    return guessParamValue(value);
+  }
+
+  const declaredType = declaration.type;
+  const trimmed = value.trim();
+
+  if (declaration.nullable && trimmed === 'null') {
+    return null;
+  }
+
+  if (declaredType === 'string') {
+    return withoutFraming(value);
+  }
+
+  if (LARGE_INT_RE.test(trimmed)) {
+    // Digits past Number.MAX_SAFE_INTEGER come back rounded from JSON.parse,
+    // so they stay text, as they always have: for a number or integer
+    // declaration that is the value in the only exact form it has, and for any
+    // other declaration it is a kind mismatch on top.
+    if (declaredType !== 'number' && declaredType !== 'integer') {
+      warnParamType(
+        schema.toolName,
+        paramName,
+        declaredType,
+        'the value is an integer too large to represent exactly; passing its digits through as text'
+      );
+    }
+    return trimmed;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    warnParamType(
+      schema.toolName,
+      paramName,
+      declaredType,
+      'the value is not valid JSON; passing the raw text through'
+    );
+    return value;
+  }
+  if (!matchesDeclaredType(parsed, declaredType)) {
+    warnParamType(schema.toolName, paramName, declaredType, `the value parsed as ${jsonKindOf(parsed)}`);
+  }
+  return parsed;
+}
+
+/**
  * Parse the parameters of one invoke body. A self-closing invoke has no body
  * and therefore no parameters.
+ *
+ * `toolName` is the name the invoke actually dispatches under — for a
+ * re-anchored head, the innermost one — so the schema consulted per parameter
+ * is the schema of the tool that will receive it.
  */
-function parseInvokeParameters(invokeBody: string | undefined): Record<string, unknown> {
+function parseInvokeParameters(
+  invokeBody: string | undefined,
+  toolName: string,
+  tools?: ToolDefinition[]
+): Record<string, unknown> {
   const input: Record<string, unknown> = {};
   if (invokeBody === undefined) return input;
 
+  const schema = invokeSchemaFor(tools, toolName);
   PARAMETER_REGEX.lastIndex = 0;
   let paramMatch: RegExpExecArray | null;
   while ((paramMatch = PARAMETER_REGEX.exec(invokeBody)) !== null) {
-    input[paramMatch[2] ?? ''] = parseParamValue(paramMatch[3] ?? '');
+    const paramName = paramMatch[2] ?? '';
+    input[paramName] = parseParamValue(paramMatch[3] ?? '', paramName, schema);
   }
   return input;
 }
@@ -115,7 +380,7 @@ function invokeOpenerOffsets(invokeBody: string): number[] {
   return offsets;
 }
 
-function collectInvokes(innerContent: string): ParsedInvokes {
+function collectInvokes(innerContent: string, tools?: ToolDefinition[]): ParsedInvokes {
   const calls: Array<{ name: string; input: Record<string, unknown> }> = [];
   let unclosedHeads = 0;
 
@@ -126,10 +391,8 @@ function collectInvokes(innerContent: string): ParsedInvokes {
     const swallowedOpenerOffsets = invokeBody === undefined ? [] : invokeOpenerOffsets(invokeBody);
 
     if (swallowedOpenerOffsets.length === 0) {
-      calls.push({
-        name: invokeMatch[INVOKE_NAME_GROUP] ?? '',
-        input: parseInvokeParameters(invokeBody),
-      });
+      const name = invokeMatch[INVOKE_NAME_GROUP] ?? '';
+      calls.push({ name, input: parseInvokeParameters(invokeBody, name, tools) });
       continue;
     }
 
@@ -147,9 +410,10 @@ function collectInvokes(innerContent: string): ParsedInvokes {
     // A re-anchored head that still does not parse — a nameless invoke, say —
     // is refused like any other: counted above, dispatched never.
     if (reanchoredMatch) {
+      const name = reanchoredMatch[INVOKE_NAME_GROUP] ?? '';
       calls.push({
-        name: reanchoredMatch[INVOKE_NAME_GROUP] ?? '',
-        input: parseInvokeParameters(reanchoredMatch[INVOKE_BODY_GROUP]),
+        name,
+        input: parseInvokeParameters(reanchoredMatch[INVOKE_BODY_GROUP], name, tools),
       });
     }
   }
@@ -249,8 +513,11 @@ function isFollowedByResults(text: string, afterPos: number): boolean {
  *
  * Uses "last-unexecuted-block" logic: finds the last function_calls block
  * that doesn't have function_results immediately following it.
+ *
+ * `options.tools` supplies the round's declared schemas; parameter values of a
+ * declared type are parsed by that type instead of guessed.
  */
-export function parseToolCalls(text: string): ParsedToolCalls | null {
+export function parseToolCalls(text: string, options?: ToolParseOptions): ParsedToolCalls | null {
   // Pick the last unexecuted block among those that survive containment: a
   // block quoted inside thinking or echoed in a tool result is content, and
   // dispatching from it runs a call the model never made.
@@ -271,7 +538,7 @@ export function parseToolCalls(text: string): ParsedToolCalls | null {
   const beforeText = text.slice(0, lastUnexecutedBlock.start);
   const afterText = text.slice(lastUnexecutedBlock.end);
 
-  const calls: ToolCall[] = collectInvokes(innerContent).calls.map((invoke) => ({
+  const calls: ToolCall[] = collectInvokes(innerContent, options?.tools).calls.map((invoke) => ({
     id: generateToolId(),
     name: invoke.name,
     input: invoke.input,
@@ -422,11 +689,46 @@ export interface ToolDefinitionForPrompt {
   name: string;
   description: string;
   parameters: Record<string, {
-    type: string;
+    /**
+     * The parameter's type name, absent when its declaration does not admit
+     * exactly one JSON type. Absent renders NO type attribute: the model is
+     * better served by a parameter with no stated type than by
+     * `type="undefined"` or a type the parser will not apply.
+     */
+    type?: string;
+    /** The declaration also admits null: renders `nullable="true"`. */
+    nullable?: boolean;
     description?: string;
     required?: boolean;
     enum?: string[];
   }>;
+}
+
+/**
+ * A tool definition as the XML tool instructions present it, read from its
+ * input schema by the same reading the XML parameter parser applies
+ * ({@link readToolSchema}): the type the model is told a parameter has is the
+ * type its value is parsed by, and a parameter the parser cannot type states
+ * none.
+ */
+export function toolDefinitionForPrompt(tool: ToolDefinition): ToolDefinitionForPrompt {
+  const { parameters } = readToolSchema(tool.inputSchema);
+  return {
+    name: tool.name,
+    description: tool.description,
+    parameters: Object.fromEntries(
+      [...parameters].map(([name, declaration]) => [
+        name,
+        {
+          type: declaration.type,
+          nullable: declaration.nullable || undefined,
+          description: declaration.description,
+          required: declaration.required,
+          enum: declaration.enum,
+        },
+      ])
+    ),
+  };
 }
 
 /**
@@ -441,7 +743,9 @@ export function formatToolDefinitions(tools: ToolDefinitionForPrompt[]): string 
     parts.push('<parameters>');
     
     for (const [paramName, param] of Object.entries(tool.parameters)) {
-      const attrs: string[] = [`name="${escapeXml(paramName)}"`, `type="${param.type}"`];
+      const attrs: string[] = [`name="${escapeXml(paramName)}"`];
+      if (param.type) attrs.push(`type="${escapeXml(param.type)}"`);
+      if (param.nullable) attrs.push('nullable="true"');
       if (param.required) attrs.push('required="true"');
       if (param.enum) attrs.push(`enum="${param.enum.join(',')}"`);
       
@@ -627,11 +931,12 @@ const LEGACY_ERROR_REGEX = /<error>\n?([\s\S]*?)\n?<\/error>/g;
  * @param text - The accumulated assistant output text
  * @param options - Optional parsing context
  * @param options.startInsideBlock - Block type we're starting inside (from prefill context)
+ * @param options.tools - Declared tool schemas, used to parse parameter values by declared type
  * @returns Array of ContentBlock in order of appearance
  */
 export function parseAccumulatedIntoBlocks(
   text: string,
-  options?: { startInsideBlock?: 'thinking' | 'tool_call' | 'tool_result' }
+  options?: ToolParseOptions & { startInsideBlock?: 'thinking' | 'tool_call' | 'tool_result' }
 ): {
   blocks: ContentBlock[];
   toolCalls: ToolCall[];
@@ -752,7 +1057,7 @@ export function parseAccumulatedIntoBlocks(
 
       // Parse invoke tags in this block (both forms, in document order); an
       // invoke left open is refused and re-anchored to the call it swallowed.
-      const parsedInvokes = collectInvokes(resolvedBlock.innerContent);
+      const parsedInvokes = collectInvokes(resolvedBlock.innerContent, options?.tools);
       unclosedInvokeHeads += parsedInvokes.unclosedHeads;
       for (const invoke of parsedInvokes.calls) {
         const toolName = invoke.name;
@@ -918,8 +1223,6 @@ export function parseAccumulatedIntoBlocks(
 // ============================================================================
 // Tool Instructions (for manual placement)
 // ============================================================================
-
-import type { ToolDefinition } from '../types/index.js';
 
 // Assembled to avoid triggering stop sequences in model output
 const FUNC_CALLS_OPEN = '<' + 'function_calls>';
