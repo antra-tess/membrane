@@ -90,7 +90,9 @@ function normalizeStandaloneItem(item: JsonObject): unknown {
     return {
       type: 'function_call_output',
       call_id: asString(item.toolUseId) || asString(item.tool_use_id),
-      output: typeof content === 'string' ? content : JSON.stringify(content ?? null),
+      output: typeof content === 'string'
+        ? content
+        : responsesToolOutputParts(content) ?? JSON.stringify(content ?? null),
     };
   }
   if (item.type === 'redacted_thinking') {
@@ -110,6 +112,43 @@ function reasoningInputItem(block: JsonObject): unknown {
   const raw = block.rawItem;
   if (isObject(raw) && raw.type === 'reasoning') return raw;
   return { type: 'reasoning', summary: [], encrypted_content: asString(block.data) };
+}
+
+/**
+ * `function_call_output.output` as a native content-part array, for tool
+ * results that carry images. Responses accepts `output` as a string OR an
+ * array of input_text / input_image parts; stringifying an image-bearing
+ * result hands the model its base64 as TEXT — no vision, and ~1 token per
+ * 2 base64 chars (a 760 KB snapshot ≈ 500k input tokens; probed live on the
+ * Codex backend 2026-10-02: array form = 526 tokens and the model describes
+ * the image). Returns null for image-free content so callers keep their
+ * legacy string form and existing replay bytes don't change.
+ */
+export function responsesToolOutputParts(content: unknown): unknown[] | null {
+  if (!Array.isArray(content)) return null;
+  if (!content.some((block) => isObject(block) && (block.type === 'image' || block.type === 'input_image'))) {
+    return null;
+  }
+  const parts: unknown[] = [];
+  for (const block of content) {
+    if (typeof block === 'string') {
+      parts.push({ type: 'input_text', text: block });
+    } else if (!isObject(block)) {
+      continue;
+    } else if (block.type === 'text') {
+      parts.push({ type: 'input_text', text: asString(block.text) });
+    } else if (block.type === 'image') {
+      const imageUrl = responsesImageUrl(block);
+      parts.push(imageUrl
+        ? { type: 'input_image', image_url: imageUrl }
+        : { type: 'input_text', text: '[image omitted: unsupported image source]' });
+    } else if (block.type === 'input_text' || block.type === 'input_image') {
+      parts.push(block);
+    } else {
+      parts.push({ type: 'input_text', text: JSON.stringify(block) });
+    }
+  }
+  return parts;
 }
 
 function responsesImageUrl(block: JsonObject): string | undefined {
