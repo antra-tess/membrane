@@ -28,8 +28,9 @@ import {
   abortError,
   networkError,
 } from '../types/index.js';
-import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
-import { toolOutputParts } from './tool-result-images.js';
+import { createCombinedSignal, textOnlyToolResultContent, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
+import { hasToolResultImages, toolOutputParts } from './tool-result-images.js';
+import { resolveImageMediaType } from '../utils/image-media.js';
 
 // ============================================================================
 // Gemini API Types
@@ -430,6 +431,8 @@ export class GeminiAdapter implements ProviderAdapter {
   private convertMessages(messages: any[], model?: string): GeminiContent[] {
     const contents: GeminiContent[] = [];
     const toolNames = new Map<string, string>();
+    const hasImages = messages.some(msg => Array.isArray(msg.content)
+      && msg.content.some((block: any) => block.type === 'tool_result' && hasToolResultImages(block.content)));
     let pendingToolImages: GeminiPart[] = [];
     const flushToolImages = () => {
       if (pendingToolImages.length) {
@@ -508,7 +511,9 @@ export class GeminiAdapter implements ProviderAdapter {
             });
           } else if (block.type === 'tool_result') {
             const id = block.tool_use_id ?? block.toolUseId;
-            const name = block.name ?? toolNames.get(id) ?? id ?? 'unknown';
+            const name = hasImages
+              ? block.name ?? toolNames.get(id) ?? id ?? 'unknown'
+              : block.name ?? block.tool_use_id ?? 'unknown';
             const output = toolOutputParts(block.content, block.is_error ?? block.isError);
             const functionResponse: NonNullable<GeminiPart['functionResponse']> = {
               name,
@@ -532,7 +537,7 @@ export class GeminiAdapter implements ProviderAdapter {
                   continue;
                 }
                 const inlineData = {
-                  mimeType: source.media_type ?? source.mediaType ?? 'image/png',
+                  mimeType: resolveImageMediaType(source.data, source.media_type ?? source.mediaType) ?? 'image/png',
                   data: source.data,
                 };
                 imageIndex++;
@@ -551,7 +556,7 @@ export class GeminiAdapter implements ProviderAdapter {
               if (media.length) functionResponse.parts = media;
             } else {
               functionResponse.response = {
-                result: typeof block.content === 'string' ? block.content : JSON.stringify(block.content),
+                result: textOnlyToolResultContent(block.content),
               };
             }
             toolResultParts.push({ functionResponse });

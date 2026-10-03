@@ -16,6 +16,21 @@ export const API_ACCEPTED_IMAGE_MEDIA_TYPES: ReadonlySet<string> = new Set([
   'image/webp',
 ]);
 
+/** Resolve supported image signatures before trusting an ingest label.
+ * Unknown bytes retain the declared type so callers can still reject unsupported
+ * formats. Inspect only the header rather than decoding the entire image. */
+export function resolveImageMediaType(data: string | undefined, declared?: string): string | undefined {
+  // Malformed blocks can carry non-string fields at runtime; treat them as
+  // unknown bytes / no label rather than throwing out of a request build.
+  const bytes = Buffer.from((typeof data === 'string' ? data : '').slice(0, 24), 'base64');
+  if (bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png';
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  const header = bytes.toString('latin1');
+  if (header.startsWith('GIF87a') || header.startsWith('GIF89a')) return 'image/gif';
+  if (header.startsWith('RIFF') && header.slice(8, 12) === 'WEBP') return 'image/webp';
+  return typeof declared === 'string' ? declared.toLowerCase() : undefined;
+}
+
 export function isAcceptedImageMediaType(mediaType: string | null | undefined): boolean {
   return API_ACCEPTED_IMAGE_MEDIA_TYPES.has((mediaType ?? '').toLowerCase());
 }

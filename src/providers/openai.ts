@@ -490,7 +490,9 @@ export class OpenAIAdapter implements ProviderAdapter {
     // Use flatMap to handle one-to-many expansion (multiple tool_results → multiple messages)
     return relocateToolImages(messages.flatMap(msg => {
       // If it's already in OpenAI format, pass through
-      if (msg.role && (typeof msg.content === 'string' || msg.content === null || msg.tool_calls || (msg.role === 'tool' && msg.tool_call_id))) {
+      const nativeToolImages = msg.role === 'tool' && msg.tool_call_id && Array.isArray(msg.content)
+        && msg.content.some((p: any) => p.type === 'image_url');
+      if (msg.role && (typeof msg.content === 'string' || msg.content === null || msg.tool_calls || nativeToolImages)) {
         return [msg as OpenAIMessage];
       }
       

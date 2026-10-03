@@ -1,3 +1,6 @@
+import { carriesInlineImageData, textOnlyToolResultContent, TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER } from './utils.js';
+import { resolveImageMediaType } from '../utils/image-media.js';
+
 /**
  * Request-side image handling for tool outputs. Image-free outputs keep their
  * historical serialization; image bytes must only appear in media fields.
@@ -10,13 +13,27 @@ export type ChatToolOutputPart =
   | { type: 'text'; text: string }
   | { type: 'image_url'; image_url: { url: string; detail?: string } };
 
+function isSourceImage(block: any): boolean {
+  return block?.type === 'image' && block.source && typeof block.source === 'object'
+    && typeof block.source.type === 'string';
+}
+
+/** Explicit source blocks are media; arbitrary tool data named "image" is not. */
+export function hasToolResultImages(content: unknown): boolean {
+  return Array.isArray(content) && content.some(isSourceImage);
+}
+
 /** null lets the adapter retain the exact legacy image-free wire form. */
 export function toolOutputParts(content: unknown, isError = false): ToolOutputPart[] | null {
-  if (!Array.isArray(content) || !content.some(b => b?.type === 'image')) return null;
+  if (!Array.isArray(content) || !hasToolResultImages(content)) return null;
   const parts: ToolOutputPart[] = isError ? [{ type: 'text', text: '[Tool result error]' }] : [];
   for (const block of content) {
-    if (block?.type === 'image') {
+    if (isSourceImage(block)) {
       parts.push({ type: 'image', source: block.source });
+    } else if (carriesInlineImageData(block)) {
+      // Keep #84's omission protection for MCP/generated_image payloads even
+      // when a normalized image in the same result activates media conversion.
+      parts.push({ type: 'text', text: TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER });
     } else {
       parts.push({
         type: 'text',
@@ -32,12 +49,12 @@ export function toolOutputParts(content: unknown, isError = false): ToolOutputPa
 /** OpenRouter accepts images directly in ChatToolMessage.content. */
 export function chatToolResultContent(block: any): string | ChatToolOutputPart[] {
   const parts = toolOutputParts(block.content, block.is_error ?? block.isError);
-  if (!parts) return typeof block.content === 'string' ? block.content : JSON.stringify(block.content);
+  if (!parts) return textOnlyToolResultContent(block.content);
   return parts.map(part => {
     if (part.type === 'text') return part;
     const source = part.source;
     const url = source?.type === 'base64' && typeof source.data === 'string' && source.data
-      ? 'data:' + (source.media_type ?? source.mediaType ?? 'image/png') + ';base64,' + source.data
+      ? 'data:' + (resolveImageMediaType(source.data, source.media_type ?? source.mediaType) ?? 'image/png') + ';base64,' + source.data
       : source?.type === 'url' && typeof source.url === 'string' && source.url ? source.url : undefined;
     return url
       ? { type: 'image_url', image_url: { url } }

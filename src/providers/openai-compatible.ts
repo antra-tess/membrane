@@ -421,7 +421,9 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     // Use flatMap to handle one-to-many expansion (multiple tool_results → multiple messages)
     return relocateToolImages(messages.flatMap(msg => {
       // If it's already in OpenAI format, pass through
-      if (msg.role && (typeof msg.content === 'string' || msg.content === null || msg.tool_calls || (msg.role === 'tool' && msg.tool_call_id))) {
+      const nativeToolImages = msg.role === 'tool' && msg.tool_call_id && Array.isArray(msg.content)
+        && msg.content.some((p: any) => p.type === 'image_url');
+      if (msg.role && (typeof msg.content === 'string' || msg.content === null || msg.tool_calls || nativeToolImages)) {
         return [msg as OpenAIMessage];
       }
       
@@ -744,14 +746,18 @@ export function toOpenAIMessages(
       }
     }
     
-    // Add tool results as separate messages
-    for (const tr of toolResults) {
-      result.push({
-        role: 'tool',
-        tool_call_id: tr.id,
-        content: tr.content,
-      });
-    }
+    // Image-bearing results precede interloper text; image-free ordering stays byte-stable.
+    const appendToolResults = () => {
+      for (const tr of toolResults) {
+        result.push({
+          role: 'tool',
+          tool_call_id: tr.id,
+          content: tr.content,
+        });
+      }
+    };
+    const hasImages = toolResults.some(tr => Array.isArray(tr.content));
+    if (hasImages) appendToolResults();
 
     // Add main message
     if (textParts.length > 0 || toolCalls.length > 0 || reasoningText) {
@@ -767,6 +773,7 @@ export function toOpenAIMessages(
       }
       result.push(message);
     }
+    if (!hasImages) appendToolResults();
   }
   
   return relocateToolImages(result);

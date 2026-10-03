@@ -36,7 +36,7 @@ import {
 import { IncrementalXmlParser } from '../utils/stream-parser.js';
 import { assertCacheMarkersWithinLimit, clampCacheMarkers } from '../utils/cache-marker-budget.js';
 import { lastCacheableBlockIndex } from './native.js';
-import { isAcceptedImageMediaType, strippedImagePlaceholder } from '../utils/image-media.js';
+import { resolveImageMediaType, isAcceptedImageMediaType, strippedImagePlaceholder } from '../utils/image-media.js';
 
 // ============================================================================
 // Configuration
@@ -523,14 +523,15 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         parts.push(block.text);
       } else if (block.type === 'image') {
         if (block.source.type === 'base64') {
-          if (!isAcceptedImageMediaType(block.source.mediaType)) {
-            parts.push(strippedImagePlaceholder(block.source.mediaType).text);
+          const mediaType = resolveImageMediaType(block.source.data, block.source.mediaType);
+          if (!isAcceptedImageMediaType(mediaType)) {
+            parts.push(strippedImagePlaceholder(mediaType).text);
           } else {
             images.push({
               type: 'image',
               source: {
                 type: 'base64',
-                media_type: block.source.mediaType,
+                media_type: mediaType,
                 data: block.source.data,
               },
             });

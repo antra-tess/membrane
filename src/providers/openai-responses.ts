@@ -23,6 +23,7 @@
  * routing and vendor configs (`openairesponses-*` prefix).
  */
 
+import { resolveImageMediaType } from '../utils/image-media.js';
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -320,14 +321,14 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
         if (block?.type === 'image') {
           const source = block.source;
           if (source?.type === 'base64' && source.data) {
-            const mimeType = source.media_type ?? source.mediaType ?? 'image/png';
+            const mimeType = resolveImageMediaType(source.data, source.media_type ?? source.mediaType) ?? 'image/png';
             refs.push({ dataUrl: `data:${mimeType};base64,${source.data}`, msgIndex, blockIndex });
           }
         } else if (block?.type === 'generated_image' && typeof block.data === 'string' && block.data) {
           // A previous output of this adapter carried forward verbatim in
           // history (consumers that keep ProviderResponse content rather
           // than rebuilding from a channel). It is an image like any other.
-          const mimeType = block.mimeType ?? 'image/png';
+          const mimeType = resolveImageMediaType(block.data, block.mimeType) ?? 'image/png';
           refs.push({ dataUrl: `data:${mimeType};base64,${block.data}`, msgIndex, blockIndex });
         }
       });

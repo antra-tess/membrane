@@ -207,6 +207,46 @@ describe.each(cases)('$name tool-result image transport', c => {
     expect(req).toEqual(before);
   });
 
+
+  it('keeps MCP/generated-image safeguards when normalized media activates conversion', async () => {
+    const { bodies } = stub(c);
+    const strayData = 'UNNORMALIZED_IMAGE_BYTES_'.repeat(100);
+    const content = [...mixed(), { type: 'image', data: strayData, mimeType: 'image/png' }, { type: 'generated_image', data: strayData, mimeType: 'image/png' }, { type: 'image', title: 'Cat', width: 640 }];
+    await c.adapter().complete({ model: c.model, messages: [
+      { role: 'assistant', content: [tool('one', 'snapshot'), tool('two', 'inspect')] },
+      { role: 'user', content: [result('one', content), result('two', content)] },
+    ] });
+    assertMedia(c, bodies[0], 2, 4);
+    const wire = JSON.stringify(bodies[0]);
+    expect(wire.includes(strayData)).toBe(false);
+    expect(wire).toContain('NOT shown');
+    expect(wire).toContain('Cat');
+  });
+
+  it('retains legacy image-free names, content bytes, and no-payload image-typed data', async () => {
+    const { bodies } = stub(c);
+    const shapes = [
+      'text', '', null, undefined, [], [text('a'), text('b')], { ok: true },
+      [null, 1, false], [{ type: 'image', title: 'Cat', width: 640 }],
+      [{ type: 'image', source: null }], [{ type: 'custom', value: 2 }],
+    ];
+    for (const content of shapes) {
+      await c.adapter().complete({ model: c.model, messages: [
+        { role: 'assistant', content: [tool('one', 'snapshot')] },
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'one', content }] },
+      ] });
+      const body = bodies.at(-1);
+      const serialized = typeof content === 'string' ? content : JSON.stringify(content);
+      if (c.gemini) {
+        const response = body.contents.flatMap((m: any) => m.parts).find((p: any) => p.functionResponse).functionResponse;
+        expect(response).toEqual({ name: 'one', response: serialized === undefined ? {} : { result: serialized } });
+      } else {
+        const message = body.messages.find((m: any) => m.role === 'tool');
+        expect(message).toEqual({ role: 'tool', tool_call_id: 'one', ...(serialized === undefined ? {} : { content: serialized }) });
+      }
+    }
+  });
+
   it('preserves image-free serialized content and explicitly describes unsupported images', async () => {
     const { bodies, fetch } = stub(c);
     const legacy = [text('plain'), { metadata: { code: 2 } }];
