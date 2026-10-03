@@ -112,8 +112,13 @@ export type ToolMode =
 // ============================================================================
 
 export interface NormalizedRequest {
-  /** Receives the exact post-format/post-hook cache receipt immediately before
-   * network submission. Observability only; never forwarded to providers. */
+  /** Cache-layout receipt: the default basis is the post-format/post-hook,
+   * post-clamp ProviderRequest, retaining semantic markers on APIs without
+   * cache_control. Adapters declaring cacheReceiptBasis: 'wire-request' use
+   * their first final onRequest observation instead (Anthropic and Bedrock).
+   * Emitted once per complete attempt or logical streaming round, not again
+   * for internal streaming refusal retries. Observability only; never sent
+   * to providers. A wire-request adapter must report onRequest to emit it. */
   onCacheWireReceipt?: (receipt: import('../cache-wire-receipt.js').CacheWireReceipt) => void;
   /**
    * Explicitly own the loss of old inline images when the serialized request

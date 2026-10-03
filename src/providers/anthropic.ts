@@ -3,6 +3,7 @@
  */
 
 import Anthropic, { type ClientOptions } from '@anthropic-ai/sdk';
+import { stripEmptyTextBlocks, stripEmptyTextRequest } from '../utils/empty-text.js';
 import { resolveImageMediaType, isAcceptedImageMediaType, assertWithinByteBudget, shedImagesToFitByteBudget } from '../utils/image-media.js';
 import type {
   ProviderAdapter,
@@ -196,6 +197,7 @@ export interface AnthropicAdapterConfig {
 
 export class AnthropicAdapter implements ProviderAdapter {
   readonly name = 'anthropic';
+  readonly cacheReceiptBasis = 'wire-request' as const;
 
   /**
    * Verified live 2026-08-25 (claude-haiku-4-5, 4,650-token cached system
@@ -817,6 +819,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       Object.assign(params, rest);
     }
 
+    stripEmptyTextRequest(params);
     return params;
   }
 
@@ -960,7 +963,7 @@ function toAnthropicToolResultContent(
   blocks: ContentBlock[],
 ): Array<Anthropic.TextBlockParam | Anthropic.ImageBlockParam> {
   const out: Array<Anthropic.TextBlockParam | Anthropic.ImageBlockParam> = [];
-  for (const block of blocks) {
+  for (const block of stripEmptyTextBlocks(blocks)) {
     if (block.type === 'text') {
       out.push({ type: 'text', text: block.text });
     } else if (block.type === 'image') {
@@ -1001,12 +1004,9 @@ export function detectImageMediaType(data: string | undefined, fallback?: string
 export function toAnthropicContent(blocks: ContentBlock[]): Anthropic.ContentBlockParam[] {
   const result: Anthropic.ContentBlockParam[] = [];
   
-  for (const block of blocks) {
+  for (const block of stripEmptyTextBlocks(blocks)) {
     switch (block.type) {
       case 'text': {
-        // Empty text blocks (including zero-width rawItem carriers for opaque
-        // provider-native items) are rejected by the Anthropic API — drop them.
-        if (block.text === '') break;
         const textBlock: any = { type: 'text', text: block.text };
         // Preserve cache_control if present
         if (block.cache_control) {

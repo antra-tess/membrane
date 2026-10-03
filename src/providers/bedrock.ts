@@ -21,6 +21,7 @@ import {
   serverError,
   abortError,
 } from '../types/index.js';
+import { stripEmptyTextRequest } from '../utils/empty-text.js';
 import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, assertTerminalEventObserved } from './utils.js';
 import {
   INTERLEAVED_THINKING_BETA,
@@ -273,6 +274,7 @@ async function signRequest(
 
 export class BedrockAdapter implements ProviderAdapter {
   readonly name = 'bedrock';
+  readonly cacheReceiptBasis = 'wire-request' as const;
 
   /**
    * Bedrock serves Anthropic models over the Anthropic Messages payload shape
@@ -536,6 +538,7 @@ export class BedrockAdapter implements ProviderAdapter {
       params.anthropic_beta = [...new Set([...existing, INTERLEAVED_THINKING_BETA])];
     }
 
+    stripEmptyTextRequest(params);
     return params;
   }
 
