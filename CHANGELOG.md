@@ -19,6 +19,8 @@ Releases up to and including 0.5.75 predate this file; for their contents see
 ### Fixed
 
 - Bedrock rejects malformed consumer `anthropic_beta` values with a non-retryable `invalid_request` error, regardless of whether the interleaved-thinking beta is needed. Supply an array of strings; valid consumer arrays still pass through on non-firing models and merge without mutation when the beta is required.
+- Native tool streaming honors the active formatter's `nameFormat`, matching non-streaming requests. Participant names prefix only the first retained text block of each message and remain literal when they contain replacement tokens such as `$&`.
+- XML continuation requests omit empty system arrays while preserving nonempty system blocks and their cache markers.
 
 ## 0.5.86 — 2026-09-21
 

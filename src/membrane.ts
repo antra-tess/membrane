@@ -1579,6 +1579,7 @@ export class Membrane {
       // Convert content blocks
       const content: any[] = [];
       const includeNamePrefix = !isAssistant;
+      let hasText = false;
       for (const block of msg.content) {
         if (block.type === 'text') {
           // Empty text blocks are rejected by the Anthropic API. In
@@ -1587,9 +1588,10 @@ export class Membrane {
           // name prefix below would make them non-empty.
           if (block.text === '') continue;
           let text = block.text;
-          if (includeNamePrefix && msg.participant) {
-            text = `${msg.participant}: ${text}`;
+          if (includeNamePrefix && msg.participant && !hasText) {
+            text = (activeFormatter.nameFormat ?? '{name}: ').replace('{name}', () => msg.participant) + text;
           }
+          hasText = true;
           const textBlock: Record<string, unknown> = { type: 'text', text };
           if ((block as any).cache_control) {
             // A block-level passthrough occupies one of the 4 breakpoint slots
@@ -2359,7 +2361,9 @@ export class Membrane {
       // extended thinking combined with prefill, so never send the param here
       thinking: undefined,
       messages,
-      system: ownSystemBlocks(prefillResult.systemContent) ?? undefined,
+      system: Array.isArray(prefillResult.systemContent) && prefillResult.systemContent.length === 0
+        ? undefined
+        : ownSystemBlocks(prefillResult.systemContent) ?? undefined,
       stopSequences: prefillResult.stopSequences,
       extra: {
         ...originalRequest.providerParams,
@@ -2450,7 +2454,9 @@ export class Membrane {
       // extended thinking combined with prefill, so never send the param here
       thinking: undefined,
       messages,
-      system: ownSystemBlocks(prefillResult.systemContent) ?? undefined,
+      system: Array.isArray(prefillResult.systemContent) && prefillResult.systemContent.length === 0
+        ? undefined
+        : ownSystemBlocks(prefillResult.systemContent) ?? undefined,
       stopSequences: prefillResult.stopSequences,
       // Copied, not aliased: the guard below deletes the smuggled thinking
       // config, and mutating the caller's own providerParams object would

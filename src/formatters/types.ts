@@ -283,6 +283,9 @@ export interface PrefillFormatter {
   /** Whether this formatter uses prefill (vs native pass-through) */
   readonly usesPrefill: boolean;
 
+  /** Participant prefix template for native tool requests. Uses {name}; defaults to '{name}: '. */
+  readonly nameFormat?: string;
+
   /**
    * The tool mode this formatter instance was EXPLICITLY constructed with, if
    * any. Read by `Membrane.resolveToolMode` as the fallback under an explicit
