@@ -1,5 +1,5 @@
 import { carriesInlineImageData, textOnlyToolResultContent, TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER } from './utils.js';
-import { resolveImageMediaType } from '../utils/image-media.js';
+import { isAcceptedImageMediaType, resolveImageMediaType } from '../utils/image-media.js';
 
 /**
  * Request-side image handling for tool outputs. Image-free outputs keep their
@@ -52,14 +52,24 @@ export function chatToolResultContent(block: any): string | ChatToolOutputPart[]
   if (!parts) return textOnlyToolResultContent(block.content);
   return parts.map(part => {
     if (part.type === 'text') return part;
-    const source = part.source;
-    const url = source?.type === 'base64' && typeof source.data === 'string' && source.data
-      ? 'data:' + (resolveImageMediaType(source.data, source.media_type ?? source.mediaType) ?? 'image/png') + ';base64,' + source.data
-      : source?.type === 'url' && typeof source.url === 'string' && source.url ? source.url : undefined;
+    const url = chatToolImageUrl(part.source);
     return url
       ? { type: 'image_url', image_url: { url } }
-      : { type: 'text', text: '[image omitted: unsupported image source]' };
+      : { type: 'text', text: '[image omitted: unsupported image source or media type]' };
   });
+}
+
+/** Inline media is validated here because live tools bypass formatter sanitation. */
+function chatToolImageUrl(source: any): string | undefined {
+  if (source?.type === 'url' && typeof source.url === 'string' && source.url) {
+    if (!/^data:/i.test(source.url)) return source.url;
+    const inline = /^data:([^;,]*);base64,([\s\S]*)$/i.exec(source.url);
+    return inline ? chatToolImageUrl({ type: 'base64', mediaType: inline[1], data: inline[2] }) : undefined;
+  }
+  if (source?.type !== 'base64' || typeof source.data !== 'string' || !source.data) return undefined;
+  const mediaType = resolveImageMediaType(source.data, source.media_type ?? source.mediaType);
+  if (!isAcceptedImageMediaType(mediaType)) return undefined;
+  return 'data:' + mediaType + ';base64,' + source.data;
 }
 
 /**

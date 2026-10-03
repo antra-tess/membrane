@@ -36,6 +36,12 @@ import { resolveImageMediaType } from '../utils/image-media.js';
 // Gemini API Types
 // ============================================================================
 
+// https://ai.google.dev/gemini-api/docs/image-understanding#supported-formats
+// Unlike Chat image inputs, Gemini supports HEIC/HEIF but not GIF.
+const GEMINI_IMAGE_MEDIA_TYPES = new Set([
+  'image/png', 'image/jpeg', 'image/webp', 'image/heic', 'image/heif',
+]);
+
 interface GeminiPart {
   text?: string;
   inlineData?: { mimeType: string; data: string };
@@ -536,10 +542,12 @@ export class GeminiAdapter implements ProviderAdapter {
                   result.push('[image omitted: Gemini tool results require inline base64 image data]');
                   continue;
                 }
-                const inlineData = {
-                  mimeType: resolveImageMediaType(source.data, source.media_type ?? source.mediaType) ?? 'image/png',
-                  data: source.data,
-                };
+                const mimeType = resolveImageMediaType(source.data, source.media_type ?? source.mediaType);
+                if (!mimeType || !GEMINI_IMAGE_MEDIA_TYPES.has(mimeType)) {
+                  result.push('[image omitted: unsupported Gemini image media type]');
+                  continue;
+                }
+                const inlineData = { mimeType, data: source.data };
                 imageIndex++;
                 if (nativeToolImages) {
                   media.push({ inlineData });

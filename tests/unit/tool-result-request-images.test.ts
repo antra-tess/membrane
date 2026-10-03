@@ -133,12 +133,12 @@ function request(c: Case, history = true): NormalizedRequest {
   } as NormalizedRequest;
 }
 
-async function yielding(membrane: Membrane, req: NormalizedRequest, live = false) {
+async function yielding(membrane: Membrane, req: NormalizedRequest, live = false, output: () => any[] = mixed) {
   const stream = membrane.streamYielding(req);
   let response: any;
   for await (const event of stream) {
     if (event.type === 'tool-calls' && live) {
-      stream.provideToolResults(event.calls.map((call, index) => ({ toolUseId: call.id, content: mixed() as any, isError: index === 1 })), {
+      stream.provideToolResults(event.calls.map((call, index) => ({ toolUseId: call.id, content: output() as any, isError: index === 1 })), {
         injectedMessages: [{ participant: 'User', content: [text('injected')] as any }],
       });
     }
@@ -207,6 +207,108 @@ describe.each(cases)('$name tool-result image transport', c => {
     expect(req).toEqual(before);
   });
 
+
+
+  it.each(['direct-complete', 'direct-stream', 'live-stream', 'live-yielding'])('%s rejects unsupported image bytes and resolves supported bytes before checking MIME', async path => {
+    const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10"/></svg>').toString('base64');
+    const output = () => [
+      text('before-svg'),
+      { type: 'image', source: { type: 'base64', data: svg, mediaType: 'image/svg+xml' } },
+      text('between-images'),
+      { type: 'image', source: { type: 'base64', data, mediaType: 'image/svg+xml' } },
+      text('after-png'),
+    ];
+    const live = path.startsWith('live');
+    const { bodies } = stub(c, live ? 1 : 0);
+    const adapter = c.adapter();
+    if (live) {
+      const membrane = new Membrane(adapter, { formatter: new NativeFormatter() });
+      if (path === 'live-yielding') await yielding(membrane, request(c, false), true, output);
+      else await membrane.stream(request(c, false), {
+        onToolCalls: async calls => calls.map(call => ({ toolUseId: call.id, content: output() as any })),
+      });
+    } else {
+      const req = { model: c.model, messages: [
+        { role: 'assistant', content: [tool('one', 'snapshot'), tool('two', 'inspect')] },
+        { role: 'user', content: [result('one', output()), result('two', output())] },
+      ] };
+      if (path === 'direct-complete') await adapter.complete(req);
+      else await adapter.stream(req, { onChunk() {} });
+    }
+    const body = bodies.at(-1);
+    const wire = JSON.stringify(body);
+    expect(wire.includes(svg)).toBe(false);
+    expect(wire).toContain('image omitted');
+    expect(wire).toMatch(/before-svg.*image omitted.*between-images.*after-png/);
+    const media: any[] = [];
+    const walk = (value: any, key = '') => {
+      if (typeof value === 'string') {
+        if (value.includes(data)) expect(['data', 'url']).toContain(key);
+      } else if (Array.isArray(value)) value.forEach(v => walk(v));
+      else if (value && typeof value === 'object') {
+        if (value.image_url) media.push(value.image_url);
+        if (value.inlineData) media.push(value.inlineData);
+        Object.entries(value).forEach(([k, v]) => walk(v, k));
+      }
+    };
+    walk(body);
+    expect(media).toHaveLength(2);
+    for (const image of media) {
+      if (c.gemini) expect(image.mimeType).toBe('image/png');
+      else expect(image.url.startsWith('data:image/png;base64,')).toBe(true);
+    }
+  });
+
+
+  it.each(['image/heic', 'image/heif'])('retains declared %s for Gemini and omits it on Chat image inputs', async mediaType => {
+    // ISO-BMFF headers are intentionally outside the shared signature sniffer;
+    // Gemini's documented declared-type support must survive MIME validation.
+    const bytes = Buffer.from('\x00\x00\x00\x18ftyp' + (mediaType === 'image/heic' ? 'heic' : 'mif1') + '\x00\x00\x00\x00heic').toString('base64');
+    const { bodies } = stub(c);
+    await c.adapter().complete({ model: c.model, messages: [
+      { role: 'assistant', content: [tool('one', 'snapshot')] },
+      { role: 'user', content: [result('one', [text('caption'), { type: 'image', source: { type: 'base64', data: bytes, mediaType: mediaType.toUpperCase() } }])] },
+    ] });
+    const wire = JSON.stringify(bodies[0]);
+    expect(wire).toContain('caption');
+    if (c.gemini) {
+      expect(wire).toContain('"mimeType":"' + mediaType + '"');
+      expect(wire).toContain('"data":"' + bytes + '"');
+    } else {
+      expect(wire).toContain('image omitted');
+      expect(wire).not.toContain(bytes);
+    }
+  });
+
+  it('applies the provider image-format policy to detected GIF bytes', async () => {
+    const gif = Buffer.from('GIF89a123456789').toString('base64');
+    const { bodies } = stub(c);
+    await c.adapter().complete({ model: c.model, messages: [
+      { role: 'assistant', content: [tool('one', 'snapshot')] },
+      { role: 'user', content: [result('one', [{ type: 'image', source: { type: 'base64', data: gif, mediaType: 'image/png' } }])] },
+    ] });
+    const wire = JSON.stringify(bodies[0]);
+    if (c.gemini) {
+      expect(wire).toContain('image omitted');
+      expect(wire).not.toContain(gif);
+    } else expect(wire).toContain('data:image/gif;base64,' + gif);
+  });
+
+  it('rejects an unsupported inline Chat data URL while retaining a supported mislabeled one', async () => {
+    const { bodies } = stub(c);
+    const svg = Buffer.from('<svg/>').toString('base64');
+    await c.adapter().complete({ model: c.model, messages: [
+      { role: 'assistant', content: [tool('one', 'snapshot')] },
+      { role: 'user', content: [result('one', [
+        { type: 'image', source: { type: 'url', url: 'data:image/svg+xml;base64,' + svg } },
+        { type: 'image', source: { type: 'url', url: 'data:image/svg+xml;base64,' + data } },
+      ])] },
+    ] });
+    const wire = JSON.stringify(bodies[0]);
+    expect(wire.includes(svg)).toBe(false);
+    expect(wire).toContain('image omitted');
+    if (!c.gemini) expect(wire.includes('data:image/png;base64,' + data)).toBe(true);
+  });
 
   it('keeps MCP/generated-image safeguards when normalized media activates conversion', async () => {
     const { bodies } = stub(c);
