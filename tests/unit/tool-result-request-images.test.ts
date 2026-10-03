@@ -391,3 +391,43 @@ describe('exported normalized Chat request helpers', () => {
     assertMedia(c, bodies[0], 2, 4);
   });
 });
+
+describe('exported helper to adapter composition after image omission', () => {
+  const routes = [
+    { name: 'OpenAI', adapter: cases[0]!, convert: toOpenAIMessages },
+    { name: 'compatible', adapter: cases[1]!, convert: toOpenAIMessages },
+    { name: 'OpenRouter', adapter: cases[2]!, convert: toOpenRouterMessages },
+  ];
+  describe.each(routes)('$name', ({ adapter: c, convert }) => {
+    it.each([
+      ['complete', false], ['stream', false],
+      ['complete', true], ['stream', true],
+    ] as const)('%s retains IDs when the parallel result batch contains supported images=%s', async (method, supported) => {
+      const svg = Buffer.from('<svg/>').toString('base64');
+      const omitted = [{ type: 'image', source: { type: 'base64', data: svg, mediaType: 'image/svg+xml' } }];
+      const normalized = [
+        { role: 'assistant', content: [tool('one', 'snapshot'), tool('two', 'inspect')] },
+        { role: 'user', content: [
+          result('one', [text('first result'), ...omitted], true),
+          result('two', [text('second result'), ...(supported ? [image()] : omitted)]),
+          text('injected'),
+        ] },
+      ] as any;
+      const messages = convert(normalized);
+      const before = structuredClone(messages);
+      const { bodies } = stub(c);
+      const adapter = c.adapter();
+      if (method === 'complete') await adapter.complete({ model: c.model, messages });
+      else await adapter.stream({ model: c.model, messages }, { onChunk() {} });
+      const wire = bodies[0].messages;
+      expect(wire.slice(0, 3).map((m: any) => m.role)).toEqual(['assistant', 'tool', 'tool']);
+      expect(wire.slice(1, 3).map((m: any) => m.tool_call_id)).toEqual(['one', 'two']);
+      expect(wire[1].content).toContain('image omitted');
+      expect(wire[1].content).toContain('Tool result error');
+      expect(wire.at(-1).content).toBe('injected');
+      expect(JSON.stringify(wire).includes(svg)).toBe(false);
+      expect(JSON.stringify(wire).includes(data)).toBe(supported);
+      expect(messages).toEqual(before);
+    });
+  });
+});

@@ -50,13 +50,18 @@ export function toolOutputParts(content: unknown, isError = false): ToolOutputPa
 export function chatToolResultContent(block: any): string | ChatToolOutputPart[] {
   const parts = toolOutputParts(block.content, block.is_error ?? block.isError);
   if (!parts) return textOnlyToolResultContent(block.content);
-  return parts.map(part => {
+  const converted: ChatToolOutputPart[] = parts.map(part => {
     if (part.type === 'text') return part;
     const url = chatToolImageUrl(part.source);
     return url
       ? { type: 'image_url', image_url: { url } }
       : { type: 'text', text: '[image omitted: unsupported image source or media type]' };
   });
+  // Keep all-omission results in the native string form so exported-helper
+  // output can re-enter an adapter without losing the tool-call ID.
+  return converted.some(part => part.type === 'image_url')
+    ? converted
+    : converted.map(part => part.type === 'text' ? part.text : '').join('\n');
 }
 
 /** Inline media is validated here because live tools bypass formatter sanitation. */

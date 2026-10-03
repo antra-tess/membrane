@@ -24,7 +24,7 @@ import {
   networkError,
 } from '../types/index.js';
 import { safeParseJson, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
-import { chatToolResultContent } from './tool-result-images.js';
+import { hasToolResultImages, chatToolResultContent } from './tool-result-images.js';
 
 // ============================================================================
 // Types
@@ -844,7 +844,7 @@ export function toOpenRouterMessages(
         });
       }
     };
-    const hasImages = toolResults.some(tr => Array.isArray(tr.content));
+    const hasImages = msg.content.some(block => block.type === 'tool_result' && hasToolResultImages(block.content));
     if (hasImages) appendToolResults();
 
     // Add main message
