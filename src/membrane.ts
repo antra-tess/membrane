@@ -128,6 +128,10 @@ class NativeBlockTracker {
 
   /** Provider block callback: first sighting of an index starts it, a second completes it. */
   onProviderBlock(index: number, block: unknown): void {
+    const type = (block as { type?: string } | undefined)?.type;
+    // Images use the content-block callback and final response, not the
+    // text/thinking/tool logical-block event vocabulary.
+    if (type === 'image' || type === 'generated_image') return;
     this.lastSeen.set(index, block);
     if (!this.started.has(index)) {
       const mbType = NativeBlockTracker.mapApiBlockType((block as { type?: string } | undefined)?.type);
@@ -840,15 +844,7 @@ export class Membrane {
         // Capture non-text content blocks from provider response (e.g., generated_image from Gemini)
         // The XML parser only handles text — binary content blocks need to be preserved separately
         if (Array.isArray(streamResult.content)) {
-          for (const block of streamResult.content) {
-            if (block.type === 'generated_image') {
-              extraContentBlocks.push({
-                type: 'generated_image',
-                data: (block as any).data,
-                mimeType: (block as any).mimeType,
-              } as ContentBlock);
-            }
-          }
+          this.captureProviderImageBlocks(streamResult.content, extraContentBlocks);
           // Native thinking blocks carry the signature (encrypted full
           // reasoning) — captured so consumers can persist and round-trip
           // them for reasoning continuity.
@@ -1881,6 +1877,8 @@ export class Membrane {
         } else if (item.type === 'redacted_thinking') {
           // Pass through verbatim — carries the encrypted `data` payload
           blocks.push({ ...item } as ContentBlock);
+        } else if (item.type === 'image') {
+          blocks.push({ ...item } as ContentBlock);
         } else if (item.type === 'generated_image') {
           blocks.push({
             type: 'generated_image',
@@ -1914,6 +1912,16 @@ export class Membrane {
     }
 
     return [];
+  }
+
+  /** Retain image blocks that the XML text parser cannot represent. */
+  private captureProviderImageBlocks(providerContent: unknown, sink: ContentBlock[]): void {
+    if (!Array.isArray(providerContent)) return;
+    for (const block of providerContent) {
+      if (block?.type === 'image' || block?.type === 'generated_image') {
+        sink.push({ ...block } as ContentBlock);
+      }
+    }
   }
 
   /**
@@ -2518,6 +2526,8 @@ export class Membrane {
         } else if (block.type === 'redacted_thinking') {
           // Pass through verbatim — carries the encrypted `data` payload
           content.push({ ...(block as any) } as ContentBlock);
+        } else if (block.type === 'image') {
+          content.push({ ...block } as ContentBlock);
         } else if (block.type === 'generated_image') {
           content.push({
             type: 'generated_image',
@@ -3118,6 +3128,9 @@ export class Membrane {
     let rawRequest: unknown;
     let rawResponse: unknown;
 
+    // The text parser cannot carry images. Retain them across all rounds.
+    const extraContentBlocks: ContentBlock[] = [];
+
     // Native thinking blocks from the provider (with signatures) — merged
     // into the parser-derived content before the final response is emitted.
     // See streamWithXmlTools for the matching non-yielding logic.
@@ -3274,6 +3287,8 @@ export class Membrane {
           streamResult.stopReason = 'stop_sequence';
           streamResult.stopSequence = detectedStopSequence;
         }
+
+        this.captureProviderImageBlocks(streamResult.content, extraContentBlocks);
 
         // Capture native thinking blocks (with signatures) from the provider
         // response — the text parser can't see signatures, so they're merged
@@ -3632,6 +3647,7 @@ export class Membrane {
       // Merge provider thinking signatures into parser-derived thinking blocks
       this.mergeProviderThinkingBlocks(response.content, providerThinkingBlocks);
 
+      response.content.push(...extraContentBlocks);
       response.details.timing.rounds = rounds;
 
       stream.emit({ type: 'complete', response });

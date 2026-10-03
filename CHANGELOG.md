@@ -21,6 +21,7 @@ Releases up to and including 0.5.75 predate this file; for their contents see
 - Bedrock rejects malformed consumer `anthropic_beta` values with a non-retryable `invalid_request` error, regardless of whether the interleaved-thinking beta is needed. Supply an array of strings; valid consumer arrays still pass through on non-firing models and merge without mutation when the beta is required.
 - Native tool streaming honors the active formatter's `nameFormat`, matching non-streaming requests. Participant names prefix only the first retained text block of each message and remain literal when they contain replacement tokens such as `$&`.
 - XML continuation requests omit empty system arrays while preserving nonempty system blocks and their cache markers.
+- Preserve OpenRouter response images from content arrays and the separate `images` field through complete, stream, and yielding responses. Inline base64 images become normalized image sources; other URLs remain references. Streaming keeps text callbacks text-only and retains images alongside tool calls. XML streams append provider images after parsed text, matching the existing generated-image behavior.
 
 ## 0.5.86 — 2026-09-21
 
