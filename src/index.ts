@@ -34,6 +34,8 @@ export {
 export type {
   CacheKeepaliveConfig,
   KeepaliveEvent,
+  KeepaliveCall,
+  KeepaliveUsage,
   KeepaliveLane,
   KeepaliveSend,
 } from './cache-keepalive.js';

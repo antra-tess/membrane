@@ -12,6 +12,10 @@ Releases up to and including 0.5.75 predate this file; for their contents see
 
 ## Unreleased
 
+### Added
+
+- Add `CacheKeepaliveConfig.onCall` receipts so applications can log background cache-refresh calls alongside foreground inference. Each logical poke reports its payload, timing, lineage, and complete terminal vendor response or error, including ineffective writes. SDK-internal retries belong to one receipt; usage comes from the terminal response. Request and success-response copies isolate observers from cached prefixes and effectiveness checks. Tested with fake timers and a mocked Anthropic transport, including an SDK retry; live provider behavior was not tested.
+
 ### Fixed
 
 - Bedrock rejects malformed consumer `anthropic_beta` values with a non-retryable `invalid_request` error, regardless of whether the interleaved-thinking beta is needed. Supply an array of strings; valid consumer arrays still pass through on non-firing models and merge without mutation when the beta is required.
