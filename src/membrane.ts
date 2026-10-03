@@ -252,23 +252,34 @@ export class Membrane {
         // `unknown` deliberately, and we acknowledge the cast at the boundary.
         const finalRequest = (await this.applyBeforeRequestHook(request, providerRequest)) as typeof providerRequest;
 
-        // Last exit before the adapter: the only place that sees EVERY
-        // contribution (builder, formatter, passthrough, float, hook).
-        if (request.cacheMarkers === 'cm-owned') {
-          assertCacheMarkersWithinLimit(finalRequest, 'complete');
-        } else {
-          clampCacheMarkers(finalRequest, 'complete');
-        }
-        request.onCacheWireReceipt?.(computeCacheWireReceipt(finalRequest));
+        // Default receipts describe this post-hook representation. Opted-in
+        // adapters reconcile the count with their final onRequest body.
+        let markersInRequest = request.cacheMarkers === 'cm-owned'
+          ? assertCacheMarkersWithinLimit(finalRequest, 'complete')
+          : clampCacheMarkers(finalRequest, 'complete').total;
+        const useWireReceipt = this.adapter.cacheReceiptBasis === 'wire-request';
+        let receiptEmitted = false;
+        if (!useWireReceipt) request.onCacheWireReceipt?.(computeCacheWireReceipt(finalRequest));
+        const receiptGuard = useWireReceipt && request.onCacheWireReceipt
+          ? this.wireReceiptGuard(options.signal)
+          : undefined;
 
-        const rawProviderResponse = await this.adapter.complete(finalRequest, {
-          signal: options.signal,
+        const adapterCall = this.adapter.complete(finalRequest, {
+          signal: receiptGuard ? receiptGuard.signal : options.signal,
           timeoutMs: options.timeoutMs,
           onRequest: (req) => {
             rawRequest = req;
+            if (useWireReceipt) {
+              markersInRequest = countWireCacheMarkers(req as Parameters<typeof countWireCacheMarkers>[0]);
+              if (!receiptEmitted) {
+                receiptEmitted = true;
+                receiptGuard?.emit(() => request.onCacheWireReceipt?.(computeCacheWireReceipt(req)));
+              }
+            }
             options.onRequest?.(req);
           },
         });
+        const rawProviderResponse = receiptGuard ? await receiptGuard.settle(adapterCall) : await adapterCall;
         // Restate usage in the one convention before any ratio or price sees it.
         const providerResponse: ProviderResponse = {
           ...rawProviderResponse,
@@ -285,7 +296,7 @@ export class Membrane {
         const response = this.transformResponse(
           providerResponse,
           request,
-          prefillResult,
+          { ...prefillResult, cacheMarkersApplied: markersInRequest },
           startTime,
           attempts,
           rawRequest
@@ -824,6 +835,7 @@ export class Membrane {
             // provider to wrap native thinking deltas so they don't stream as
             // visible text (see ProviderRequestOptions.wrapThinkingTags)
             wrapThinkingTags: true,
+            onWireCacheMarkers: (count) => { prefillResult.cacheMarkersApplied = count; },
             onRequest: (req) => {
               rawRequest = req;
               onRequest?.(req);
@@ -2063,6 +2075,45 @@ export class Membrane {
   // ==========================================================================
 
   /**
+   * Fail loudly when a wire-request receipt consumer throws.
+   *
+   * Wire-request receipts are emitted from inside the adapter's `onRequest`,
+   * where an adapter decorator may catch and discard whatever the hook throws
+   * (logging wrappers commonly do: "never block on caller hook"). Post-hook
+   * receipts fire before the adapter is called, so a throwing consumer stops
+   * the call before any provider request. Keep that contract for wire-request
+   * receipts too: remember the failure, abort the adapter call through its
+   * signal (adapters invoke `onRequest` before sending, so nothing goes out),
+   * and rethrow the consumer's original error once the adapter settles.
+   */
+  private wireReceiptGuard(callerSignal: AbortSignal | undefined) {
+    const controller = new AbortController();
+    const state: { failure?: { error: unknown } } = {};
+    return {
+      signal: callerSignal ? AbortSignal.any([callerSignal, controller.signal]) : controller.signal,
+      emit(send: () => void): void {
+        try {
+          send();
+        } catch (error) {
+          state.failure = { error };
+          controller.abort(error);
+          throw error;
+        }
+      },
+      async settle<T>(call: Promise<T>): Promise<T> {
+        let result: T;
+        try {
+          result = await call;
+        } catch (error) {
+          throw state.failure ? state.failure.error : error;
+        }
+        if (state.failure) throw state.failure.error;
+        return result;
+      },
+    };
+  }
+
+  /**
    * Apply the configured `beforeRequest` hook to a provider-format request.
    * Returns the (possibly modified) request, or the original if no hook is
    * configured. This is the single point that all request-build sites should
@@ -2259,15 +2310,9 @@ export class Membrane {
        */
       onRetrying?: (info: { attempt: number; maxAttempts: number; category?: string }) => void;
       /**
-       * Receives the number of cache_control markers the request ACTUALLY
-       * ships with, taken from the clamp's own tally below — i.e. after the
-       * `beforeRequest` hook has added or removed markers of its own and
-       * after everything past the 4-breakpoint budget has been dropped.
-       *
-       * Telemetry that counts the request at BUILD time reports a number no
-       * request ever had (a hook placing 7 markers on a wire that carries 4
-       * was reported as the builder's 1), which defeats the audit the count
-       * exists for. This is the only count that describes the wire.
+       * Starts with the post-hook/post-clamp input count. Wire-request
+       * adapters update it from onRequest; default adapters retain the
+       * semantic count. Callers keep the latest value for telemetry.
        */
       onWireCacheMarkers?: (markerCount: number) => void;
     }
@@ -2286,16 +2331,36 @@ export class Membrane {
     const { normalizedRequest, refusalRetries, onRetrying, onWireCacheMarkers, ...adapterOptions } = options;
     const finalRequest = (await this.applyBeforeRequestHook(normalizedRequest, request)) as typeof request;
 
-    // Last exit before the adapter: the only place that sees EVERY
-    // contribution (builder, formatter, passthrough, float, hook). Every
-    // streaming path — stream(), streamYielding(), both tool loops — funnels
-    // through here, so this is the one clamp they all get, and its tally is
-    // therefore the only count that describes the wire.
+    // Check every streaming path's post-hook representation. Only adapters
+    // opting into wire-request receipts reconcile it with their final body;
+    // other APIs may not transmit the semantic markers at all.
     const markerCount = normalizedRequest.cacheMarkers === 'cm-owned'
       ? assertCacheMarkersWithinLimit(finalRequest, 'streamOnce')
       : clampCacheMarkers(finalRequest, 'streamOnce').total;
-    normalizedRequest.onCacheWireReceipt?.(computeCacheWireReceipt(finalRequest));
     onWireCacheMarkers?.(markerCount);
+    const useWireReceipt = this.adapter.cacheReceiptBasis === 'wire-request';
+    let receiptEmitted = false;
+    if (!useWireReceipt) normalizedRequest.onCacheWireReceipt?.(computeCacheWireReceipt(finalRequest));
+    const receiptGuard = useWireReceipt && normalizedRequest.onCacheWireReceipt
+      ? this.wireReceiptGuard(adapterOptions.signal)
+      : undefined;
+    const observedOptions = {
+      ...adapterOptions,
+      ...(receiptGuard ? { signal: receiptGuard.signal } : {}),
+      onRequest: (wireRequest: unknown) => {
+        if (useWireReceipt) {
+          const wireCount = countWireCacheMarkers(wireRequest as Parameters<typeof countWireCacheMarkers>[0]);
+          onWireCacheMarkers?.(wireCount);
+          // Refusal retries replay the same logical round. Register it once
+          // so receipt queues stay aligned with the one accepted usage event.
+          if (!receiptEmitted) {
+            receiptEmitted = true;
+            receiptGuard?.emit(() => normalizedRequest.onCacheWireReceipt?.(computeCacheWireReceipt(wireRequest)));
+          }
+        }
+        adapterOptions.onRequest?.(wireRequest);
+      },
+    };
 
     // Retries are only safe when the caller can discard the abandoned
     // attempt, so they require BOTH a budget and an onRetrying hook.
@@ -2308,7 +2373,8 @@ export class Membrane {
     let providerCalls = 0;
     while (true) {
       providerCalls++;
-      const rawResult = await this.adapter.stream(finalRequest, callbacks, adapterOptions);
+      const streamCall = this.adapter.stream(finalRequest, callbacks, observedOptions);
+      const rawResult = receiptGuard ? await receiptGuard.settle(streamCall) : await streamCall;
       // Restate usage in the one convention before any accumulator, ratio or
       // price sees it — this is the only door streamed usage enters through.
       const result: ProviderResponse = {
@@ -3275,6 +3341,7 @@ export class Membrane {
             // the provider to wrap native thinking deltas so they don't
             // stream as visible text (same as streamWithXmlTools).
             wrapThinkingTags: true,
+            onWireCacheMarkers: (count) => { prefillResult.cacheMarkersApplied = count; },
             onRequest: (req: unknown) => { rawRequest = req; },
           }
         );
