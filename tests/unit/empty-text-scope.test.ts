@@ -38,13 +38,14 @@ function capture() {
 }
 
 describe('empty-text cleanup scope and ordering', () => {
-  it.each(['complete', 'stream', 'yielding'])('omits a wire receipt when a custom adapter omits onRequest on %s', async entry => {
+  it.each(['complete', 'stream', 'yielding'])('preserves the semantic receipt when a custom adapter omits onRequest on %s', async entry => {
     const receipts: any[] = [];
     const result = { content: [text('ok')], stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 } };
+    let adapterInput: unknown;
     const adapter: any = {
       name: 'unobserved-custom-adapter', supportsModel: () => true,
-      complete: async () => result,
-      stream: async (_request: unknown, callbacks: any) => { callbacks.onChunk('ok'); return result; },
+      complete: async (input: unknown) => { adapterInput = input; return result; },
+      stream: async (input: unknown, callbacks: any) => { adapterInput = input; callbacks.onChunk('ok'); return result; },
     };
     const membrane = new Membrane(adapter, { formatter: new NativeFormatter() });
     const req = {
@@ -58,8 +59,8 @@ describe('empty-text cleanup scope and ordering', () => {
       if (event.type === 'error') throw event.error;
       if (event.type === 'complete') response = event.response;
     }
-    expect(receipts).toEqual([]);
-    // The documented compatibility fallback counts the adapter input.
+    expect(receipts).toEqual([computeCacheWireReceipt(adapterInput)]);
+    // Default semantic receipt/count behavior does not require wire logging.
     expect(response.details.cache.markersInRequest).toBe(1);
   });
 

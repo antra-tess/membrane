@@ -21,7 +21,7 @@ import {
   serverError,
   abortError,
 } from '../types/index.js';
-import { stripEmptyTextBlocks, stripEmptyTextRequest } from '../utils/empty-text.js';
+import { stripEmptyTextRequest } from '../utils/empty-text.js';
 import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, assertTerminalEventObserved } from './utils.js';
 import {
   INTERLEAVED_THINKING_BETA,
@@ -274,6 +274,7 @@ async function signRequest(
 
 export class BedrockAdapter implements ProviderAdapter {
   readonly name = 'bedrock';
+  readonly cacheReceiptBasis = 'wire-request' as const;
 
   /**
    * Bedrock serves Anthropic models over the Anthropic Messages payload shape
@@ -473,7 +474,7 @@ export class BedrockAdapter implements ProviderAdapter {
     if (request.system) {
       const needsFlatten = bedrockModelId?.includes('claude-3-sonnet-20240229') ?? false;
       if (needsFlatten && Array.isArray(request.system)) {
-        const blocks = stripEmptyTextBlocks(request.system as Array<{ type: string; text: string }>);
+        const blocks = request.system as Array<{ type: string; text: string }>;
         params.system = blocks.map(b => b.text).join('\n\n');
       } else if (Array.isArray(request.system)) {
         params.system = (request.system as Array<Record<string, any>>).map(

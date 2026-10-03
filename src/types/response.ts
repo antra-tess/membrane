@@ -209,9 +209,10 @@ export interface TimingInfo {
 // ============================================================================
 
 export interface CacheInfo {
-  /** Cache markers in the last request reported by the adapter's onRequest.
-   * For custom adapters that omit onRequest, counts the post-hook request
-   * supplied to the adapter instead. */
+  /** Cache markers in the last logical request, using the adapter's
+   * cacheReceiptBasis. The default counts post-hook semantic markers;
+   * wire-request adapters count their final onRequest body. If an opted-in
+   * adapter omits that observation, the adapter-input count is the fallback. */
   markersInRequest: number;
   
   /** Tokens created in cache */

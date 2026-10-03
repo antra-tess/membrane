@@ -77,12 +77,12 @@ describe.each(['Anthropic', 'Bedrock'])('%s empty text at the wire boundary', ki
     expect(built.system).toEqual([valid]);
   });
 
-  it('sanitizes system text before the Bedrock legacy Sonnet flattening path', () => {
+  it('preserves valid system string separators in the Bedrock legacy Sonnet flattening path', () => {
     const built = makeAdapter(kind).buildRequest({
       ...base, messages: [{ role: 'user', content: 'hello' }],
-      system: [...emptyBlocks(), text('system')],
+      system: [text('Rules A'), text(''), text('Rules B')],
     }, 'anthropic.claude-3-sonnet-20240229-v1:0');
-    expect(built.system).toEqual(kind === 'Bedrock' ? 'system' : [text('system')]);
+    expect(built.system).toEqual(kind === 'Bedrock' ? 'Rules A\n\n\n\nRules B' : [text('Rules A'), text('Rules B')]);
   });
 
   it.each(['', ' \t\n', [], emptyBlocks()].map(system => ({ system })))('omits an empty system prompt: $system', ({ system }) => {

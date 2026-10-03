@@ -251,19 +251,27 @@ export class Membrane {
         // `unknown` deliberately, and we acknowledge the cast at the boundary.
         const finalRequest = (await this.applyBeforeRequestHook(request, providerRequest)) as typeof providerRequest;
 
-        // Check the post-hook request before adapter conversion. Use this
-        // count as a fallback for custom adapters without onRequest.
+        // Default receipts describe this post-hook representation. Opted-in
+        // adapters reconcile the count with their final onRequest body.
         let markersInRequest = request.cacheMarkers === 'cm-owned'
           ? assertCacheMarkersWithinLimit(finalRequest, 'complete')
           : clampCacheMarkers(finalRequest, 'complete').total;
+        const useWireReceipt = this.adapter.cacheReceiptBasis === 'wire-request';
+        let receiptEmitted = false;
+        if (!useWireReceipt) request.onCacheWireReceipt?.(computeCacheWireReceipt(finalRequest));
 
         const rawProviderResponse = await this.adapter.complete(finalRequest, {
           signal: options.signal,
           timeoutMs: options.timeoutMs,
           onRequest: (req) => {
             rawRequest = req;
-            markersInRequest = countWireCacheMarkers(req as Parameters<typeof countWireCacheMarkers>[0]);
-            request.onCacheWireReceipt?.(computeCacheWireReceipt(req));
+            if (useWireReceipt) {
+              markersInRequest = countWireCacheMarkers(req as Parameters<typeof countWireCacheMarkers>[0]);
+              if (!receiptEmitted) {
+                receiptEmitted = true;
+                request.onCacheWireReceipt?.(computeCacheWireReceipt(req));
+              }
+            }
             options.onRequest?.(req);
           },
         });
@@ -2257,9 +2265,9 @@ export class Membrane {
        */
       onRetrying?: (info: { attempt: number; maxAttempts: number; category?: string }) => void;
       /**
-       * Starts with the post-hook/post-clamp input count as a compatibility
-       * fallback, then receives the final count when the adapter reports
-       * onRequest. Callers retain the latest count for response telemetry.
+       * Starts with the post-hook/post-clamp input count. Wire-request
+       * adapters update it from onRequest; default adapters retain the
+       * semantic count. Callers keep the latest value for telemetry.
        */
       onWireCacheMarkers?: (markerCount: number) => void;
     }
@@ -2278,19 +2286,29 @@ export class Membrane {
     const { normalizedRequest, refusalRetries, onRetrying, onWireCacheMarkers, ...adapterOptions } = options;
     const finalRequest = (await this.applyBeforeRequestHook(normalizedRequest, request)) as typeof request;
 
-    // Check every streaming path's post-hook request before adapter
-    // conversion. Adapters may still alter content (including markers);
-    // reconcile against their final onRequest observation below.
+    // Check every streaming path's post-hook representation. Only adapters
+    // opting into wire-request receipts reconcile it with their final body;
+    // other APIs may not transmit the semantic markers at all.
     const markerCount = normalizedRequest.cacheMarkers === 'cm-owned'
       ? assertCacheMarkersWithinLimit(finalRequest, 'streamOnce')
       : clampCacheMarkers(finalRequest, 'streamOnce').total;
     onWireCacheMarkers?.(markerCount);
+    const useWireReceipt = this.adapter.cacheReceiptBasis === 'wire-request';
+    let receiptEmitted = false;
+    if (!useWireReceipt) normalizedRequest.onCacheWireReceipt?.(computeCacheWireReceipt(finalRequest));
     const observedOptions = {
       ...adapterOptions,
       onRequest: (wireRequest: unknown) => {
-        const wireCount = countWireCacheMarkers(wireRequest as Parameters<typeof countWireCacheMarkers>[0]);
-        normalizedRequest.onCacheWireReceipt?.(computeCacheWireReceipt(wireRequest));
-        onWireCacheMarkers?.(wireCount);
+        if (useWireReceipt) {
+          const wireCount = countWireCacheMarkers(wireRequest as Parameters<typeof countWireCacheMarkers>[0]);
+          onWireCacheMarkers?.(wireCount);
+          // Refusal retries replay the same logical round. Register it once
+          // so receipt queues stay aligned with the one accepted usage event.
+          if (!receiptEmitted) {
+            receiptEmitted = true;
+            normalizedRequest.onCacheWireReceipt?.(computeCacheWireReceipt(wireRequest));
+          }
+        }
         adapterOptions.onRequest?.(wireRequest);
       },
     };

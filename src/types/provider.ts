@@ -212,6 +212,12 @@ export interface ProviderAdapter {
    * maintenance messages). Wrappers must forward this capability. */
   readonly requiresNativeResponsesInput?: boolean;
 
+  /** Representation used for cache-layout receipts. The default provider-request
+   * basis preserves post-hook semantic breakpoints even when this adapter's API
+   * does not transmit cache_control. wire-request opts into the final body
+   * reported through onRequest. Decorators must forward this capability. */
+  readonly cacheReceiptBasis?: 'provider-request' | 'wire-request';
+
   /** Check if this adapter handles a model */
   supportsModel(modelId: string): boolean;
   
@@ -289,8 +295,9 @@ export interface ProviderRequestOptions {
    */
   firstEventTimeoutMs?: number;
   /** Report the final API request body immediately before sending it.
-   * Adapters and wrappers must invoke/forward this observation for Membrane
-   * to emit wire-cache receipts and final marker counts. */
+   * Required for adapters declaring cacheReceiptBasis: 'wire-request'.
+   * Decorators forward it; raw logging observes each attempt, even when
+   * a refusal retry shares its logical cache receipt with an earlier attempt. */
   onRequest?: (rawRequest: unknown) => void;
   /**
    * Wrap native thinking deltas in <thinking>...</thinking> tags on the
