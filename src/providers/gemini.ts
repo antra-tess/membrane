@@ -28,7 +28,7 @@ import {
   abortError,
   networkError,
 } from '../types/index.js';
-import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
+import { createCombinedSignal, textOnlyToolResultContent, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
 
 // ============================================================================
 // Gemini API Types
@@ -490,9 +490,7 @@ export class GeminiAdapter implements ProviderAdapter {
               },
             });
           } else if (block.type === 'tool_result') {
-            const resultContent = typeof block.content === 'string'
-              ? block.content
-              : JSON.stringify(block.content);
+            const resultContent = textOnlyToolResultContent(block.content);
             toolResultParts.push({
               functionResponse: {
                 name: block.name ?? block.tool_use_id ?? 'unknown',

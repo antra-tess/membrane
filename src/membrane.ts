@@ -86,6 +86,7 @@ import {
   warnUnconvertibleProviderItem,
 } from './utils/usage.js';
 import {
+  resolveImageMediaType,
   isAcceptedImageMediaType,
   strippedImagePlaceholder,
   shedImagesToFitByteBudget, assertWithinByteBudget,
@@ -1637,17 +1638,18 @@ export class Membrane {
           content.push({ ...(block as unknown as Record<string, unknown>) });
         } else if (block.type === 'image') {
           if (block.source.type === 'base64') {
-            if (!isAcceptedImageMediaType(block.source.mediaType)) {
+            const mediaType = resolveImageMediaType(block.source.data, block.source.mediaType);
+            if (!isAcceptedImageMediaType(mediaType)) {
               // API-unacceptable media type (e.g. image/svg): degrade to a
               // loud text placeholder instead of poisoning the whole request
               // (one bad stored block otherwise 400s every compile forever).
-              content.push(strippedImagePlaceholder(block.source.mediaType));
+              content.push(strippedImagePlaceholder(mediaType));
             } else {
               const imageBlock: Record<string, unknown> = {
                 type: 'image',
                 source: {
                   type: 'base64',
-                  media_type: block.source.mediaType,
+                  media_type: mediaType,
                   data: block.source.data,
                 },
               };

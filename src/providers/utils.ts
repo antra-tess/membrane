@@ -189,6 +189,53 @@ export function safeParseJson(str: string | undefined): Record<string, unknown> 
 }
 
 /**
+ * Agent-facing stand-in for an image inside a tool result on a wire that
+ * carries tool results as text only (Chat Completions `role: 'tool'`
+ * messages, Gemini `functionResponse.response`). Constant text, so a history
+ * that holds it serializes to the same bytes on every request.
+ */
+export const TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER =
+  '[system: an image in this tool result was NOT shown to you — tool results ' +
+  'reach this model as text only. You are not seeing this image.]';
+
+/**
+ * Serialize tool_result content for a text-only tool-result wire.
+ *
+ * Strings pass through. Anything else is JSON-stringified as before, except
+ * that array blocks carrying INLINE image data (`image` with a base64 source or
+ * an MCP-style `data` field, `generated_image`) are first replaced by
+ * {@link TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER}: stringifying them puts the
+ * whole base64 payload into the prompt as text (a 300KB screenshot becomes
+ * ~400KB of input text on every request while it stays in history), which
+ * the model cannot read as an image anyway. Everything else — URL-source
+ * images, image-typed tool data without a payload, arrays without images,
+ * non-array content — serializes byte-identically to plain `JSON.stringify`.
+ */
+function carriesInlineImageData(block: unknown): boolean {
+  if (!block || typeof block !== 'object') return false;
+  const b = block as { type?: unknown; data?: unknown; source?: unknown };
+  if (b.type === 'generated_image') return typeof b.data === 'string';
+  if (b.type !== 'image') return false;
+  if (typeof b.data === 'string') return true; // MCP-shaped image content
+  const source = b.source as { data?: unknown } | null | undefined;
+  return !!source && typeof source === 'object' && typeof source.data === 'string';
+}
+
+export function textOnlyToolResultContent(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return JSON.stringify(content);
+  let replaced = false;
+  const blocks = content.map((block) => {
+    if (carriesInlineImageData(block)) {
+      replaced = true;
+      return { type: 'text', text: TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER };
+    }
+    return block;
+  });
+  return JSON.stringify(replaced ? blocks : content);
+}
+
+/**
  * Marks the abort reason raised by an adapter's own `timeoutMs` deadline, so
  * the error that comes back out of `fetch` can be told apart from a caller's
  * cancellation by PROVENANCE rather than by matching its message text.

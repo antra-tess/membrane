@@ -229,6 +229,46 @@ describe('OpenAI Responses subscription mode', () => {
     ]);
   });
 
+  test.each(['complete', 'stream'] as const)('%s sniffs normalized image bytes at the subscription transport boundary', async (lane) => {
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==';
+    let body: Record<string, any> = {};
+    globalThis.fetch = async (_input, init) => {
+      body = JSON.parse(String(init?.body));
+      return completedResponse();
+    };
+    const adapter = new OpenAIResponsesAPIAdapter({
+      mode: 'subscription',
+      credentials: async () => ({ token: 'subscription-token' }),
+    });
+    const nativeUrl = 'data:image/webp;base64,' + png;
+    const req: ProviderRequest = {
+      model: 'gpt-5.4',
+      messages: [{
+        type: 'message', role: 'user', content: [
+          ...[
+            { mediaType: 'image/webp' },
+            { media_type: 'image/svg+xml' },
+            {},
+          ].map(label => ({ type: 'image', source: { type: 'base64', data: png, ...label } })),
+          { type: 'image', source: { type: 'base64', mediaType: 'image/gif', data: 'unknown' } },
+          { type: 'image', source: { type: 'url', url: 'https://example.test/image.png' } },
+          // Already-native items are replayed verbatim, not reinterpreted.
+          { type: 'input_image', image_url: nativeUrl },
+        ],
+      }],
+    };
+    const original = structuredClone(req);
+    if (lane === 'complete') await adapter.complete(req);
+    else await adapter.stream(req, { onChunk: () => {} });
+    expect(body.input[0].content).toEqual([
+      ...Array.from({ length: 3 }, () => ({ type: 'input_image', image_url: 'data:image/png;base64,' + png })),
+      { type: 'input_image', image_url: 'data:image/gif;base64,unknown' },
+      { type: 'input_image', image_url: 'https://example.test/image.png' },
+      { type: 'input_image', image_url: nativeUrl },
+    ]);
+    expect(req).toEqual(original);
+  });
+
   test('turns Fast mode off without reconstructing the adapter', async () => {
     const bodies: Record<string, unknown>[] = [];
     globalThis.fetch = async (_input, init) => {
