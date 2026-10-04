@@ -5,9 +5,10 @@ import type { ProviderRequest } from '../../src/types/index.js';
 /**
  * Idle-watchdog regressions through the real SDK SSE parser. The SDK drops
  * `ping` events before the adapter sees them, so a body that only carries
- * keepalives must still count as live transport. Timings are scaled fixture
- * inputs only: the ratios (pings every ~IDLE/5, runs of 4x IDLE) are wide so
- * loaded machines do not turn them into races.
+ * keepalives must still count as live transport after the first SDK event. The
+ * first-event deadline remains fixed even when pre-event bytes arrive. Timings
+ * are scaled fixture inputs only: the ratios (pings every ~IDLE/5, runs of
+ * 4x IDLE) are wide so loaded machines do not turn them into races.
  */
 const IDLE_MS = 150;
 const PING_MS = 30;
@@ -120,14 +121,47 @@ describe('Anthropic stream idle watchdog with live transport', () => {
     expect(chunks).toEqual(['hello back']);
   });
 
-  it('does not hit the first-event deadline while only keepalives precede message_start', async () => {
+  it('enforces the fixed first-event deadline while keepalives precede message_start', async () => {
     stubFetch(init => liveResponse(init, async io => {
       await keepalives(io, LIVE_MS);
       io.emit(messageStart());
       for (const part of answer()) io.emit(part);
       io.close();
     }));
-    const result = await newAdapter().stream(request, { onChunk: () => {} }, timing);
+    await expect(newAdapter().stream(request, { onChunk: () => {} }, timing)).rejects.toMatchObject({
+      type: 'timeout', retryable: true, message: expect.stringMatching(/first-event timeout/),
+    });
+    expect(probes[0]?.torn).toBe(true);
+  });
+
+  it('enforces the fixed first-event deadline while partial SSE bytes arrive', async () => {
+    stubFetch(init => liveResponse(init, async io => {
+      io.emit('event: message_start\ndata: ');
+      for (let elapsed = 0; elapsed < LIVE_MS && !io.isDone(); elapsed += PING_MS) {
+        io.emit(' ');
+        await io.sleep(PING_MS);
+      }
+      io.emit(`${JSON.stringify({ type: 'message_start', message })}\n\n`);
+      for (const part of answer()) io.emit(part);
+      io.close();
+    }));
+    await expect(newAdapter().stream(request, { onChunk: () => {} }, timing)).rejects.toMatchObject({
+      type: 'timeout', retryable: true, message: expect.stringMatching(/first-event timeout/),
+    });
+    expect(probes[0]?.torn).toBe(true);
+  });
+
+  it('allows first pings after the idle interval within the larger first-event deadline', async () => {
+    stubFetch(init => liveResponse(init, async io => {
+      await io.sleep(2 * IDLE_MS);
+      await keepalives(io, IDLE_MS);
+      io.emit(messageStart());
+      for (const part of answer()) io.emit(part);
+      io.close();
+    }));
+    const result = await newAdapter().stream(request, { onChunk: () => {} }, {
+      ...timing, firstEventTimeoutMs: 6 * IDLE_MS,
+    });
     expect(result.stopReason).toBe('end_turn');
     expect(result.content).toMatchObject([{ type: 'text', text: 'hello back' }]);
   });

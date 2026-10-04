@@ -412,8 +412,8 @@ export class AnthropicAdapter implements ProviderAdapter {
     // with a cache miss, the API sends only SSE `ping` keepalives until
     // message_start — and the SDK swallows pings before they reach this loop
     // (core/streaming: `if (sse.event === 'ping') continue`). Transport body
-    // bytes, pings included, re-arm the timer (onTransportActivity below), but
-    // the first event keeps this longer deadline; killing at idleMs turned
+    // bytes, pings included, re-arm the idle timer only after the first event.
+    // The first event retains a fixed longer deadline; killing at idleMs turned
     // every long-TTFT request into a spurious "idle timeout" (Cairn, 600k
     // context, 2026-07-20: repeated deaths at exactly 120s). Give the first
     // event a much longer deadline; keep the tight idle for gaps after that.
@@ -439,11 +439,12 @@ export class AnthropicAdapter implements ProviderAdapter {
     };
 
     // Body bytes (including SSE pings the SDK filters before the loop below)
-    // prove transport liveness. They re-arm the same deadline but are not model
-    // progress; `settled` keeps late chunks from re-arming after cleanup.
+    // prove transport liveness after the first SDK event. They re-arm the idle
+    // timer without extending the fixed first-event deadline; `settled` keeps
+    // late chunks from re-arming after cleanup.
     let settled = false;
     const onTransportActivity = () => {
-      if (!settled && !idleAbort.signal.aborted) resetIdleTimer();
+      if (sawEvent && !settled && !idleAbort.signal.aborted) resetIdleTimer();
     };
 
     resetIdleTimer();
