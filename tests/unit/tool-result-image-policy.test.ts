@@ -551,3 +551,42 @@ describe('review fine-tuned OpenAI families', () => {
     expect(bodies.map(hasPixels)).toEqual([true, false, true]);
   });
 });
+
+describe('review accessor-backed request compatibility', () => {
+  for (const p of providers) {
+    for (const kind of ['class getters', 'non-enumerable own fields']) {
+      it.each(['complete', 'stream'])(p.name + ' %s preserves image-free ' + kind, async method => {
+        const { bodies } = stub();
+        let modelReads = 0;
+        class AccessorRequest {
+          #model = p.model;
+          #messages = [{ role: 'user', content: 'hello' }];
+          get model() { modelReads++; return this.#model; }
+          get messages() { return this.#messages; }
+          get maxTokens() { return 32; }
+          get temperature() { return 0.4; }
+        }
+        const request = kind === 'class getters' ? new AccessorRequest() : Object.defineProperties({}, {
+          model: { get() { modelReads++; return p.model; }, enumerable: false },
+          messages: { value: [{ role: 'user', content: 'hello' }], enumerable: false },
+          maxTokens: { value: 32, enumerable: false },
+          temperature: { value: 0.4, enumerable: false },
+        });
+        const getModelImageInput = vi.fn(() => undefined);
+        const adapter = p.make();
+        if (method === 'complete') await adapter.complete(request as any, { getModelImageInput });
+        else await adapter.stream(request as any, { onChunk() {} }, { getModelImageInput });
+        expect(modelReads).toBe(1);
+        expect(getModelImageInput).not.toHaveBeenCalled();
+        if (p.name === 'Gemini') {
+          expect(bodies[0]).toMatchObject({
+            contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+            generationConfig: { maxOutputTokens: 32, temperature: 0.4 },
+          });
+        } else {
+          expect(bodies[0]).toMatchObject({ model: p.model, messages: [{ role: 'user', content: 'hello' }], max_tokens: 32, temperature: 0.4 });
+        }
+      });
+    }
+  }
+});

@@ -11,7 +11,7 @@
  * Endpoint: generativelanguage.googleapis.com/v1beta
  */
 
-import { captureRequestExtras, ToolResultImagePolicy, type ToolResultImageMode } from './tool-result-image-policy.js';
+import { captureRequestSelection, ToolResultImagePolicy, type ToolResultImageMode } from './tool-result-image-policy.js';
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -204,12 +204,13 @@ export class GeminiAdapter implements ProviderAdapter {
     request: ProviderRequest,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const geminiRequest = this.buildRequest(request, options);
+    const selection = captureRequestSelection(request);
+    const geminiRequest = this.buildRequest(request, options, selection);
     options?.onRequest?.(geminiRequest);
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
-      const url = `${this.baseURL}/models/${request.model}:generateContent?key=${this.apiKey}`;
+      const url = `${this.baseURL}/models/${selection.model}:generateContent?key=${this.apiKey}`;
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -228,7 +229,7 @@ export class GeminiAdapter implements ProviderAdapter {
         throw new Error(`Gemini API error: ${data.error.code} ${data.error.message}`);
       }
 
-      return this.parseResponse(data, request.model, geminiRequest);
+      return this.parseResponse(data, selection.model, geminiRequest);
     } catch (error) {
       throw this.handleError(error, geminiRequest);
     } finally {
@@ -241,12 +242,13 @@ export class GeminiAdapter implements ProviderAdapter {
     callbacks: StreamCallbacks,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const geminiRequest = this.buildRequest(request, options);
+    const selection = captureRequestSelection(request);
+    const geminiRequest = this.buildRequest(request, options, selection);
     options?.onRequest?.(geminiRequest);
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
-      const url = `${this.baseURL}/models/${request.model}:streamGenerateContent?alt=sse&key=${this.apiKey}`;
+      const url = `${this.baseURL}/models/${selection.model}:streamGenerateContent?alt=sse&key=${this.apiKey}`;
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -359,7 +361,7 @@ export class GeminiAdapter implements ProviderAdapter {
         stopReason: this.mapFinishReason(finishReason),
         stopSequence: undefined,
         usage: geminiUsageToProviderUsage(lastUsage),
-        model: lastModelVersion ?? request.model,
+        model: lastModelVersion ?? selection.model,
         rawRequest: geminiRequest,
         raw: { finishReason, usage: lastUsage },
       };
@@ -374,10 +376,9 @@ export class GeminiAdapter implements ProviderAdapter {
   // Request Building
   // --------------------------------------------------------------------------
 
-  private buildRequest(request: ProviderRequest, options?: ProviderRequestOptions): GeminiRequest {
-    request = captureRequestExtras(request);
-    const media = Object.prototype.propertyIsEnumerable.call(request.extra ?? {}, 'contents') ? false : this.toolImagePolicy.resolve(request.model, request.messages as any[], options);
-    const contents = this.convertMessages(request.messages as any[], request.model, media);
+  private buildRequest(request: ProviderRequest, options?: ProviderRequestOptions, selection = captureRequestSelection(request)): GeminiRequest {
+    const media = Object.prototype.propertyIsEnumerable.call(selection.extra ?? {}, 'contents') ? false : this.toolImagePolicy.resolve(selection.model, request.messages as any[], options);
+    const contents = this.convertMessages(request.messages as any[], selection.model, media);
     const maxTokens = request.maxTokens || this.defaultMaxTokens;
 
     const geminiRequest: GeminiRequest = { contents };
@@ -421,7 +422,7 @@ export class GeminiAdapter implements ProviderAdapter {
     }
 
     // Auto-detect image generation models by name
-    if (request.model?.includes('image')) {
+    if (selection.model?.includes('image')) {
       geminiRequest.generationConfig.responseModalities = ['TEXT', 'IMAGE'];
     }
 
@@ -433,8 +434,8 @@ export class GeminiAdapter implements ProviderAdapter {
     }
 
     // Extra params — deep-merge generationConfig to preserve auto-detected settings
-    if (request.extra) {
-      const { normalizedMessages, prompt, generationConfig: extraGenConfig, ...rest } = request.extra as Record<string, unknown>;
+    if (selection.extra) {
+      const { normalizedMessages, prompt, generationConfig: extraGenConfig, ...rest } = selection.extra as Record<string, unknown>;
       Object.assign(geminiRequest, rest);
       if (extraGenConfig && typeof extraGenConfig === 'object') {
         Object.assign(geminiRequest.generationConfig, extraGenConfig);

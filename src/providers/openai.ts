@@ -12,7 +12,7 @@
  * - Direct API integration with proper error handling
  */
 
-import { captureRequestExtras, effectiveChatModel, ToolResultImagePolicy, type ToolResultImageMode, openAIModelImageInput } from './tool-result-image-policy.js';
+import { captureRequestSelection, effectiveChatModel, ToolResultImagePolicy, type ToolResultImageMode, openAIModelImageInput } from './tool-result-image-policy.js';
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -252,12 +252,13 @@ export class OpenAIAdapter implements ProviderAdapter {
     request: ProviderRequest,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const openAIRequest = this.buildRequest(request, options);
+    const selection = captureRequestSelection(request);
+    const openAIRequest = this.buildRequest(request, options, selection);
     options?.onRequest?.(openAIRequest);
 
     try {
       const response = await this.makeRequest(openAIRequest, options);
-      return this.parseResponse(response, request.model, openAIRequest);
+      return this.parseResponse(response, selection.model, openAIRequest);
     } catch (error) {
       throw this.handleError(error, openAIRequest);
     }
@@ -268,7 +269,8 @@ export class OpenAIAdapter implements ProviderAdapter {
     callbacks: StreamCallbacks,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const openAIRequest = this.buildRequest(request, options);
+    const selection = captureRequestSelection(request);
+    const openAIRequest = this.buildRequest(request, options, selection);
     openAIRequest.stream = true;
     // Request usage data in stream for cache metrics
     openAIRequest.stream_options = { include_usage: true };
@@ -399,7 +401,7 @@ export class OpenAIAdapter implements ProviderAdapter {
         message.tool_calls = toolCalls;
       }
 
-      return this.parseStreamedResponse(message, finishReason, servedModel ?? request.model, streamUsage, openAIRequest);
+      return this.parseStreamedResponse(message, finishReason, servedModel ?? selection.model, streamUsage, openAIRequest);
 
     } catch (error) {
       throw this.handleError(error, openAIRequest);
@@ -421,12 +423,11 @@ export class OpenAIAdapter implements ProviderAdapter {
     return headers;
   }
 
-  private buildRequest(request: ProviderRequest, options?: ProviderRequestOptions): any {
-    request = captureRequestExtras(request);
-    const effectiveModel = effectiveChatModel(request);
-    const media = Object.prototype.propertyIsEnumerable.call(request.extra ?? {}, 'messages') ? false : this.toolImagePolicy.resolve(effectiveModel, request.messages as any[], options);
+  private buildRequest(request: ProviderRequest, options?: ProviderRequestOptions, selection = captureRequestSelection(request)): any {
+    const effectiveModel = effectiveChatModel(selection);
+    const media = Object.prototype.propertyIsEnumerable.call(selection.extra ?? {}, 'messages') ? false : this.toolImagePolicy.resolve(effectiveModel, request.messages as any[], options);
     const messages = this.convertMessages(request.messages as any[], media);
-    const model = request.model;
+    const model = selection.model;
     const maxTokens = request.maxTokens || this.defaultMaxTokens;
     
     // Handle system prompt (same as openrouter.ts)
@@ -488,8 +489,8 @@ export class OpenAIAdapter implements ProviderAdapter {
     }
     
     // Apply extra params (filter out internal membrane fields)
-    if (request.extra) {
-      const { normalizedMessages, prompt, ...rest } = request.extra as Record<string, unknown>;
+    if (selection.extra) {
+      const { normalizedMessages, prompt, ...rest } = selection.extra as Record<string, unknown>;
       Object.assign(params, rest);
     }
     

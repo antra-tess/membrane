@@ -12,7 +12,7 @@
  * Uses the standard OpenAI chat completions format with tool_calls support.
  */
 
-import { captureRequestExtras, effectiveChatModel, ToolResultImagePolicy, type ToolResultImageMode, type ToolResultImageConversionOptions } from './tool-result-image-policy.js';
+import { captureRequestSelection, effectiveChatModel, ToolResultImagePolicy, type ToolResultImageMode, type ToolResultImageConversionOptions } from './tool-result-image-policy.js';
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -189,12 +189,13 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     request: ProviderRequest,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const openAIRequest = this.buildRequest(request, options);
+    const selection = captureRequestSelection(request);
+    const openAIRequest = this.buildRequest(request, options, selection);
     options?.onRequest?.(openAIRequest);
 
     try {
       const response = await this.makeRequest(openAIRequest, options);
-      return this.parseResponse(response, request.model, openAIRequest);
+      return this.parseResponse(response, selection.model, openAIRequest);
     } catch (error) {
       throw this.handleError(error, openAIRequest);
     }
@@ -205,7 +206,8 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     callbacks: StreamCallbacks,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const openAIRequest = this.buildRequest(request, options);
+    const selection = captureRequestSelection(request);
+    const openAIRequest = this.buildRequest(request, options, selection);
     openAIRequest.stream = true;
     // Ask for usage in the stream — without this the endpoint sends no usage
     // frame at all and every streamed call reports 0/0 tokens.
@@ -339,7 +341,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         message.tool_calls = toolCalls;
       }
 
-      return this.parseStreamedResponse(message, finishReason, request.model, streamUsage, openAIRequest);
+      return this.parseStreamedResponse(message, finishReason, selection.model, streamUsage, openAIRequest);
 
     } catch (error) {
       throw this.handleError(error, openAIRequest);
@@ -362,10 +364,9 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     return headers;
   }
 
-  private buildRequest(request: ProviderRequest, options?: ProviderRequestOptions): any {
-    request = captureRequestExtras(request);
-    const model = effectiveChatModel(request);
-    const media = Object.prototype.propertyIsEnumerable.call(request.extra ?? {}, 'messages') ? false : this.toolImagePolicy.resolve(model, request.messages as any[], options);
+  private buildRequest(request: ProviderRequest, options?: ProviderRequestOptions, selection = captureRequestSelection(request)): any {
+    const model = effectiveChatModel(selection);
+    const media = Object.prototype.propertyIsEnumerable.call(selection.extra ?? {}, 'messages') ? false : this.toolImagePolicy.resolve(model, request.messages as any[], options);
     const messages = this.convertMessages(request.messages as any[], media);
     
     // Handle system prompt (same as openrouter.ts)
@@ -384,7 +385,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     }
     
     const params: any = {
-      model: request.model,
+      model: selection.model,
       messages,
       max_tokens: request.maxTokens || this.defaultMaxTokens,
     };
@@ -419,8 +420,8 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     }
     
     // Apply extra params (filter out internal membrane fields)
-    if (request.extra) {
-      const { normalizedMessages, prompt, ...rest } = request.extra as Record<string, unknown>;
+    if (selection.extra) {
+      const { normalizedMessages, prompt, ...rest } = selection.extra as Record<string, unknown>;
       Object.assign(params, rest);
     }
     

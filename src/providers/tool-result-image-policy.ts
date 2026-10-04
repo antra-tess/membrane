@@ -9,18 +9,24 @@ export interface ToolResultImageConversionOptions {
   toolResultImages?: 'media' | 'omit';
 }
 
-/** Capture model and extra values once, before any async resolution.
- * Inherited/non-enumerable properties do not override the wire. A getter's
- * selected value must be shared by the gate and the eventual request body. */
-export function captureRequestExtras(request: ProviderRequest): ProviderRequest {
-  const captured = { ...request };
-  if (captured.extra) captured.extra = { ...captured.extra };
-  return captured;
+/** The fields whose selected values must survive asynchronous resolution. */
+export interface RequestModelSelection {
+  model: string;
+  extra?: Record<string, unknown>;
 }
 
-/** Call after captureRequestExtras so this is the same read used for the wire. */
-export function effectiveChatModel(request: ProviderRequest): string {
-  return Object.hasOwn(request.extra ?? {}, 'model') ? request.extra!.model as string : request.model;
+/** Capture only the selected model and the values extra's object-rest will send.
+ * Other request fields retain direct property access on the original object,
+ * including class getters and non-enumerable fields. */
+export function captureRequestSelection(request: ProviderRequest): RequestModelSelection {
+  const model = request.model;
+  const extra = request.extra;
+  return { model, extra: extra ? { ...extra } : extra };
+}
+
+/** A captured extra override is the same value used for the eventual wire. */
+export function effectiveChatModel(selection: RequestModelSelection): string {
+  return Object.hasOwn(selection.extra ?? {}, 'model') ? selection.extra!.model as string : selection.model;
 }
 
 /** Only known tool media needs a capability decision. User images are explicit. */

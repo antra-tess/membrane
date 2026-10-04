@@ -4,7 +4,7 @@
  * Handles OpenAI-compatible API with tool_calls format
  */
 
-import { captureRequestExtras, effectiveChatModel, ToolResultImagePolicy, type ToolResultImageMode, type ToolResultImageConversionOptions, waitForImageDecision } from './tool-result-image-policy.js';
+import { captureRequestSelection, effectiveChatModel, ToolResultImagePolicy, type RequestModelSelection, type ToolResultImageMode, type ToolResultImageConversionOptions, waitForImageDecision } from './tool-result-image-policy.js';
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -210,15 +210,15 @@ export class OpenRouterAdapter implements ProviderAdapter {
     request: ProviderRequest,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    request = captureRequestExtras(request);
+    const selection = captureRequestSelection(request);
     const { signal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
-      const media = await this.resolveToolImages(request, options, signal);
-      const openRouterRequest = this.buildRequest(request, media);
+      const media = await this.resolveToolImages(request, selection, options, signal);
+      const openRouterRequest = this.buildRequest(request, media, selection);
       options?.onRequest?.(openRouterRequest);
       try {
         const response = await this.makeRequest(openRouterRequest, { ...options, signal, timeoutMs: undefined });
-        return this.parseResponse(response, request.model, openRouterRequest);
+        return this.parseResponse(response, selection.model, openRouterRequest);
       } catch (error) {
         throw this.handleError(error, openRouterRequest);
       }
@@ -232,16 +232,16 @@ export class OpenRouterAdapter implements ProviderAdapter {
     callbacks: StreamCallbacks,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    request = captureRequestExtras(request);
+    const selection = captureRequestSelection(request);
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
-      const media = await this.resolveToolImages(request, options, combinedSignal);
-      const openRouterRequest = this.buildRequest(request, media);
+      const media = await this.resolveToolImages(request, selection, options, combinedSignal);
+      const openRouterRequest = this.buildRequest(request, media, selection);
       openRouterRequest.stream = true;
       // Request usage data in stream for cache metrics
       openRouterRequest.stream_options = { include_usage: true };
       options?.onRequest?.(openRouterRequest);
-      return await this.makeStreamRequest(openRouterRequest, request.model, callbacks, combinedSignal);
+      return await this.makeStreamRequest(openRouterRequest, selection.model, callbacks, combinedSignal);
     } finally {
       cleanup?.();
     }
@@ -418,13 +418,13 @@ export class OpenRouterAdapter implements ProviderAdapter {
     };
   }
 
-  private async resolveToolImages(request: ProviderRequest, options?: ProviderRequestOptions, signal?: AbortSignal): Promise<boolean> {
+  private async resolveToolImages(request: ProviderRequest, selection: RequestModelSelection, options?: ProviderRequestOptions, signal?: AbortSignal): Promise<boolean> {
     try {
       signal?.throwIfAborted();
       // A whole native payload override is caller-owned. Replaced normalized
       // images cannot trigger a lookup or freeze a model's first-use decision.
-      if (Object.prototype.propertyIsEnumerable.call(request.extra ?? {}, 'messages')) return false;
-      const model = effectiveChatModel(request);
+      if (Object.prototype.propertyIsEnumerable.call(selection.extra ?? {}, 'messages')) return false;
+      const model = effectiveChatModel(selection);
       const media = await waitForImageDecision(this.toolImagePolicy.resolve(model, request.messages as any[], options), signal);
       signal?.throwIfAborted();
       return media;
@@ -467,11 +467,11 @@ export class OpenRouterAdapter implements ProviderAdapter {
     }
   }
 
-  private buildRequest(request: ProviderRequest, media = false): any {
+  private buildRequest(request: ProviderRequest, media = false, selection = captureRequestSelection(request)): any {
     const messages = this.convertMessages(request.messages as any[], media);
     
     const params: any = {
-      model: request.model,
+      model: selection.model,
       messages,
       max_tokens: request.maxTokens || this.defaultMaxTokens,
     };
@@ -506,7 +506,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
     }
 
     // Anthropic models (routed via OpenRouter) reject both temperature and top_p.
-    const isAnthropicModel = /claude|anthropic/i.test(request.model);
+    const isAnthropicModel = /claude|anthropic/i.test(selection.model);
     if (request.topP !== undefined && !(isAnthropicModel && request.temperature !== undefined)) {
       params.top_p = request.topP;
     }
@@ -547,8 +547,8 @@ export class OpenRouterAdapter implements ProviderAdapter {
     }
     
     // Apply extra params (filter out internal membrane fields)
-    if (request.extra) {
-      const { normalizedMessages, prompt, ...rest } = request.extra as Record<string, unknown>;
+    if (selection.extra) {
+      const { normalizedMessages, prompt, ...rest } = selection.extra as Record<string, unknown>;
       Object.assign(params, rest);
     }
     
