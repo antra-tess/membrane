@@ -1,0 +1,1 @@
+- Anthropic streaming idle watchdog now treats received SSE body bytes, including `ping` keepalives the SDK filters out, as transport liveness; default deadlines are unchanged.

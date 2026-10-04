@@ -55,6 +55,7 @@ describe('AnthropicAdapter streaming: signature_delta', () => {
 
     // Replace the SDK client with a stub that returns our scripted stream.
     (adapter as any).client = {
+      withOptions() { return this; },
       messages: {
         stream: async (_req: any, _opts: any) => fakeStream([
           {
@@ -112,6 +113,7 @@ describe('AnthropicAdapter streaming: signature_delta', () => {
     const adapter = new AnthropicAdapter({ apiKey: 'sk-test' });
 
     (adapter as any).client = {
+      withOptions() { return this; },
       messages: {
         stream: async () => fakeStream([
           { type: 'message_start', message: { model: 'claude-x', usage: { input_tokens: 1 } } },

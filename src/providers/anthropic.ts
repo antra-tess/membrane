@@ -195,6 +195,38 @@ export interface AnthropicAdapterConfig {
 // Anthropic Adapter
 // ============================================================================
 
+/** The SDK's fetch signature, taken from its public ClientOptions. */
+type SdkFetch = NonNullable<ClientOptions['fetch']>;
+
+/**
+ * Wrap a fetch so each nonempty chunk of a successful response body is
+ * reported to `observe` before the SDK parses it. The SDK drops SSE `ping`
+ * events before callers see them, so this is the only point where keepalive
+ * bytes are observable through public APIs. Bytes and headers pass through
+ * unchanged; error responses are returned untouched so SDK error
+ * classification keeps their full metadata. The rebuilt Response has an empty
+ * `url`, which SDK 0.52 reads only for debug logging. Without `observe` the
+ * base fetch is returned as is.
+ */
+function observeBodyActivity(base: SdkFetch, observe?: () => void): SdkFetch {
+  if (!observe) return base;
+  return async (input, init) => {
+    const response = await base(input, init);
+    if (!response.ok || !response.body) return response;
+    const body = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        if (chunk.byteLength > 0) observe();
+        controller.enqueue(chunk);
+      },
+    }));
+    return new Response(body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+  };
+}
+
 export class AnthropicAdapter implements ProviderAdapter {
   readonly name = 'anthropic';
   readonly cacheReceiptBasis = 'wire-request' as const;
@@ -262,15 +294,23 @@ export class AnthropicAdapter implements ProviderAdapter {
   }
 
   /** One SDK operation owns its failure state: concurrent calls cannot
-   * overwrite each other's auth error or cancel each other's requests. */
-  private credentialSession(signal?: AbortSignal) {
+   * overwrite each other's auth error or cancel each other's requests.
+   * observeBody (stream only) is told about each nonempty chunk of a
+   * successful response body before SDK parsing, so transport liveness stays
+   * visible even for SSE keepalives the SDK filters out. */
+  private credentialSession(signal?: AbortSignal, observeBody?: () => void) {
     const credentials = this.credentials;
-    if (!credentials) return { client: this.client, signal, failure: () => undefined };
+    if (!credentials) {
+      const client = observeBody
+        ? this.client.withOptions({ fetch: observeBodyActivity((input, init) => fetch(input, init), observeBody) })
+        : this.client;
+      return { client, signal, failure: () => undefined };
+    }
     const abort = new AbortController();
     const combined = signal ? AbortSignal.any([signal, abort.signal]) : abort.signal;
     let failure: MembraneError | undefined;
     const client = this.client.withOptions({
-      fetch: (input, init) => {
+      fetch: observeBodyActivity((input, init) => {
         const headers = new Headers(init?.headers);
         headers.delete('x-api-key');
         return fetchWithCredentials(input, { ...init, headers }, async context => {
@@ -292,7 +332,7 @@ export class AnthropicAdapter implements ProviderAdapter {
             throw failure;
           }
         });
-      },
+      }, observeBody),
     });
     return { client, signal: combined, failure: () => failure };
   }
@@ -371,8 +411,9 @@ export class AnthropicAdapter implements ProviderAdapter {
     // TTFT can legitimately exceed the inter-event idle: on a large context
     // with a cache miss, the API sends only SSE `ping` keepalives until
     // message_start — and the SDK swallows pings before they reach this loop
-    // (core/streaming: `if (sse.event === 'ping') continue`). The watchdog is
-    // therefore BLIND until the first real event; killing at idleMs turned
+    // (core/streaming: `if (sse.event === 'ping') continue`). Transport body
+    // bytes, pings included, re-arm the timer (onTransportActivity below), but
+    // the first event keeps this longer deadline; killing at idleMs turned
     // every long-TTFT request into a spurious "idle timeout" (Cairn, 600k
     // context, 2026-07-20: repeated deaths at exactly 120s). Give the first
     // event a much longer deadline; keep the tight idle for gaps after that.
@@ -397,8 +438,16 @@ export class AnthropicAdapter implements ProviderAdapter {
       );
     };
 
+    // Body bytes (including SSE pings the SDK filters before the loop below)
+    // prove transport liveness. They re-arm the same deadline but are not model
+    // progress; `settled` keeps late chunks from re-arming after cleanup.
+    let settled = false;
+    const onTransportActivity = () => {
+      if (!settled && !idleAbort.signal.aborted) resetIdleTimer();
+    };
+
     resetIdleTimer();
-    const session = this.credentialSession(idleAbort.signal);
+    const session = this.credentialSession(idleAbort.signal, onTransportActivity);
 
     try {
       const stream = await session.client.messages.stream(anthropicRequest, {
@@ -566,6 +615,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       }
 
       // Clean up idle timer and external signal listener
+      settled = true;
       if (idleTimer) clearTimeout(idleTimer);
       options?.signal?.removeEventListener('abort', onExternalAbort);
 
@@ -622,6 +672,7 @@ export class AnthropicAdapter implements ProviderAdapter {
 
     } catch (error) {
       // Clean up timer on error path too
+      settled = true;
       if (idleTimer) clearTimeout(idleTimer);
       options?.signal?.removeEventListener('abort', onExternalAbort);
 

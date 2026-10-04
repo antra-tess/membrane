@@ -78,7 +78,7 @@ describe('conversion and native formatting boundaries', () => {
     const wire: any[] = [];
     const raw = { model: base.model, content: [text('ok')], stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 } };
     const a = adapter('Anthropic');
-    a.client = { messages: {
+    a.client = { withOptions() { return this; }, messages: {
       create: async (request: any) => { wire.push(request); return raw; },
       stream: async (request: any) => {
         wire.push(request);
