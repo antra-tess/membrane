@@ -189,14 +189,12 @@ export function safeParseJson(str: string | undefined): Record<string, unknown> 
 }
 
 /**
- * Agent-facing stand-in for an image inside a tool result on a wire that
- * carries tool results as text only (Chat Completions `role: 'tool'`
- * messages, Gemini `functionResponse.response`). Constant text, so a history
- * that holds it serializes to the same bytes on every request.
+ * Per-image notice for omitted tool-result media. Sibling parts or results
+ * may still carry images/audio, so the notice makes no channel-wide claim.
+ * Constant wording keeps regenerated notices stable across later requests.
  */
 export const TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER =
-  '[system: an image in this tool result was NOT shown to you — tool results ' +
-  'reach this model as text only. You are not seeing this image.]';
+  '[system: this image in the tool result was NOT shown to you.]';
 
 /**
  * Serialize tool_result content for a text-only tool-result wire.
