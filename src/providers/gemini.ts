@@ -11,6 +11,7 @@
  * Endpoint: generativelanguage.googleapis.com/v1beta
  */
 
+import { ToolResultImagePolicy, type ToolResultImageMode } from './tool-result-image-policy.js';
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -28,8 +29,8 @@ import {
   abortError,
   networkError,
 } from '../types/index.js';
-import { createCombinedSignal, textOnlyToolResultContent, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
-import { hasToolResultImages, toolOutputParts } from './tool-result-images.js';
+import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
+import { toolOutputParts, omittedToolResultContent } from './tool-result-images.js';
 import { resolveImageMediaType } from '../utils/image-media.js';
 
 // ============================================================================
@@ -146,6 +147,10 @@ function geminiUsageToProviderUsage(
 // ============================================================================
 
 export interface GeminiAdapterConfig {
+  /** Tool-result image policy (default: auto). Explicit media/omit wins over
+   * registry knowledge; auto is pinned per model on first tool-image use. */
+  toolResultImages?: ToolResultImageMode;
+
   /** Google AI API key */
   apiKey?: string;
 
@@ -178,11 +183,13 @@ export class GeminiAdapter implements ProviderAdapter {
   private apiKey: string;
   private baseURL: string;
   private defaultMaxTokens: number;
+  private readonly toolImagePolicy: ToolResultImagePolicy;
 
   constructor(config: GeminiAdapterConfig = {}) {
     this.apiKey = config.apiKey ?? process.env.GOOGLE_API_KEY ?? '';
     this.baseURL = (config.baseURL ?? 'https://generativelanguage.googleapis.com/v1beta').replace(/\/$/, '');
     this.defaultMaxTokens = config.defaultMaxTokens ?? 4096;
+    this.toolImagePolicy = new ToolResultImagePolicy(config.toolResultImages, () => true);
 
     if (!this.apiKey) {
       throw new Error('Google AI API key not provided');
@@ -197,7 +204,7 @@ export class GeminiAdapter implements ProviderAdapter {
     request: ProviderRequest,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const geminiRequest = this.buildRequest(request);
+    const geminiRequest = this.buildRequest(request, options);
     options?.onRequest?.(geminiRequest);
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
@@ -234,7 +241,7 @@ export class GeminiAdapter implements ProviderAdapter {
     callbacks: StreamCallbacks,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const geminiRequest = this.buildRequest(request);
+    const geminiRequest = this.buildRequest(request, options);
     options?.onRequest?.(geminiRequest);
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
@@ -367,8 +374,9 @@ export class GeminiAdapter implements ProviderAdapter {
   // Request Building
   // --------------------------------------------------------------------------
 
-  private buildRequest(request: ProviderRequest): GeminiRequest {
-    const contents = this.convertMessages(request.messages as any[], request.model);
+  private buildRequest(request: ProviderRequest, options?: ProviderRequestOptions): GeminiRequest {
+    const media = Object.prototype.propertyIsEnumerable.call(request.extra ?? {}, 'contents') ? false : this.toolImagePolicy.resolve(request.model, request.messages as any[], options);
+    const contents = this.convertMessages(request.messages as any[], request.model, media);
     const maxTokens = request.maxTokens || this.defaultMaxTokens;
 
     const geminiRequest: GeminiRequest = { contents };
@@ -435,11 +443,9 @@ export class GeminiAdapter implements ProviderAdapter {
     return geminiRequest;
   }
 
-  private convertMessages(messages: any[], model?: string): GeminiContent[] {
+  private convertMessages(messages: any[], model?: string, media = false): GeminiContent[] {
     const contents: GeminiContent[] = [];
     const toolNames = new Map<string, string>();
-    const hasImages = messages.some(msg => Array.isArray(msg.content)
-      && msg.content.some((block: any) => block.type === 'tool_result' && hasToolResultImages(block.content)));
     let pendingToolImages: GeminiPart[] = [];
     const flushToolImages = () => {
       if (pendingToolImages.length) {
@@ -455,7 +461,7 @@ export class GeminiAdapter implements ProviderAdapter {
     // model-role images, we fall back to embedding the source URL as text — Gemini
     // auto-fetches URLs from text content, enabling iterative editing without
     // thought_signature. User images pass through as normal inlineData.
-    const useUrlForModelImages = model?.startsWith('gemini-3');
+    const useUrlForModelImages = nativeToolImages;
 
     for (const msg of messages) {
       if (!Array.isArray(msg.content) || !msg.content.some((b: any) => b.type === 'tool_result')) flushToolImages();
@@ -518,10 +524,8 @@ export class GeminiAdapter implements ProviderAdapter {
             });
           } else if (block.type === 'tool_result') {
             const id = block.tool_use_id ?? block.toolUseId;
-            const name = hasImages
-              ? block.name ?? toolNames.get(id) ?? id ?? 'unknown'
-              : block.name ?? block.tool_use_id ?? 'unknown';
-            const output = toolOutputParts(block.content, block.is_error ?? block.isError);
+            const name = block.name ?? toolNames.get(id) ?? id ?? 'unknown';
+            const output = media ? toolOutputParts(block.content, block.is_error ?? block.isError) : null;
             const functionResponse: NonNullable<GeminiPart['functionResponse']> = {
               name,
               response: {},
@@ -565,7 +569,7 @@ export class GeminiAdapter implements ProviderAdapter {
               if (media.length) functionResponse.parts = media;
             } else {
               functionResponse.response = {
-                result: textOnlyToolResultContent(block.content),
+                result: omittedToolResultContent(block.content),
               };
             }
             toolResultParts.push({ functionResponse });

@@ -12,6 +12,7 @@
  * Uses the standard OpenAI chat completions format with tool_calls support.
  */
 
+import { ToolResultImagePolicy, type ToolResultImageMode, type ToolResultImageConversionOptions } from './tool-result-image-policy.js';
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -31,7 +32,7 @@ import {
   networkError,
 } from '../types/index.js';
 import { safeParseJson, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
-import { hasToolResultImages, chatToolResultContent, relocateToolImages } from './tool-result-images.js';
+import { hasToolResultImages, chatToolResultContent, relocateToolImages, nativeChatToolContent, validatedChatImagePart } from './tool-result-images.js';
 
 // ============================================================================
 // Types
@@ -125,6 +126,10 @@ interface OpenAIResponse {
 // ============================================================================
 
 export interface OpenAICompatibleAdapterConfig {
+  /** Tool-result image policy (default: auto). Explicit media/omit wins over
+   * registry knowledge; auto is pinned per model on first tool-image use. */
+  toolResultImages?: ToolResultImageMode;
+
   /** Base URL for the API (required, e.g., 'http://localhost:11434/v1') */
   baseURL: string;
   
@@ -158,6 +163,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   private baseURL: string;
   private apiKey: string;
   private defaultMaxTokens: number;
+  private readonly toolImagePolicy: ToolResultImagePolicy;
   private extraHeaders: Record<string, string>;
 
   constructor(config: OpenAICompatibleAdapterConfig) {
@@ -169,6 +175,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     this.baseURL = config.baseURL.replace(/\/$/, ''); // Remove trailing slash
     this.apiKey = config.apiKey ?? '';
     this.defaultMaxTokens = config.defaultMaxTokens ?? 4096;
+    this.toolImagePolicy = new ToolResultImagePolicy(config.toolResultImages, () => false);
     this.extraHeaders = config.extraHeaders ?? {};
   }
 
@@ -182,7 +189,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     request: ProviderRequest,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const openAIRequest = this.buildRequest(request);
+    const openAIRequest = this.buildRequest(request, options);
     options?.onRequest?.(openAIRequest);
 
     try {
@@ -198,7 +205,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     callbacks: StreamCallbacks,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const openAIRequest = this.buildRequest(request);
+    const openAIRequest = this.buildRequest(request, options);
     openAIRequest.stream = true;
     // Ask for usage in the stream — without this the endpoint sends no usage
     // frame at all and every streamed call reports 0/0 tokens.
@@ -355,8 +362,10 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     return headers;
   }
 
-  private buildRequest(request: ProviderRequest): any {
-    const messages = this.convertMessages(request.messages as any[]);
+  private buildRequest(request: ProviderRequest, options?: ProviderRequestOptions): any {
+    const model = (request.extra?.model ?? request.model) as string;
+    const media = Object.prototype.propertyIsEnumerable.call(request.extra ?? {}, 'messages') ? false : this.toolImagePolicy.resolve(model, request.messages as any[], options);
+    const messages = this.convertMessages(request.messages as any[], media);
     
     // Handle system prompt (same as openrouter.ts)
     if (request.system) {
@@ -417,13 +426,14 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     return params;
   }
 
-  private convertMessages(messages: any[]): OpenAIMessage[] {
+  private convertMessages(messages: any[], media = false): OpenAIMessage[] {
     // Use flatMap to handle one-to-many expansion (multiple tool_results → multiple messages)
     return relocateToolImages(messages.flatMap(msg => {
       // If it's already in OpenAI format, pass through
       const nativeToolImages = msg.role === 'tool' && msg.tool_call_id && Array.isArray(msg.content)
         && msg.content.some((p: any) => p.type === 'image_url');
-      if (msg.role && (typeof msg.content === 'string' || msg.content === null || msg.tool_calls || nativeToolImages)) {
+      if (nativeToolImages) return [{ ...msg, content: nativeChatToolContent(msg.content, media) }];
+      if (msg.role && (typeof msg.content === 'string' || msg.content === null || msg.tool_calls)) {
         return [msg as OpenAIMessage];
       }
       
@@ -445,7 +455,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
               reasoningText += (reasoningText ? '\n' : '') + block.thinking;
             }
           } else if (block.type === 'image_url') {
-            contentParts.push(block);
+            contentParts.push(validatedChatImagePart(block));
           } else if (block.type === 'image') {
             // Convert Anthropic-style image to OpenAI image_url with data URI
             if (block.source?.type === 'base64') {
@@ -474,7 +484,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
             toolResults.push({
               role: 'tool' as const,
               tool_call_id: block.tool_use_id || block.toolUseId,
-              content: chatToolResultContent(block),
+              content: chatToolResultContent(block, media),
             });
           }
         }
@@ -709,10 +719,13 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
 // ============================================================================
 
 /**
- * Convert normalized content blocks to OpenAI message format
+ * Convert normalized content blocks to OpenAI message format.
+ * Defaults to tool-image omission. Explicit media is a caller-owned native-media
+ * choice; relocated user images cannot later be identified as tool output.
  */
 export function toOpenAIMessages(
-  messages: { role: string; content: ContentBlock[] }[]
+  messages: { role: string; content: ContentBlock[] }[],
+  options: ToolResultImageConversionOptions = {}
 ): OpenAIMessage[] {
   const result: OpenAIMessage[] = [];
   
@@ -741,7 +754,7 @@ export function toOpenAIMessages(
       } else if (block.type === 'tool_result') {
         toolResults.push({
           id: block.toolUseId,
-          content: chatToolResultContent(block),
+          content: chatToolResultContent(block, options.toolResultImages === 'media'),
         });
       }
     }
@@ -758,7 +771,7 @@ export function toOpenAIMessages(
       }
     };
     const hasImages = msg.content.some(block => block.type === 'tool_result' && hasToolResultImages(block.content));
-    const resultsFirst = hasImages && msg.role === 'user' && toolCalls.length === 0;
+    const resultsFirst = options.toolResultImages === 'media' && hasImages && msg.role === 'user' && toolCalls.length === 0;
     if (resultsFirst) appendToolResults();
 
     // Add main message

@@ -265,6 +265,7 @@ export class Membrane {
           : undefined;
 
         const adapterCall = this.adapter.complete(finalRequest, {
+          getModelImageInput: model => this.registry?.getCapabilities(model)?.media?.imageInput,
           signal: receiptGuard ? receiptGuard.signal : options.signal,
           timeoutMs: options.timeoutMs,
           onRequest: (req) => {
@@ -2349,6 +2350,7 @@ export class Membrane {
       : undefined;
     const observedOptions = {
       ...adapterOptions,
+      getModelImageInput: (model: string) => this.registry?.getCapabilities(model)?.media?.imageInput,
       ...(receiptGuard ? { signal: receiptGuard.signal } : {}),
       onRequest: (wireRequest: unknown) => {
         if (useWireReceipt) {

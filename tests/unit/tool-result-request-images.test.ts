@@ -26,11 +26,11 @@ const definitions = ['snapshot', 'inspect'].map(name => ({ name, description: na
 
 type Case = { name: string; model: string; adapter: () => ProviderAdapter; gemini?: boolean; nativeImages?: boolean };
 const cases: Case[] = [
-  { name: 'OpenAI', model: 'gpt-4o', adapter: () => new OpenAIAdapter({ apiKey: 'test' }) },
-  { name: 'compatible', model: 'vision-model', adapter: () => new OpenAICompatibleAdapter({ baseURL: 'https://example.test/v1' }) },
-  { name: 'OpenRouter', model: 'vendor/vision-model', adapter: () => new OpenRouterAdapter({ apiKey: 'test' }), nativeImages: true },
-  { name: 'Gemini 2', model: 'gemini-2.5-flash', adapter: () => new GeminiAdapter({ apiKey: 'test' }), gemini: true },
-  { name: 'Gemini 3', model: 'gemini-3-flash', adapter: () => new GeminiAdapter({ apiKey: 'test' }), gemini: true, nativeImages: true },
+  { name: 'OpenAI', model: 'gpt-4o', adapter: () => new OpenAIAdapter({ apiKey: 'test', toolResultImages: 'media' }) },
+  { name: 'compatible', model: 'vision-model', adapter: () => new OpenAICompatibleAdapter({ baseURL: 'https://example.test/v1', toolResultImages: 'media' }) },
+  { name: 'OpenRouter', model: 'vendor/vision-model', adapter: () => new OpenRouterAdapter({ apiKey: 'test', toolResultImages: 'media' }), nativeImages: true },
+  { name: 'Gemini 2', model: 'gemini-2.5-flash', adapter: () => new GeminiAdapter({ apiKey: 'test', toolResultImages: 'media' }), gemini: true },
+  { name: 'Gemini 3', model: 'gemini-3-flash', adapter: () => new GeminiAdapter({ apiKey: 'test', toolResultImages: 'media' }), gemini: true, nativeImages: true },
 ];
 afterEach(() => vi.unstubAllGlobals());
 
@@ -378,7 +378,7 @@ describe.each(cases)('$name tool-result image transport', c => {
     expect(wire).toContain('Cat');
   });
 
-  it('retains legacy image-free names, content bytes, and no-payload image-typed data', async () => {
+  it('recovers Gemini names while retaining image-free content bytes and no-payload image-typed data', async () => {
     const { bodies } = stub(c);
     const shapes = [
       'text', '', null, undefined, [], [text('a'), text('b')], { ok: true },
@@ -394,7 +394,7 @@ describe.each(cases)('$name tool-result image transport', c => {
       const serialized = typeof content === 'string' ? content : JSON.stringify(content);
       if (c.gemini) {
         const response = body.contents.flatMap((m: any) => m.parts).find((p: any) => p.functionResponse).functionResponse;
-        expect(response).toEqual({ name: 'one', response: serialized === undefined ? {} : { result: serialized } });
+        expect(response).toEqual({ name: 'snapshot', response: serialized === undefined ? {} : { result: serialized } });
       } else {
         const message = body.messages.find((m: any) => m.role === 'tool');
         expect(message).toEqual({ role: 'tool', tool_call_id: 'one', ...(serialized === undefined ? {} : { content: serialized }) });
@@ -435,7 +435,7 @@ describe('exported normalized Chat request helpers', () => {
       { role: 'user', content: [result('one', mixed()), result('two', mixed()), text('injected')] },
     ] as any;
     const before = structuredClone(messages);
-    const output = convert(messages);
+    const output = convert(messages, { toolResultImages: 'media' });
     assertMedia(c, { messages: output }, 2, 4);
     expect(output.at(-1)?.content).toBe('injected');
     expect(messages).toEqual(before);
@@ -466,7 +466,7 @@ describe('exported helper to adapter composition after image omission', () => {
           text('injected'),
         ] },
       ] as any;
-      const messages = convert(normalized);
+      const messages = convert(normalized, { toolResultImages: 'media' });
       const before = structuredClone(messages);
       const { bodies } = stub(c);
       const adapter = c.adapter();
@@ -508,7 +508,7 @@ describe('combined stream content replay through exported helpers', () => {
       });
       expect(response.content.filter((b: any) => b.type === 'tool_use')).toHaveLength(2);
       expect(response.content.filter((b: any) => b.type === 'tool_result')).toHaveLength(2);
-      const messages = convert([{ role: 'assistant', content: response.content }]);
+      const messages = convert([{ role: 'assistant', content: response.content }], { toolResultImages: 'media' });
       if (path === 'complete') await adapter.complete({ model: c.model, messages });
       else await adapter.stream({ model: c.model, messages }, { onChunk() {} });
       const wire = bodies.at(-1).messages;

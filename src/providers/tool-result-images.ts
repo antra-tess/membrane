@@ -47,7 +47,8 @@ export function toolOutputParts(content: unknown, isError = false): ToolOutputPa
 }
 
 /** OpenRouter accepts images directly in ChatToolMessage.content. */
-export function chatToolResultContent(block: any): string | ChatToolOutputPart[] {
+export function chatToolResultContent(block: any, media = false): string | ChatToolOutputPart[] {
+  if (!media) return omittedToolResultContent(block.content);
   const parts = toolOutputParts(block.content, block.is_error ?? block.isError);
   if (!parts) return textOnlyToolResultContent(block.content);
   const converted: ChatToolOutputPart[] = parts.map(part => {
@@ -62,6 +63,30 @@ export function chatToolResultContent(block: any): string | ChatToolOutputPart[]
   return converted.some(part => part.type === 'image_url')
     ? converted
     : converted.map(part => part.type === 'text' ? part.text : '').join('\n');
+}
+
+/** Omit normalized sources too, including data URLs that must never become text. */
+export function omittedToolResultContent(content: unknown): string {
+  return textOnlyToolResultContent(Array.isArray(content)
+    ? content.map(block => isSourceImage(block)
+      ? { type: 'text', text: TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER } : block)
+    : content);
+}
+
+/** Validate caller-owned native user media with the same policy as tool media. */
+export function validatedChatImagePart(part: any): ChatToolOutputPart {
+  const url = chatToolImageUrl({ type: 'url', url: part.image_url?.url });
+  return url
+    ? { ...part, image_url: { ...part.image_url, url } }
+    : { type: 'text', text: '[image omitted: unsupported image source or media type]' };
+}
+
+/** Native tool media still has provenance, unlike relocated native user images. */
+export function nativeChatToolContent(content: any[], media: boolean): string | ChatToolOutputPart[] {
+  const parts: ChatToolOutputPart[] = content.map(part => part?.type !== 'image_url' ? part
+    : media ? validatedChatImagePart(part)
+    : { type: 'text', text: TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER });
+  return parts.some(part => part.type === 'image_url') ? parts : parts.map(part => part.type === 'text' ? part.text : '').join('\n');
 }
 
 /** Inline media is validated here because live tools bypass formatter sanitation. */

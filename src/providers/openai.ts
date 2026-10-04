@@ -12,6 +12,7 @@
  * - Direct API integration with proper error handling
  */
 
+import { ToolResultImagePolicy, type ToolResultImageMode, openAIModelImageInput } from './tool-result-image-policy.js';
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -30,7 +31,7 @@ import {
   networkError,
 } from '../types/index.js';
 import { safeParseJson, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
-import { chatToolResultContent, relocateToolImages } from './tool-result-images.js';
+import { chatToolResultContent, relocateToolImages, nativeChatToolContent, validatedChatImagePart } from './tool-result-images.js';
 
 // ============================================================================
 // Types
@@ -96,6 +97,10 @@ interface OpenAIResponse {
 // ============================================================================
 
 export interface OpenAIAdapterConfig {
+  /** Tool-result image policy (default: auto). Explicit media/omit wins over
+   * registry knowledge; auto is pinned per model on first tool-image use. */
+  toolResultImages?: ToolResultImageMode;
+
   /** API key (defaults to OPENAI_API_KEY env var) */
   apiKey?: string;
   
@@ -219,12 +224,14 @@ export class OpenAIAdapter implements ProviderAdapter {
   private baseURL: string;
   private organization?: string;
   private defaultMaxTokens: number;
+  private readonly toolImagePolicy: ToolResultImagePolicy;
 
   constructor(config: OpenAIAdapterConfig = {}) {
     this.apiKey = config.apiKey ?? process.env.OPENAI_API_KEY ?? '';
     this.baseURL = config.baseURL ?? 'https://api.openai.com/v1';
     this.organization = config.organization;
     this.defaultMaxTokens = config.defaultMaxTokens ?? 4096;
+    this.toolImagePolicy = new ToolResultImagePolicy(config.toolResultImages, openAIModelImageInput);
     
     if (!this.apiKey) {
       throw new Error('OpenAI API key not provided');
@@ -245,7 +252,7 @@ export class OpenAIAdapter implements ProviderAdapter {
     request: ProviderRequest,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const openAIRequest = this.buildRequest(request);
+    const openAIRequest = this.buildRequest(request, options);
     options?.onRequest?.(openAIRequest);
 
     try {
@@ -261,7 +268,7 @@ export class OpenAIAdapter implements ProviderAdapter {
     callbacks: StreamCallbacks,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const openAIRequest = this.buildRequest(request);
+    const openAIRequest = this.buildRequest(request, options);
     openAIRequest.stream = true;
     // Request usage data in stream for cache metrics
     openAIRequest.stream_options = { include_usage: true };
@@ -414,8 +421,10 @@ export class OpenAIAdapter implements ProviderAdapter {
     return headers;
   }
 
-  private buildRequest(request: ProviderRequest): any {
-    const messages = this.convertMessages(request.messages as any[]);
+  private buildRequest(request: ProviderRequest, options?: ProviderRequestOptions): any {
+    const effectiveModel = (request.extra?.model ?? request.model) as string;
+    const media = Object.prototype.propertyIsEnumerable.call(request.extra ?? {}, 'messages') ? false : this.toolImagePolicy.resolve(effectiveModel, request.messages as any[], options);
+    const messages = this.convertMessages(request.messages as any[], media);
     const model = request.model;
     const maxTokens = request.maxTokens || this.defaultMaxTokens;
     
@@ -486,13 +495,14 @@ export class OpenAIAdapter implements ProviderAdapter {
     return params;
   }
 
-  private convertMessages(messages: any[]): OpenAIMessage[] {
+  private convertMessages(messages: any[], media = false): OpenAIMessage[] {
     // Use flatMap to handle one-to-many expansion (multiple tool_results → multiple messages)
     return relocateToolImages(messages.flatMap(msg => {
       // If it's already in OpenAI format, pass through
       const nativeToolImages = msg.role === 'tool' && msg.tool_call_id && Array.isArray(msg.content)
         && msg.content.some((p: any) => p.type === 'image_url');
-      if (msg.role && (typeof msg.content === 'string' || msg.content === null || msg.tool_calls || nativeToolImages)) {
+      if (nativeToolImages) return [{ ...msg, content: nativeChatToolContent(msg.content, media) }];
+      if (msg.role && (typeof msg.content === 'string' || msg.content === null || msg.tool_calls)) {
         return [msg as OpenAIMessage];
       }
       
@@ -506,7 +516,7 @@ export class OpenAIAdapter implements ProviderAdapter {
           if (block.type === 'text') {
             contentParts.push({ type: 'text', text: block.text });
           } else if (block.type === 'image_url') {
-            contentParts.push(block);
+            contentParts.push(validatedChatImagePart(block));
           } else if (block.type === 'image') {
             // Convert Anthropic-style image to OpenAI image_url with data URI
             if (block.source?.type === 'base64') {
@@ -535,7 +545,7 @@ export class OpenAIAdapter implements ProviderAdapter {
             toolResults.push({
               role: 'tool' as const,
               tool_call_id: block.tool_use_id || block.toolUseId,
-              content: chatToolResultContent(block),
+              content: chatToolResultContent(block, media),
             });
           }
         }

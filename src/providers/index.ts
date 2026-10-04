@@ -74,3 +74,5 @@ export {
 } from './openai-responses-api.js';
 
 export type { CredentialContext, CredentialResolver, ResolvedCredential } from './credentials.js';
+
+export type { ToolResultImageMode, ToolResultImageConversionOptions } from './tool-result-image-policy.js';

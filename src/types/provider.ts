@@ -293,6 +293,10 @@ export interface ProviderRequest {
 }
 
 export interface ProviderRequestOptions {
+  /** Caller registry knowledge for the adapter's effective wire model. Undefined
+   * means unknown. Tool-image auto mode consults this on first image use only;
+   * its answer is pinned per adapter/model. Decorators forward this option. */
+  getModelImageInput?: (model: string) => boolean | undefined;
   signal?: AbortSignal;
   timeoutMs?: number;
   /** Abort if no SSE event arrives within this many ms (default: 120000) */
