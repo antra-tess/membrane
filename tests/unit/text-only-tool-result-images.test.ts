@@ -1,6 +1,6 @@
 /**
- * The text-only fallback from #84 stays intact for non-normalized image
- * payloads. Normalized source images now use native/adjacent media parts;
+ * The omission safeguard from #84 stays intact for non-normalized image
+ * payloads, with a per-image notice. Normalized sources use native/adjacent media;
  * tool-result-request-images.test.ts covers those transport paths.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -116,7 +116,7 @@ describe.each(adapters)('%s adapter: Membrane.complete with tool-result image hi
     expect(body).not.toContain(PAYLOAD_PROBE);
     expect(body).toContain('Screenshot taken');
     // The placeholder sits inside a JSON string that is itself JSON-encoded.
-    expect(body).toContain('tool results reach this model as text only');
+    expect(body).toContain('this image in the tool result was NOT shown to you');
     expect(body.length).toBeLessThan(5_000);
   });
 
@@ -137,7 +137,7 @@ describe('exported ChatCompletions converters', () => {
     ] as ContentBlock[] }]);
     const serialized = JSON.stringify(out);
     expect(serialized).not.toContain(PAYLOAD_PROBE);
-    expect(serialized).toContain('tool results reach this model as text only');
+    expect(serialized).toContain('this image in the tool result was NOT shown to you');
     expect(serialized).toContain('Screenshot');
   });
 });

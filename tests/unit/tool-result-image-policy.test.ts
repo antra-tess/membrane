@@ -590,3 +590,56 @@ describe('review accessor-backed request compatibility', () => {
     }
   }
 });
+
+describe('per-image omission notices', () => {
+  const oldNotice = '[system: an image in this tool result was NOT shown to you — tool results reach this model as text only. You are not seeing this image.]';
+  const newNotice = '[system: this image in the tool result was NOT shown to you.]';
+  for (const p of providers) {
+    for (const shape of ['MCP', 'generated_image']) {
+      it.each(['same result', 'sibling result'])(p.name + ' ' + shape + ' omission beside media in %s makes only a per-image claim', async arrangement => {
+        const { bodies } = stub();
+        const omitted = shape === 'MCP'
+          ? { type: 'image', data: 'OMITTED_PAYLOAD', mimeType: 'image/png' }
+          : { type: 'generated_image', data: 'OMITTED_PAYLOAD', mimeType: 'image/png' };
+        const input = [
+          { role: 'assistant', content: [call('one'), call('two', 'inspect')] },
+          { role: 'user', content: [
+            result('one', arrangement === 'same result' ? [image, omitted] : [omitted]),
+            result('two', arrangement === 'same result' ? [text('plain')] : [image]),
+          ] },
+        ];
+        await invoke(p.make('media'), 'complete', p.model, undefined, input);
+        const wire = JSON.stringify(bodies[0]);
+        expect(hasPixels(bodies[0])).toBe(true);
+        expect(wire).toContain(newNotice);
+        expect(wire).not.toContain('OMITTED_PAYLOAD');
+        expect(wire).not.toContain('tool results reach this model as text only');
+      });
+    }
+    it.each(['string', 'text block'])(p.name + ' keeps already-stored old notice in ordinary %s unchanged', async form => {
+      const { bodies } = stub();
+      const content = form === 'string' ? oldNotice : [text(oldNotice)];
+      const input = [
+        { role: 'assistant', content: [call('one')] },
+        { role: 'user', content: [{ type: 'tool_result', toolUseId: 'one', content }] },
+      ];
+      await invoke(p.make('media'), 'complete', p.model, undefined, input);
+      const wire = JSON.stringify(bodies[0]);
+      expect(wire).toContain(oldNotice);
+      expect(wire).not.toContain(newNotice);
+    });
+  }
+  it.each(providers.slice(0, 3))('$name native image omission beside audio makes only a per-image claim', async p => {
+    const { bodies } = stub();
+    const input = [{ role: 'tool', tool_call_id: 'one', content: [
+      { type: 'image_url', image_url: { url: 'data:image/png;base64,' + data } },
+      { type: 'input_audio', input_audio: { data: 'AUDIO_BYTES', format: 'wav' } },
+    ] }];
+    await invoke(p.make('omit'), 'complete', p.model, undefined, input);
+    const wire = JSON.stringify(bodies[0]);
+    expect(wire).toContain('AUDIO_BYTES');
+    expect(wire).toContain(newNotice);
+    expect(wire).not.toContain('tool results reach this model as text only');
+    expect(hasPixels(bodies[0])).toBe(false);
+  });
+});
