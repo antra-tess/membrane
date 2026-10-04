@@ -274,6 +274,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
       const decoder = new TextDecoder();
       const sseParser = new SSELineParser();
       const contentParts: OpenRouterContentBlock[] = [];
+      const readImageUrl = createImageUrlReader();
       let finishReason = 'stop';
       let sawTerminalEvent = false;
       let toolCalls: OpenRouterToolCall[] = [];
@@ -311,15 +312,19 @@ export class OpenRouterAdapter implements ProviderAdapter {
 
           // Text remains a text-only callback stream. Keep image parts in
           // order instead of coercing content arrays into "[object Object]".
-          const appendPart = (part: OpenRouterContentBlock): void => {
-            if (part.type === 'text') {
+          const appendPart = (part: unknown): void => {
+            if (!part || typeof part !== 'object') return;
+            const block = part as { type?: unknown; text?: unknown };
+            if (block.type === 'text' && typeof block.text === 'string' && block.text !== '') {
               const previous = contentParts[contentParts.length - 1];
-              if (previous?.type === 'text') previous.text += part.text;
-              else contentParts.push({ type: 'text', text: part.text });
-              callbacks.onChunk(part.text);
-            } else if (part.type === 'image_url') {
-              contentParts.push(part);
-              callbacks.onContentBlock?.(contentParts.length - 1, imageFromUrl(part.image_url.url));
+              if (previous?.type === 'text') previous.text += block.text;
+              else contentParts.push({ type: 'text', text: block.text });
+              callbacks.onChunk(block.text);
+            } else if (block.type === 'image_url') {
+              const url = readImageUrl(part);
+              if (url === undefined) return;
+              contentParts.push(part as OpenRouterContentBlock);
+              callbacks.onContentBlock?.(contentParts.length - 1, imageFromUrl(url));
             }
           };
           if (typeof delta?.content === 'string' && delta.content) {
@@ -329,7 +334,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
           }
           if (Array.isArray(delta?.images)) {
             for (const image of delta.images) {
-              appendPart({ type: 'image_url', image_url: image.image_url });
+              appendPart({ type: 'image_url', image_url: image?.image_url });
             }
           }
 
@@ -945,14 +950,31 @@ export function toOpenRouterMessages(
   return result;
 }
 
+/** A malformed image is local to that entry, not a failed response. Warn
+ * once per response without logging provider content or image URLs. */
+function createImageUrlReader(): (entry: unknown) => string | undefined {
+  let warned = false;
+  return (entry) => {
+    const url = (entry as { image_url?: { url?: unknown } } | null)?.image_url?.url;
+    if (typeof url === 'string') return url;
+    if (!warned) {
+      warned = true;
+      console.warn('[membrane:openrouter] skipped image entry: expected a string image_url.url');
+    }
+    return undefined;
+  };
+}
+
 /** Keep inline base64 data as media data and other URLs as references.
  * Response normalization never fetches a provider-supplied URL. */
 function imageFromUrl(url: string): ContentBlock {
-  const inline = /^data:([^;,]+);base64,([\s\S]*)$/i.exec(url);
+  const inline = /^data:([^,]*),([\s\S]*)$/i.exec(url);
+  const [mediaType, ...parameters] = inline?.[1]?.split(';') ?? [];
+  const base64 = mediaType && parameters.some(parameter => parameter.toLowerCase() === 'base64');
   return {
     type: 'image',
-    source: inline
-      ? { type: 'base64', mediaType: inline[1]!, data: inline[2]! }
+    source: inline && base64
+      ? { type: 'base64', mediaType, data: inline[2]! }
       : { type: 'url', url },
   };
 }
@@ -962,6 +984,7 @@ function imageFromUrl(url: string): ContentBlock {
  */
 export function fromOpenRouterMessage(message: OpenRouterMessage): ContentBlock[] {
   const result: ContentBlock[] = [];
+  const readImageUrl = createImageUrlReader();
   
   if (message.content) {
     if (typeof message.content === 'string') {
@@ -969,17 +992,21 @@ export function fromOpenRouterMessage(message: OpenRouterMessage): ContentBlock[
     } else if (Array.isArray(message.content)) {
       // cache_control is request-only; text and images are response content.
       for (const block of message.content) {
-        if (block.type === 'text') {
+        if (block?.type === 'text') {
           result.push({ type: 'text', text: block.text });
-        } else if (block.type === 'image_url') {
-          result.push(imageFromUrl(block.image_url.url));
+        } else if (block?.type === 'image_url') {
+          const url = readImageUrl(block);
+          if (url !== undefined) result.push(imageFromUrl(url));
         }
       }
     }
   }
   
-  for (const image of message.images ?? []) {
-    result.push(imageFromUrl(image.image_url.url));
+  if (Array.isArray(message.images)) {
+    for (const image of message.images) {
+      const url = readImageUrl(image);
+      if (url !== undefined) result.push(imageFromUrl(url));
+    }
   }
 
   if (message.tool_calls) {

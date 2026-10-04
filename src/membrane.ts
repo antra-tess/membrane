@@ -2443,9 +2443,7 @@ export class Membrane {
       // extended thinking combined with prefill, so never send the param here
       thinking: undefined,
       messages,
-      system: Array.isArray(prefillResult.systemContent) && prefillResult.systemContent.length === 0
-        ? undefined
-        : ownSystemBlocks(prefillResult.systemContent) ?? undefined,
+      system: ownSystemBlocks(prefillResult.systemContent) ?? undefined,
       stopSequences: prefillResult.stopSequences,
       extra: {
         ...originalRequest.providerParams,
@@ -2536,9 +2534,7 @@ export class Membrane {
       // extended thinking combined with prefill, so never send the param here
       thinking: undefined,
       messages,
-      system: Array.isArray(prefillResult.systemContent) && prefillResult.systemContent.length === 0
-        ? undefined
-        : ownSystemBlocks(prefillResult.systemContent) ?? undefined,
+      system: ownSystemBlocks(prefillResult.systemContent) ?? undefined,
       stopSequences: prefillResult.stopSequences,
       // Copied, not aliased: the guard below deletes the smuggled thinking
       // config, and mutating the caller's own providerParams object would
