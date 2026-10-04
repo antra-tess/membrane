@@ -428,3 +428,126 @@ describe('native override and observer boundaries', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 });
+
+describe('review regressions', () => {
+  for (const [name, convert] of [['OpenAI', toOpenAIMessages], ['OpenRouter', toOpenRouterMessages]] as const) {
+    it.each([undefined, 'omit', 'media'] as const)(name + ' helper %s keeps omitted-image results ahead of sibling user text', mode => {
+      const input = messages();
+      (input[2]!.content as any[]).push(text('interloper'));
+      const output = convert(input as any, { toolResultImages: mode });
+      const callIndex = output.findIndex(m => m.role === 'assistant');
+      expect(output[callIndex + 1]).toMatchObject({ role: 'tool', tool_call_id: 'one' });
+      expect(output.at(-1)).toMatchObject({ role: 'user', content: 'interloper' });
+    });
+    it(name + ' helper preserves an image-free array own toJSON', () => {
+      const content: any = [text('raw internal')];
+      content.toJSON = () => [text('serialized public')];
+      const output = convert([{ role: 'user', content: [result('one', content)] }] as any);
+      expect(JSON.stringify(output)).toContain('serialized public');
+      expect(JSON.stringify(output)).not.toContain('raw internal');
+    });
+  }
+  it.each(providers)('$name preserves image-free array own toJSON on the wire', async p => {
+    const { bodies } = stub();
+    const content: any = [text('raw internal')];
+    content.toJSON = () => [text('serialized public')];
+    const input = messages(false);
+    (input[2]!.content as any) = [result('one', content)];
+    await invoke(p.make(), 'complete', p.model, undefined, input);
+    expect(JSON.stringify(bodies[0])).toContain('serialized public');
+    expect(JSON.stringify(bodies[0])).not.toContain('raw internal');
+  });
+  for (const p of providers.slice(0, 3)) {
+    it.each(['inherited', 'non-enumerable'])(p.name + ' ignores %s extra.model for capability selection', async kind => {
+      const { bodies } = stub();
+      const extra = kind === 'inherited' ? Object.create({ model: 'vision-shadow' })
+        : Object.defineProperty({}, 'model', { value: 'vision-shadow', enumerable: false });
+      const getModelImageInput = vi.fn(model => model === 'vision-shadow');
+      await p.make().complete({ model: p.model, messages: messages(), extra }, { getModelImageInput });
+      expect(bodies[0].model).toBe(p.model);
+      expect(getModelImageInput).toHaveBeenCalledExactlyOnceWith(p.model);
+      expect(hasPixels(bodies[0])).toBe(false);
+    });
+    for (const mode of ['media', 'omit'] as const) {
+      it.each([true, false])(p.name + ' native siblings survive ' + mode + ' with valid image=%s', async valid => {
+        const { bodies } = stub();
+        const audio = { type: 'input_audio', input_audio: { data: 'AUDIO_BYTES', format: 'wav' } };
+        const input = [{ role: 'tool', tool_call_id: 'one', content: [text('caption'),
+          { type: 'image_url', image_url: { url: valid ? 'data:image/png;base64,' + data : 'file:///tmp/image.png' } },
+          audio, text('after'),
+        ] }];
+        const before = structuredClone(input);
+        await invoke(p.make(mode), 'complete', p.model, undefined, input);
+        const tool = bodies[0].messages.find((m: any) => m.role === 'tool');
+        expect(tool.tool_call_id).toBe('one');
+        expect(tool.content).toEqual(expect.arrayContaining([audio, text('caption'), text('after')]));
+        expect(tool.content[2]).toEqual(audio);
+        expect(hasPixels(bodies[0])).toBe(mode === 'media' && valid);
+        const users = bodies[0].messages.filter((m: any) => m.role === 'user');
+        expect(JSON.stringify(users)).not.toContain('AUDIO_BYTES');
+        expect(input).toEqual(before);
+      });
+    }
+  }
+});
+
+describe('review model getter regression', () => {
+  for (const p of providers.slice(0, 3)) {
+    it.each(['complete', 'stream'])(p.name + ' %s shares one captured extra.model read with the wire', async method => {
+      const { bodies } = stub();
+      const getter = vi.fn().mockReturnValueOnce('vision-selected').mockReturnValue('text-second-read');
+      const extra = Object.defineProperty({}, 'model', { get: getter, enumerable: true });
+      const getModelImageInput = vi.fn(model => model === 'vision-selected');
+      const adapter = p.make();
+      const request = { model: p.model, messages: messages(), extra };
+      if (method === 'complete') await adapter.complete(request, { getModelImageInput });
+      else await adapter.stream(request, { onChunk() {} }, { getModelImageInput });
+      expect(getter).toHaveBeenCalledTimes(1);
+      expect(bodies[0].model).toBe('vision-selected');
+      expect(getModelImageInput).toHaveBeenCalledExactlyOnceWith(bodies[0].model);
+      expect(hasPixels(bodies[0])).toBe(true);
+    });
+  }
+});
+
+
+describe('review async model snapshot', () => {
+  it('pins the sent model to the input observed before the catalogue wait', async () => {
+    let finish!: (response: Response) => void;
+    const { bodies } = stub(() => new Promise(resolve => { finish = resolve; }));
+    const request = { model: 'vendor/vision', messages: messages() };
+    const pending = providers[2]!.make().complete(request);
+    request.model = 'vendor/text';
+    finish(catalogue());
+    await pending;
+    expect(bodies[0].model).toBe('vendor/vision');
+    expect(hasPixels(bodies[0])).toBe(true);
+  });
+});
+
+describe('review fine-tuned OpenAI families', () => {
+  it.each([
+    ['ft:gpt-3.5-turbo-0125:org:agent:abc', false],
+    ['ft:gpt-3.5-turbo:org:agent:def', false],
+    ['ft:gpt-4o-2024-08-06:org:agent:ghi', true],
+    ['ft:gpt-4.1-2025-04-14:org:agent:jkl', true],
+  ] as const)('%s follows the base default', async (model, expected) => {
+    const { bodies } = stub();
+    await invoke(providers[0]!.make(), 'complete', model);
+    expect(bodies[0].model).toBe(model);
+    expect(hasPixels(bodies[0])).toBe(expected);
+  });
+  it('keeps full fine-tuned IDs for registry lookup and separate pinned decisions', async () => {
+    const { bodies } = stub();
+    const first = 'ft:gpt-3.5-turbo-0125:org:agent:one';
+    const second = 'ft:gpt-3.5-turbo-0125:org:agent:two';
+    const getModelImageInput = vi.fn(model => model === first);
+    const adapter = providers[0]!.make();
+    await invoke(adapter, 'complete', first, { getModelImageInput });
+    await invoke(adapter, 'stream', second, { getModelImageInput });
+    await invoke(adapter, 'complete', first, { getModelImageInput: () => false });
+    expect(getModelImageInput.mock.calls).toEqual([[first], [second]]);
+    expect(bodies.map(body => body.model)).toEqual([first, second, first]);
+    expect(bodies.map(hasPixels)).toEqual([true, false, true]);
+  });
+});

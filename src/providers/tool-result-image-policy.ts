@@ -1,4 +1,4 @@
-import type { ProviderRequestOptions } from '../types/index.js';
+import type { ProviderRequest, ProviderRequestOptions } from '../types/index.js';
 import { hasToolResultImages } from './tool-result-images.js';
 
 /** Explicit modes override registry knowledge; auto uses the adapter fallback. */
@@ -7,6 +7,20 @@ export type ToolResultImageMode = 'auto' | 'media' | 'omit';
 /** Synchronous helpers have no model context: callers own a media choice. */
 export interface ToolResultImageConversionOptions {
   toolResultImages?: 'media' | 'omit';
+}
+
+/** Capture model and extra values once, before any async resolution.
+ * Inherited/non-enumerable properties do not override the wire. A getter's
+ * selected value must be shared by the gate and the eventual request body. */
+export function captureRequestExtras(request: ProviderRequest): ProviderRequest {
+  const captured = { ...request };
+  if (captured.extra) captured.extra = { ...captured.extra };
+  return captured;
+}
+
+/** Call after captureRequestExtras so this is the same read used for the wire. */
+export function effectiveChatModel(request: ProviderRequest): string {
+  return Object.hasOwn(request.extra ?? {}, 'model') ? request.extra!.model as string : request.model;
 }
 
 /** Only known tool media needs a capability decision. User images are explicit. */
@@ -43,6 +57,9 @@ export class ToolResultImagePolicy<T extends boolean | Promise<boolean> = boolea
 
 /** OpenAI Chat models known to lack image input; other models default to media. */
 export function openAIModelImageInput(model: string): boolean {
+  // Fine-tuning a text-only base does not add image input. Keep the complete
+  // model ID everywhere else: registry identity, pinned policy, and wire.
+  model = model.startsWith('ft:') ? model.split(':')[1] ?? model : model;
   return !(
     /^(?:o1-mini|o1-preview|o3-mini)(?:-|$)/.test(model)
     || model.startsWith('gpt-3.5')

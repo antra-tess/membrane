@@ -12,7 +12,7 @@
  * Uses the standard OpenAI chat completions format with tool_calls support.
  */
 
-import { ToolResultImagePolicy, type ToolResultImageMode, type ToolResultImageConversionOptions } from './tool-result-image-policy.js';
+import { captureRequestExtras, effectiveChatModel, ToolResultImagePolicy, type ToolResultImageMode, type ToolResultImageConversionOptions } from './tool-result-image-policy.js';
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -363,7 +363,8 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   }
 
   private buildRequest(request: ProviderRequest, options?: ProviderRequestOptions): any {
-    const model = (request.extra?.model ?? request.model) as string;
+    request = captureRequestExtras(request);
+    const model = effectiveChatModel(request);
     const media = Object.prototype.propertyIsEnumerable.call(request.extra ?? {}, 'messages') ? false : this.toolImagePolicy.resolve(model, request.messages as any[], options);
     const messages = this.convertMessages(request.messages as any[], media);
     
@@ -771,7 +772,7 @@ export function toOpenAIMessages(
       }
     };
     const hasImages = msg.content.some(block => block.type === 'tool_result' && hasToolResultImages(block.content));
-    const resultsFirst = options.toolResultImages === 'media' && hasImages && msg.role === 'user' && toolCalls.length === 0;
+    const resultsFirst = hasImages && msg.role === 'user' && toolCalls.length === 0;
     if (resultsFirst) appendToolResults();
 
     // Add main message

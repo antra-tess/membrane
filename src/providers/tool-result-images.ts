@@ -67,6 +67,7 @@ export function chatToolResultContent(block: any, media = false): string | ChatT
 
 /** Omit normalized sources too, including data URLs that must never become text. */
 export function omittedToolResultContent(content: unknown): string {
+  if (!hasToolResultImages(content)) return textOnlyToolResultContent(content);
   return textOnlyToolResultContent(Array.isArray(content)
     ? content.map(block => isSourceImage(block)
       ? { type: 'text', text: TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER } : block)
@@ -82,11 +83,13 @@ export function validatedChatImagePart(part: any): ChatToolOutputPart {
 }
 
 /** Native tool media still has provenance, unlike relocated native user images. */
-export function nativeChatToolContent(content: any[], media: boolean): string | ChatToolOutputPart[] {
-  const parts: ChatToolOutputPart[] = content.map(part => part?.type !== 'image_url' ? part
+export function nativeChatToolContent(content: any[], media: boolean): string | any[] {
+  const parts = content.map(part => part?.type !== 'image_url' ? part
     : media ? validatedChatImagePart(part)
     : { type: 'text', text: TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER });
-  return parts.some(part => part.type === 'image_url') ? parts : parts.map(part => part.type === 'text' ? part.text : '').join('\n');
+  // Preserve caller-owned audio/other native parts; only all-text output can
+  // collapse to a string without losing a sibling carrier.
+  return parts.every(part => part?.type === 'text') ? parts.map(part => part.text).join('\n') : parts;
 }
 
 /** Inline media is validated here because live tools bypass formatter sanitation. */
@@ -135,13 +138,15 @@ export function relocateToolImages<T extends { role: string; content?: unknown; 
       continue;
     }
     let imageIndex = 0;
-    const text = (message.content as ChatToolOutputPart[]).map(part => {
-      if (part.type === 'text') return part.text;
+    const parts = (message.content as any[]).map(part => {
+      if (part?.type !== 'image_url') return part;
       const label = 'Image ' + (++imageIndex) + ' from tool result ' + JSON.stringify(message.tool_call_id);
       attachments.push({ type: 'text', text: '[' + label + ']' }, part);
-      return '[' + label + ' follows in the next user message.]';
-    }).join('\n');
-    output.push({ ...message, content: text });
+      return { type: 'text', text: '[' + label + ' follows in the next user message.]' };
+    });
+    const content = parts.every(part => part?.type === 'text')
+      ? parts.map(part => part.text).join('\n') : parts;
+    output.push({ ...message, content });
   }
   flush();
   return output;

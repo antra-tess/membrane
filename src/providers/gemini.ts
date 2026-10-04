@@ -11,7 +11,7 @@
  * Endpoint: generativelanguage.googleapis.com/v1beta
  */
 
-import { ToolResultImagePolicy, type ToolResultImageMode } from './tool-result-image-policy.js';
+import { captureRequestExtras, ToolResultImagePolicy, type ToolResultImageMode } from './tool-result-image-policy.js';
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -375,6 +375,7 @@ export class GeminiAdapter implements ProviderAdapter {
   // --------------------------------------------------------------------------
 
   private buildRequest(request: ProviderRequest, options?: ProviderRequestOptions): GeminiRequest {
+    request = captureRequestExtras(request);
     const media = Object.prototype.propertyIsEnumerable.call(request.extra ?? {}, 'contents') ? false : this.toolImagePolicy.resolve(request.model, request.messages as any[], options);
     const contents = this.convertMessages(request.messages as any[], request.model, media);
     const maxTokens = request.maxTokens || this.defaultMaxTokens;

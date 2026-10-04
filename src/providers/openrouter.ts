@@ -4,7 +4,7 @@
  * Handles OpenAI-compatible API with tool_calls format
  */
 
-import { ToolResultImagePolicy, type ToolResultImageMode, type ToolResultImageConversionOptions, waitForImageDecision } from './tool-result-image-policy.js';
+import { captureRequestExtras, effectiveChatModel, ToolResultImagePolicy, type ToolResultImageMode, type ToolResultImageConversionOptions, waitForImageDecision } from './tool-result-image-policy.js';
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -210,6 +210,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
     request: ProviderRequest,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
+    request = captureRequestExtras(request);
     const { signal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
       const media = await this.resolveToolImages(request, options, signal);
@@ -231,6 +232,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
     callbacks: StreamCallbacks,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
+    request = captureRequestExtras(request);
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
       const media = await this.resolveToolImages(request, options, combinedSignal);
@@ -422,7 +424,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
       // A whole native payload override is caller-owned. Replaced normalized
       // images cannot trigger a lookup or freeze a model's first-use decision.
       if (Object.prototype.propertyIsEnumerable.call(request.extra ?? {}, 'messages')) return false;
-      const model = (request.extra?.model ?? request.model) as string;
+      const model = effectiveChatModel(request);
       const media = await waitForImageDecision(this.toolImagePolicy.resolve(model, request.messages as any[], options), signal);
       signal?.throwIfAborted();
       return media;
@@ -923,7 +925,7 @@ export function toOpenRouterMessages(
       }
     };
     const hasImages = msg.content.some(block => block.type === 'tool_result' && hasToolResultImages(block.content));
-    const resultsFirst = options.toolResultImages === 'media' && hasImages && msg.role === 'user' && toolCalls.length === 0;
+    const resultsFirst = hasImages && msg.role === 'user' && toolCalls.length === 0;
     if (resultsFirst) appendToolResults();
 
     // Add main message

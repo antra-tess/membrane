@@ -12,7 +12,7 @@
  * - Direct API integration with proper error handling
  */
 
-import { ToolResultImagePolicy, type ToolResultImageMode, openAIModelImageInput } from './tool-result-image-policy.js';
+import { captureRequestExtras, effectiveChatModel, ToolResultImagePolicy, type ToolResultImageMode, openAIModelImageInput } from './tool-result-image-policy.js';
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -422,7 +422,8 @@ export class OpenAIAdapter implements ProviderAdapter {
   }
 
   private buildRequest(request: ProviderRequest, options?: ProviderRequestOptions): any {
-    const effectiveModel = (request.extra?.model ?? request.model) as string;
+    request = captureRequestExtras(request);
+    const effectiveModel = effectiveChatModel(request);
     const media = Object.prototype.propertyIsEnumerable.call(request.extra ?? {}, 'messages') ? false : this.toolImagePolicy.resolve(effectiveModel, request.messages as any[], options);
     const messages = this.convertMessages(request.messages as any[], media);
     const model = request.model;
