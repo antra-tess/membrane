@@ -1554,7 +1554,7 @@ export class Membrane {
     toolLoopRebuild = false,
     activeFormatter: PrefillFormatter = this.formatter
   ): any {
-    const { providerRequest, prefixRewritten } = this.transformRequest({ ...request, messages }, activeFormatter, 'native');
+    const { providerRequest, prefixRewritten } = this.transformRequest(request, activeFormatter, 'native', messages);
     // Responses formatters own their input-item representation and cache policy.
     if (activeFormatter.name === 'openai-responses') return providerRequest;
 
@@ -1984,6 +1984,7 @@ export class Membrane {
     request: NormalizedRequest,
     activeFormatter: PrefillFormatter = this.formatter,
     toolMode: 'xml' | 'native' = this.resolveToolMode(request, activeFormatter),
+    messages: NormalizedRequest['messages'] = request.messages,
   ): {
     providerRequest: any;
     prefillResult: BuildResult;
@@ -2001,8 +2002,10 @@ export class Membrane {
       ?? 10;
 
     let prefixRewritten = false;
+    // Keep ordinary request properties on their original receiver; only the
+    // native loop's current messages are a separate build input.
     // Use formatter's buildMessages for all request building
-    const buildResult = activeFormatter.buildMessages(request.messages, {
+    const buildResult = activeFormatter.buildMessages(messages, {
       onNormalize: event => {
         if (PREFIX_REWRITING_NORMALIZE_EVENT_KINDS.has(event.kind)) prefixRewritten = true;
       },
@@ -2046,7 +2049,7 @@ export class Membrane {
       tools: buildResult.nativeTools,
       extra: {
         ...request.providerParams,
-        normalizedMessages: request.messages,
+        normalizedMessages: messages,
       },
     };
 

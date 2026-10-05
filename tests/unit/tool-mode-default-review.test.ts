@@ -364,3 +364,24 @@ describe('native loop tool-name restoration', () => {
     expect(adapter.getRequestLog()).toHaveLength(0);
   });
 });
+
+describe('normalized request accessor preservation', () => {
+  it.each(['complete', 'stream', 'yielding'])('%s keeps ordinary fields on their original receiver', async path => {
+    class AccessorRequest {
+      #data = req(true, 'gpt-4o');
+      get config() { return this.#data.config; }
+      get messages() { return this.#data.messages; }
+      get tools() { return this.#data.tools; }
+      get assistantParticipant() { return 'Agent'; }
+      get contextPrefix() { return 'private prefix'; }
+      get stopSequences() { return ['PRIVATE_STOP']; }
+    }
+    const input = new AccessorRequest();
+    const adapter = mock();
+    await run(path, new Membrane(adapter, { formatter: new NativeFormatter() }), input);
+    expect(adapter.getLastRequest()?.model).toBe('gpt-4o');
+    expect(adapter.getLastRequest()?.stopSequences).toContain('PRIVATE_STOP');
+    expect(JSON.stringify(adapter.getLastRequest()?.messages)).toContain('private prefix');
+    expect(input.messages).toEqual(req().messages);
+  });
+});
