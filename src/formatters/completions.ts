@@ -21,6 +21,7 @@ import type {
 } from '../types/index.js';
 import type {
   PrefillFormatter,
+  ContentParseContext,
   StreamParser,
   BuildOptions,
   BuildResult,
@@ -325,9 +326,11 @@ export class CompletionsFormatter implements PrefillFormatter {
     return false;
   }
 
-  parseContentBlocks(content: string): ContentBlock[] {
-    // Trim leading whitespace (model often starts with space after prefix)
-    const trimmed = content.replace(/^\s+/, '');
+  parseContentBlocks(content: string, _tools?: ToolDefinition[], context?: ContentParseContext): ContentBlock[] {
+    // Prefix trimming belongs to the whole visible response. A thinking
+    // boundary does not turn an internal space/newline into a new prefix.
+    const atResponseStart = !context || !/\S/.test(context.visibleText.slice(0, context.offset));
+    const trimmed = atResponseStart ? content.replace(/^\s+/, '') : content;
 
     if (!trimmed) {
       return [];

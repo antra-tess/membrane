@@ -21,6 +21,7 @@ import type {
 } from '../types/index.js';
 import type {
   PrefillFormatter,
+  ContentParseContext,
   StreamParser,
   BuildOptions,
   BuildResult,
@@ -393,9 +394,10 @@ export class NativeFormatter implements PrefillFormatter {
     return false;
   }
 
-  parseContentBlocks(content: string): ContentBlock[] {
-    // Native mode - content is plain text
-    if (!content.trim()) {
+  parseContentBlocks(content: string, _tools?: ToolDefinition[], context?: ContentParseContext): ContentBlock[] {
+    // Only a wholly blank response is omitted. Whitespace-only spans of a
+    // nonblank response are still its text, including before thinking.
+    if (!content || !(context?.visibleText ?? content).trim()) {
       return [];
     }
     return [{ type: 'text', text: content }];

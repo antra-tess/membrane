@@ -1229,7 +1229,7 @@ export class Membrane {
 
       const response = this.buildFinalResponse(
         newContent,
-        xmlToolProtocol ? contentBlocks : streamedThinking.content(newContent, value => formatter.parseContentBlocks(value)),
+        xmlToolProtocol ? contentBlocks : streamedThinking.content(newContent, (value, context) => formatter.parseContentBlocks(value, request.tools, context)),
         lastStopReason,
         turnUsage,
         request,
@@ -1271,7 +1271,7 @@ export class Membrane {
           this.abortReason(error, signal),
           xmlToolProtocol
             ? parseAccumulatedIntoBlocks(newContent, { tools: request.tools, ...(initialBlockType ? { startInsideBlock: initialBlockType } : {}) }).blocks
-            : streamedThinking.content(newContent, value => formatter.parseContentBlocks(value))
+            : streamedThinking.content(newContent, (value, context) => formatter.parseContentBlocks(value, request.tools, context))
         );
       }
       // Re-throw with rawRequest attached for logging
@@ -3144,7 +3144,7 @@ export class Membrane {
             reason: 'user',
             partialContent: xmlToolProtocol
               ? parseAccumulatedIntoBlocks(newContent, { tools: request.tools }).blocks
-              : streamedThinking.content(newContent, value => formatter.parseContentBlocks(value)),
+              : streamedThinking.content(newContent, (value, context) => formatter.parseContentBlocks(value, request.tools, context)),
             rawAssistantText: newContent,
             toolCalls: executedToolCalls,
             toolResults: executedToolResults,
@@ -3610,7 +3610,7 @@ export class Membrane {
 
       const response = this.buildFinalResponse(
         newContent,
-        xmlToolProtocol ? contentBlocks : streamedThinking.content(newContent, value => formatter.parseContentBlocks(value)),
+        xmlToolProtocol ? contentBlocks : streamedThinking.content(newContent, (value, context) => formatter.parseContentBlocks(value, request.tools, context)),
         lastStopReason,
         turnUsage,
         request,
@@ -3642,7 +3642,7 @@ export class Membrane {
           reason: this.abortReason(error, stream.signal),
           partialContent: xmlToolProtocol
               ? parseAccumulatedIntoBlocks(newContent, { tools: request.tools }).blocks
-              : streamedThinking.content(newContent, value => formatter.parseContentBlocks(value)),
+              : streamedThinking.content(newContent, (value, context) => formatter.parseContentBlocks(value, request.tools, context)),
           rawAssistantText: newContent,
           toolCalls: executedToolCalls,
           toolResults: executedToolResults,

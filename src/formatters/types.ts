@@ -318,6 +318,14 @@ export interface StreamParser {
 // Prefill Formatter Interface
 // ============================================================================
 
+/** Source context when parsing visible text between native thinking blocks. */
+export interface ContentParseContext {
+  /** Complete visible response text, excluding provider thinking blocks. */
+  readonly visibleText: string;
+  /** Start of the current content span in visibleText, in String.slice units. */
+  readonly offset: number;
+}
+
 export interface PrefillFormatter {
   /** Formatter name for identification */
   readonly name: string;
@@ -405,6 +413,11 @@ export interface PrefillFormatter {
    * Extracts text, thinking, tool_use blocks, etc.
    *
    * `tools` is used exactly as in {@link PrefillFormatter.parseToolCalls}.
+   * When context is supplied, content is a span of the complete visible text.
+   * Preserve whole-response operations (such as prefix trimming) using that
+   * context. Custom parsers and decorators must honor/forward it rather than
+   * treating an internal span as a fresh response. Calls without context keep
+   * whole-response semantics.
    */
-  parseContentBlocks(content: string, tools?: ToolDefinition[]): ContentBlock[];
+  parseContentBlocks(content: string, tools?: ToolDefinition[], context?: ContentParseContext): ContentBlock[];
 }

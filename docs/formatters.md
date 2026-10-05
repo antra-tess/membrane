@@ -27,7 +27,7 @@ await membrane.stream({
 
 The native and XML paths intentionally produce different request bytes and cache prefixes. Native response text remains text, including XML-looking examples. XML tool decoding, closing-tag reconstruction, and XML diagnostics require a selected XML-capable formatter in XML mode. Plain CompletionsFormatter output follows its own text parser, including final and aborted stream content. To retain the old textual-tool fallback from native `complete()`, select an XML-capable formatter and `toolMode: 'xml'`. Native mode preserves caller-authored assistant-ended history; it does not append an invented user turn or silently re-role that history to satisfy a provider restriction.
 
-Provider block types keep streamed thinking out of a plain formatter’s text parser. Thinking chunks carry non-visible metadata. Received thinking snapshots, signatures, and redacted blocks remain typed in final and partial content. The plain formatter parses visible text spans between those blocks, so its `rawAssistantText` contains text rather than native thinking or synthetic XML wrappers. Native aborted responses also expose observed `partialContent`, including completed rounds and the current text/thinking prefix; their raw chunk accumulation is unchanged. Explicit XML retains its tagged parser and continuation behavior.
+Provider block types keep streamed thinking out of a plain formatter’s text parser. Thinking chunks carry non-visible metadata. Received thinking snapshots, signatures, and redacted blocks remain typed in final and partial content. The plain formatter parses visible text spans between those blocks with whole-response context, so internal spaces and newlines retain their positions. Its `rawAssistantText` contains text rather than native thinking or synthetic XML wrappers. Native aborted responses also expose observed `partialContent`, including completed rounds and the current text/thinking prefix; their raw chunk accumulation is unchanged. Explicit XML retains its tagged parser and continuation behavior.
 
 ## Available formatters
 
@@ -154,10 +154,12 @@ Yielding calls use the instance formatter and the request's tool-mode choice. Th
 
 ## Creating custom formatters
 
+Custom response parsers receive `parseContentBlocks(content, tools?, context?)`. The optional third argument is `ContentParseContext { visibleText, offset }`: the complete visible response and the current span's start offset, using `String.slice` units. Streaming assembly supplies it when parsing visible text around native thinking blocks, for both final and partial output. Prefix-sensitive or other whole-response-sensitive parsers must use this context rather than treating every span as a new response. Decorators must forward it. An optional parameter keeps existing call signatures valid; it does not make an existing whole-response assumption safe for spans. Literal, span-independent parsing needs no behavioral change. Calls without context keep their whole-response semantics, and the existing tool-schema argument remains second.
+
 Implement `PrefillFormatter` and declare both carrier flags as booleans. Missing declarations in JavaScript produce an explicit diagnostic; absence does not silently select XML. `usesPrefill` describes parser seeding, not an exemption from a transport's prefill restriction.
 
 ```typescript
-import type { PrefillFormatter, BuildOptions, BuildResult } from '@animalabs/membrane';
+import type { PrefillFormatter, BuildOptions, BuildResult, ContentParseContext, ToolDefinition } from '@animalabs/membrane';
 
 class CustomFormatter implements PrefillFormatter {
 	readonly name = 'custom';
@@ -176,7 +178,10 @@ class CustomFormatter implements PrefillFormatter {
 
 	parseToolCalls(content) { return []; }
 	hasToolUse(content) { return false; }
-	parseContentBlocks(content) { return [{ type: 'text', text: content }]; }
+	parseContentBlocks(content: string, _tools?: ToolDefinition[], context?: ContentParseContext) {
+		// Literal passthrough preserves span semantics. Prefix-sensitive parsing uses context.
+		return [{ type: 'text', text: content }];
+	}
 	formatToolResults(results) { return JSON.stringify(results); }
 }
 ```

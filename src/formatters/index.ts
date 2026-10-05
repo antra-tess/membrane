@@ -5,6 +5,7 @@
 // Export formatter-specific types only (avoid duplicates with types/streaming.js)
 export type {
   PrefillFormatter,
+  ContentParseContext,
   StreamParser,
   FormatterConfig,
   BuildOptions,

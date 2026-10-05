@@ -1,4 +1,5 @@
 import type { ContentBlock } from '../types/index.js';
+import type { ContentParseContext } from '../formatters/types.js';
 
 /**
  * Thinking is a provider block, not a delimiter in a text stream. Keep its
@@ -59,16 +60,17 @@ export class StreamedThinking {
     }
   }
 
-  content(text: string, parseText: (text: string) => ContentBlock[]): ContentBlock[] {
+  content(text: string, parseText: (text: string, context: ContentParseContext) => ContentBlock[]): ContentBlock[] {
     const result: ContentBlock[] = [];
     let cursor = 0;
     for (const span of this.spans) {
       const end = Math.max(cursor, Math.min(span.offset, text.length));
-      if (end > cursor) result.push(...parseText(text.slice(cursor, end)));
+      if (end > cursor) result.push(...parseText(text.slice(cursor, end), { visibleText: text, offset: cursor }));
       result.push({ ...span.block });
       cursor = end;
     }
-    if (cursor < text.length) result.push(...parseText(text.slice(cursor)));
+    // Preserve the parser's empty-response operation even when only thinking arrived.
+    if (cursor < text.length || text.length === 0) result.push(...parseText(text.slice(cursor), { visibleText: text, offset: cursor }));
     return result;
   }
 }

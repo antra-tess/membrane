@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
+import { StreamedThinking } from '../../src/utils/streamed-thinking.js';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import { BedrockAdapter } from '../../src/providers/bedrock.js';
 import { CompletionsFormatter } from '../../src/formatters/completions.js';
@@ -32,12 +33,12 @@ function events(signatureOnly = false, xml = false) {
   return result;
 }
 
-function setup(provider: string, mode: string, finish: string, signatureOnly = false, wire?: any[]) {
+function setup(provider: string, mode: string, finish: string, signatureOnly = false, wire?: any[], abortChunk = visible) {
   vi.stubGlobal('fetch', vi.fn(async () => {
     const source = wire ?? events(signatureOnly, mode === 'xml');
     const abortAt = finish === 'thinking-abort'
       ? source.findIndex(event => event.delta?.type === 'thinking_delta')
-      : finish === 'text-abort' ? source.findIndex(event => event.delta?.type === 'text_delta' && event.delta.text === visible) : -1;
+      : finish === 'text-abort' ? source.findIndex(event => event.delta?.type === 'text_delta' && event.delta.text === abortChunk) : -1;
     const frames = (abortAt >= 0 ? source.slice(0, abortAt + 1) : source).map(event => provider === 'anthropic'
       ? new TextEncoder().encode('event: ' + event.type + '\ndata: ' + JSON.stringify(event) + '\n\n')
       : chunkFrame(event));
@@ -194,4 +195,77 @@ it.each(['stream', 'yielding'])('plain %s keeps finalized-only thinking callback
   };
   const response: any = await run(path, new Membrane(adapter, { formatter: new CompletionsFormatter() }), 'plain', []);
   expect(response.content).toEqual([{ type: 'thinking', thinking: thought, signature: 'signature' }, text(visible)]);
+});
+
+for (const mode of ['plain', 'plain-native']) {
+  for (const finish of ['success', 'text-abort']) {
+    for (const [prefix, suffix] of [
+      ['A', ' B'],
+      [' A', '\n B'],
+      [' \t', ' \n B'],
+      ['A', ' \n'],
+      [' \t', '\n '],
+    ]) {
+      it.each(['stream', 'yielding'])(mode + ' whole-visible whitespace ' + JSON.stringify([prefix, suffix]) + ' ' + finish + ' via %s', async path => {
+        const wire = events().map(event => {
+          const moved = event.index === undefined ? event : { ...event, index: event.index + 1 };
+          return moved.delta?.type === 'text_delta' ? { ...moved, delta: { ...moved.delta, text: suffix } } : moved;
+        });
+        wire.splice(1, 0,
+          { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+          { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: prefix } },
+          { type: 'content_block_stop', index: 0 },
+        );
+        const parser = mode === 'plain' ? new CompletionsFormatter() : new NativeFormatter();
+        const expectedText = parser.parseContentBlocks(prefix + suffix).filter(block => block.type === 'text').map(block => block.text).join('');
+        const response: any = await run(path, setup('anthropic', mode, finish, false, wire, suffix), mode, [], [],
+          mode === 'plain-native' ? { toolMode: 'xml' } : {});
+        const content = finish === 'success' ? response.content : response.partialContent;
+        expect(content.filter((block: any) => block.type === 'text').map((block: any) => block.text).join('')).toBe(expectedText);
+        expect(content.filter((block: any) => block.type === 'thinking')).toEqual([{ type: 'thinking', thinking: thought, signature: 'signature' }]);
+        expect(response.rawAssistantText).toBe(prefix + suffix);
+      });
+    }
+  }
+}
+
+for (const finish of ['success', 'abort']) {
+  it.each(['stream', 'yielding'])('custom parser receives source context and preserves tool argument ' + finish + ' via %s', async path => {
+    const seen: any[] = [];
+    const formatter = new CompletionsFormatter();
+    const parse = formatter.parseContentBlocks.bind(formatter);
+    formatter.parseContentBlocks = (span, tools, context) => {
+      seen.push({ span, tools, context });
+      return parse(span, tools, context);
+    };
+    const content = [text('A'), { type: 'thinking', thinking: thought }, text(' B')];
+    const adapter: any = {
+      name: 'parser-context', supportsModel: () => true,
+      async stream(request: any, callbacks: any) {
+        content.forEach((block, index) => {
+          callbacks.onContentBlock?.(index, block.type === 'text' ? text('') : { type: 'thinking', thinking: '' });
+          callbacks.onChunk(block.type === 'text' ? block.text : block.thinking);
+          callbacks.onContentBlock?.(index, block);
+        });
+        if (finish === 'abort') throw new DOMException('aborted after received content', 'AbortError');
+        return { content, stopReason: 'end_turn', model: request.model, usage: { inputTokens: 1, outputTokens: 1 } };
+      },
+    };
+    const response: any = await run(path, new Membrane(adapter, { formatter }), 'plain', [], [], { tools: [] });
+    expect(finish === 'success' ? response.content : response.partialContent).toEqual(content);
+    expect(seen).toEqual([
+      { span: 'A', tools: [], context: { visibleText: 'A B', offset: 0 } },
+      { span: ' B', tools: [], context: { visibleText: 'A B', offset: 1 } },
+    ]);
+  });
+}
+
+it.each([false, true])('empty visible response still reaches its parser (thinking=%s)', thinking => {
+  const captured = new StreamedThinking();
+  if (thinking) captured.onBlock(0, { type: 'thinking', thinking: thought }, 0);
+  const parse = vi.fn(() => [text('empty-response default')]);
+  expect(captured.content('', parse)).toEqual([
+    ...(thinking ? [{ type: 'thinking', thinking: thought }] : []), text('empty-response default'),
+  ]);
+  expect(parse.mock.calls).toEqual([['', { visibleText: '', offset: 0 }]]);
 });
