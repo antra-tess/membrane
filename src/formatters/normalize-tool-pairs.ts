@@ -29,7 +29,7 @@
  *     they do not need to be: both emit flattened text documents with no
  *     structural tool blocks, so tool-cycle placement rules have nothing
  *     to bind to in their output.
- *   - `OpenAiResponsesFormatter` — NOT covered, and it DOES carry
+ *   - `OpenAIResponsesFormatter` — NOT covered, and it DOES carry
  *     provider-native tool items (`function_call` / `function_call_output`),
  *     so it genuinely needs pairing discipline. The bypass is deliberate:
  *     membrane.ts routes this formatter around `buildNativeToolRequest`
@@ -37,10 +37,9 @@
  *     ids, encrypted reasoning, assistant phases and compaction items.
  *     That reasoning is sound, and it applies to this module too — the
  *     repair is NOT to call `normalizeToolPairs` on Responses items.
- *     FUTURE WORK: an items-level pairing pass for the Responses shape.
- *     Until it exists, that formatter's `ready: true` is a hardcoded
- *     literal, not a checked claim, and the one path carrying
- *     provider-native tool items has no net by construction.
+ *     Responses item pairing is outside this module's scope. That
+ *     formatter's `ready: true` is not a validation result from this
+ *     normalizer.
  *
  * Algorithm overview (phases): refuse malformed input at entry (phase 0 —
  * non-set `pendingToolCallIds`, duplicate tool_use ids, non-array/
@@ -288,7 +287,10 @@ export function normalizeToolPairs(
  * that no earlier phase produced one, which is a claim about the sweep, not
  * about the validator. Callers holding messages from a path that does NOT
  * funnel through this module (see the COVERAGE note in the file header) can
- * use it as a wire-boundary check.
+ * use it to check pairing and known strict-role placement. This is not a
+ * complete provider-schema or cache-budget validator. Explicitly pending
+ * calls may remain unmatched; success with a pending set does not establish
+ * that the request is ready to send.
  */
 export function assertToolPairsValid(
   messages: ReadonlyArray<LooseProviderMessage>,
@@ -718,7 +720,11 @@ function textifyDuplicateResult(
     recoveredChars: recovered.length,
     reason,
   });
-  return { type: 'text', text: `[duplicate tool_result for ${toolUseId}]: ${recovered}` };
+  return {
+    type: 'text',
+    text: `[duplicate tool_result for ${toolUseId}]: ${recovered}`,
+    ...(block.cache_control ? { cache_control: block.cache_control } : {}),
+  };
 }
 
 function evictInterlopers(
@@ -913,6 +919,24 @@ function validate(
 ): void {
   // Empty input → empty output is fine.
   if (envelopes.length === 0) return;
+
+  // The standalone assertion reaches this phase without the repair pass.
+  // Check the same strict-role policy used by reflow before role-filtered
+  // pairing loops can accidentally ignore a misplaced block.
+  for (let i = 0; i < envelopes.length; i++) {
+    const envelope = envelopes[i]!;
+    for (const block of envelope.content) {
+      if (typeof block.type !== 'string') continue;
+      const required = requiredRoleOf(block);
+      if (required !== 'inherit' && envelope.role !== required) {
+        throw new MembraneNormalizerError(
+          `${block.type} in envelope ${i} has role '${envelope.role}'; expected '${required}'.`,
+          input.map(cloneMsg),
+          envelopes.map(toProviderMessage),
+        );
+      }
+    }
+  }
 
   // First message must be user (Anthropic requirement). We try to
   // repair this in the caller; if it still isn't user here, fail.

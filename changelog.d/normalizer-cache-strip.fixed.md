@@ -1,15 +1,2 @@
-- Tool-pair normalizer: stranded-call synthesis no longer strips `cache_control`
-  from the rest of the conversation. The suppression existed in case synthetic
-  bytes were rewritten when the real result landed, but a synthetic is only ever
-  produced for an id the caller did NOT declare in-flight — a stranded call,
-  whose `[pending]` payload is a fixed literal reproduced byte-identically on
-  every later compile. The strip therefore defended against a rewrite that
-  cannot happen, at the cost of the entire remaining prompt cache for as long as
-  the stranded `tool_use` stayed in the window.
-- Membrane now refuses to send a build that reported `ready: false`, throwing the
-  new `MembraneNotReadyError` (a non-retryable `invalid_request`) at the request
-  boundary. `BuildResult.ready` is the normalizer's answer to
-  `BuildOptions.pendingToolCallIds`; it was written by two formatters and read
-  nowhere, so a consumer following Membrane's own example of ignoring it shipped
-  an unmatched `tool_use` — the exact 400 the normalizer exists to prevent,
-  produced by using its documented option.
+- Tool-pair normalization no longer strips caller `cache_control` markers merely because it synthesized `[pending]` results. Repeated normalization of unchanged input is stable; later real results can still change the prefix. Request builders retain their existing marker-budget refusal/clamp policies, and native tool loops withhold automatic floating markers after prefix-rewriting repairs.
+- Formatter builds reporting `ready: false` are refused before hooks or provider execution with exported `MembraneNotReadyError`, a non-retryable `invalid_request` carrying `formatterName`. The subtype survives complete and native-stream error handling. This applies to `complete()`, XML streaming/yielding, and Responses-native formatter builds. Anthropic-native tool streaming uses its own normalizer after tool results have arrived and supplies no in-flight set. Callers with pending tool results must wait for them and rebuild.

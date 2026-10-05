@@ -33,3 +33,5 @@
   that answered its call). `tool_result_hoisted` now also fires for a result
   pushed DOWN into its own later cycle (`fromEnvelope < toEnvelope`) — the mirror of phase 3's
   existing pull-back from downstream (`fromEnvelope > toEnvelope`).
+- Export `assertToolPairsValid` from the package root and enforce known strict-role placement, including user-role tool calls and assistant-role tool results, before checking one-to-one adjacency. The assertion also enforces the normalizer's reasoning-block role policy. It is not a complete provider-schema or cache-budget validator; explicitly pending calls may remain unmatched.
+- Preserve a duplicate tool result's `cache_control` marker when recovering its content as text, including the marker's TTL. This keeps an explicit message breakpoint from disappearing after the formatter has suppressed its system fallback; the builder's existing marker-budget policy still applies.

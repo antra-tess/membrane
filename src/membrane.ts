@@ -336,6 +336,9 @@ export class Membrane {
         return response;
 
       } catch (error) {
+        // A not-ready build never reached the provider. Preserve its public
+        // wait-and-rebuild subtype instead of wrapping it as a transport error.
+        if (error instanceof MembraneNotReadyError) throw error;
         const errorInfo = classifyError(error);
         errorInfo.rawRequest = rawRequest;
 
@@ -1727,7 +1730,8 @@ export class Membrane {
 
     // ONE recount of the constructed wire artifacts, taken BEFORE the
     // tools/system fallback decision so the fallback and the float share a
-    // single truth. Counted post-normalize. `request.system` is the caller's own system content:
+    // single truth, counted post-normalize. `request.system` is the caller's
+    // own system content:
     // it explicitly accepts pre-marked blocks, and those are real wire markers
     // that no running tally ever saw (three of them plus both fallbacks = 5 on
     // the wire = a 400 on every inference of that config).
@@ -2233,17 +2237,13 @@ export class Membrane {
       prefillUserMessage: request.prefillUserMessage,
     });
 
-    // Readiness gate. `BuildResult.ready` is the tool-pair normalizer's
-    // answer to `BuildOptions.pendingToolCallIds`: false means a tool_use in
-    // this build has no result yet and the caller declared that id still in
-    // flight, so the normalizer deliberately did NOT synthesize a `[pending]`
-    // over it. The flag used to be written by two formatters and read
-    // nowhere, which made membrane's own paths safe only by accident (they
-    // never populate the pending set) while any consumer-supplied formatter
-    // following that example shipped an unmatched tool_use — the exact 400
-    // the normalizer exists to prevent, reached by using its documented
-    // option. This is the one place that ships bytes, so this is where the
-    // flag is read.
+    // Honor readiness whenever this path invokes a formatter: complete(),
+    // XML streaming/yielding, and Responses-native builds. NativeFormatter
+    // derives it from pendingToolCallIds supplied by a custom build; the
+    // caller must wait for those results and rebuild before sending.
+    // Anthropic-native tool streaming uses buildNativeToolRequest's own
+    // normalizer after tool results have arrived, rather than this formatter
+    // build. It intentionally supplies no in-flight set.
     if (buildResult.ready === false) {
       throw new MembraneNotReadyError(activeFormatter.name);
     }
@@ -2985,6 +2985,8 @@ export class Membrane {
   }
 
   private attachRawRequest(error: unknown, rawRequest: unknown): Error {
+    // Responses-native streaming also builds through transformRequest.
+    if (error instanceof MembraneNotReadyError) return error;
     const errorInfo = classifyError(error);
     errorInfo.rawRequest = rawRequest;
     return new MembraneError(errorInfo);
