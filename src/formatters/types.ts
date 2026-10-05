@@ -49,6 +49,16 @@ export interface BuildOptions {
   /** Tool definitions to include */
   tools?: ToolDefinition[];
 
+  /**
+   * The tool mode Membrane RESOLVED for this request (see
+   * `Membrane.resolveToolMode`), which already accounts for `request.toolMode`,
+   * the formatter's own configured mode, and provider/formatter derivation.
+   * A formatter that supports both shapes must build for THIS mode; its
+   * constructor-time mode is only the fallback for direct `buildMessages`
+   * callers that resolve nothing.
+   */
+  toolMode?: 'xml' | 'native';
+
   /** Whether thinking is enabled */
   thinking?: { enabled: boolean; budgetTokens?: number };
 
@@ -57,6 +67,9 @@ export interface BuildOptions {
 
   /** Enable prompt caching (Anthropic-specific) */
   promptCaching?: boolean;
+
+  /** See NormalizedRequest.cacheMarkers. */
+  cacheMarkers?: 'membrane-system' | 'cm-owned';
 
   /** Cache TTL for Anthropic prompt caching - '5m' (default) or '1h' for extended */
   cacheTtl?: '5m' | '1h';
@@ -201,6 +214,18 @@ export interface BuildResult {
   cacheMarkersApplied?: number;
 
   /**
+   * Offset into the turn's accumulated assistant text at which the CURRENT
+   * last message of `messages` begins. Zero (or absent) for an ordinary
+   * build: the whole accumulated document is the trailing assistant prefill.
+   *
+   * A split-turn image injection persists its three messages here and moves
+   * this watermark to the image seam, so later continuations replace only
+   * the trailing assistant message and never re-flatten the pre-image text
+   * over the user turn that carries the image.
+   */
+  accumulatedBaseOffset?: number;
+
+  /**
    * `false` only when the tool-pair normalizer detected a trailing
    * unmatched tool_use whose id is in `pendingToolCallIds` — i.e. the
    * caller (yielding stream) is mid-cycle and the request should not be
@@ -295,6 +320,19 @@ export interface PrefillFormatter {
   /** Whether this formatter uses prefill (vs native pass-through) */
   readonly usesPrefill: boolean;
 
+  /** Participant prefix template for native tool requests. Uses {name}; defaults to '{name}: '. */
+  readonly nameFormat?: string;
+
+  /**
+   * The tool mode this formatter instance was EXPLICITLY constructed with, if
+   * any. Read by `Membrane.resolveToolMode` as the fallback under an explicit
+   * `request.toolMode`: a formatter that can build either shape carries its
+   * caller's configured choice here so resolution honors it instead of
+   * re-deriving one from the formatter's name. Left undefined by formatters
+   * that build exactly one shape.
+   */
+  readonly configuredToolMode?: 'xml' | 'native';
+
   // ==========================================================================
   // REQUEST BUILDING
   // ==========================================================================
@@ -329,8 +367,13 @@ export interface PrefillFormatter {
   /**
    * Parse tool calls from accumulated content.
    * Returns empty array if no tool calls detected.
+   *
+   * `tools` carries the round's declared schemas. XML-style formatters use them
+   * to parse parameter values by declared type (a `string` parameter keeps its
+   * raw, untrimmed text) instead of guessing; formatters whose provider returns
+   * typed arguments ignore it.
    */
-  parseToolCalls(content: string): ToolCall[];
+  parseToolCalls(content: string, tools?: ToolDefinition[]): ToolCall[];
 
   /**
    * Check if content indicates tool use.
@@ -341,6 +384,8 @@ export interface PrefillFormatter {
   /**
    * Parse content blocks from accumulated response.
    * Extracts text, thinking, tool_use blocks, etc.
+   *
+   * `tools` is used exactly as in {@link PrefillFormatter.parseToolCalls}.
    */
-  parseContentBlocks(content: string): ContentBlock[];
+  parseContentBlocks(content: string, tools?: ToolDefinition[]): ContentBlock[];
 }

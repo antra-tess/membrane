@@ -66,8 +66,34 @@ export interface ContextConfig {
     preferUserMessages?: boolean;
   };
   
+  /**
+   * Participant name this deployment's assistant speaks as (membrane's own
+   * `assistantParticipant`). Used by the `preferUserMessages` adjustment to
+   * tell an assistant turn from a user turn. When unset, the legacy name
+   * list (`claude`/`assistant`/`bot`/`ai`) is used.
+   */
+  assistantParticipant?: string;
+
   /** Custom token estimator (default: chars / 4) */
   tokenEstimator?: (message: NormalizedMessage) => number;
+}
+
+/**
+ * Thrown by `processContext` when messages do not carry stable identity.
+ *
+ * The module keys continuity detection, marker stability and the
+ * `cachedStartMessageId` fetch anchor off `metadata.sourceId`. Without it
+ * every call sees a brand-new conversation, so rolling and caching are
+ * silently disabled — the module refuses rather than degrade invisibly.
+ */
+export class MembraneContextIdentityError extends Error {
+  constructor(
+    message: string,
+    public readonly messageIndices: readonly number[]
+  ) {
+    super(message);
+    this.name = 'MembraneContextIdentityError';
+  }
 }
 
 // ============================================================================
@@ -155,6 +181,18 @@ export interface ContextInfo {
   
   /** Whether hard limit was hit */
   hardLimitHit: boolean;
+
+  /**
+   * Set when the window still exceeds a limit after truncation. The kept
+   * window is floored at one message, so a single oversize message cannot
+   * be truncated away — it is reported here instead of shipping an empty
+   * `messages` array.
+   */
+  residualOverflow?: {
+    unit: 'characters' | 'tokens' | 'messages';
+    limit: number;
+    actual: number;
+  };
   
   /**
    * First message ID of the cached window.

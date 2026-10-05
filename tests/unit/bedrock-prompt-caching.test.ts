@@ -78,6 +78,30 @@ afterEach(() => {
 });
 
 describe('BedrockAdapter cache_control ttl strip', () => {
+  it('preserves all four caller-owned message breakpoints and their order', () => {
+    const body = buildRequest({
+      model: 'us.anthropic.claude-sonnet-4-20250514-v1:0',
+      maxTokens: 100,
+      messages: Array.from({ length: 4 }, (_, index) => ({
+        role: index % 2 === 0 ? 'user' : 'assistant',
+        content: [{
+          type: 'text',
+          text: `marker-${index}`,
+          cache_control: { type: 'ephemeral', ttl: '1h' },
+        }],
+      })),
+      system: 'unmarked-system',
+    });
+
+    expect(body.messages.map((message: any) => message.content[0].text)).toEqual([
+      'marker-0', 'marker-1', 'marker-2', 'marker-3',
+    ]);
+    expect(body.messages.flatMap((message: any) => message.content)
+      .filter((block: any) => block.cache_control)).toHaveLength(4);
+    expect(body.messages.every((message: any) =>
+      message.content[0].cache_control?.ttl === undefined)).toBe(true);
+  });
+
   it('strips ttl from message content blocks, keeping the marker', () => {
     const body = buildRequest({
       model: 'us.anthropic.claude-sonnet-4-20250514-v1:0',

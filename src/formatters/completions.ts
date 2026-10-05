@@ -236,7 +236,7 @@ export class CompletionsFormatter implements PrefillFormatter {
 
     // Add context prefix after system prompt (for simulacrum seeding)
     if (contextPrefix) {
-      const assistantPrefix = this.config.nameFormat.replace('{name}', assistantParticipant);
+      const assistantPrefix = this.config.nameFormat.replace('{name}', () => assistantParticipant);
       parts.push(`${assistantPrefix}${contextPrefix}${this.config.eotToken}`);
     }
 
@@ -255,7 +255,7 @@ export class CompletionsFormatter implements PrefillFormatter {
       }
 
       // Format: "Participant: content<eot>"
-      const prefix = this.config.nameFormat.replace('{name}', message.participant);
+      const prefix = this.config.nameFormat.replace('{name}', () => message.participant);
       const eot = this.config.eotToken;
       parts.push(`${prefix}${text}${eot}`);
     }
@@ -266,7 +266,7 @@ export class CompletionsFormatter implements PrefillFormatter {
     }
 
     // Add final assistant prefix (no EOT - model generates this)
-    const assistantPrefix = this.config.nameFormat.replace('{name}', assistantParticipant);
+    const assistantPrefix = this.config.nameFormat.replace('{name}', () => assistantParticipant);
     parts.push(assistantPrefix.trimEnd()); // Remove trailing space for cleaner completion
 
     // Join all parts into single prompt
@@ -370,13 +370,13 @@ export class CompletionsFormatter implements PrefillFormatter {
       if (count >= maxParticipants) break;
 
       // Add both "\n\nName:" and "\nName:" variants
-      const prefix = this.config.nameFormat.replace('{name}', participant).trimEnd();
+      const prefix = this.config.nameFormat.replace('{name}', () => participant).trimEnd();
       stops.push(`\n\n${prefix}`);
       stops.push(`\n${prefix}`);
 
       // Add lowercased variants if casing differs (for models that generate mixed-case names)
       if (this.config.caseInsensitiveStops) {
-        const lower = this.config.nameFormat.replace('{name}', participant.toLowerCase()).trimEnd();
+        const lower = this.config.nameFormat.replace('{name}', () => participant.toLowerCase()).trimEnd();
         if (lower !== prefix) {
           stops.push(`\n\n${lower}`);
           stops.push(`\n${lower}`);

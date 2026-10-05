@@ -112,6 +112,14 @@ export type ToolMode =
 // ============================================================================
 
 export interface NormalizedRequest {
+  /** Cache-layout receipt: the default basis is the post-format/post-hook,
+   * post-clamp ProviderRequest, retaining semantic markers on APIs without
+   * cache_control. Adapters declaring cacheReceiptBasis: 'wire-request' use
+   * their first final onRequest observation instead (Anthropic and Bedrock).
+   * Emitted once per complete attempt or logical streaming round, not again
+   * for internal streaming refusal retries. Observability only; never sent
+   * to providers. A wire-request adapter must report onRequest to emit it. */
+  onCacheWireReceipt?: (receipt: import('../cache-wire-receipt.js').CacheWireReceipt) => void;
   /**
    * Explicitly own the loss of old inline images when the serialized request
    * exceeds the API byte cap: oldest images are replaced with loud
@@ -151,6 +159,10 @@ export interface NormalizedRequest {
    * Set to false to disable cache_control markers in requests.
    */
   promptCaching?: boolean;
+
+  /** Marker ownership policy. `cm-owned` disables every formatter-generated
+   * system/context-prefix marker; only normalized message breakpoints survive. */
+  cacheMarkers?: 'membrane-system' | 'cm-owned';
 
   /**
    * Cache TTL for Anthropic prompt caching.

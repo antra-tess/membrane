@@ -40,13 +40,21 @@
 
 import { createHash } from 'node:crypto';
 
-/** Minimal shape we need back from a keepalive send. */
+/** Vendor usage fields used by keepalive checks and spend observers. */
 export interface KeepaliveUsage {
   // The SDK types these as `number | null`, and null is meaningfully different
   // from 0 here: null means the field was absent (we learned nothing), 0 means
   // the API told us nothing was read. Both are treated as "not a read" below.
   cache_read_input_tokens?: number | null;
   cache_creation_input_tokens?: number | null;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cache_creation?: {
+    ephemeral_5m_input_tokens?: number | null;
+    ephemeral_1h_input_tokens?: number | null;
+  } | null;
+  service_tier?: string | null;
+  inference_geo?: string | null;
 }
 
 export type KeepaliveSend = (
@@ -55,6 +63,25 @@ export type KeepaliveSend = (
 ) => Promise<{ usage?: KeepaliveUsage }>;
 
 export type KeepaliveLane = 'stream' | 'complete';
+
+/** One terminal receipt per KeepaliveSend invocation, not per HTTP attempt.
+ * SDK-internal retries belong to that invocation. A success carries the full
+ * vendor response and its terminal usage, including ineffective cache writes.
+ * Request and response objects are observer-owned copies; recorded request
+ * headers are excluded. */
+export type KeepaliveCall = {
+  key: string;
+  /** The real request's lane whose cache lineage this poke refreshes. */
+  lane: KeepaliveLane;
+  /** Unix epoch milliseconds when this poke attempt began. */
+  startedAt: number;
+  durationMs: number;
+  /** JSON wire payload sent by the poke: max_tokens is 0 and stream is omitted. */
+  request: Record<string, unknown>;
+} & (
+  | { outcome: 'success'; response: Record<string, unknown> & { usage?: KeepaliveUsage } }
+  | { outcome: 'error'; error: unknown }
+);
 
 export type KeepaliveEvent =
   | { type: 'refreshed'; key: string; lane: KeepaliveLane; readTokens: number; idleMs: number }
@@ -101,6 +128,12 @@ export interface CacheKeepaliveConfig {
    */
   maxIneffective?: number;
   onEvent?: (event: KeepaliveEvent) => void;
+  /** Report background calls to the same ledger as foreground inference.
+   * Invoked once on success (including ineffective responses) or failure.
+   * Observer errors are isolated, and returned promises never delay the loop.
+   * Skipped, expired, and disabled lineages do not make calls or receipts.
+   * Poke serialization failures are reported through onEvent before any sender invocation. */
+  onCall?: (call: KeepaliveCall) => void | Promise<void>;
 }
 
 interface Lineage {
@@ -203,9 +236,9 @@ function scanCacheMarkers(wire: Record<string, unknown>): { any: boolean; oneHou
 export function lineageKey(wire: Record<string, unknown>): string {
   const h = createHash('sha256');
   h.update(String(wire.model ?? ''));
-  h.update(' ');
+  h.update('\0');
   h.update(JSON.stringify(wire.system ?? null));
-  h.update(' ');
+  h.update('\0');
   h.update(JSON.stringify(wire.tools ?? null));
   return h.digest('hex').slice(0, 16);
 }
@@ -216,9 +249,8 @@ export class CacheKeepalive {
   private ticking = false;
   private consecutiveErrors = 0;
   private stopped = false;
-  private readonly cfg: Required<Omit<CacheKeepaliveConfig, 'onEvent'>> & {
-    onEvent?: (event: KeepaliveEvent) => void;
-  };
+  private readonly cfg: Required<Omit<CacheKeepaliveConfig, 'onEvent' | 'onCall'>> &
+    Pick<CacheKeepaliveConfig, 'onEvent' | 'onCall'>;
 
   constructor(private readonly send: KeepaliveSend, config: CacheKeepaliveConfig = {}) {
     this.cfg = { ...DEFAULTS, ...config };
@@ -297,14 +329,27 @@ export class CacheKeepalive {
   }
 
   private async refresh(key: string, lin: Lineage): Promise<void> {
-    // Only max_tokens (not part of the cache key) and stream (transport) differ
-    // from the recorded request. Nothing else is touched — see file header.
-    const payload: Record<string, unknown> = { ...lin.wire, max_tokens: 0 };
-    delete payload.stream;
-
-    const idleMs = Date.now() - lin.lastTouchAt;
+    const startedAt = Date.now();
+    const idleMs = startedAt - lin.lastTouchAt;
+    let payload: Record<string, unknown> | undefined;
     try {
+      // Materialize the same JSON shape HTTP would send, once. Callable fields
+      // serialize away, and toJSON values are evaluated before both sending and
+      // observation. Re-serializing caller objects for the receipt could differ
+      // from the sent body; structuredClone on those objects can fail outright.
+      const wire: unknown = JSON.parse(JSON.stringify(lin.wire));
+      if (!wire || typeof wire !== 'object' || Array.isArray(wire)) {
+        throw new Error('Keepalive request must serialize to a JSON object');
+      }
+      // Only max_tokens (not part of the cache key) and stream (transport)
+      // differ from the recorded wire request — see file header.
+      payload = { ...wire as Record<string, unknown>, max_tokens: 0 };
+      delete payload.stream;
       const res = await this.send(payload, lin.headers);
+      this.reportCall({
+        key, lane: lin.lane, startedAt, durationMs: Date.now() - startedAt,
+        request: payload, outcome: 'success', response: { ...res },
+      });
       this.consecutiveErrors = 0;
 
       const read = res.usage?.cache_read_input_tokens ?? 0;
@@ -334,8 +379,14 @@ export class CacheKeepalive {
       lin.lastTouchAt = Date.now();
       this.emit({ type: 'refreshed', key, lane: lin.lane, readTokens: read, idleMs });
     } catch (err) {
-      this.consecutiveErrors += 1;
       const message = err instanceof Error ? err.message : String(err);
+      if (payload) {
+        this.reportCall({
+          key, lane: lin.lane, startedAt, durationMs: Date.now() - startedAt,
+          request: payload, outcome: 'error', error: err,
+        });
+      }
+      this.consecutiveErrors += 1;
       this.emit({ type: 'error', key, error: message, consecutive: this.consecutiveErrors });
 
       // Back this lineage off immediately rather than retrying on the next tick.
@@ -352,6 +403,22 @@ export class CacheKeepalive {
           reason: `${this.consecutiveErrors} consecutive keepalive failures; last: ${message}`,
         });
       }
+    }
+  }
+
+  private reportCall(call: KeepaliveCall): void {
+    if (!this.cfg.onCall) return;
+    try {
+      // A logging callback must not be able to change the cached prefix or
+      // usage that the effectiveness check below will read.
+      const receipt: KeepaliveCall = call.outcome === 'success'
+        ? { ...call, request: structuredClone(call.request), response: structuredClone(call.response) }
+        : { ...call, request: structuredClone(call.request) };
+      void Promise.resolve(this.cfg.onCall(receipt)).catch(() => {
+        // Observers cannot turn a completed call into a keepalive failure.
+      });
+    } catch {
+      // Match onEvent isolation, including failures while copying the payload.
     }
   }
 
