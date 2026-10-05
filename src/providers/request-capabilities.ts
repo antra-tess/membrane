@@ -36,19 +36,23 @@ export function assertPromptToolSupport(
   request: ProviderRequest,
   options: ProviderRequestOptions | undefined,
   provider: string,
-  hasExplicitXmlPrompt = false,
+  carrier: { kind: 'xml-prompt'; prompt: unknown; extraTools: unknown } | { kind: 'none'; extraTools: unknown },
 ): void {
   const context = options?.requestContext;
-  const native = Array.isArray(request.tools) && request.tools.length > 0;
+  const tools = request.tools;
+  const native = (Array.isArray(tools) && tools.length > 0)
+    || (Array.isArray(carrier.extraTools) && carrier.extraTools.length > 0);
+  const hasExplicitXmlPrompt = carrier.kind === 'xml-prompt' && typeof carrier.prompt === 'string';
   const discarded = context?.toolsDeclared
     && !(context.toolMode === 'xml' && hasExplicitXmlPrompt);
   if (!native && !discarded) return;
   const source = context ? 'Formatter "' + context.formatterName + '"' : 'Direct provider input';
+  const remedy = carrier.kind === 'xml-prompt'
+    ? 'Use an XML-capable formatter with toolMode: "xml" and an explicit XML prompt, a tool-capable transport, or omit tool definitions.'
+    : 'Use a tool-capable transport or omit tool definitions; this transport does not support tool calling.';
   throw unsupportedError(
     source + ' declares ' + (native ? 'native' : context?.toolMode ?? 'native')
-    + ' tools for the ' + provider + ' text-prompt transport. Native tool fields are '
-    + 'unsupported; XML tool requests require an explicit prompt with an XML-capable '
-    + 'formatter. Use that carrier, a tool-capable transport, or omit tool definitions.',
+    + ' tools unsupported by the selected ' + provider + ' prompt transport. ' + remedy,
     request,
   );
 }

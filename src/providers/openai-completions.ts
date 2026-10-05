@@ -440,9 +440,13 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
     let prompt: string;
     let stopSequences: string[];
 
-    const explicitPrompt = request.extra?.prompt;
-    const normalizedMessages = request.extra?.normalizedMessages;
-    assertPromptToolSupport(request, options, this.name, typeof explicitPrompt === 'string');
+    // Capture the exact excluded extra fields once, retaining ordinary getter
+    // access and the rest-spread semantics of the native overrides below.
+    const extra = request.extra ?? {};
+    const { messages: _messages, tools: extraTools, normalizedMessages, prompt: explicitPrompt, ...rest } = extra;
+    const hasNormalizedMessages = normalizedMessages !== undefined || 'normalizedMessages' in Object(extra);
+    const promptMessages = hasNormalizedMessages ? normalizedMessages : options?.promptMessages;
+    assertPromptToolSupport(request, options, this.name, { kind: 'xml-prompt', prompt: explicitPrompt, extraTools });
 
     if (typeof explicitPrompt === 'string') {
       // Continuation path: prompt is already serialized, skip re-serialization.
@@ -454,7 +458,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
       ];
     } else {
       // Normal path: serialize messages into prompt format
-      const messages = (normalizedMessages as any[]) || (request.messages as any[]);
+      const messages = (promptMessages as any[]) || (request.messages as any[]);
       const result = this.serializeToPrompt(messages);
       prompt = result.prompt;
       stopSequences = [
@@ -496,10 +500,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
     }
 
     // Apply extra params (but not messages/tools/normalizedMessages/prompt which don't apply)
-    if (request.extra) {
-      const { messages, tools, normalizedMessages, prompt, ...rest } = request.extra as any;
-      Object.assign(params, rest);
-    }
+    Object.assign(params, rest);
 
     return params;
   }

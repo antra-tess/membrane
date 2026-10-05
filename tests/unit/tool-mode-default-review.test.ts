@@ -1,3 +1,4 @@
+import { OpenAIResponsesAdapter } from '../../src/providers/openai-responses.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { AnthropicXmlFormatter } from '../../src/formatters/anthropic-xml.js';
@@ -383,5 +384,104 @@ describe('normalized request accessor preservation', () => {
     expect(adapter.getLastRequest()?.stopSequences).toContain('PRIVATE_STOP');
     expect(JSON.stringify(adapter.getLastRequest()?.messages)).toContain('private prefix');
     expect(input.messages).toEqual(req().messages);
+  });
+});
+
+describe('native prompt metadata stays outside semantic receipts', () => {
+  for (const kind of ['bigint', 'cyclic']) {
+    it.each(['stream', 'yielding'])(kind + ' message metadata survives %s with a receipt consumer', async path => {
+      const { fetch } = http();
+      const metadata: any = kind === 'bigint' ? { opaqueId: 1n } : {};
+      if (kind === 'cyclic') metadata.self = metadata;
+      const input = { ...req(true, 'gpt-4o'), toolMode: 'native' };
+      input.messages[0].metadata = metadata;
+      const receipts: unknown[] = [];
+      input.onCacheWireReceipt = (receipt: unknown) => receipts.push(receipt);
+      await run(path, new Membrane(new OpenAIAdapter({ apiKey: 'test' })), input);
+      expect(fetch).toHaveBeenCalledOnce();
+      expect(receipts).toHaveLength(1);
+      expect(input.messages[0].metadata).toBe(metadata);
+    });
+  }
+  it.each(['stream', 'yielding'])('%s prompt serialization still receives original participant messages', async path => {
+    const { bodies } = http();
+    await run(path, new Membrane(new OpenAICompletionsAdapter({ baseURL: 'https://example.test', apiKey: 'test' })), req());
+    expect(bodies[0].prompt).toContain('User: hello');
+    expect(bodies[0].prompt).not.toContain('User: User:');
+  });
+});
+
+describe('prompt extra-tools and remedies', () => {
+  it.each(['complete', 'stream'])('direct %s refuses extra.tools and reads its getter once', async method => {
+    const { fetch } = http();
+    let reads = 0;
+    const request: any = { model: 'test', messages: [{ role: 'user', content: 'hello' }],
+      extra: { get tools() { reads++; return [tool]; } } };
+    const adapter = new OpenAICompletionsAdapter({ baseURL: 'https://example.test', apiKey: 'test' });
+    const operation = method === 'complete' ? adapter.complete(request) : adapter.stream(request, { onChunk() {} });
+    await expect(operation).rejects.toMatchObject({ type: 'unsupported', retryable: false });
+    expect(reads).toBe(1);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it.each(['complete', 'stream', 'yielding'])('%s refuses providerParams.tools instead of silently discarding them', async path => {
+    const { fetch } = http();
+    const input = { ...req(), providerParams: { tools: [tool] } };
+    await expect(run(path, new Membrane(new OpenAICompletionsAdapter({ baseURL: 'https://example.test', apiKey: 'test' })), input))
+      .rejects.toMatchObject({ type: 'unsupported', retryable: false });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it('the Images adapter gives a usable remedy even when XML/prompt is already supplied', async () => {
+    const { fetch } = http();
+    const error = await new Membrane(new OpenAIResponsesAdapter({ apiKey: 'test' })).complete({
+      ...req(true, 'gpt-image-1'), toolMode: 'xml', providerParams: { prompt: '<tools>lookup</tools> User: hello' },
+    }).catch(error => error);
+    expect(error).toMatchObject({ type: 'unsupported', retryable: false });
+    expect(error.message).toContain('tool-capable transport');
+    expect(error.message).not.toMatch(/explicit.*prompt/i);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('prompt-source option contract', () => {
+  it.each([
+    ['sidecar', {}, 'from option'],
+    ['explicit normalized', { normalizedMessages: [{ participant: 'User', content: [text('from extra')] }] }, 'from extra'],
+    ['explicit undefined', { normalizedMessages: undefined }, 'from provider'],
+    ['explicit null', { normalizedMessages: null }, 'from provider'],
+    ['explicit prompt', { prompt: 'verbatim prompt', normalizedMessages: [{ participant: 'User', content: [text('from extra')] }] }, 'verbatim prompt'],
+  ])('%s retains precedence over other prompt sources', async (_name, extra, expected) => {
+    const { bodies } = http();
+    await new OpenAICompletionsAdapter({ baseURL: 'https://example.test', apiKey: 'test' }).complete({
+      model: 'test', messages: [{ role: 'user', content: 'from provider' }], extra: extra as any,
+    }, { promptMessages: [{ participant: 'User', content: [text('from option')] }] });
+    expect(bodies[0].prompt).toContain(expected);
+    if (_name === 'explicit prompt') expect(bodies[0].prompt).toBe(expected);
+  });
+  it.each(['stream', 'yielding'])('%s forwards the current loop messages outside its request', async path => {
+    const observed: Array<{ length: number; hasInternalMessages: boolean }> = [];
+    const adapter: any = {
+      name: 'option-observer', supportsModel: () => true,
+      async stream(request: any, _callbacks: any, options: any) {
+        observed.push({ length: options.promptMessages?.length ?? 0, hasInternalMessages: 'normalizedMessages' in (request.extra ?? {}) });
+        options.onRequest?.(request);
+        const first = observed.length === 1;
+        return { content: first ? [{ type: 'tool_use', id: 'call', name: 'lookup', input: {} }] : [text('done')],
+          stopReason: first ? 'tool_use' : 'end_turn', usage: { inputTokens: 1, outputTokens: 1 }, model: request.model, rawRequest: request, raw: {} };
+      },
+    };
+    const membrane = new Membrane(adapter);
+    const input = req(true, 'gpt-4o');
+    const results = (calls: any[]) => calls.map(call => ({ toolUseId: call.id, content: 'ok' }));
+    if (path === 'stream') await membrane.stream(input, { onToolCalls: async calls => results(calls) });
+    else {
+      const stream = membrane.streamYielding(input);
+      for await (const event of stream) {
+        if (event.type === 'tool-calls') stream.provideToolResults(results(event.calls));
+        if (event.type === 'error') throw event.error;
+      }
+    }
+    expect(observed).toEqual([{ length: 1, hasInternalMessages: false }, { length: 3, hasInternalMessages: false }]);
+    expect(input.messages).toHaveLength(1);
   });
 });

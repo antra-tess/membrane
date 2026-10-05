@@ -1327,6 +1327,7 @@ export class Membrane {
             normalizedRequest: request,
             formatterName: activeFormatter.name,
             requiresAssistantPrefill: false,
+            promptMessages: messages,
             onRequest: (req) => {
               rawRequest = req;
               onRequest?.(req);
@@ -1984,13 +1985,14 @@ export class Membrane {
     request: NormalizedRequest,
     activeFormatter: PrefillFormatter = this.formatter,
     toolMode: 'xml' | 'native' = this.resolveToolMode(request, activeFormatter),
-    messages: NormalizedRequest['messages'] = request.messages,
+    nativeLoopMessages?: NormalizedRequest['messages'],
   ): {
     providerRequest: any;
     prefillResult: BuildResult;
     prefixRewritten: boolean;
     toolMode: 'xml' | 'native';
   } {
+    const messages = nativeLoopMessages ?? request.messages;
     // Extract user-provided stop sequences
     const additionalStopSequences = Array.isArray(request.stopSequences)
       ? request.stopSequences
@@ -2047,10 +2049,12 @@ export class Membrane {
       system: ownSystemBlocks(buildResult.systemContent),
       stopSequences: buildResult.stopSequences,
       tools: buildResult.nativeTools,
-      extra: {
-        ...request.providerParams,
-        normalizedMessages: messages,
-      },
+      // The legacy native loop did not put opaque normalized metadata into
+      // its semantic request. Prompt serializers receive those messages in
+      // options instead. Complete/XML/Responses keep their existing contract.
+      extra: nativeLoopMessages && activeFormatter.name !== 'openai-responses'
+        ? request.providerParams
+        : { ...request.providerParams, normalizedMessages: messages },
     };
 
     // Prefill-style builds (XML formatter) use the thinking config for the
@@ -2092,6 +2096,8 @@ export class Membrane {
       normalizedRequest: NormalizedRequest;
       formatterName: string;
       requiresAssistantPrefill: boolean;
+      /** Current participant messages for prompt transports, outside receipts. */
+      promptMessages?: NormalizedRequest['messages'];
       /**
        * Re-issue this attempt when the provider ends it with
        * `stop_reason: 'refusal'` (see RetryingEvent). Default 0 = off, so
@@ -3661,6 +3667,7 @@ export class Membrane {
             normalizedRequest: request,
             formatterName: activeFormatter.name,
             requiresAssistantPrefill: false,
+            promptMessages: messages,
             onRequest: (req: unknown) => { rawRequest = req; },
             // Telemetry reports what this request actually SHIPPED with —
             // builder breakpoints, stale passthrough, fallback, float, plus

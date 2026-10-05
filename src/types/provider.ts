@@ -295,6 +295,11 @@ export interface ProviderRequestOptions {
   /** Build/protocol facts for validation against the adapter's final model/body.
    * Not provider JSON. Decorators forward this context with the other options. */
   requestContext?: ProviderRequestContext;
+  /** Current normalized participant messages for prompt serialization. Native
+   * loops pass them outside ProviderRequest so opaque message metadata is not
+   * serialized by semantic receipts. Explicit extra.prompt/normalizedMessages
+   * retain precedence in OpenAICompletionsAdapter. */
+  promptMessages?: import('./message.js').NormalizedMessage[];
   signal?: AbortSignal;
   timeoutMs?: number;
   /** Abort if no SSE event arrives within this many ms (default: 120000) */

@@ -232,7 +232,7 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
     request: ProviderRequest,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    assertPromptToolSupport(request, options, this.name);
+    assertPromptToolSupport(request, options, this.name, { kind: 'none', extraTools: request.extra?.tools });
     const allImages = this.allowImageEditing ? this.collectImages(request) : [];
     const selected = this.selectImages(allImages);
     const inputImages = selected.map(ref => ref.dataUrl);

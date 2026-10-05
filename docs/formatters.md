@@ -75,7 +75,7 @@ const formatter = new CompletionsFormatter({
 });
 ```
 
-A prompt string may seed a parser through `assistantPrefill` without being an assistant-role Messages turn. The actual adapter determines that distinction. `OpenAICompletionsAdapter`, including a renamed instance, uses a prompt endpoint and remains exempt from the Messages-prefill rule. It rejects native `request.tools` that it would discard. For XML tools through this adapter, use an XML-capable formatter and an explicit `providerParams.prompt` carrying the tool description; that caller-owned prompt is preserved. The normal normalized-message serialization does not carry the formatter's injected XML definitions.
+A prompt string may seed a parser through `assistantPrefill` without being an assistant-role Messages turn. The actual adapter determines that distinction. `OpenAICompletionsAdapter`, including a renamed instance, uses a prompt endpoint and remains exempt from the Messages-prefill rule. It rejects nonempty native tool lists in `request.tools` or `extra.tools` that it would discard. For XML tools through this adapter, use an XML-capable formatter and an explicit `providerParams.prompt` carrying the tool description; that caller-owned prompt is preserved. The normal normalized-message serialization does not carry the formatter's injected XML definitions.
 
 ### OpenAIResponsesFormatter
 
@@ -91,7 +91,7 @@ The Anthropic, Bedrock, OpenRouter, OpenAI Chat, and OpenAI-compatible adapters 
 
 XML streaming runners also declare that their continuation protocol needs assistant prefill. A message adapter can therefore reject an incompatible model before the first provider/tool round even if a custom formatter's first body is user-ended. Each later send is checked again, including plain and image continuations after a model/body override. `complete()` does not declare a future-loop requirement because it does not execute a tool loop.
 
-`ProviderRequestOptions.requestContext` carries `formatterName`, resolved `toolMode`, `toolsDeclared`, and `requiresAssistantPrefill` outside provider JSON and cache receipts. Adapter decorators forward options unchanged. Third-party adapters receive this context and own validation of their final representation; the transport checks described here cover the listed built-ins. A formatter name alone cannot establish transport semantics.
+`ProviderRequestOptions.requestContext` carries `formatterName`, resolved `toolMode`, `toolsDeclared`, and `requiresAssistantPrefill` outside provider JSON and cache receipts. Adapter decorators forward options unchanged, including `promptMessages` when supplied. `OpenAICompletionsAdapter` gives explicit `extra.prompt` and `extra.normalizedMessages` priority over that optional current-loop input. Third-party adapters receive this context and own validation of their final representation; the transport checks described here cover the listed built-ins. A formatter name alone cannot establish transport semantics.
 
 ## Prompt caching
 
@@ -126,7 +126,7 @@ With prompt caching enabled, explicit message breakpoints and context-prefix mar
 
 For `cacheMarkers: 'membrane-system'`, Membrane applies the complete-request clamp after hooks, retaining the deepest permitted markers. For `cacheMarkers: 'cm-owned'`, it rejects an excess budget instead of displacing caller-owned markers. Native streaming still spends only the remaining budget on floating tool-loop markers and withholds them across prefix-rewriting normalization repairs.
 
-Standalone `NativeFormatter.buildMessages()` checks its complete built budget by default. `BuildOptions.deferCacheBudgetCheck: true` explicitly delegates that check to a later complete-request boundary, as Membrane does; CM-owned builds still assert their budget. Thus native Membrane calls share the final clamp policy while standalone callers keep a usable fail-loud boundary. The shared native build also changes native-stream semantic cache-receipt hashes because its provider-request representation includes the normalized-message metadata used by prompt transports; this metadata is not sent as provider JSON.
+Standalone `NativeFormatter.buildMessages()` checks its complete built budget by default. `BuildOptions.deferCacheBudgetCheck: true` explicitly delegates that check to a later complete-request boundary, as Membrane does; CM-owned builds still assert their budget. Thus native Membrane calls share the final clamp policy while standalone callers keep a usable fail-loud boundary. Native stream and yielding paths that formerly used the legacy builder keep automatic prompt-serialization input in `ProviderRequestOptions.promptMessages`, outside the request and its receipt hash. This preserves opaque normalized-message metadata. The existing complete/XML and configured Responses representations retain their earlier `extra.normalizedMessages` contract.
 
 ## Selecting a formatter
 
