@@ -145,7 +145,7 @@ export type NormalizeEvent =
    *
    * `reason` names which duplicate shape the producer emitted, since the two
    * point at different producer bugs:
-   *   - `'cycle_closed'`      → the copy arrived in some LATER envelope and
+   *   - `'cycle_closed'`      → the copy is outside its paired envelope and
    *                             its own cycle already holds a result, so it
    *                             had nowhere to be relocated to.
    *   - `'duplicate_in_cycle'`→ the copy arrived inside its own cycle's user
