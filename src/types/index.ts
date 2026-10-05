@@ -157,6 +157,7 @@ export type {
 
 export {
   MembraneError,
+  MembraneNotReadyError,
   serializeError,
   rateLimitError,
   contextLengthError,

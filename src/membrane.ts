@@ -44,6 +44,7 @@ import {
 import {
   DEFAULT_RETRY_CONFIG,
   MembraneError,
+  MembraneNotReadyError,
   classifyError,
   isOverloadedError,
   isTimeoutAbortError,
@@ -335,6 +336,9 @@ export class Membrane {
         return response;
 
       } catch (error) {
+        // A not-ready build never reached the provider. Preserve its public
+        // wait-and-rebuild subtype instead of wrapping it as a transport error.
+        if (error instanceof MembraneNotReadyError) throw error;
         const errorInfo = classifyError(error);
         errorInfo.rawRequest = rawRequest;
 
@@ -1696,9 +1700,8 @@ export class Membrane {
     // streaming-native path (runNativeToolsYielding) used to bypass this
     // and exposed every agent inference to the 400 family.
     //
-    // Synthesized [pending] tool_results land in fresh user envelopes;
-    // the normalizer also suppresses cache_control on those envelopes
-    // so an in-flight gap can't poison the prompt cache. Merging after
+    // Synthesized [pending] tool_results land in fresh user envelopes.
+    // Caller markers are retained; the builder owns their budget. Merging after
     // normalize collapses any same-role neighbours the upstream may have
     // produced before they reach the API's alternating-role check.
     //
@@ -1710,9 +1713,7 @@ export class Membrane {
     // to catch) — `[pending]` is exactly the right synthesis.
     // A synthesized [pending] tool_result's bytes are rewritten when the
     // real result lands — the floating-marker block below must not cache
-    // past one. `synthetic_pending_result` (not the downstream
-    // cache_suppressed_for_synthetic, which only fires when a marker was
-    // actually stripped) is the root condition.
+    // past one. `synthetic_pending_result` is the root condition.
     // Every repair that REWRITES prefix bytes stands the float down, not just
     // the synthetic [pending] result: a textified orphan tool_result is
     // rewritten the same way when its real pairing arrives, so caching at or
@@ -1729,8 +1730,8 @@ export class Membrane {
 
     // ONE recount of the constructed wire artifacts, taken BEFORE the
     // tools/system fallback decision so the fallback and the float share a
-    // single truth. Counted post-normalize, so phase-5.5 cache suppression is
-    // already reflected. `request.system` is the caller's own system content:
+    // single truth, counted post-normalize. `request.system` is the caller's
+    // own system content:
     // it explicitly accepts pre-marked blocks, and those are real wire markers
     // that no running tally ever saw (three of them plus both fallbacks = 5 on
     // the wire = a 400 on every inference of that config).
@@ -2235,6 +2236,17 @@ export class Membrane {
       contextPrefix: request.contextPrefix,
       prefillUserMessage: request.prefillUserMessage,
     });
+
+    // Honor readiness whenever this path invokes a formatter: complete(),
+    // XML streaming/yielding, and Responses-native builds. NativeFormatter
+    // derives it from pendingToolCallIds supplied by a custom build; the
+    // caller must wait for those results and rebuild before sending.
+    // Anthropic-native tool streaming uses buildNativeToolRequest's own
+    // normalizer after tool results have arrived, rather than this formatter
+    // build. It intentionally supplies no in-flight set.
+    if (buildResult.ready === false) {
+      throw new MembraneNotReadyError(activeFormatter.name);
+    }
 
     // Byte-wall policy point (2026-07-12): transformRequest serves BOTH
     // complete() and the streaming path through EVERY adapter. Oversize
@@ -2973,6 +2985,8 @@ export class Membrane {
   }
 
   private attachRawRequest(error: unknown, rawRequest: unknown): Error {
+    // Responses-native streaming also builds through transformRequest.
+    if (error instanceof MembraneNotReadyError) return error;
     const errorInfo = classifyError(error);
     errorInfo.rawRequest = rawRequest;
     return new MembraneError(errorInfo);

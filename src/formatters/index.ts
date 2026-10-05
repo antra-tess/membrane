@@ -24,6 +24,7 @@ export { CompletionsFormatter, type CompletionsFormatterConfig } from './complet
 
 export {
   normalizeToolPairs,
+  assertToolPairsValid,
   MembraneNormalizerError,
   type NormalizeOptions,
   type NormalizeResult,
