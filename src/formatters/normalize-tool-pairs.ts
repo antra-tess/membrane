@@ -41,9 +41,9 @@
  * non-string content), reclassify blocks by required role, reflow into
  * role-correct envelopes, hoist matching tool_results across the
  * assistant→user boundary, sweep the converse direction so every
- * tool_result sits with its own tool_use, evict interlopers wedged
- * between use and result, synthesize `[pending]` results for orphans (or
- * signal not-ready when the id is in the caller-supplied pending set),
+ * tool_result sits with its own tool_use, synthesize `[pending]` results
+ * for orphans (or signal not-ready for caller-declared pending ids), put
+ * all results before non-results while preserving order within each group,
  * drop empty envelopes, prepend a synthetic `[continuing]` user envelope
  * when the first envelope ended up assistant-role, validate both
  * directions of the pairing rule and its one-to-one arity.
@@ -198,21 +198,23 @@ export function normalizeToolPairs(
   envelopes = repairStrayResults(envelopes, onEvent);
 
   // ---------------------------------------------------------------------
-  // Phase 4: evict interlopers wedged between a tool_use and its result
-  // ---------------------------------------------------------------------
-  envelopes = evictInterlopers(envelopes, onEvent);
-
-  // ---------------------------------------------------------------------
-  // Phase 5: resolve orphans
+  // Phase 4: resolve orphans. Textification can create new non-result
+  // blocks before or between results, so ordering repair must follow it.
   // ---------------------------------------------------------------------
   const orphanRes = resolveOrphans(envelopes, pending, onEvent);
   envelopes = orphanRes.envelopes;
   const ready = orphanRes.ready;
 
   // ---------------------------------------------------------------------
-  // Phase 6: drop empty envelopes (can arise from phase 4 dropping or
-  // phase 3 hoisting). We deliberately do NOT merge consecutive
-  // same-role envelopes here — that's the formatter's job.
+  // Phase 5: put every tool_result before all other user-envelope blocks.
+  // This includes text just created by orphan/duplicate recovery.
+  // ---------------------------------------------------------------------
+  envelopes = evictInterlopers(envelopes, onEvent);
+
+  // ---------------------------------------------------------------------
+  // Phase 6: drop empty envelopes left by hoisting or relocation.
+  // We deliberately do NOT merge consecutive same-role envelopes here —
+  // that's the formatter's job.
   // ---------------------------------------------------------------------
   envelopes = envelopes.filter((e) => e.content.length > 0);
 
@@ -259,7 +261,7 @@ export function normalizeToolPairs(
   // ---------------------------------------------------------------------
   // Phase 8: validate. When `ready === false` we intentionally have
   // unmatched tool_uses — but ONLY the ones in `pending` are allowed to
-  // remain unsynthesized. Any other gap is a bug in phase 5 and must
+  // remain unsynthesized. Any other gap is a bug in phase 4 and must
   // throw. The first-message-must-be-user branch should be unreachable
   // after phase 7; it remains as defense-in-depth against a future
   // phase introducing a leading assistant envelope without firing
@@ -274,7 +276,8 @@ export function normalizeToolPairs(
  * Assert that an already-normalized message list satisfies Anthropic's
  * tool-cycle pairing rules: every tool_use paired by a tool_result in the
  * very next user envelope (modulo `pendingToolCallIds`), every tool_result
- * preceded by its own tool_use, and exactly one result per use.
+ * preceded by its own tool_use, and exactly one result per use. All results
+ * must precede text, images, and other blocks in their user envelope.
  *
  * This is phase 8 of {@link normalizeToolPairs}, reachable on its own. The
  * validator's contract has to hold independently of the repair phases that
@@ -580,7 +583,7 @@ function hoistMatchingResults(
           toEnvelope: nextIdx,
         });
       }
-      // If not found downstream, leave it — phase 5 will synthesize.
+      // If not found downstream, leave it — phase 4 will synthesize.
     }
   }
   return envelopes;
@@ -597,11 +600,11 @@ function hoistMatchingResults(
  *      turn (the module's doc names cancellations and stream restarts).
  *
  * A and B are RELOCATED into their own cycle's user envelope, which keeps
- * the real payload as a tool_result and stops phase 5 from synthesizing a
+ * the real payload as a tool_result and stops phase 4 from synthesizing a
  * `[pending]` over a result that actually landed. C cannot be relocated
  * without displacing the real result, so it is textified — content
  * preserved, structure dropped. A result whose id appears nowhere is left
- * alone here; phase 5's orphan pass owns that case.
+ * alone here; phase 4's orphan pass owns that case.
  *
  * Pairing is ONE-TO-ONE, so this scan CONSUMES ids rather than testing
  * membership: the first result carrying an id its envelope actually pairs
@@ -653,7 +656,7 @@ function repairStrayResults(
       }
       const useEnvelope = useEnvelopeOfId.get(id);
       if (useEnvelope === undefined) {
-        // Id appears nowhere — phase 5's orphan textification owns it.
+        // Id appears nowhere — phase 4's orphan textification owns it.
         kept.push(block);
         continue;
       }
@@ -669,7 +672,7 @@ function repairStrayResults(
       if (cycleIsOpen) {
         // At its own call's position, never at the front: unshifting each
         // relocated result reversed a multi-call batch ([ite1, ite2] came
-        // back as [ite2, ite1]), which is the read-order defect phase 5
+        // back as [ite2, ite1]), which is the read-order defect phase 4
         // already fixed for synthetics.
         const cycleUseIds = collectToolUseIds(envelopes[useEnvelope]!);
         cycleEnvelope!.content.splice(
@@ -726,59 +729,30 @@ function evictInterlopers(
   envelopes: Envelope[],
   onEvent: (e: NormalizeEvent) => void,
 ): Envelope[] {
-  // For every assistant envelope ending with a tool_use, the
-  // immediately-following user envelope's tool_results should appear
-  // BEFORE any interloping text/image/etc. — otherwise the agent's
-  // forward timeline reads "tool called, then [unrelated event], then
-  // tool result." Phase 3 already places hoisted results at the front,
-  // but locally-present results may sit after text in the same envelope
-  // (e.g. user sent a chat message and the tool_result is appended
-  // afterward by the producer). We always defer interlopers — never
-  // drop — so that a mid-cycle user event isn't lost to the agent's
-  // long-term memory after the chunk gets summarized. A summarizer LLM
-  // can tolerate slight temporal reordering; it cannot reconstruct a
-  // message that was discarded.
+  // Results must form a prefix, not merely start the envelope. Partition
+  // after every repair that can create text, preserving the relative order
+  // and payloads of both groups. No user content is discarded.
   for (let i = 0; i < envelopes.length; i++) {
     const env = envelopes[i]!;
-    if (env.role !== 'assistant') continue;
-    const useIds = new Set(collectToolUseIds(env));
-    if (useIds.size === 0) continue;
-    const next = envelopes[i + 1];
-    if (!next || next.role !== 'user') continue;
-
-    const matching: ProviderBlock[] = [];
-    const interlopers: ProviderBlock[] = [];
-    const rest: ProviderBlock[] = [];
-
-    let seenMatching = false;
-    for (const block of next.content) {
-      const isResult = block.type === 'tool_result';
-      const resultId = isResult ? getToolUseId(block) : undefined;
-      const isMatching = isResult && typeof resultId === 'string' && useIds.has(resultId);
-
-      if (isMatching) {
-        matching.push(block);
-        seenMatching = true;
-      } else if (!seenMatching && !isResult) {
-        // Block precedes the first matching tool_result. Treat as
-        // interloper only if it would sit between the assistant's
-        // tool_use and its result.
-        interlopers.push(block);
+    if (env.role !== 'user') continue;
+    const results: ProviderBlock[] = [];
+    const other: ProviderBlock[] = [];
+    let deferredCount = 0;
+    for (const block of env.content) {
+      if (block.type === 'tool_result') {
+        results.push(block);
+        // Only non-results before the LAST result are displaced. A suffix
+        // already after all results needs neither repair nor an event.
+        deferredCount = other.length;
       } else {
-        rest.push(block);
+        other.push(block);
       }
     }
-
-    if (interlopers.length === 0) continue;
-
-    for (const block of interlopers) {
-      onEvent({
-        kind: 'interloper_deferred',
-        blockType: block.type,
-        fromEnvelope: i + 1,
-      });
+    if (deferredCount === 0) continue;
+    for (const block of other.slice(0, deferredCount)) {
+      onEvent({ kind: 'interloper_deferred', blockType: block.type, fromEnvelope: i });
     }
-    next.content = [...matching, ...interlopers, ...rest];
+    env.content = [...results, ...other];
   }
   return envelopes;
 }
@@ -885,7 +859,7 @@ function resolveOrphans(
  * Where the result for `useIds[useIdIndex]` belongs in the cycle's user
  * envelope: immediately after the result of the nearest earlier call that
  * already landed, or at the front when no earlier call has one. Every phase
- * that puts a result into a cycle envelope — synthesis (phase 5) and
+ * that puts a result into a cycle envelope — synthesis (phase 4) and
  * relocation (phase 3.5) alike — routes through here, so the envelope's
  * tool_results end up in call order no matter which phase placed them or in
  * what sequence. Anchoring on landed neighbours rather than on a running
@@ -948,7 +922,7 @@ function validate(
   // tool_result in the immediately-following user envelope — except
   // tool_uses whose id is in `pending` (the in-flight set the caller
   // declared off-limits for synthesis). A gap on any other id is a
-  // phase-5 bug and must throw.
+  // phase-4 bug and must throw.
   for (let i = 0; i < envelopes.length; i++) {
     const env = envelopes[i]!;
     if (env.role !== 'assistant') continue;
@@ -969,7 +943,7 @@ function validate(
       throw new MembraneNormalizerError(
         `tool_use id='${useId}' in envelope ${i} has no matching tool_result in envelope ${i + 1}, ` +
           `and the id is not in pendingToolCallIds. This indicates a bug in the normalizer itself — ` +
-          `phase 5 should have synthesized a result for any non-pending unmatched id.`,
+          `phase 4 should have synthesized a result for any non-pending unmatched id.`,
         input.map(cloneMsg),
         envelopes.map(toProviderMessage),
       );
@@ -998,8 +972,20 @@ function validate(
       previous?.role === 'assistant' ? collectToolUseIds(previous) : [],
     );
     const resultsPerId = new Map<string, number>();
+    let seenNonResult = false;
     for (const block of env.content) {
-      if (block.type !== 'tool_result') continue;
+      if (block.type !== 'tool_result') {
+        seenNonResult = true;
+        continue;
+      }
+      if (seenNonResult) {
+        throw new MembraneNormalizerError(
+          `tool_result in envelope ${i} appears after non-result content. ` +
+            `All tool_result blocks must appear before text, images, and other blocks.`,
+          input.map(cloneMsg),
+          envelopes.map(toProviderMessage),
+        );
+      }
       const resultId = getToolUseId(block);
       if (typeof resultId !== 'string' || !availableUseIds.has(resultId)) {
         throw new MembraneNormalizerError(
