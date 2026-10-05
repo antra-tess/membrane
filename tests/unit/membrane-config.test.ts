@@ -252,15 +252,14 @@ describe('Membrane: resolveToolMode', () => {
     expect(lastRequest.tools[0].name).toBe('calculate');
   });
 
-  // NB: complete() never consults resolveToolMode — it always builds through
-  // formatter.buildMessages, and AnthropicXmlFormatter's own constructor-time
-  // `toolMode` (default 'xml') decides there. The native-by-default rule this
-  // wave introduced governs stream()/streamYielding, which do route by mode.
-  it('complete() with the default AnthropicXmlFormatter injects tools as XML', async () => {
+  // Explicit XML is still available; automatic mode now selects native on
+  // complete(), stream(), and yielding requests through one resolution.
+  it('complete() with explicit XML and the default formatter injects XML tools', async () => {
     const adapter = new MockAdapter();
     const membrane = new Membrane(adapter);
 
     const request: NormalizedRequest = {
+      toolMode: 'xml',
       messages: [
         textMessage('User', 'Hello'),
         textMessage('Claude', ''),

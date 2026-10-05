@@ -2,6 +2,8 @@
  * Anthropic provider adapter
  */
 
+import { assertMessagePrefillSupported } from './request-capabilities.js';
+
 import Anthropic, { type ClientOptions } from '@anthropic-ai/sdk';
 import { stripEmptyTextBlocks, stripEmptyTextRequest } from '../utils/empty-text.js';
 import { resolveImageMediaType, isAcceptedImageMediaType, assertWithinByteBudget, shedImagesToFitByteBudget } from '../utils/image-media.js';
@@ -320,6 +322,7 @@ export class AnthropicAdapter implements ProviderAdapter {
   ): Promise<ProviderResponse> {
     const anthropicRequest = this.buildRequest(request);
     const fullRequest = { ...anthropicRequest, stream: false as const };
+    assertMessagePrefillSupported(fullRequest.model, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
 
     const headers = this.betaHeaders(request);
@@ -346,6 +349,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     const anthropicRequest = this.buildRequest(request);
     // Note: stream is implicitly true when using .stream()
     const fullRequest = { ...anthropicRequest, stream: true };
+    assertMessagePrefillSupported(fullRequest.model, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
 
     // Snapshot the primary lane's prefix so it can be held warm across idle

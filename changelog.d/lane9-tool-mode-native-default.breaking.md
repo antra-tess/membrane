@@ -1,22 +1,7 @@
-- **Everyone using `stream()` / `streamYielding()` with tools and no explicit
-  `toolMode`:** the default tool mode is now `native`, not `xml`. XML tools
-  ride in an assistant prefill, and current Anthropic models refuse assistant
-  prefill outright — measured live 2026-08-25, `claude-sonnet-4-6`,
-  `claude-opus-4-6/4-7/4-8`, `claude-sonnet-5` and `claude-fable-5` all answer
-  a prefill-terminated conversation with HTTP 400 `"This model does not
-  support assistant message prefill."` — so the out-of-the-box default aimed
-  the library at a guaranteed 400 on the models most callers reach for.
-  Migration: pass `toolMode: 'xml'` on the request to keep the old path; it
-  still works on prefill-capable models (Claude 4.5 and earlier, including
-  `claude-haiku-4-5`). A formatter that cannot carry native tools at all
-  (`CompletionsFormatter`) still defaults to XML.
-- **Formatter authors:** `PrefillFormatter` gained a required
-  `supportsNativeTools: boolean`. It is what the new default reads, so a
-  custom formatter must declare it — the in-tree formatters set it to `true`
-  except `CompletionsFormatter`, whose text-completion wire shape has no tool
-  channel.
-- An assistant-message prefill aimed at a model that refuses one now
-  fails fast with a typed `MembraneError` (`type: 'unsupported'`) naming the
-  model, the formatter and the remedy, instead of surfacing the raw provider
-  400. The measured model table lives in `src/registry/model-capabilities.ts`,
-  in the same prefix-list shape as the existing `NO_TEMPERATURE_MODELS`.
+- **Default/native Membrane callers:** automatic tool mode selects native when the active formatter supports it across `complete()`, `stream()`, and `streamYielding()`, including tool-free calls. `AnthropicXmlFormatter` in resolved native mode now builds a real native conversation rather than an assistant-prefill transcript with attached tools. Native paths share formatter-backed normalization, media handling, context prefixes, participant labels, custom stops, and provider parameters. The tool loop retains its separate floating-cache placement. **Request bytes and cache prefixes change** for the former default/XML representation and for native paths that previously dropped caller fields. Native-stream semantic cache-receipt hashes also change with the shared provider-request representation, including its internal normalized-message metadata. To keep transcript-prefill behavior, select `toolMode: 'xml'` on a compatible formatter/transport/model. Explicit request mode takes precedence over the active formatter's explicitly configured mode, then its declared capabilities.
+- **Formatter authors:** declare both required booleans `supportsNativeTools` and `supportsXmlTools`. Missing JavaScript declarations now fail explicitly. False native support does not imply XML support; a tool-bearing request using an unsupported selected carrier fails before HTTP instead of silently losing tools. `CompletionsFormatter` supports neither tool carrier. This supersedes the unmerged PR's `buildsAssistantMessagePrefill` flag: parser prefill, a manufactured assistant prefix, and actual transport prefill are different facts.
+- **Message-adapter callers and decorators:** built-in message transports check the final converted model/body, including post-hook/native overrides, against the assistant-prefill capability table. Known-incompatible tails fail with non-retryable `unsupported`, naming the selected formatter when called through Membrane. XML streaming runners also declare their future continuation requirement, so rejection can precede the first tool round; plain and image continuations are checked again. Native mode preserves caller-authored assistant-ended history rather than inventing a user turn. `ProviderRequestOptions.requestContext` carries the selected carrier and protocol facts outside provider JSON/receipts; decorators must forward options. Actual prompt transports, including renamed `OpenAICompletionsAdapter` instances, remain exempt from the Messages-prefill rule. Native declarations that a prompt adapter would discard are rejected; caller-owned XML `providerParams.prompt` content remains usable with an XML-capable formatter.
+- **Native cache-budget callers:** Membrane's shared native build delegates membrane-owned budgets to its existing final post-hook clamp; CM-owned markers remain fail-loud. This changes `NativeFormatter`/`complete()`'s earlier message-only over-budget refusal into the same final policy used by native streaming. Standalone `NativeFormatter.buildMessages()` checks the complete messages/system/tools budget by default. Only callers owning a later complete-request check should set `BuildOptions.deferCacheBudgetCheck: true`; it never disables CM-owned assertions.
+- The prefill table recognizes dotted OpenRouter versions, `bedrock:` aliases, dated/profile/ARN IDs, and Vertex suffixes. The original August measurements and the maintainer's September re-measurement remain attributed to their sources; Opus 5 is now correctly labelled measured, while Mythos entries remain family inferences. This correction's transport tests are mocked.
+
+- Native tool calls restore names against the declared definitions instead of treating every double underscore as a colon. This preserves literal double-underscore names in complete, stream, and yielding calls. NativeFormatter rejects definitions whose encoded names collide before dispatch.

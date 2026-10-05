@@ -102,6 +102,7 @@ export type {
   ProviderAdapter,
   ProviderRequest,
   ProviderRequestOptions,
+  ProviderRequestContext,
   ProviderResponse,
   StreamCallbacks,
   UsageCacheConvention,

@@ -5,8 +5,8 @@
  * (`NO_TEMPERATURE_MODELS` in `providers/anthropic.ts` and
  * `providers/openai.ts`): a prefix table plus a predicate, prefix-matched so
  * dated snapshots are covered, and kept current by hand as models launch.
- * This one lives in the registry rather than in an adapter because request
- * shaping in `Membrane` consults it before any adapter is involved.
+ * Message adapters consult this shared table against their final built model
+ * and body. Formatter/parser prefill on a text-prompt transport is separate.
  */
 
 /**
@@ -25,14 +25,14 @@
  *     also accepted prefill combined with `thinking.type: 'enabled'` (200),
  *     so the prefill/thinking incompatibility is per-model too, not API law.
  *
- * `claude-opus-5` and `claude-mythos-*` were not reachable on the probe key
- * (404 model not found) and are listed by family with the measured 5-series
- * members. If one of them turns out to accept prefill, delete its prefix —
- * a wrong entry here costs a capable path, not correctness.
+ * The maintainer independently re-measured refusal on 2026-09-14 for
+ * claude-opus-5 and claude-fable-5-1, in addition to the 4.6/4.8 and sonnet-5
+ * cases. Mythos entries remain family-analogy entries, not measurements here;
+ * an incorrect refusal entry would reject a working request.
  *
  * Older Claude (4.5 and earlier, including 3.x) accepts prefill and must NOT
  * be listed. Nothing outside Anthropic belongs here: the OpenAI, Gemini and
- * Bedrock surfaces have their own prefill stories, and an unlisted model is
+ * text-completion surfaces have their own prefill stories, and an unlisted model is
  * treated as capable.
  */
 const NO_ASSISTANT_PREFILL_MODELS = [
@@ -50,11 +50,12 @@ const NO_ASSISTANT_PREFILL_MODELS = [
 /**
  * Strip the routing prefixes that gateways bolt onto the vendor's own model
  * id, so one prefix table covers direct, OpenRouter and Bedrock spellings:
- * `anthropic/claude-sonnet-4-6` and `us.anthropic.claude-sonnet-4-6-v1:0`
- * both reduce to `claude-sonnet-4-6…`.
+ * `bedrock:claude-sonnet-4-6`, `anthropic/claude-sonnet-4.6`, and
+ * `us.anthropic.claude-sonnet-4-6-v1:0` share the same capability lookup.
+ * Dotted version components are canonicalized by the predicate below.
  */
 function stripRoutingPrefix(model: string): string {
-  const afterSlash = model.slice(model.lastIndexOf('/') + 1);
+  const afterSlash = model.slice(model.lastIndexOf('/') + 1).replace(/^bedrock:/, '');
   const vendorMarker = afterSlash.lastIndexOf('anthropic.');
   return vendorMarker === -1
     ? afterSlash
@@ -69,6 +70,6 @@ function stripRoutingPrefix(model: string): string {
  * false positive degrades to the raw provider 400 we had before.
  */
 export function supportsAssistantPrefill(model: string): boolean {
-  const id = stripRoutingPrefix(model);
+  const id = stripRoutingPrefix(model).replace(/(\d)\.(\d)/g, '$1-$2');
   return !NO_ASSISTANT_PREFILL_MODELS.some(prefix => id.startsWith(prefix));
 }

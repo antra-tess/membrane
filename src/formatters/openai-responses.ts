@@ -78,8 +78,7 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
   readonly name = 'openai-responses';
   readonly usesPrefill = false;
   readonly supportsNativeTools = true;
-  /** Responses-API item array, not an Anthropic Messages conversation. */
-  readonly buildsAssistantMessagePrefill = false;
+  readonly supportsXmlTools = false;
 
   buildMessages(messages: NormalizedMessage[], options: BuildOptions): BuildResult {
     const items: NativeItem[] = [];

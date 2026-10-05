@@ -44,6 +44,8 @@
  * - Support `size`, `quality`, `n`, `background`, `output_format`
  */
 
+import { assertPromptToolSupport } from './request-capabilities.js';
+
 import { resolveImageMediaType } from '../utils/image-media.js';
 import type {
   ProviderAdapter,
@@ -230,6 +232,7 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
     request: ProviderRequest,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
+    assertPromptToolSupport(request, options, this.name);
     const allImages = this.allowImageEditing ? this.collectImages(request) : [];
     const selected = this.selectImages(allImages);
     const inputImages = selected.map(ref => ref.dataUrl);

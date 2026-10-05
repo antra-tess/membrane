@@ -283,7 +283,18 @@ export interface ProviderRequest {
   extra?: Record<string, unknown>;
 }
 
+export interface ProviderRequestContext {
+  formatterName: string;
+  toolMode: 'native' | 'xml';
+  toolsDeclared: boolean;
+  /** An XML streaming runner may manufacture prefill on a later continuation. */
+  requiresAssistantPrefill: boolean;
+}
+
 export interface ProviderRequestOptions {
+  /** Build/protocol facts for validation against the adapter's final model/body.
+   * Not provider JSON. Decorators forward this context with the other options. */
+  requestContext?: ProviderRequestContext;
   signal?: AbortSignal;
   timeoutMs?: number;
   /** Abort if no SSE event arrives within this many ms (default: 120000) */

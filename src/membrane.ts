@@ -4,6 +4,8 @@
  * A selective boundary that transforms what passes through.
  */
 
+import { restoreToolName } from './utils/tool-names.js';
+
 import type {
   NormalizedRequest,
   NormalizedResponse,
@@ -92,7 +94,6 @@ import {
   shedImagesToFitByteBudget, assertWithinByteBudget,
 } from './utils/image-media.js';
 import { getDefaultPricing } from './registry/default-pricing.js';
-import { supportsAssistantPrefill } from './registry/model-capabilities.js';
 
 // ============================================================================
 // Membrane Class
@@ -244,7 +245,7 @@ export class Membrane {
       attempts++;
 
       try {
-        const { providerRequest, prefillResult } = this.transformRequest(request, activeFormatter);
+        const { providerRequest, prefillResult, toolMode } = this.transformRequest(request, activeFormatter);
 
         // Route through the single canonical hook helper so any future
         // change to hook semantics (logging, retry interaction, error
@@ -266,6 +267,12 @@ export class Membrane {
           : undefined;
 
         const adapterCall = this.adapter.complete(finalRequest, {
+          requestContext: {
+            formatterName: activeFormatter.name,
+            toolMode,
+            toolsDeclared: Boolean(request.tools?.length),
+            requiresAssistantPrefill: false,
+          },
           signal: receiptGuard ? receiptGuard.signal : options.signal,
           timeoutMs: options.timeoutMs,
           onRequest: (req) => {
@@ -443,7 +450,7 @@ export class Membrane {
     // Determine tool mode against the formatter that will build the request
     const activeFormatter = this.resolveActiveFormatter(options.formatter);
     const toolMode = this.resolveToolMode(request, activeFormatter);
-    const useNative = toolMode === 'native' && !!request.tools && request.tools.length > 0;
+    const useNative = toolMode === 'native';
 
     // Overloaded (529) pre-emission retry. The streaming paths have no retry
     // loop of their own, so a capacity error used to kill the turn outright —
@@ -588,37 +595,17 @@ export class Membrane {
     request: NormalizedRequest,
     formatter: PrefillFormatter = this.formatter
   ): 'xml' | 'native' {
-    const mode = this.resolveToolModeUnchecked(request, formatter);
-    if (mode === 'xml' && formatter.buildsAssistantMessagePrefill) {
-      this.assertPrefillSupported(
-        request.config.model,
-        `xml tool mode (formatter "${formatter.name}")`,
-      );
+    for (const field of ['supportsNativeTools', 'supportsXmlTools'] as const) {
+      if (typeof formatter[field] !== 'boolean') {
+        throw unsupportedError(`Formatter "${formatter.name}" must declare ${field} as a boolean.`);
+      }
+    }
+    const mode = request.toolMode && request.toolMode !== 'auto' ? request.toolMode
+      : formatter.configuredToolMode ?? (formatter.supportsNativeTools ? 'native' : 'xml');
+    if (request.tools?.length && !(mode === 'native' ? formatter.supportsNativeTools : formatter.supportsXmlTools)) {
+      throw unsupportedError(`Formatter "${formatter.name}" cannot carry ${mode} tool definitions. Choose a formatter supporting that carrier or omit tools.`);
     }
     return mode;
-  }
-
-  private resolveToolModeUnchecked(request: NormalizedRequest, formatter: PrefillFormatter): 'xml' | 'native' {
-    if (request.toolMode && request.toolMode !== 'auto') return request.toolMode;
-    if (formatter.configuredToolMode) return formatter.configuredToolMode;
-    return formatter.supportsNativeTools ? 'native' : 'xml';
-  }
-
-  /**
-   * Refuse a prefill-shaped request aimed at a model that rejects assistant
-   * prefill, before the round-trip. See registry/model-capabilities.ts for
-   * the measured table.
-   */
-  private assertPrefillSupported(model: string, site: string): void {
-    if (supportsAssistantPrefill(model)) return;
-    throw unsupportedError(
-      `Model "${model}" does not support assistant prefill, and ${site} ` +
-      `builds one: the conversation would end in an assistant turn, ` +
-      `which this model rejects with HTTP 400. ` +
-      `Use a native path instead — NativeFormatter, or toolMode: 'native' with ` +
-      `the XML formatter — or target a prefill-capable model ` +
-      `(Claude 4.5 and earlier, including claude-haiku-4-5).`,
-    );
   }
 
   /**
@@ -690,7 +677,7 @@ export class Membrane {
     const providerThinkingBlocks: ContentBlock[] = [];
 
     // Transform initial request using the formatter
-    let { providerRequest, prefillResult } = this.transformRequest(request, formatter);
+    let { providerRequest, prefillResult } = this.transformRequest(request, formatter, 'xml');
 
     // Initialize parser with prefill content so it knows about any open tags
     // (e.g., <thinking> in the prefill means API response continues inside thinking)
@@ -839,6 +826,8 @@ export class Membrane {
             timeoutMs,
             idleTimeoutMs,
             normalizedRequest: request,
+            formatterName: formatter.name,
+            requiresAssistantPrefill: true,
             // The tag-based parser tracks thinking via <thinking> tags — ask the
             // provider to wrap native thinking deltas so they don't stream as
             // visible text (see ProviderRequestOptions.wrapThinkingTags)
@@ -1336,6 +1325,8 @@ export class Membrane {
             timeoutMs,
             idleTimeoutMs,
             normalizedRequest: request,
+            formatterName: activeFormatter.name,
+            requiresAssistantPrefill: false,
             onRequest: (req) => {
               rawRequest = req;
               onRequest?.(req);
@@ -1372,7 +1363,7 @@ export class Membrane {
         onUsage?.(usageSoFar);
 
         // Parse content blocks from response
-        const responseBlocks = this.parseProviderContent(streamResult.content);
+        const responseBlocks = this.parseProviderContent(streamResult.content, request.tools);
         allContentBlocks.push(...responseBlocks);
 
         // Check for tool_use blocks
@@ -1563,218 +1554,23 @@ export class Membrane {
     toolLoopRebuild = false,
     activeFormatter: PrefillFormatter = this.formatter
   ): any {
-    // Provider-native formatters own their complete input-item shape. The
-    // legacy implementation below is intentionally Anthropic-specific; using
-    // it for Responses would normalize away item IDs, encrypted reasoning,
-    // assistant phases, and compaction items.
-    if (activeFormatter.name === 'openai-responses') {
-      return this.transformRequest({ ...request, messages }, activeFormatter).providerRequest;
-    }
+    const { providerRequest, prefixRewritten } = this.transformRequest({ ...request, messages }, activeFormatter, 'native');
+    // Responses formatters own their input-item representation and cache policy.
+    if (activeFormatter.name === 'openai-responses') return providerRequest;
 
-    // Convert messages to provider format
-    const providerMessages: any[] = [];
-    
-    const assistantName = request.assistantParticipant
-      ?? this.config.assistantParticipant ?? 'Claude';
-
+    const mergedMessages = providerRequest.messages;
+    const system = providerRequest.system;
+    const tools = providerRequest.tools;
     const promptCaching = request.promptCaching ?? this.config.defaultPromptCaching ?? true;
-    const cacheControl = promptCaching ? { type: 'ephemeral' as const, ...(request.cacheTtl ? { ttl: request.cacheTtl } : {}) } : undefined;
-
-    // Anthropic allows at most 4 cache_control breakpoints per request. The
-    // message breakpoints are the valuable ones (they cache the longest prefixes,
-    // and every one already includes tools+system at the front of the request).
-    // So tools/system get a breakpoint only as a FALLBACK — when no marker
-    // exists anywhere on the wire — otherwise they're redundant and would push
-    // the total past 4, which the API hard-rejects (the agent goes
-    // unresponsive). The fallback gate reads a RECOUNT of the built artifacts
-    // (see below), never a running tally: a running tally cannot see a
-    // caller-marked system block, and double-counts a message breakpoint that
-    // lands on a block already carrying stale cache_control.
-    for (const msg of messages) {
-      const isAssistant = msg.participant === assistantName;
-      const role = isAssistant ? 'assistant' : 'user';
-
-      // Convert content blocks
-      const content: any[] = [];
-      const includeNamePrefix = !isAssistant;
-      let hasText = false;
-      for (const block of msg.content) {
-        if (block.type === 'text') {
-          // Empty text blocks are rejected by the Anthropic API. In
-          // particular, zero-width rawItem carriers (opaque Responses items,
-          // see parseProviderContent) must not leak here. Filter BEFORE the
-          // name prefix below would make them non-empty.
-          if (block.text === '') continue;
-          let text = block.text;
-          if (includeNamePrefix && msg.participant && !hasText) {
-            text = (activeFormatter.nameFormat ?? '{name}: ').replace('{name}', () => msg.participant) + text;
-          }
-          hasText = true;
-          const textBlock: Record<string, unknown> = { type: 'text', text };
-          if ((block as any).cache_control) {
-            // A block-level passthrough occupies one of the 4 breakpoint slots
-            // exactly like a marked message; the recount below sees it.
-            // (Imported/seeded conversations carry stale request-time
-            // cache_control on stored blocks — first seen wedging Sill
-            // 2026-07-25: 3 cm markers + 2 stale Arc-export blocks = 5 → hard
-            // 400 on every inference.)
-            textBlock.cache_control = (block as any).cache_control;
-          }
-          content.push(textBlock);
-        } else if (block.type === 'tool_use') {
-          content.push({
-            type: 'tool_use',
-            id: block.id,
-            name: sanitizeToolName(block.name),
-            input: block.input,
-          });
-        } else if (block.type === 'tool_result') {
-          content.push({
-            type: 'tool_result',
-            tool_use_id: block.toolUseId,
-            content: block.content,
-            is_error: block.isError,
-          });
-        } else if (block.type === 'thinking') {
-          // Round-trip thinking blocks verbatim including the signature — the
-          // API validates it and (on display:'omitted' models) decrypts it to
-          // reconstruct prior reasoning. Empty thinking + signature is valid.
-          content.push({
-            type: 'thinking',
-            thinking: (block as { thinking?: string }).thinking ?? '',
-            ...((block as { signature?: string }).signature
-              ? { signature: (block as { signature?: string }).signature }
-              : {}),
-          });
-        } else if (block.type === 'redacted_thinking') {
-          content.push({ ...(block as unknown as Record<string, unknown>) });
-        } else if (block.type === 'image') {
-          if (block.source.type === 'base64') {
-            const mediaType = resolveImageMediaType(block.source.data, block.source.mediaType);
-            if (!isAcceptedImageMediaType(mediaType)) {
-              // API-unacceptable media type (e.g. image/svg): degrade to a
-              // loud text placeholder instead of poisoning the whole request
-              // (one bad stored block otherwise 400s every compile forever).
-              content.push(strippedImagePlaceholder(mediaType));
-            } else {
-              const imageBlock: Record<string, unknown> = {
-                type: 'image',
-                source: {
-                  type: 'base64',
-                  media_type: mediaType,
-                  data: block.source.data,
-                },
-              };
-              // Preserve sourceUrl for providers that use URL-as-text (Gemini 3.x)
-              if (block.sourceUrl) {
-                imageBlock.sourceUrl = block.sourceUrl;
-              }
-              content.push(imageBlock);
-            }
-          }
-        }
-      }
-
-      // Apply cache_control to the last CACHEABLE block of messages with a
-      // cacheBreakpoint. The API rejects cache_control on thinking /
-      // redacted_thinking blocks (400 "thinking.cache_control: Extra inputs
-      // are not permitted"), so a breakpoint landing on a thinking-terminated
-      // message must step back to the last non-thinking block — and is skipped
-      // entirely when the message is thinking-only.
-      //
-      // 2026-07-14: this is the THIRD request builder to need the rule. The
-      // 2026-07-01 fix hardened NativeFormatter's two sites but not this one,
-      // which is the live Connectome path (native tools + thinking) — so the
-      // 400 came back the moment a breakpoint landed on a thinking-only turn.
-      // The rule now lives in ONE exported helper that every builder calls.
-      if (msg.cacheBreakpoint && cacheControl && content.length > 0) {
-        const bpIdx = lastCacheableBlockIndex(content as Array<Record<string, unknown>>);
-        if (bpIdx >= 0) {
-          content[bpIdx].cache_control = cacheControl;
-        }
-      }
-
-      providerMessages.push({ role, content });
-    }
-
-    // Wire-boundary safety net: repair upstream-produced violations of
-    // Anthropic's tool-cycle structural rules (orphan tool_use, mis-roled
-    // blocks, consecutive same-role envelopes from upstream chunkers that
-    // dropped a tool_result). Mirrors NativeFormatter.buildMessages — the
-    // streaming-native path (runNativeToolsYielding) used to bypass this
-    // and exposed every agent inference to the 400 family.
-    //
-    // Synthesized [pending] tool_results land in fresh user envelopes;
-    // the normalizer also suppresses cache_control on those envelopes
-    // so an in-flight gap can't poison the prompt cache. Merging after
-    // normalize collapses any same-role neighbours the upstream may have
-    // produced before they reach the API's alternating-role check.
-    //
-    // `pendingToolCallIds` is intentionally not threaded here: by the
-    // time runNativeToolsYielding rebuilds the request between
-    // tool-execution rounds, it has already appended the corresponding
-    // tool_results to `messages`. Any unmatched tool_use that reaches
-    // this splice is upstream stranding (the bug class this fix exists
-    // to catch) — `[pending]` is exactly the right synthesis.
-    // A synthesized [pending] tool_result's bytes are rewritten when the
-    // real result lands — the floating-marker block below must not cache
-    // past one. `synthetic_pending_result` (not the downstream
-    // cache_suppressed_for_synthetic, which only fires when a marker was
-    // actually stripped) is the root condition.
-    // Every repair that REWRITES prefix bytes stands the float down, not just
-    // the synthetic [pending] result: a textified orphan tool_result is
-    // rewritten the same way when its real pairing arrives, so caching at or
-    // past one poisons the prefix identically. The kinds live in one exported
-    // set so a normalizer that grows a new prefix-rewriting repair cannot
-    // silently escape this guard.
-    let prefixRewritten = false;
-    const normalized = normalizeToolPairs(providerMessages, {
-      onEvent: (e) => {
-        if (PREFIX_REWRITING_NORMALIZE_EVENT_KINDS.has(e.kind)) prefixRewritten = true;
-      },
-    });
-    const mergedMessages = mergeConsecutiveRoles(normalized.messages);
-
-    // ONE recount of the constructed wire artifacts, taken BEFORE the
-    // tools/system fallback decision so the fallback and the float share a
-    // single truth. Counted post-normalize, so phase-5.5 cache suppression is
-    // already reflected. `request.system` is the caller's own system content:
-    // it explicitly accepts pre-marked blocks, and those are real wire markers
-    // that no running tally ever saw (three of them plus both fallbacks = 5 on
-    // the wire = a 400 on every inference of that config).
-    const upstreamWireMarkers = countWireCacheMarkers({
-      messages: mergedMessages,
-      system: request.system,
-    });
-
-    // Convert tools to provider format.
-    // Native tool names must match ^[a-zA-Z0-9_-]{1,128}$ — sanitize colons
-    // from the module:tool namespace convention. Reversed in parseProviderContent.
-    const tools = request.tools?.map((tool, idx) => {
-      const t: Record<string, unknown> = {
-        name: sanitizeToolName(tool.name),
-        description: tool.description,
-        input_schema: tool.inputSchema,
-      };
-      // Cache the tool list (last tool) only as a fallback — a marked message
-      // breakpoint already caches the tools as part of its prefix.
-      if (cacheControl && upstreamWireMarkers === 0 && request.tools && idx === request.tools.length - 1) {
-        t.cache_control = cacheControl;
-      }
-      return t;
-    });
-
-    // Wrap system prompt with cache_control only as a fallback (no message
-    // breakpoint marked); otherwise a message breakpoint already caches
-    // tools+system as part of its prefix.
-    let system: unknown = ownSystemBlocks(request.system);
-    if (cacheControl && upstreamWireMarkers === 0 && typeof system === 'string' && system.length > 0) {
-      system = [{ type: 'text', text: system, cache_control: cacheControl }];
-    } else if (cacheControl && upstreamWireMarkers === 0 && Array.isArray(system) && system.length > 0) {
-      const blocks = system as Record<string, unknown>[];
-      system = blocks.map((block, idx) =>
-        idx === blocks.length - 1 ? { ...block, cache_control: cacheControl } : block
-      );
+    const membraneOwned = (request.cacheMarkers ?? 'membrane-system') === 'membrane-system';
+    const cacheControl = promptCaching && membraneOwned
+      ? { type: 'ephemeral' as const, ...(request.cacheTtl ? { ttl: request.cacheTtl } : {}) }
+      : undefined;
+    // A formatter already applies the system fallback. For the native loop,
+    // retain the tool-list fallback only when no caller marker exists upstream.
+    const upstreamWireMarkers = countWireCacheMarkers({ messages: mergedMessages, system: request.system });
+    if (cacheControl && upstreamWireMarkers === 0 && Array.isArray(tools) && tools.length) {
+      tools[tools.length - 1] = { ...tools[tools.length - 1], cache_control: cacheControl };
     }
 
     // ------------------------------------------------------------------
@@ -1835,39 +1631,13 @@ export class Membrane {
       }
     }
 
-    // Build thinking config for native extended thinking (budget clamped to max_tokens)
-    // Fable/Mythos models: thinking is always on and unconfigurable; sampling params are removed.
-    // Sending thinking config or temperature returns a 400 — omit both entirely.
-    const alwaysOnThinking = Membrane.isAlwaysThinkingModel(request.config.model);
-    const thinking = alwaysOnThinking ? undefined : this.buildThinkingParam(request.config);
-
-    // Anthropic requires temperature=1 when extended thinking is enabled
-    const temperature = alwaysOnThinking ? undefined : (thinking ? 1 : request.config.temperature);
-
-    // Byte-wall policy point (see transformRequest): loud failure unless the
-    // caller explicitly owns image loss.
-    if (request.shedOversizeImages) {
-      shedImagesToFitByteBudget(mergedMessages, undefined, 'buildNativeToolRequest');
-    } else {
-      assertWithinByteBudget(mergedMessages, undefined, 'buildNativeToolRequest');
-    }
-
-    return {
-      model: request.config.model,
-      maxTokens: request.config.maxTokens,
-      temperature,
-      messages: mergedMessages,
-      system,
-      tools,
-      thinking,
-      extra: request.providerParams,
-    };
+    return providerRequest;
   }
 
   /**
    * Parse provider response content into normalized blocks
    */
-  private parseProviderContent(content: unknown): ContentBlock[] {
+  private parseProviderContent(content: unknown, tools?: readonly { name: string }[]): ContentBlock[] {
     if (!content) return [];
     
     if (Array.isArray(content)) {
@@ -1882,7 +1652,7 @@ export class Membrane {
           blocks.push({
             type: 'tool_use',
             id: item.id,
-            name: unsanitizeToolName(item.name),
+            name: restoreToolName(item.name, tools),
             input: item.input,
             // Arguments that never parsed: carry the marker through so a
             // consumer can refuse the block instead of trusting `input`.
@@ -2210,9 +1980,15 @@ export class Membrane {
    * a re-derivation so that the formatter which BUILDS is the same one that
    * resolved the tool mode and drives the loop.
    */
-  private transformRequest(request: NormalizedRequest, activeFormatter: PrefillFormatter = this.formatter): {
+  private transformRequest(
+    request: NormalizedRequest,
+    activeFormatter: PrefillFormatter = this.formatter,
+    toolMode: 'xml' | 'native' = this.resolveToolMode(request, activeFormatter),
+  ): {
     providerRequest: any;
     prefillResult: BuildResult;
+    prefixRewritten: boolean;
+    toolMode: 'xml' | 'native';
   } {
     // Extract user-provided stop sequences
     const additionalStopSequences = Array.isArray(request.stopSequences)
@@ -2224,15 +2000,20 @@ export class Membrane {
       ?? this.config.maxParticipantsForStop
       ?? 10;
 
+    let prefixRewritten = false;
     // Use formatter's buildMessages for all request building
     const buildResult = activeFormatter.buildMessages(request.messages, {
+      onNormalize: event => {
+        if (PREFIX_REWRITING_NORMALIZE_EVENT_KINDS.has(event.kind)) prefixRewritten = true;
+      },
+      deferCacheBudgetCheck: true,
       participantMode: 'multiuser',
       assistantParticipant: request.assistantParticipant ?? this.config.assistantParticipant ?? 'Claude',
       tools: request.tools,
       // One resolution for every entry point: complete() used to build from the
       // formatter's constructor-time mode alone, so request.toolMode was a
       // second, disconnected source of truth on this path.
-      toolMode: this.resolveToolMode(request, activeFormatter),
+      toolMode,
       thinking: request.config.thinking,
       systemPrompt: request.system,
       promptCaching: request.promptCaching ?? this.config.defaultPromptCaching ?? true, // Default true for backward compat
@@ -2243,22 +2024,6 @@ export class Membrane {
       contextPrefix: request.contextPrefix,
       prefillUserMessage: request.prefillUserMessage,
     });
-
-    // Prefill-capability policy point: this is the one place membrane
-    // MANUFACTURES an assistant prefill, and a model that refuses prefill
-    // answers it with an opaque 400. Refuse here, typed and named, before
-    // the round-trip. Covers the no-tools path as well as xml tool mode.
-    //
-    // Both conditions are load-bearing. `assistantPrefill` alone is too
-    // broad: CompletionsFormatter returns its entire text-completions prompt
-    // in that field, and refusing on it aimed the fast-fail at a surface
-    // where no assistant-role Messages turn is ever built. The formatter's
-    // own declaration says whether the built request has the Messages shape
-    // the measured refusal is about; the field says whether this particular
-    // build actually ended in one.
-    if (buildResult.assistantPrefill && activeFormatter.buildsAssistantMessagePrefill) {
-      this.assertPrefillSupported(request.config.model, `formatter "${activeFormatter.name}"`);
-    }
 
     // Byte-wall policy point (2026-07-12): transformRequest serves BOTH
     // complete() and the streaming path through EVERY adapter. Oversize
@@ -2300,7 +2065,7 @@ export class Membrane {
       stripThinkingForPrefill(providerRequest);
     }
 
-    return { providerRequest, prefillResult: buildResult };
+    return { providerRequest, prefillResult: buildResult, prefixRewritten, toolMode };
   }
 
   private async streamOnce(
@@ -2322,6 +2087,8 @@ export class Membrane {
        * separate `streamOnceWithoutHook` so the bypass is intentional.
        */
       normalizedRequest: NormalizedRequest;
+      formatterName: string;
+      requiresAssistantPrefill: boolean;
       /**
        * Re-issue this attempt when the provider ends it with
        * `stop_reason: 'refusal'` (see RetryingEvent). Default 0 = off, so
@@ -2358,7 +2125,7 @@ export class Membrane {
     // compatibility won't catch the excess field (checked only on object
     // literals, not on variables). Leaving it in would silently leak the
     // normalized form into every adapter's options.
-    const { normalizedRequest, refusalRetries, onRetrying, onWireCacheMarkers, ...adapterOptions } = options;
+    const { normalizedRequest, formatterName, requiresAssistantPrefill, refusalRetries, onRetrying, onWireCacheMarkers, ...adapterOptions } = options;
     const finalRequest = (await this.applyBeforeRequestHook(normalizedRequest, request)) as typeof request;
 
     // Check every streaming path's post-hook representation. Only adapters
@@ -2376,6 +2143,12 @@ export class Membrane {
       : undefined;
     const observedOptions = {
       ...adapterOptions,
+      requestContext: {
+        formatterName,
+        toolMode: requiresAssistantPrefill ? 'xml' as const : 'native' as const,
+        toolsDeclared: Boolean(normalizedRequest.tools?.length),
+        requiresAssistantPrefill,
+      },
       ...(receiptGuard ? { signal: receiptGuard.signal } : {}),
       onRequest: (wireRequest: unknown) => {
         if (useWireReceipt) {
@@ -2606,15 +2379,16 @@ export class Membrane {
           content.push({ type: 'text', text: block.text });
           rawAssistantText += block.text;
         } else if (block.type === 'tool_use') {
+          const name = restoreToolName(block.name, request.tools);
           content.push({
             type: 'tool_use',
             id: block.id,
-            name: block.name,
+            name,
             input: block.input,
           });
           toolCalls.push({
             id: block.id,
-            name: block.name,
+            name,
             input: block.input,
           });
         } else if (block.type === 'thinking') {
@@ -3241,7 +3015,7 @@ export class Membrane {
     const executedToolResults: ToolResult[] = [];
 
     // Transform initial request using the formatter
-    let { providerRequest, prefillResult } = this.transformRequest(request, formatter);
+    let { providerRequest, prefillResult } = this.transformRequest(request, formatter, 'xml');
 
     // Initialize parser with prefill content
     let initialPrefillLength = 0;
@@ -3369,6 +3143,8 @@ export class Membrane {
             timeoutMs: options.timeoutMs,
             idleTimeoutMs: options.idleTimeoutMs,
             normalizedRequest: request,
+            formatterName: formatter.name,
+            requiresAssistantPrefill: true,
             // The tag-based parser tracks thinking via <thinking> tags — ask
             // the provider to wrap native thinking deltas so they don't
             // stream as visible text (same as streamWithXmlTools).
@@ -3880,6 +3656,8 @@ export class Membrane {
             timeoutMs: options.timeoutMs,
             idleTimeoutMs: options.idleTimeoutMs,
             normalizedRequest: request,
+            formatterName: activeFormatter.name,
+            requiresAssistantPrefill: false,
             onRequest: (req: unknown) => { rawRequest = req; },
             // Telemetry reports what this request actually SHIPPED with —
             // builder breakpoints, stale passthrough, fallback, float, plus
@@ -3930,7 +3708,7 @@ export class Membrane {
         }
 
         // Parse content blocks from response
-        const responseBlocks = this.parseProviderContent(streamResult.content);
+        const responseBlocks = this.parseProviderContent(streamResult.content, request.tools);
         allContentBlocks.push(...responseBlocks);
 
         // Check for tool_use blocks
@@ -4091,19 +3869,4 @@ export class Membrane {
       }
     }
   }
-}
-
-// Native tool names must match ^[a-zA-Z0-9_-]{1,128}$.
-// Tool names use `--` namespacing, which is already API-valid; the only
-// character that ever needs escaping is a literal colon, encoded losslessly as
-// `__` and back. We deliberately do NOT escape underscores — they are valid,
-// and escaping them (the previous `_u`/`_c` scheme) garbled every
-// underscore-containing tool name in the request the model actually sees
-// (`send_message` → `send_umessage`), polluting its reasoning for no benefit.
-function sanitizeToolName(name: string): string {
-  return name.replace(/:/g, '__');
-}
-
-function unsanitizeToolName(name: string): string {
-  return name.replace(/__/g, ':');
 }

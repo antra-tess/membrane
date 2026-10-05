@@ -7,7 +7,9 @@
  * fails here, typed, instead of surfacing a provider 400.
  */
 
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
+import { OpenRouterAdapter } from '../../src/providers/openrouter.js';
+afterEach(() => vi.unstubAllGlobals());
 import { AnthropicXmlFormatter } from '../../src/formatters/anthropic-xml.js';
 import { CompletionsFormatter } from '../../src/formatters/completions.js';
 import { NativeFormatter } from '../../src/formatters/native.js';
@@ -110,17 +112,17 @@ describe('resolveToolMode default', () => {
   });
 });
 
-describe('assistant-MESSAGE prefill is what the fast-fail gates on', () => {
-  it('declares the Messages-shaped prefill only for the formatter that builds one', () => {
-    expect(new AnthropicXmlFormatter().buildsAssistantMessagePrefill).toBe(true);
-    expect(new CompletionsFormatter().buildsAssistantMessagePrefill).toBe(false);
-    expect(new NativeFormatter().buildsAssistantMessagePrefill).toBe(false);
+describe('formatter tool-carrier declarations', () => {
+  it('declares XML tools only for the formatter that encodes them', () => {
+    expect(new AnthropicXmlFormatter().supportsXmlTools).toBe(true);
+    expect(new CompletionsFormatter().supportsXmlTools).toBe(false);
+    expect(new NativeFormatter().supportsXmlTools).toBe(false);
     // usesPrefill does NOT discriminate: both prefill formatters set it.
     expect(new AnthropicXmlFormatter().usesPrefill).toBe(true);
     expect(new CompletionsFormatter().usesPrefill).toBe(true);
   });
 
-  it('lets CompletionsFormatter reach a prefill-refusing model id with xml tools', async () => {
+  it('rejects tool declarations that CompletionsFormatter cannot encode', async () => {
     const adapter = new MockAdapter();
     const membrane = new Membrane(adapter, { formatter: new CompletionsFormatter() });
 
@@ -130,14 +132,8 @@ describe('assistant-MESSAGE prefill is what the fast-fail gates on', () => {
       config: { model: 'claude-sonnet-4-6', maxTokens: 100 },
     };
 
-    // supportsNativeTools is false here, so auto resolves to xml — but the
-    // text-completions surface never builds an assistant-role Messages turn,
-    // so the model's Messages-API prefill refusal does not apply.
-    await expect(membrane.complete(request)).resolves.toBeDefined();
-    const lastRequest = adapter.getLastRequest()!;
-    expect(lastRequest.messages.length).toBe(1);
-    expect(lastRequest.messages[0].role).toBe('assistant');
-    expect(typeof lastRequest.messages[0].content).toBe('string');
+    await expect(membrane.complete(request)).rejects.toMatchObject({ type: 'unsupported', retryable: false });
+    expect(adapter.getLastRequest()).toBeUndefined();
   });
 
   it('lets CompletionsFormatter reach a prefill-refusing model id with no tools', async () => {
@@ -169,69 +165,37 @@ describe('assistant-MESSAGE prefill is what the fast-fail gates on', () => {
   });
 });
 
-describe('prefill-incompatibility fails fast', () => {
-  it('refuses explicit XML tool mode against a prefill-refusing model', async () => {
-    const adapter = new MockAdapter();
-    const membrane = new Membrane(adapter);
-
-    const request: NormalizedRequest = {
-      messages: [textMessage('User', 'Hello')],
-      tools: [zzTool1],
-      toolMode: 'xml',
-      config: { model: 'claude-sonnet-4-6', maxTokens: 100 },
-    };
-
-    await expect(membrane.complete(request)).rejects.toThrow(MembraneError);
-    await expect(membrane.complete(request)).rejects.toThrow(/does not support assistant prefill/i);
-    expect(adapter.getLastRequest()).toBeUndefined();
+describe('prefill-incompatibility fails at the actual message transport', () => {
+  function membrane() {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ choices: [{ message: { content: 'done' }, finish_reason: 'stop' }] }))));
+    return new Membrane(new OpenRouterAdapter({ apiKey: 'test' }));
+  }
+  it.each([false, true])('refuses explicit XML with tools=%s before HTTP on a refusing model', async tools => {
+    const instance = membrane();
+    await expect(instance.complete({
+      messages: [textMessage('User', 'Hello')], toolMode: 'xml',
+      ...(tools ? { tools: [zzTool1] } : {}),
+      config: { model: 'anthropic/claude-sonnet-4.6', maxTokens: 100 },
+    })).rejects.toMatchObject({ type: 'unsupported', retryable: false });
+    expect(fetch).not.toHaveBeenCalled();
   });
-
-  it('refuses a prefill build against a prefill-refusing model even with no tools', async () => {
-    const adapter = new MockAdapter();
-    const membrane = new Membrane(adapter);
-
-    const request: NormalizedRequest = {
-      messages: [textMessage('User', 'Hello')],
-      config: { model: 'claude-opus-4-8', maxTokens: 100 },
-    };
-
-    await expect(membrane.complete(request)).rejects.toMatchObject({
-      name: 'MembraneError',
-      type: 'unsupported',
-    });
-    expect(adapter.getLastRequest()).toBeUndefined();
-  });
-
-  it('names the model, the formatter and the remedy', async () => {
-    const adapter = new MockAdapter();
-    const membrane = new Membrane(adapter);
-
-    const request: NormalizedRequest = {
-      messages: [textMessage('User', 'Hello')],
-      config: { model: 'claude-sonnet-5', maxTokens: 100 },
-    };
-
-    const error = await membrane.complete(request).then(
-      () => undefined,
-      (e: unknown) => e as MembraneError,
-    );
+  it('names the model, selected formatter and an actually usable remedy', async () => {
+    const instance = membrane();
+    const error = await instance.complete({
+      messages: [textMessage('User', 'Hello')], toolMode: 'xml',
+      config: { model: 'anthropic/claude-sonnet-5', maxTokens: 100 },
+    }).catch(error => error);
     expect(error).toBeInstanceOf(MembraneError);
-    expect(error!.message).toContain('claude-sonnet-5');
-    expect(error!.message).toContain('anthropic-xml');
-    expect(error!.message).toContain('NativeFormatter');
-    expect(error!.retryable).toBe(false);
+    expect(error.message).toContain('claude-sonnet-5');
+    expect(error.message).toContain('anthropic-xml');
+    expect(error.message).toContain('NativeFormatter');
+    expect(fetch).not.toHaveBeenCalled();
   });
-
-  it('lets a prefill-capable model through the same path', async () => {
-    const adapter = new MockAdapter();
-    const membrane = new Membrane(adapter);
-
-    const request: NormalizedRequest = {
-      messages: [textMessage('User', 'Hello')],
-      config: { model: 'claude-haiku-4-5-20251001', maxTokens: 100 },
-    };
-
-    await expect(membrane.complete(request)).resolves.toBeDefined();
-    expect(adapter.getLastRequest()).toBeDefined();
+  it('keeps explicit XML on a prefill-capable model', async () => {
+    await membrane().complete({
+      messages: [textMessage('User', 'Hello')], toolMode: 'xml',
+      config: { model: 'anthropic/claude-haiku-4.5', maxTokens: 100 },
+    });
+    expect(fetch).toHaveBeenCalledOnce();
   });
 });

@@ -37,6 +37,11 @@ export interface FormatterConfig {
 }
 
 export interface BuildOptions {
+  /** The caller owns a later complete-request cache-budget check/clamp (Membrane
+   * checks after hooks). Standalone builds check by default. CM-owned markers
+   * always assert here because they may not be displaced. */
+  deferCacheBudgetCheck?: boolean;
+
   /** How to handle multiple participants */
   participantMode: 'simple' | 'multiuser';
 
@@ -294,27 +299,9 @@ export interface PrefillFormatter {
    */
   readonly supportsNativeTools: boolean;
 
-  /**
-   * Whether `buildMessages` produces a chat-transport request whose final
-   * entry is a genuine ASSISTANT-ROLE MESSAGE — the Anthropic Messages-API
-   * prefill shape, which prefill-refusing models answer with HTTP 400
-   * ("The conversation must end with a user message").
-   *
-   * This is NOT `usesPrefill`, and the two must not be conflated:
-   * `usesPrefill` says only that the formatter seeds the parser with text it
-   * built. `CompletionsFormatter` sets `usesPrefill` and returns its whole
-   * single-string prompt as `BuildResult.assistantPrefill`, but its wire
-   * shape is a TEXT-COMPLETIONS prompt — the lone `{role:'assistant'}`
-   * envelope is a carrier the completions adapter unwraps, not a turn in a
-   * Messages conversation. No Messages request is ever built, so no model's
-   * Messages-API prefill refusal applies to it.
-   *
-   * `Membrane` reads this — never `usesPrefill` — to decide whether the
-   * measured `supportsAssistantPrefill` table may refuse a request. A
-   * formatter that targets a non-Messages surface declares `false` and is
-   * passed through.
-   */
-  readonly buildsAssistantMessagePrefill: boolean;
+  /** Whether this formatter can encode tool definitions/results in an XML protocol. */
+  readonly supportsXmlTools: boolean;
+
   /** Participant prefix template for native tool requests. Uses {name}; defaults to '{name}: '. */
   readonly nameFormat?: string;
 

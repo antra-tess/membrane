@@ -9,6 +9,9 @@
  * - 'multiuser': Multiple participants, names prefixed to content
  */
 
+import { sanitizeToolName } from '../utils/tool-names.js';
+import { unsupportedError } from '../types/errors.js';
+
 import type {
   NormalizedMessage,
   ContentBlock,
@@ -30,7 +33,7 @@ import type {
 } from './types.js';
 import { normalizeToolPairs, mergeConsecutiveRoles } from './normalize-tool-pairs.js';
 import { resolveImageMediaType, isAcceptedImageMediaType, strippedImagePlaceholder } from '../utils/image-media.js';
-import { assertCacheMarkersWithinLimit } from '../utils/cache-marker-budget.js';
+import { assertCacheMarkersWithinLimit, countWireCacheMarkers } from '../utils/cache-marker-budget.js';
 
 /** Index of the last content block that can carry cache_control. Anthropic
  *  rejects cache_control on thinking / redacted_thinking blocks, so a cache
@@ -163,8 +166,7 @@ export class NativeFormatter implements PrefillFormatter {
   readonly name = 'native';
   readonly usesPrefill = false;
   readonly supportsNativeTools = true;
-  /** Pass-through: the built conversation ends where the caller's does. */
-  readonly buildsAssistantMessagePrefill = false;
+  readonly supportsXmlTools = false;
 
   readonly nameFormat: string;
   private config: Required<FormatterConfig>;
@@ -315,9 +317,9 @@ export class NativeFormatter implements PrefillFormatter {
     // Build system content. Cache the system block only as a fallback — when no
     // message breakpoint was marked (see note above; otherwise a message
     // breakpoint already caches tools+system as part of its prefix).
-    if (markedBreakpoints > 4) {
-      throw new Error(`cache_control limit exceeded: ${markedBreakpoints} markers (maximum 4)`);
-    }
+    // The complete request budget is enforced after hooks in Membrane. This
+    // formatter's message-only count cannot include later system/tool additions.
+    markedBreakpoints = countWireCacheMarkers({ messages: mergedMessages, system: systemPrompt });
     const cacheSystem =
       cacheMarkers === 'membrane-system' && cacheControl && markedBreakpoints === 0
         ? cacheControl
@@ -346,7 +348,7 @@ export class NativeFormatter implements PrefillFormatter {
 
     // Native tools
     const nativeTools = tools?.length ? this.convertToNativeTools(tools) : undefined;
-    if (cacheMarkers === 'cm-owned') {
+    if (cacheMarkers === 'cm-owned' || !options.deferCacheBudgetCheck) {
       assertCacheMarkersWithinLimit(
         { messages: mergedMessages, system: systemContent, tools: nativeTools },
         'native'
@@ -494,7 +496,7 @@ export class NativeFormatter implements PrefillFormatter {
         result.push({
           type: 'tool_use',
           id: block.id,
-          name: block.name,
+          name: sanitizeToolName(block.name),
           input: block.input,
         });
       } else if (block.type === 'tool_result') {
@@ -536,10 +538,14 @@ export class NativeFormatter implements PrefillFormatter {
   }
 
   private convertToNativeTools(tools: ToolDefinition[]): unknown[] {
-    return tools.map(tool => ({
-      name: tool.name,
-      description: tool.description,
-      input_schema: tool.inputSchema,
-    }));
+    const names = new Set<string>();
+    return tools.map(tool => {
+      const name = sanitizeToolName(tool.name);
+      if (names.has(name)) {
+        throw unsupportedError('Native tool names collide after colon escaping: "' + name + '". Choose distinct wire names.');
+      }
+      names.add(name);
+      return { name, description: tool.description, input_schema: tool.inputSchema };
+    });
   }
 }

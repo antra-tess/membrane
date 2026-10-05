@@ -4,6 +4,8 @@
  * Handles OpenAI-compatible API with tool_calls format
  */
 
+import { assertMessagePrefillSupported } from './request-capabilities.js';
+
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -202,6 +204,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
     const openRouterRequest = this.buildRequest(request);
+    assertMessagePrefillSupported(openRouterRequest.model, openRouterRequest.messages, options, this.name, openRouterRequest);
     options?.onRequest?.(openRouterRequest);
 
     try {
@@ -221,6 +224,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
     openRouterRequest.stream = true;
     // Request usage data in stream for cache metrics
     openRouterRequest.stream_options = { include_usage: true };
+    assertMessagePrefillSupported(openRouterRequest.model, openRouterRequest.messages, options, this.name, openRouterRequest);
     options?.onRequest?.(openRouterRequest);
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);

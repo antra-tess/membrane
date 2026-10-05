@@ -4,6 +4,8 @@
  * Uses the Anthropic Messages API format through AWS Bedrock.
  */
 
+import { assertMessagePrefillSupported } from './request-capabilities.js';
+
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -374,6 +376,7 @@ export class BedrockAdapter implements ProviderAdapter {
     const bedrockModelId = this.toBedrockModelId(request.model);
     const bedrockRequest = this.buildRequest(request, bedrockModelId);
     const fullRequest = { modelId: bedrockModelId, ...bedrockRequest };
+    assertMessagePrefillSupported(bedrockModelId, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
@@ -395,6 +398,7 @@ export class BedrockAdapter implements ProviderAdapter {
     const bedrockModelId = this.toBedrockModelId(request.model);
     const bedrockRequest = this.buildRequest(request, bedrockModelId);
     const fullRequest = { modelId: bedrockModelId, ...bedrockRequest, stream: true };
+    assertMessagePrefillSupported(bedrockModelId, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);

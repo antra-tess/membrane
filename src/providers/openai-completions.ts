@@ -10,6 +10,8 @@
  * Serializes conversations to Human:/Assistant: format.
  */
 
+import { assertPromptToolSupport } from './request-capabilities.js';
+
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -158,7 +160,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
     request: ProviderRequest,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const completionsRequest = this.buildRequest(request);
+    const completionsRequest = this.buildRequest(request, options);
     options?.onRequest?.(completionsRequest);
 
     try {
@@ -174,7 +176,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
     callbacks: StreamCallbacks,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const completionsRequest = this.buildRequest(request);
+    const completionsRequest = this.buildRequest(request, options);
     completionsRequest.stream = true;
     // Ask for usage in the stream — without this the endpoint sends no usage
     // frame at all and every streamed call reports 0/0 tokens.
@@ -434,21 +436,25 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
     return headers;
   }
 
-  private buildRequest(request: ProviderRequest): CompletionsRequest {
+  private buildRequest(request: ProviderRequest, options?: ProviderRequestOptions): CompletionsRequest {
     let prompt: string;
     let stopSequences: string[];
 
-    if (typeof request.extra?.prompt === 'string') {
+    const explicitPrompt = request.extra?.prompt;
+    const normalizedMessages = request.extra?.normalizedMessages;
+    assertPromptToolSupport(request, options, this.name, typeof explicitPrompt === 'string');
+
+    if (typeof explicitPrompt === 'string') {
       // Continuation path: prompt is already serialized, skip re-serialization.
       // No participant-based stops or eotToken — the prompt already contains them.
-      prompt = request.extra.prompt;
+      prompt = explicitPrompt;
       stopSequences = [
         ...this.extraStopSequences,
         ...(request.stopSequences || []),
       ];
     } else {
       // Normal path: serialize messages into prompt format
-      const messages = (request.extra?.normalizedMessages as any[]) || (request.messages as any[]);
+      const messages = (normalizedMessages as any[]) || (request.messages as any[]);
       const result = this.serializeToPrompt(messages);
       prompt = result.prompt;
       stopSequences = [

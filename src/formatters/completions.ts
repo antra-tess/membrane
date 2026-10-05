@@ -183,15 +183,10 @@ class CompletionsStreamParser implements StreamParser {
 export class CompletionsFormatter implements PrefillFormatter {
   readonly name = 'completions';
   readonly usesPrefill = true;
-  /** Text-completion wire shape: there is no tool channel to put tools in. */
+  /** This formatter does not encode provider-native tool definitions. */
   readonly supportsNativeTools = false;
-  /**
-   * Text-completion wire shape again: `assistantPrefill` here is the whole
-   * prompt string and the single `{role:'assistant'}` envelope is the carrier
-   * the completions adapter unwraps, not a Messages turn. No Messages request
-   * is built, so Messages-API prefill refusals do not apply.
-   */
-  readonly buildsAssistantMessagePrefill = false;
+  /** The prompt formatter does not inject XML tool definitions either. */
+  readonly supportsXmlTools = false;
 
   private config: Required<Omit<CompletionsFormatterConfig, 'unsupportedMedia' | 'warnOnStrip'>> & {
     unsupportedMedia: 'strip'; // Always strip for completions

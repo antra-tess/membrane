@@ -97,6 +97,7 @@ const slowTool: ToolDefinition = {
 
 function makeRequest(): NormalizedRequest {
   return {
+    toolMode: 'xml',
     messages: [{ participant: 'User', content: [{ type: 'text', text: 'go' }] }],
     config: { model: 'zz-test-model', maxTokens: 64 },
     tools: [slowTool],
