@@ -34,24 +34,12 @@
  * for Anthropic and are left untouched; only the root is rewritten.
  */
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function isMergeableObjectVariant(variant: Record<string, unknown>): boolean {
-  return (
-    variant.type === 'object' ||
-    (variant.type === undefined && isPlainObject(variant.properties))
-  );
-}
-
-function stringRequired(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.filter((entry): entry is string => typeof entry === 'string')
-    : [];
-}
-
-const ROOT_UNION_KEYS = ['oneOf', 'anyOf', 'allOf'] as const;
+import {
+  effectiveRequiredKeys,
+  isPlainObject,
+  rootUnionOf,
+  stringMembers,
+} from '../utils/tool-schema.js';
 
 /** Max length of the description we synthesize on the fallback path. */
 const MAX_FALLBACK_DESCRIPTION = 4000;
@@ -71,57 +59,49 @@ export function flattenRootSchemaUnion(schema: unknown): unknown {
   // keys — handling only the first would strip the others' variants (the
   // destructuring below removes all three keys), silently losing their
   // properties and required lists.
-  const presentKeys = ROOT_UNION_KEYS.filter(
-    (key) => Array.isArray(schema[key]) && (schema[key] as unknown[]).length > 0,
-  );
-  if (presentKeys.length === 0) return schema;
+  //
+  // `rootUnionOf` is also what decides, for the XML tool surfaces, whether a
+  // root union's variants are read as parameters: both wires merge exactly the
+  // unions this function merges, and fall back on the rest.
+  const union = rootUnionOf(schema);
+  if (!union) return schema;
 
-  const combinators = presentKeys.map((key) => {
-    const raw = schema[key] as unknown[];
-    return { key, raw, variants: raw.filter(isPlainObject) };
-  });
+  const { combinators } = union;
+  const presentKeys = combinators.map(({ key }) => key);
   const rawVariantsAll: unknown[] = combinators.flatMap(({ raw }) => raw);
 
   // Keep every root key except the combinators themselves.
   const { oneOf: _oneOf, anyOf: _anyOf, allOf: _allOf, ...rest } = schema;
 
-  const allMergeable = combinators.every(
-    ({ raw, variants }) =>
-      variants.length === raw.length && variants.every(isMergeableObjectVariant),
-  );
-
-  if (allMergeable) {
+  if (union.mergeable) {
     // Common case: every variant of every present combinator is an object
-    // schema — merge them all.
-    const properties: Record<string, unknown> = isPlainObject(rest.properties)
-      ? { ...rest.properties }
-      : {};
+    // schema — merge them all. Keys are tested for OWN presence, and the
+    // merged object is built from entries: a property named like an
+    // `Object.prototype` member (`constructor`, `toString`, `__proto__`) is a
+    // parameter like any other, not a key that is somehow already there.
+    const mergedProperties = new Map<string, unknown>(
+      isPlainObject(rest.properties) ? Object.entries(rest.properties) : [],
+    );
     for (const { variants } of combinators) {
       for (const variant of variants) {
         if (isPlainObject(variant.properties)) {
           for (const [key, propSchema] of Object.entries(variant.properties)) {
-            if (!(key in properties)) properties[key] = propSchema;
+            if (!mergedProperties.has(key)) mergedProperties.set(key, propSchema);
           }
         }
       }
     }
+    const properties: Record<string, unknown> = Object.fromEntries(mergedProperties);
 
-    // Per-combinator required semantics: `allOf` unions its variants' required
-    // lists (every variant applies); `oneOf`/`anyOf` keep only keys required by
-    // every variant (alternatives). Across combinators they all apply at once,
-    // so the effective required set is the union of the per-combinator results.
-    const mergedRequired = combinators.flatMap(({ key, variants }) => {
-      const variantRequired = variants.map((variant) => stringRequired(variant.required));
-      return key === 'allOf'
-        ? [...new Set(variantRequired.flat())]
-        : variantRequired.reduce(
-            (acc, req) => acc.filter((k) => req.includes(k)),
-            variantRequired[0] ?? [],
-          );
-    });
-    const required = [
-      ...new Set([...stringRequired(rest.required), ...mergedRequired]),
-    ].filter((key) => key in properties);
+    // Per-combinator required semantics (`allOf` unions, `oneOf`/`anyOf`
+    // intersect) come from `effectiveRequiredKeys`, the one derivation the XML
+    // tool surfaces read too: what the wire declares required and what the
+    // model is told is required cannot drift. A required key with no merged
+    // property is dropped, since this schema's `required` may only name
+    // properties it carries.
+    const required = effectiveRequiredKeys(rest.required, combinators).filter((key) =>
+      mergedProperties.has(key),
+    );
 
     const {
       properties: _properties,
@@ -144,7 +124,7 @@ export function flattenRootSchemaUnion(schema: unknown): unknown {
       .map(({ variants }) => {
         const groups = variants
           .map((variant) => {
-            const req = stringRequired(variant.required);
+            const req = stringMembers(variant.required);
             return req.length > 0 ? `(${req.join(', ')})` : '(no required fields)';
           })
           .join(' | ');

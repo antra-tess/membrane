@@ -70,6 +70,18 @@ export class YieldingStreamImpl implements YieldingStream {
   // Flag indicating the stream producer is done
   private producerDone = false;
 
+  // Set when the CONSUMER leaves — `for await … break` (iterator.return) or
+  // iterator.throw. Nobody will read this stream again, so queued events are
+  // dropped rather than accumulated for a reader that is never coming back.
+  private consumerDeparted = false;
+
+  // Held so the listener can be removed at terminal: a long-lived caller
+  // signal shared across many streams otherwise accumulates one closure per
+  // stream, none of which are ever released.
+  private readonly onExternalAbort = () => {
+    this.cancel();
+  };
+
   constructor(
     private readonly options: YieldingStreamOptions,
     private readonly runInference: (stream: YieldingStreamImpl) => Promise<void>
@@ -78,9 +90,7 @@ export class YieldingStreamImpl implements YieldingStream {
 
     // Link external signal if provided
     if (options.signal) {
-      options.signal.addEventListener('abort', () => {
-        this.cancel();
-      });
+      options.signal.addEventListener('abort', this.onExternalAbort, { once: true });
     }
   }
 
@@ -179,6 +189,7 @@ export class YieldingStreamImpl implements YieldingStream {
     this.emit({ type: 'aborted', reason: 'user' });
     this.producerDone = true;
     this.state = { status: 'done' };
+    this.releaseExternalSignal();
   }
 
   // ============================================================================
@@ -215,6 +226,27 @@ export class YieldingStreamImpl implements YieldingStream {
           await this.waitForEvent();
         }
       },
+
+      // `for await … break`, `return` out of the loop body, and a throw in
+      // the loop body all call return(). Without it the consumer walks away
+      // and the producer keeps streaming, resuming and billing. Cancelling
+      // here is the same act the consumer would perform by hand.
+      return: async (): Promise<IteratorResult<StreamEvent>> => {
+        this.departConsumer();
+        return { value: undefined as unknown as StreamEvent, done: true };
+      },
+
+      // Reached through `yield*` delegation, or by a caller injecting an
+      // error by hand. Same departure as return() — nobody is reading this
+      // stream again — and then the error continues on its way, exactly as an
+      // async generator with no handler of its own would rethrow it. Reporting
+      // `done: true` here instead swallowed it: a `yield*` delegating to this
+      // stream resumed after the delegation as if nothing had been thrown in,
+      // and a direct `.throw(e)` resolved rather than rejecting.
+      throw: async (error?: unknown): Promise<IteratorResult<StreamEvent>> => {
+        this.departConsumer();
+        throw error;
+      },
     };
   }
 
@@ -226,6 +258,9 @@ export class YieldingStreamImpl implements YieldingStream {
    * Push an event to be yielded to the consumer.
    */
   emit(event: StreamEvent): void {
+    // The consumer has left for good; queueing here would grow without bound
+    // for a reader that cannot observe it.
+    if (this.consumerDeparted) return;
     this.eventQueue.push(event);
     this.notifyEventWaiter();
   }
@@ -255,6 +290,7 @@ export class YieldingStreamImpl implements YieldingStream {
    */
   markDone(): void {
     this.producerDone = true;
+    this.releaseExternalSignal();
     this.notifyEventWaiter();
   }
 
@@ -268,6 +304,21 @@ export class YieldingStreamImpl implements YieldingStream {
   // ============================================================================
   // Private Helpers
   // ============================================================================
+
+  /**
+   * The consumer has stopped iterating for good: drop everything queued for
+   * it, refuse further queueing, and cancel the producer.
+   */
+  private departConsumer(): void {
+    this.consumerDeparted = true;
+    this.eventQueue.length = 0;
+    this.cancel();
+    this.eventQueue.length = 0;
+  }
+
+  private releaseExternalSignal(): void {
+    this.options.signal?.removeEventListener('abort', this.onExternalAbort);
+  }
 
   private startInference(): void {
     if (this.state.status !== 'idle') {

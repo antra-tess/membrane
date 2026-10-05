@@ -137,10 +137,13 @@ describe('CacheKeepalive', () => {
     expect(payload.max_tokens).toBe(0);
     expect('stream' in payload).toBe(false);
     expect(headers).toEqual({ 'anthropic-beta': 'x' });
-    // The cache-key-bearing fields must be untouched — this is the whole point.
+    // Cache identity depends on serialized bytes, not JavaScript references.
     expect(payload.thinking).toEqual({ type: 'adaptive' });
-    expect(payload.system).toBe(original.system);
-    expect(payload.messages).toBe(original.messages);
+    expect(JSON.stringify(payload.system)).toBe(JSON.stringify(original.system));
+    expect(JSON.stringify(payload.messages)).toBe(JSON.stringify(original.messages));
+    const expected: Record<string, unknown> = { ...original, max_tokens: 0 };
+    delete expected.stream;
+    expect(JSON.stringify(payload)).toBe(JSON.stringify(expected));
     expect(payload.model).toBe('claude-fable-5');
     ka.stop();
   });

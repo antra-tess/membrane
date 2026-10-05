@@ -121,6 +121,20 @@ export interface ToolUseContent {
    * block. Absent on native-tools blocks and on legacy stored blocks.
    */
   rawXml?: string;
+  /**
+   * Raw accumulated argument text that FAILED to parse as JSON, kept verbatim.
+   *
+   * Present only when the provider's streamed `input_json_delta` fragments did
+   * not assemble into valid JSON — a call truncated mid-arguments (max_tokens)
+   * is the usual cause. `input` then holds whatever the provider's
+   * content_block_start carried, which for Anthropic is `{}`: a wire-valid
+   * tool call with empty arguments, indistinguishable from a genuine no-arg
+   * call once it is written to durable history. Presence of this field means
+   * `input` is NOT the model's arguments, so a consumer can refuse the block
+   * (or attempt its own repair) instead of trusting a plausible `{}`.
+   */
+  unparseableInput?: string;
+
   /** See {@link TextContent.rawItem}. */
   rawItem?: unknown;
 }

@@ -440,6 +440,28 @@ describe('flattenRootSchemaUnion', () => {
     expect(flattenRootSchemaUnion(null)).toBeNull();
     expect(flattenRootSchemaUnion('not a schema')).toBe('not a schema');
   });
+
+  it('merges a variant property named like an Object.prototype member', () => {
+    // `key in properties` found `constructor`/`toString` on the prototype of the
+    // merged object, so such a variant property was never merged, and a
+    // required key naming one survived the "only properties it carries" filter
+    // without any property behind it.
+    const schema = JSON.parse(`{
+      "required": ["toString"],
+      "oneOf": [
+        { "type": "object", "properties": { "constructor": { "type": "string" }, "a": {} },
+          "required": ["constructor"] },
+        { "type": "object", "properties": { "constructor": { "type": "string" }, "b": {} },
+          "required": ["constructor"] }
+      ]
+    }`);
+
+    const result = flattenRootSchemaUnion(schema) as Record<string, any>;
+
+    expect(Object.keys(result.properties)).toEqual(['constructor', 'a', 'b']);
+    expect(result.properties.constructor).toEqual({ type: 'string' });
+    expect(result.required).toEqual(['constructor']);
+  });
 });
 
 describe('AnthropicAdapter: tool input_schema union flattening', () => {

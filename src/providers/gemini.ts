@@ -28,7 +28,7 @@ import {
   abortError,
   networkError,
 } from '../types/index.js';
-import { createCombinedSignal } from './utils.js';
+import { createCombinedSignal, textOnlyToolResultContent, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
 
 // ============================================================================
 // Gemini API Types
@@ -77,9 +77,56 @@ interface GeminiResponse {
     candidatesTokenCount?: number;
     totalTokenCount?: number;
     cachedContentTokenCount?: number;
+    /**
+     * Reasoning ("thinking") tokens. DISJOINT from candidatesTokenCount and
+     * billed at the output rate, so generated output is candidates + thoughts.
+     * Live receipt 2026-08-25, gemini-3.5-flash-lite, thinkingBudget 512:
+     * prompt 35, candidates 2, thoughts 228, total 265 — 35+2+228 === 265.
+     */
+    thoughtsTokenCount?: number;
   };
   modelVersion?: string;
   error?: { code: number; message: string; status: string };
+}
+
+/**
+ * Map Gemini's `usageMetadata` onto membrane's usage shape.
+ *
+ * `thoughtsTokenCount` is disjoint from `candidatesTokenCount` and billed at
+ * the output rate, so generated output is the SUM of the two; reading only
+ * candidates reported a thinking turn at a fraction of its real size. The
+ * reconciliation check makes the next such omission loud rather than silent:
+ * Google's own total is the independent witness, and a mismatch means a
+ * usageMetadata field membrane does not read is carrying tokens.
+ */
+function geminiUsageToProviderUsage(
+  usageMetadata: GeminiResponse['usageMetadata']
+): ProviderResponse['usage'] {
+  const promptTokens = usageMetadata?.promptTokenCount ?? 0;
+  const candidatesTokens = usageMetadata?.candidatesTokenCount ?? 0;
+  const thoughtsTokens = usageMetadata?.thoughtsTokenCount;
+  const totalTokens = usageMetadata?.totalTokenCount;
+
+  if (usageMetadata && totalTokens != null) {
+    const accountedTokens = promptTokens + candidatesTokens + (thoughtsTokens ?? 0);
+    if (accountedTokens !== totalTokens) {
+      console.warn(
+        `[membrane:gemini] usageMetadata does not reconcile: promptTokenCount(${promptTokens})`
+        + ` + candidatesTokenCount(${candidatesTokens}) + thoughtsTokenCount(${thoughtsTokens ?? 0})`
+        + ` = ${accountedTokens}, but totalTokenCount = ${totalTokens}.`
+        + ' Some billed tokens are in a usageMetadata field membrane does not read.'
+      );
+    }
+  }
+
+  return {
+    inputTokens: promptTokens,
+    outputTokens: candidatesTokens + (thoughtsTokens ?? 0),
+    ...(thoughtsTokens != null ? { thinkingTokens: thoughtsTokens } : {}),
+    cacheReadTokens: usageMetadata?.cachedContentTokenCount
+      ? usageMetadata.cachedContentTokenCount
+      : undefined,
+  };
 }
 
 // ============================================================================
@@ -103,6 +150,18 @@ export interface GeminiAdapterConfig {
 
 export class GeminiAdapter implements ProviderAdapter {
   readonly name = 'gemini';
+
+  /**
+   * NOT ESTABLISHED. Google documents `cachedContentTokenCount` but the probes
+   * available on 2026-08-25 could not produce a cache hit to measure against:
+   * three identical 10,893-token calls to gemini-3.5-flash-lite never reported
+   * the field (implicit caching did not trigger), and explicit `cachedContents`
+   * is refused on the free tier (429,
+   * TotalCachedContentStorageTokensPerModelFreeTier limit=0). Declared honestly
+   * rather than guessed — membrane passes the counts through and warns once if
+   * a cache read ever arrives.
+   */
+  readonly usageCacheConvention = 'unknown' as const;
   private apiKey: string;
   private baseURL: string;
   private defaultMaxTokens: number;
@@ -188,10 +247,64 @@ export class GeminiAdapter implements ProviderAdapter {
       const decoder = new TextDecoder();
       let accumulated = '';
       let finishReason = 'STOP';
+      let sawTerminalEvent = false;
       let toolCalls: { name: string; args: Record<string, unknown> }[] = [];
       let images: { data: string; mimeType: string }[] = [];
       let lastUsage: GeminiResponse['usageMetadata'] | undefined;
+      // The resolved model Google actually served, echoed on stream frames.
+      // Reporting the requested id instead hides alias/auto-upgrade routing.
+      let lastModelVersion: string | undefined;
       let buffer = '';
+
+      // One frame handler for both the streaming lines and the trailing
+      // buffer — the two used to carry byte-identical copies of this logic,
+      // so any fix (error frames, terminal observation) had to be made twice.
+      const processDataLine = (dataLine: string): void => {
+        let parsed: GeminiResponse;
+        try {
+          parsed = JSON.parse(dataLine) as GeminiResponse;
+        } catch {
+          return; // Ignore parse errors in stream chunks
+        }
+
+        throwOnStreamErrorFrame(parsed, 'Gemini', geminiRequest);
+
+        const candidate = parsed.candidates?.[0];
+
+        if (candidate?.content?.parts) {
+          for (const part of candidate.content.parts) {
+            if (part.text) {
+              accumulated += part.text;
+              callbacks.onChunk(part.text);
+            }
+            if (part.inlineData) {
+              images.push({
+                data: part.inlineData.data,
+                mimeType: part.inlineData.mimeType,
+              });
+            }
+            if (part.functionCall) {
+              toolCalls.push({
+                name: part.functionCall.name,
+                args: part.functionCall.args,
+              });
+            }
+          }
+        }
+
+        if (candidate?.finishReason) {
+          finishReason = candidate.finishReason;
+          sawTerminalEvent = true;
+        }
+
+        if (parsed.usageMetadata) {
+          lastUsage = parsed.usageMetadata;
+        }
+
+        if (parsed.modelVersion) {
+          lastModelVersion = parsed.modelVersion;
+        }
+      };
 
       while (true) {
         const { done, value } = await reader.read();
@@ -206,42 +319,7 @@ export class GeminiAdapter implements ProviderAdapter {
           if (!line.startsWith('data: ')) continue;
           const data = line.slice(6).trim();
           if (!data || data === '[DONE]') continue;
-
-          try {
-            const parsed = JSON.parse(data) as GeminiResponse;
-            const candidate = parsed.candidates?.[0];
-
-            if (candidate?.content?.parts) {
-              for (const part of candidate.content.parts) {
-                if (part.text) {
-                  accumulated += part.text;
-                  callbacks.onChunk(part.text);
-                }
-                if (part.inlineData) {
-                  images.push({
-                    data: part.inlineData.data,
-                    mimeType: part.inlineData.mimeType,
-                  });
-                }
-                if (part.functionCall) {
-                  toolCalls.push({
-                    name: part.functionCall.name,
-                    args: part.functionCall.args,
-                  });
-                }
-              }
-            }
-
-            if (candidate?.finishReason) {
-              finishReason = candidate.finishReason;
-            }
-
-            if (parsed.usageMetadata) {
-              lastUsage = parsed.usageMetadata;
-            }
-          } catch {
-            // Ignore parse errors in stream chunks
-          }
+          processDataLine(data);
         }
       }
 
@@ -250,56 +328,18 @@ export class GeminiAdapter implements ProviderAdapter {
         const remaining = buffer.trim();
         const dataLine = remaining.startsWith('data: ') ? remaining.slice(6).trim() : remaining;
         if (dataLine && dataLine !== '[DONE]') {
-          try {
-            const parsed = JSON.parse(dataLine) as GeminiResponse;
-            const candidate = parsed.candidates?.[0];
-
-            if (candidate?.content?.parts) {
-              for (const part of candidate.content.parts) {
-                if (part.text) {
-                  accumulated += part.text;
-                  callbacks.onChunk(part.text);
-                }
-                if (part.inlineData) {
-                  images.push({
-                    data: part.inlineData.data,
-                    mimeType: part.inlineData.mimeType,
-                  });
-                }
-                if (part.functionCall) {
-                  toolCalls.push({
-                    name: part.functionCall.name,
-                    args: part.functionCall.args,
-                  });
-                }
-              }
-            }
-
-            if (candidate?.finishReason) {
-              finishReason = candidate.finishReason;
-            }
-
-            if (parsed.usageMetadata) {
-              lastUsage = parsed.usageMetadata;
-            }
-          } catch {
-            // Final buffer wasn't valid JSON — nothing to do
-          }
+          processDataLine(dataLine);
         }
       }
+
+      assertTerminalEventObserved(sawTerminalEvent, 'Gemini', geminiRequest);
 
       return {
         content: this.buildContentBlocks(accumulated, toolCalls, images),
         stopReason: this.mapFinishReason(finishReason),
         stopSequence: undefined,
-        usage: {
-          inputTokens: lastUsage?.promptTokenCount ?? 0,
-          outputTokens: lastUsage?.candidatesTokenCount ?? 0,
-          cacheReadTokens: lastUsage?.cachedContentTokenCount
-            ? lastUsage.cachedContentTokenCount
-            : undefined,
-        },
-        model: request.model,
+        usage: geminiUsageToProviderUsage(lastUsage),
+        model: lastModelVersion ?? request.model,
         rawRequest: geminiRequest,
         raw: { finishReason, usage: lastUsage },
       };
@@ -450,9 +490,7 @@ export class GeminiAdapter implements ProviderAdapter {
               },
             });
           } else if (block.type === 'tool_result') {
-            const resultContent = typeof block.content === 'string'
-              ? block.content
-              : JSON.stringify(block.content);
+            const resultContent = textOnlyToolResultContent(block.content);
             toolResultParts.push({
               functionResponse: {
                 name: block.name ?? block.tool_use_id ?? 'unknown',
@@ -563,13 +601,7 @@ export class GeminiAdapter implements ProviderAdapter {
       content: this.buildContentBlocks(text, toolCalls, images),
       stopReason: this.mapFinishReason(candidate?.finishReason),
       stopSequence: undefined,
-      usage: {
-        inputTokens: response.usageMetadata?.promptTokenCount ?? 0,
-        outputTokens: response.usageMetadata?.candidatesTokenCount ?? 0,
-        cacheReadTokens: response.usageMetadata?.cachedContentTokenCount
-          ? response.usageMetadata.cachedContentTokenCount
-          : undefined,
-      },
+      usage: geminiUsageToProviderUsage(response.usageMetadata),
       model: response.modelVersion ?? requestedModel,
       rawRequest,
       raw: response,
@@ -630,6 +662,10 @@ export class GeminiAdapter implements ProviderAdapter {
   // --------------------------------------------------------------------------
 
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
+    // A deadline abort is a timeout and stays one. Collapsing it into a bare
+    // abortError() here is what erased the identity before Membrane's
+    // caller-signal > timeout > error ladder could read it.
+    if (isDeadlineAbort(error)) return deadlineTimeoutError(error, rawRequest);
     if (error instanceof MembraneError) return error;
 
     if (error instanceof Error) {

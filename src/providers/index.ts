@@ -7,6 +7,7 @@ export {
   toAnthropicContent,
   fromAnthropicContent,
   type AnthropicAdapterConfig,
+  type DynamicHeadersContext,
 } from './anthropic.js';
 
 export { flattenRootSchemaUnion } from './anthropic-tool-schema.js';
@@ -71,3 +72,5 @@ export {
   type OpenAIResponsesInputItem,
   type OpenAIResponsesOutputItem,
 } from './openai-responses-api.js';
+
+export type { CredentialContext, CredentialResolver, ResolvedCredential } from './credentials.js';
