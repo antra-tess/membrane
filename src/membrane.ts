@@ -5,6 +5,7 @@
  */
 
 import { restoreToolName } from './utils/tool-names.js';
+import { StreamedThinking } from './utils/streamed-thinking.js';
 
 import type {
   NormalizedRequest,
@@ -189,6 +190,7 @@ class NativeBlockTracker {
       mb.input = apiBlock?.input as Record<string, unknown> | undefined;
     }
     this.emit?.({ event: 'block_complete', index, block: mb });
+    if (this.blockIndex === index) this.currentType = 'text';
   }
 }
 
@@ -648,6 +650,7 @@ export class Membrane {
     // different format than the one on the wire.
     const formatter = activeFormatter;
     const xmlToolProtocol = formatter.supportsXmlTools;
+    const streamedThinking = new StreamedThinking();
 
     // Initialize parser from formatter for format-specific tracking
     const parser = formatter.createStreamParser();
@@ -776,6 +779,31 @@ export class Membrane {
         // this index and doesn't count as model progress.
         const checkFromIndex = parser.getAccumulated().length;
 
+        let typedCallbacks = false;
+        let sawChunk = false;
+        const textStarts = new Map<number, number>();
+        streamedThinking.beginRound(parser.getAccumulated().length - initialPrefillLength);
+        const tracker = new NativeBlockTracker((event) => { if (typedCallbacks) onBlock?.(event); });
+        const onProviderBlock = (index: number, block: unknown) => {
+          if (!xmlToolProtocol && (!detectedStopSequence || textStarts.has(index))) {
+            const type = (block as { type?: string } | undefined)?.type;
+            if (!sawChunk && (type === 'text' || type === 'thinking' || type === 'redacted_thinking')) typedCallbacks = true;
+            const accepted = truncatedAccumulated ?? parser.getAccumulated();
+            const offset = accepted.length - initialPrefillLength;
+            // Logical completion reports accepted text, not a suffix
+            // discarded by the parser's local stop-sequence boundary.
+            let reported = block;
+            if (type === 'text') {
+              const start = textStarts.get(index);
+              if (start === undefined) textStarts.set(index, offset);
+              else reported = { ...(block as object), text: accepted.slice(initialPrefillLength + start) };
+            }
+            streamedThinking.onBlock(index, reported, offset);
+            tracker.onProviderBlock(index, reported);
+          }
+          onContentBlockUpdate?.(index, block as ContentBlock);
+        };
+
         // Stream from provider
         const streamResult = await this.streamOnce(
           providerRequest,
@@ -787,6 +815,13 @@ export class Membrane {
               }
 
               // Process chunk with enriched streaming API
+              sawChunk = true;
+              if (!xmlToolProtocol && tracker.currentType === 'thinking') {
+                streamedThinking.onThinkingChunk(tracker.blockIndex, chunk);
+                onChunk?.(chunk, { type: 'thinking', visible: false, blockIndex: tracker.blockIndex });
+                return;
+              }
+              // Only visible text enters a plain formatter's parser.
               const { emissions } = parser.processChunk(chunk);
 
               // Check for stop sequences only in NEW content (not already-processed)
@@ -819,15 +854,13 @@ export class Membrane {
               // Emit in correct interleaved order using emissions array
               for (const emission of emissions) {
                 if (emission.kind === 'blockEvent') {
-                  onBlock?.(emission.event);
+                  if (!typedCallbacks) onBlock?.(emission.event);
                 } else {
-                  onChunk?.(emission.text, emission.meta);
+                  onChunk?.(emission.text, typedCallbacks ? { ...emission.meta, blockIndex: tracker.blockIndex } : emission.meta);
                 }
               }
             },
-            onContentBlock: onContentBlockUpdate
-              ? (index: number, block: unknown) => onContentBlockUpdate(index, block as ContentBlock)
-              : undefined,
+            onContentBlock: onProviderBlock,
           },
           {
             signal,
@@ -848,6 +881,7 @@ export class Membrane {
           }
         );
 
+        if (typedCallbacks) tracker.flush();
         rounds++;
         providerCalls += streamResult.providerCalls;
 
@@ -886,7 +920,7 @@ export class Membrane {
         // Flush the parser to complete any in-progress streaming block
         const flushResult = parser.flush();
         for (const emission of flushResult.emissions) {
-          if (emission.kind === 'blockEvent') {
+          if (emission.kind === 'blockEvent' && !typedCallbacks) {
             onBlock?.(emission.event);
           }
         }
@@ -1195,7 +1229,7 @@ export class Membrane {
 
       const response = this.buildFinalResponse(
         newContent,
-        xmlToolProtocol ? contentBlocks : formatter.parseContentBlocks(newContent),
+        xmlToolProtocol ? contentBlocks : streamedThinking.content(newContent, value => formatter.parseContentBlocks(value)),
         lastStopReason,
         turnUsage,
         request,
@@ -1237,7 +1271,7 @@ export class Membrane {
           this.abortReason(error, signal),
           xmlToolProtocol
             ? parseAccumulatedIntoBlocks(newContent, { tools: request.tools, ...(initialBlockType ? { startInsideBlock: initialBlockType } : {}) }).blocks
-            : formatter.parseContentBlocks(newContent)
+            : streamedThinking.content(newContent, value => formatter.parseContentBlocks(value))
         );
       }
       // Re-throw with rawRequest attached for logging
@@ -1295,6 +1329,9 @@ export class Membrane {
     // Build messages array that we'll update with tool results
     let messages = [...request.messages];
     let allContentBlocks: ContentBlock[] = [];
+    const partialThinking = new StreamedThinking();
+    let partialText = '';
+    let partialActive = false;
     let markersInLastRequest = 0;
 
     try {
@@ -1305,6 +1342,9 @@ export class Membrane {
 
         // Stream from provider
         let textAccumulated = '';
+        partialThinking.reset();
+        partialText = '';
+        partialActive = true;
         // Tag every token chunk with the membrane block it belongs to and
         // surface the block lifecycle through onBlock — the same shape
         // runNativeToolsYielding uses (#19). Before this, meta.type was
@@ -1317,6 +1357,8 @@ export class Membrane {
             onChunk: (chunk) => {
               textAccumulated += chunk;
               allTextAccumulated += chunk;
+              if (tracker.currentType === 'thinking') partialThinking.onThinkingChunk(tracker.blockIndex, chunk);
+              else partialText += chunk;
               const meta: ChunkMeta = {
                 type: tracker.currentType,
                 visible: tracker.currentType === 'text',
@@ -1325,6 +1367,7 @@ export class Membrane {
               onChunk?.(chunk, meta);
             },
             onContentBlock: (index: number, block: unknown) => {
+              partialThinking.onBlock(index, block, partialText.length);
               tracker.onProviderBlock(index, block);
               // Deprecated pass-through, kept for callers still on it.
               onContentBlockUpdate?.(index, block as ContentBlock);
@@ -1376,6 +1419,7 @@ export class Membrane {
         // Parse content blocks from response
         const responseBlocks = this.parseProviderContent(streamResult.content, request.tools);
         allContentBlocks.push(...responseBlocks);
+        partialActive = false;
 
         // Check for tool_use blocks
         const toolUseBlocks = responseBlocks.filter(
@@ -1507,7 +1551,7 @@ export class Membrane {
           executedToolCalls,
           executedToolResults,
           this.abortReason(error, signal),
-          this.parseProviderContent(allTextAccumulated)
+          [...allContentBlocks, ...(partialActive ? partialThinking.content(partialText, value => this.parseProviderContent(value)) : [])]
         );
       }
       // Re-throw with rawRequest attached for logging
@@ -3007,6 +3051,7 @@ export class Membrane {
     // parser and the build below read the same format.
     const formatter = activeFormatter;
     const xmlToolProtocol = formatter.supportsXmlTools;
+    const streamedThinking = new StreamedThinking();
     const parser = formatter.createStreamParser();
     let toolDepth = 0;
     // Honest turn telemetry: provider calls actually made (including refusal
@@ -3099,7 +3144,7 @@ export class Membrane {
             reason: 'user',
             partialContent: xmlToolProtocol
               ? parseAccumulatedIntoBlocks(newContent, { tools: request.tools }).blocks
-              : formatter.parseContentBlocks(newContent),
+              : streamedThinking.content(newContent, value => formatter.parseContentBlocks(value)),
             rawAssistantText: newContent,
             toolCalls: executedToolCalls,
             toolResults: executedToolResults,
@@ -3112,6 +3157,30 @@ export class Membrane {
         let truncatedAccumulated: string | null = null;
         const checkFromIndex = parser.getAccumulated().length;
 
+        let typedCallbacks = false;
+        let sawChunk = false;
+        const textStarts = new Map<number, number>();
+        streamedThinking.beginRound(parser.getAccumulated().length - initialPrefillLength);
+        const tracker = new NativeBlockTracker((event) => { if (typedCallbacks && emitBlocks) stream.emit({ type: 'block', event }); });
+        const onProviderBlock = (index: number, block: unknown) => {
+          if (!xmlToolProtocol && (!detectedStopSequence || textStarts.has(index))) {
+            const type = (block as { type?: string } | undefined)?.type;
+            if (!sawChunk && (type === 'text' || type === 'thinking' || type === 'redacted_thinking')) typedCallbacks = true;
+            const accepted = truncatedAccumulated ?? parser.getAccumulated();
+            const offset = accepted.length - initialPrefillLength;
+            // Logical completion reports accepted text, not a suffix
+            // discarded by the parser's local stop-sequence boundary.
+            let reported = block;
+            if (type === 'text') {
+              const start = textStarts.get(index);
+              if (start === undefined) textStarts.set(index, offset);
+              else reported = { ...(block as object), text: accepted.slice(initialPrefillLength + start) };
+            }
+            streamedThinking.onBlock(index, reported, offset);
+            tracker.onProviderBlock(index, reported);
+          }
+        };
+
         // Stream from provider
         const streamResult = await this.streamOnce(
           providerRequest,
@@ -3122,6 +3191,13 @@ export class Membrane {
               }
 
               // Process chunk with enriched streaming API
+              sawChunk = true;
+              if (!xmlToolProtocol && tracker.currentType === 'thinking') {
+                streamedThinking.onThinkingChunk(tracker.blockIndex, chunk);
+                if (emitTokens) stream.emit({ type: 'tokens', content: chunk, meta: { type: 'thinking', visible: false, blockIndex: tracker.blockIndex } });
+                return;
+              }
+              // Only visible text enters a plain formatter's parser.
               const { emissions } = parser.processChunk(chunk);
 
               // Check for stop sequences only in NEW content
@@ -3153,17 +3229,17 @@ export class Membrane {
               // Emit in correct interleaved order
               for (const emission of emissions) {
                 if (emission.kind === 'blockEvent') {
-                  if (emitBlocks) {
+                  if (emitBlocks && !typedCallbacks) {
                     stream.emit({ type: 'block', event: emission.event });
                   }
                 } else {
                   if (emitTokens) {
-                    stream.emit({ type: 'tokens', content: emission.text, meta: emission.meta });
+                    stream.emit({ type: 'tokens', content: emission.text, meta: typedCallbacks ? { ...emission.meta, blockIndex: tracker.blockIndex } : emission.meta });
                   }
                 }
               }
             },
-            onContentBlock: undefined,
+            onContentBlock: onProviderBlock,
           },
           {
             signal: stream.signal,
@@ -3181,6 +3257,7 @@ export class Membrane {
           }
         );
 
+        if (typedCallbacks) tracker.flush();
         rounds++;
         providerCalls += streamResult.providerCalls;
 
@@ -3212,7 +3289,7 @@ export class Membrane {
         // Flush the parser
         const flushResult = parser.flush();
         for (const emission of flushResult.emissions) {
-          if (emission.kind === 'blockEvent' && emitBlocks) {
+          if (emission.kind === 'blockEvent' && emitBlocks && !typedCallbacks) {
             stream.emit({ type: 'block', event: emission.event });
           }
         }
@@ -3533,7 +3610,7 @@ export class Membrane {
 
       const response = this.buildFinalResponse(
         newContent,
-        xmlToolProtocol ? contentBlocks : formatter.parseContentBlocks(newContent),
+        xmlToolProtocol ? contentBlocks : streamedThinking.content(newContent, value => formatter.parseContentBlocks(value)),
         lastStopReason,
         turnUsage,
         request,
@@ -3565,7 +3642,7 @@ export class Membrane {
           reason: this.abortReason(error, stream.signal),
           partialContent: xmlToolProtocol
               ? parseAccumulatedIntoBlocks(newContent, { tools: request.tools }).blocks
-              : formatter.parseContentBlocks(newContent),
+              : streamedThinking.content(newContent, value => formatter.parseContentBlocks(value)),
           rawAssistantText: newContent,
           toolCalls: executedToolCalls,
           toolResults: executedToolResults,
@@ -3626,6 +3703,9 @@ export class Membrane {
 
     let messages = [...request.messages];
     let allContentBlocks: ContentBlock[] = [];
+    const partialThinking = new StreamedThinking();
+    let partialText = '';
+    let partialActive = false;
     let markersInLastRequest = 0;
 
     try {
@@ -3636,6 +3716,7 @@ export class Membrane {
           stream.emit({
             type: 'aborted',
             reason: 'user',
+            partialContent: [...allContentBlocks, ...(partialActive ? partialThinking.content(partialText, value => this.parseProviderContent(value)) : [])],
             rawAssistantText: allTextAccumulated,
             toolCalls: executedToolCalls,
             toolResults: executedToolResults,
@@ -3648,6 +3729,9 @@ export class Membrane {
 
         // Stream from provider
         let textAccumulated = '';
+        partialThinking.reset();
+        partialText = '';
+        partialActive = true;
         // Where this attempt starts inside the tool-loop-spanning buffer, so
         // a refusal retry can roll back exactly this attempt's contribution.
         const allTextBefore = allTextAccumulated.length;
@@ -3666,6 +3750,8 @@ export class Membrane {
 
               textAccumulated += chunk;
               allTextAccumulated += chunk;
+              if (tracker.currentType === 'thinking') partialThinking.onThinkingChunk(tracker.blockIndex, chunk);
+              else partialText += chunk;
 
               if (emitTokens) {
                 const meta: ChunkMeta = {
@@ -3678,6 +3764,7 @@ export class Membrane {
             },
             onContentBlock: (index, block) => {
               if (stream.isCancelled) return;
+              partialThinking.onBlock(index, block, partialText.length);
               tracker.onProviderBlock(index, block);
             },
           },
@@ -3707,6 +3794,8 @@ export class Membrane {
               allTextAccumulated = allTextAccumulated.slice(0, allTextBefore);
               textAccumulated = '';
               tracker.reset();
+              partialThinking.reset();
+              partialText = '';
               stream.emit({
                 type: 'retrying',
                 attempt: info.attempt,
@@ -3741,6 +3830,7 @@ export class Membrane {
         // Parse content blocks from response
         const responseBlocks = this.parseProviderContent(streamResult.content, request.tools);
         allContentBlocks.push(...responseBlocks);
+        partialActive = false;
 
         // Check for tool_use blocks
         const toolUseBlocks = responseBlocks.filter(
@@ -3891,6 +3981,7 @@ export class Membrane {
         stream.emit({
           type: 'aborted',
           reason: this.abortReason(error, stream.signal),
+          partialContent: [...allContentBlocks, ...(partialActive ? partialThinking.content(partialText, value => this.parseProviderContent(value)) : [])],
           rawAssistantText: allTextAccumulated,
           toolCalls: executedToolCalls,
           toolResults: executedToolResults,

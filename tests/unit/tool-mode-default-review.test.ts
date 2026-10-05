@@ -571,19 +571,15 @@ describe('plain/native partial and stop responses', () => {
       });
     }
   }
-  it.each(['stream', 'yielding'])('plain %s retains native thinking without generating XML text', async path => {
-    const adapter: any = {
-      name: 'native-thinking', supportsModel: () => true,
-      async stream(request: any, callbacks: any, options: any) {
-        options.onRequest?.(request);
-        if (options.wrapThinkingTags) callbacks.onChunk('<thinking>thought</thinking>');
-        callbacks.onChunk('visible');
-        return { content: [{ type: 'thinking', thinking: 'thought', signature: 'sig' }, text('visible')],
-          stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 }, model: request.model, rawRequest: request, raw: {} };
-      },
-    };
+  it.each(['stream', 'yielding'])('plain %s retains separately reported compatible reasoning', async path => {
+    vi.stubGlobal('fetch', vi.fn(async () => sseResponse([
+      JSON.stringify({ choices: [{ index: 0, delta: { reasoning_content: 'thought' } }] }),
+      JSON.stringify({ choices: [{ index: 0, delta: { content: 'visible' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1 } }),
+      '[DONE]',
+    ])));
+    const adapter = new OpenAICompatibleAdapter({ baseURL: 'https://compatible.test' });
     const response = await run(path, new Membrane(adapter, { formatter: new CompletionsFormatter() }), req(false, 'gpt-4o'));
-    expect(response.content.filter((block: any) => block.type === 'thinking')).toEqual([{ type: 'thinking', thinking: 'thought', signature: 'sig' }]);
+    expect(response.content.filter((block: any) => block.type === 'thinking')).toEqual([{ type: 'thinking', thinking: 'thought' }]);
     expect(response.content.filter((block: any) => block.type === 'text')).toEqual([text('visible')]);
   });
 });

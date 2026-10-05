@@ -27,6 +27,8 @@ await membrane.stream({
 
 The native and XML paths intentionally produce different request bytes and cache prefixes. Native response text remains text, including XML-looking examples. XML tool decoding, closing-tag reconstruction, and XML diagnostics require a selected XML-capable formatter in XML mode. Plain CompletionsFormatter output follows its own text parser, including final and aborted stream content. To retain the old textual-tool fallback from native `complete()`, select an XML-capable formatter and `toolMode: 'xml'`. Native mode preserves caller-authored assistant-ended history; it does not append an invented user turn or silently re-role that history to satisfy a provider restriction.
 
+Provider block types keep streamed thinking out of a plain formatter’s text parser. Thinking chunks carry non-visible metadata. Received thinking snapshots, signatures, and redacted blocks remain typed in final and partial content. The plain formatter parses visible text spans between those blocks, so its `rawAssistantText` contains text rather than native thinking or synthetic XML wrappers. Native aborted responses also expose observed `partialContent`, including completed rounds and the current text/thinking prefix; their raw chunk accumulation is unchanged. Explicit XML retains its tagged parser and continuation behavior.
+
 ## Available formatters
 
 ### AnthropicXmlFormatter
