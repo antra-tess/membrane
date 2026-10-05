@@ -25,7 +25,7 @@ await membrane.stream({
 });
 ```
 
-The native and XML paths intentionally produce different request bytes and cache prefixes. Native mode preserves caller-authored assistant-ended history; it does not append an invented user turn or silently re-role that history to satisfy a provider restriction.
+The native and XML paths intentionally produce different request bytes and cache prefixes. Native response text remains text, including XML-looking examples. XML tool decoding, closing-tag reconstruction, and XML diagnostics require a selected XML-capable formatter in XML mode. Plain CompletionsFormatter output follows its own text parser, including final and aborted stream content. To retain the old textual-tool fallback from native `complete()`, select an XML-capable formatter and `toolMode: 'xml'`. Native mode preserves caller-authored assistant-ended history; it does not append an invented user turn or silently re-role that history to satisfy a provider restriction.
 
 ## Available formatters
 

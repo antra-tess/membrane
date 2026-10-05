@@ -246,6 +246,7 @@ export class Membrane {
 
       try {
         const { providerRequest, prefillResult, toolMode } = this.transformRequest(request, activeFormatter);
+        const xmlToolProtocol = toolMode === 'xml' && activeFormatter.supportsXmlTools;
 
         // Route through the single canonical hook helper so any future
         // change to hook semantics (logging, retry interaction, error
@@ -307,6 +308,7 @@ export class Membrane {
           { ...prefillResult, cacheMarkersApplied: markersInRequest },
           startTime,
           attempts,
+          xmlToolProtocol,
           rawRequest
         );
 
@@ -530,7 +532,8 @@ export class Membrane {
                 { inputTokens: 0, outputTokens: 0 },
                 [],
                 [],
-                this.abortReason(sleepError, options.signal)
+                this.abortReason(sleepError, options.signal),
+                []
               );
             }
             throw sleepError;
@@ -640,6 +643,7 @@ export class Membrane {
     // mode and will build the request, so the parser can never be reading a
     // different format than the one on the wire.
     const formatter = activeFormatter;
+    const xmlToolProtocol = formatter.supportsXmlTools;
 
     // Initialize parser from formatter for format-specific tracking
     const parser = formatter.createStreamParser();
@@ -831,7 +835,7 @@ export class Membrane {
             // The tag-based parser tracks thinking via <thinking> tags — ask the
             // provider to wrap native thinking deltas so they don't stream as
             // visible text (see ProviderRequestOptions.wrapThinkingTags)
-            wrapThinkingTags: true,
+            wrapThinkingTags: xmlToolProtocol,
             onWireCacheMarkers: (count) => { prefillResult.cacheMarkersApplied = count; },
             onRequest: (req) => {
               rawRequest = req;
@@ -919,7 +923,7 @@ export class Membrane {
         enteredViaResumption = false;
 
         // Check for tool calls (if handler provided)
-        if (onToolCalls && streamResult.stopSequence === '</function_calls>') {
+        if (xmlToolProtocol && onToolCalls && streamResult.stopSequence === '</function_calls>') {
           // Append the closing tag (we truncated before it, or API stopped before it)
           const closeTag = '</function_calls>';
           parser.push(closeTag);
@@ -1187,10 +1191,11 @@ export class Membrane {
 
       const response = this.buildFinalResponse(
         newContent,
-        contentBlocks,
+        xmlToolProtocol ? contentBlocks : formatter.parseContentBlocks(newContent),
         lastStopReason,
         turnUsage,
         request,
+        xmlToolProtocol,
         prefillResult,
         startTime,
         providerCalls,
@@ -1226,8 +1231,9 @@ export class Membrane {
           executedToolCalls,
           executedToolResults,
           this.abortReason(error, signal),
-          initialBlockType,
-          request.tools
+          xmlToolProtocol
+            ? parseAccumulatedIntoBlocks(newContent, { tools: request.tools, ...(initialBlockType ? { startInsideBlock: initialBlockType } : {}) }).blocks
+            : formatter.parseContentBlocks(newContent)
         );
       }
       // Re-throw with rawRequest attached for logging
@@ -1496,7 +1502,8 @@ export class Membrane {
           turnUsage.total,
           executedToolCalls,
           executedToolResults,
-          this.abortReason(error, signal)
+          this.abortReason(error, signal),
+          this.parseProviderContent(allTextAccumulated)
         );
       }
       // Re-throw with rawRequest attached for logging
@@ -2373,6 +2380,7 @@ export class Membrane {
     },
     startTime: number,
     attempts: number,
+    xmlToolProtocol: boolean,
     rawRequest?: unknown
   ): NormalizedResponse {
     // Extract text from response
@@ -2426,7 +2434,7 @@ export class Membrane {
 
     // If we stopped on a closing XML tag, append it to the text so parsers can complete
     // the block. The API stops BEFORE the stop sequence, but we need the closing tag.
-    const stoppedOnClosingTag = providerResponse.stopReason === 'stop_sequence' &&
+    const stoppedOnClosingTag = xmlToolProtocol && providerResponse.stopReason === 'stop_sequence' &&
       providerResponse.stopSequence?.startsWith('</');
     if (stoppedOnClosingTag && providerResponse.stopSequence) {
       rawAssistantText += providerResponse.stopSequence;
@@ -2443,7 +2451,7 @@ export class Membrane {
     // Parse XML tool calls from text if no native tool_use blocks were found
     // This handles prefill mode where tools are XML in the text
     let emptyToolBlocks = 0;
-    if (toolCalls.length === 0 && rawAssistantText.includes('<function_calls>')) {
+    if (xmlToolProtocol && toolCalls.length === 0 && rawAssistantText.includes('<function_calls>')) {
       const parsed = parseToolCalls(rawAssistantText, { tools: request.tools });
       if (parsed?.calls.length) {
         for (const tc of parsed.calls) {
@@ -2453,10 +2461,10 @@ export class Membrane {
         emptyToolBlocks = 1;
       }
     }
-    const unclosedToolBlock = endsWithPartialToolBlock(rawAssistantText);
+    const unclosedToolBlock = xmlToolProtocol && endsWithPartialToolBlock(rawAssistantText);
 
     const stopReason = this.mapStopReason(providerResponse.stopReason);
-    this.reportToolParseDiagnostics({ unclosedToolBlock, emptyToolBlocks }, stopReason);
+    if (xmlToolProtocol) this.reportToolParseDiagnostics({ unclosedToolBlock, emptyToolBlocks }, stopReason);
     const durationMs = Date.now() - startTime;
     // `NormalizedResponse.usage` is typed DetailedUsage and the streaming paths
     // already return the whole thing; complete() used to narrow it to
@@ -2569,6 +2577,7 @@ export class Membrane {
     stopReason: StopReason,
     turnUsage: TurnUsageAccumulator,
     request: NormalizedRequest,
+    xmlToolProtocol: boolean,
     prefillResult: {
       cacheMarkersApplied?: number;
     },
@@ -2590,7 +2599,7 @@ export class Membrane {
 
     let unclosedToolBlock = false;
 
-    if (contentBlocks.length > 0) {
+    if (contentBlocks.length > 0 || !xmlToolProtocol) {
       // Native mode - content blocks already structured
       finalContent = contentBlocks;
       toolCalls = executedToolCalls;
@@ -2855,17 +2864,8 @@ export class Membrane {
     toolCalls: ToolCall[],
     toolResults: ToolResult[],
     reason: 'user' | 'timeout' | 'error',
-    startInsideBlock: 'thinking' | 'tool_call' | 'tool_result' | null = null,
-    tools?: ToolDefinition[]
+    blocks: ContentBlock[]
   ): AbortedResponse {
-    // Parse accumulated text into content blocks for partial content
-    // If we started inside a block (from prefill), pass that context
-    const parseOptions = {
-      tools,
-      ...(startInsideBlock ? { startInsideBlock } : {}),
-    };
-    const { blocks } = parseAccumulatedIntoBlocks(accumulated, parseOptions);
-
     return {
       aborted: true,
       partialContent: blocks.length > 0 ? blocks : undefined,
@@ -2991,6 +2991,7 @@ export class Membrane {
     // Initialize parser from the formatter streamYielding selected, so the
     // parser and the build below read the same format.
     const formatter = activeFormatter;
+    const xmlToolProtocol = formatter.supportsXmlTools;
     const parser = formatter.createStreamParser();
     let toolDepth = 0;
     // Honest turn telemetry: provider calls actually made (including refusal
@@ -3081,7 +3082,9 @@ export class Membrane {
           stream.emit({
             type: 'aborted',
             reason: 'user',
-            partialContent: parseAccumulatedIntoBlocks(newContent, { tools: request.tools }).blocks,
+            partialContent: xmlToolProtocol
+              ? parseAccumulatedIntoBlocks(newContent, { tools: request.tools }).blocks
+              : formatter.parseContentBlocks(newContent),
             rawAssistantText: newContent,
             toolCalls: executedToolCalls,
             toolResults: executedToolResults,
@@ -3157,7 +3160,7 @@ export class Membrane {
             // The tag-based parser tracks thinking via <thinking> tags — ask
             // the provider to wrap native thinking deltas so they don't
             // stream as visible text (same as streamWithXmlTools).
-            wrapThinkingTags: true,
+            wrapThinkingTags: xmlToolProtocol,
             onWireCacheMarkers: (count) => { prefillResult.cacheMarkersApplied = count; },
             onRequest: (req: unknown) => { rawRequest = req; },
           }
@@ -3228,7 +3231,7 @@ export class Membrane {
         enteredViaResumption = false;
 
         // Check for tool calls
-        if (streamResult.stopSequence === '</function_calls>') {
+        if (xmlToolProtocol && streamResult.stopSequence === '</function_calls>') {
           const closeTag = '</function_calls>';
           parser.push(closeTag);
 
@@ -3515,10 +3518,11 @@ export class Membrane {
 
       const response = this.buildFinalResponse(
         newContent,
-        contentBlocks,
+        xmlToolProtocol ? contentBlocks : formatter.parseContentBlocks(newContent),
         lastStopReason,
         turnUsage,
         request,
+        xmlToolProtocol,
         prefillResult,
         startTime,
         providerCalls,
@@ -3544,7 +3548,9 @@ export class Membrane {
         stream.emit({
           type: 'aborted',
           reason: this.abortReason(error, stream.signal),
-          partialContent: parseAccumulatedIntoBlocks(newContent, { tools: request.tools }).blocks,
+          partialContent: xmlToolProtocol
+              ? parseAccumulatedIntoBlocks(newContent, { tools: request.tools }).blocks
+              : formatter.parseContentBlocks(newContent),
           rawAssistantText: newContent,
           toolCalls: executedToolCalls,
           toolResults: executedToolResults,

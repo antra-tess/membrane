@@ -485,3 +485,105 @@ describe('prompt-source option contract', () => {
     expect(input.messages).toHaveLength(1);
   });
 });
+
+describe('complete response decoding follows the selected protocol', () => {
+  const closed = '<function_calls><invoke name="lookup"></invoke></function_calls>';
+  const scripts = [
+    { name: 'closed', value: closed, stopReason: 'end_turn', stopSequence: undefined },
+    { name: 'closing stop', value: '<function_calls><invoke name="lookup"></invoke>', stopReason: 'stop_sequence', stopSequence: '</function_calls>' },
+    { name: 'partial', value: '<function_calls><invoke name="lookup">', stopReason: 'max_tokens', stopSequence: undefined },
+  ];
+  for (const carrier of ['default', 'native', 'plain-completions', 'xml']) {
+    it.each(scripts)(carrier + ' keeps $name text within its declared protocol', async script => {
+      const warnings: string[] = [];
+      const adapter: any = {
+        name: 'protocol-output', supportsModel: () => true,
+        async complete(request: any, options: any) {
+          options.onRequest?.(request);
+          return { content: [text(script.value)], stopReason: script.stopReason, stopSequence: script.stopSequence,
+            usage: { inputTokens: 1, outputTokens: 1 }, model: request.model, rawRequest: request, raw: {} };
+        },
+      };
+      const formatter = carrier === 'plain-completions' ? new CompletionsFormatter()
+        : carrier === 'native' ? new NativeFormatter() : new AnthropicXmlFormatter();
+      const membrane = new Membrane(adapter, { formatter, logger: { debug() {}, info() {}, error() {}, warn(value) { warnings.push(value); } } });
+      const response: any = await membrane.complete({ ...req(false, 'gpt-4o'), ...(carrier === 'xml' ? { toolMode: 'xml' } : {}) });
+      const xml = carrier === 'xml';
+      expect(response.toolCalls).toHaveLength(xml && script.name !== 'partial' ? 1 : 0);
+      expect(response.rawAssistantText).toBe(script.value + (xml && script.stopSequence ? script.stopSequence : ''));
+      expect(response.details.stop.unclosedToolBlock).toBe(xml && script.name === 'partial');
+      if (!xml) expect(warnings.some(message => /unclosed tool block|zero tool calls/.test(message))).toBe(false);
+    });
+  }
+  for (const carrier of ['native', 'plain-completions']) {
+    it.each(['stream', 'yielding'])(carrier + ' %s also keeps XML-looking text as text', async path => {
+      const adapter = new MockAdapter({ defaultResponse: closed, completeDelayMs: 0, streamChunkDelayMs: 0 });
+      const formatter = carrier === 'native' ? new NativeFormatter() : new CompletionsFormatter();
+      const response = await run(path, new Membrane(adapter, { formatter }), req(false, 'gpt-4o'));
+      expect(response.toolCalls).toEqual([]);
+      expect(response.content.filter((block: any) => block.type === 'text').map((block: any) => block.text).join('')).toContain(closed);
+    });
+  }
+});
+
+describe('plain/native partial and stop responses', () => {
+  for (const carrier of ['native', 'plain-completions']) {
+    for (const finish of ['stop', 'abort']) {
+      it.each(['stream', 'yielding'])(carrier + ' ' + finish + ' via %s never decodes a textual call', async path => {
+        const value = '<function_calls><invoke name="lookup"></invoke>' + (finish === 'abort' ? '</function_calls>' : '');
+        let sends = 0;
+        const calls: string[] = [];
+        const adapter: any = {
+          name: 'text-protocol', supportsModel: () => true,
+          async stream(request: any, callbacks: any, options: any) {
+            options.onRequest?.(request);
+            const first = sends++ === 0;
+            callbacks.onChunk(first ? value : 'done');
+            if (finish === 'abort') throw new Error('aborted by test');
+            return { content: [text(first ? value : 'done')], stopReason: first ? 'stop_sequence' : 'end_turn',
+              stopSequence: first ? '</function_calls>' : undefined, usage: { inputTokens: 1, outputTokens: 1 }, model: request.model, rawRequest: request, raw: {} };
+          },
+        };
+        const formatter = carrier === 'native' ? new NativeFormatter() : new CompletionsFormatter();
+        const membrane = new Membrane(adapter, { formatter });
+        const results = (items: any[]) => items.map(item => { calls.push(item.name); return { toolUseId: item.id, content: 'ok' }; });
+        let response: any;
+        if (path === 'stream') response = await membrane.stream(req(false, 'gpt-4o'), { onToolCalls: async items => results(items) });
+        else {
+          const stream = membrane.streamYielding(req(false, 'gpt-4o'));
+          for await (const event of stream) {
+            if (event.type === 'tool-calls') stream.provideToolResults(results(event.calls));
+            if (event.type === 'complete') response = event.response;
+            if (event.type === 'aborted') response = event;
+            if (event.type === 'error') throw event.error;
+          }
+        }
+        expect(sends).toBe(1);
+        expect(calls).toEqual([]);
+        expect(response.toolCalls ?? []).toEqual([]);
+        const content = finish === 'abort' ? response.partialContent : response.content;
+        expect(response.rawAssistantText).toBe(value);
+        // Native yielding aborts expose raw text rather than partialContent.
+        if (content !== undefined) {
+          expect(content.every((block: any) => block.type === 'text')).toBe(true);
+          expect(content.map((block: any) => block.text).join('')).toBe(value);
+        } else expect([carrier, finish, path]).toEqual(['native', 'abort', 'yielding']);
+      });
+    }
+  }
+  it.each(['stream', 'yielding'])('plain %s retains native thinking without generating XML text', async path => {
+    const adapter: any = {
+      name: 'native-thinking', supportsModel: () => true,
+      async stream(request: any, callbacks: any, options: any) {
+        options.onRequest?.(request);
+        if (options.wrapThinkingTags) callbacks.onChunk('<thinking>thought</thinking>');
+        callbacks.onChunk('visible');
+        return { content: [{ type: 'thinking', thinking: 'thought', signature: 'sig' }, text('visible')],
+          stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 }, model: request.model, rawRequest: request, raw: {} };
+      },
+    };
+    const response = await run(path, new Membrane(adapter, { formatter: new CompletionsFormatter() }), req(false, 'gpt-4o'));
+    expect(response.content.filter((block: any) => block.type === 'thinking')).toEqual([{ type: 'thinking', thinking: 'thought', signature: 'sig' }]);
+    expect(response.content.filter((block: any) => block.type === 'text')).toEqual([text('visible')]);
+  });
+});

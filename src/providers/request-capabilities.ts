@@ -16,9 +16,9 @@ export function assertMessagePrefillSupported(
   if (!(assistantEnded || context?.requiresAssistantPrefill) || typeof model !== 'string') return;
   if (supportsAssistantPrefill(model)) return;
   const source = context ? 'Formatter "' + context.formatterName + '"' : 'Direct provider input';
-  const reason = context?.requiresAssistantPrefill
-    ? 'selects an XML continuation protocol that requires assistant prefill'
-    : 'produces a request ending in an assistant message';
+  const reason = assistantEnded
+    ? 'produces a request ending in an assistant message'
+    : 'selects a continuation protocol that requires assistant prefill';
   throw unsupportedError(
     'Model "' + model + '" does not support assistant prefill on ' + provider + '. '
     + source + ' ' + reason + '. Use native tool mode with a native-capable formatter '
