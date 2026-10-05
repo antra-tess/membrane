@@ -46,6 +46,7 @@ import {
 import {
   DEFAULT_RETRY_CONFIG,
   MembraneError,
+  MembraneNotReadyError,
   classifyError,
   isOverloadedError,
   isTimeoutAbortError,
@@ -343,6 +344,9 @@ export class Membrane {
         return response;
 
       } catch (error) {
+        // A not-ready build never reached the provider. Preserve its public
+        // wait-and-rebuild subtype instead of wrapping it as a transport error.
+        if (error instanceof MembraneNotReadyError) throw error;
         const errorInfo = classifyError(error);
         errorInfo.rawRequest = rawRequest;
 
@@ -2025,6 +2029,15 @@ export class Membrane {
       prefillUserMessage: request.prefillUserMessage,
     });
 
+    // Honor readiness at the shared formatter-build boundary used by
+    // complete(), stream(), and streamYielding(), including native loops.
+    // NativeFormatter derives it from pendingToolCallIds supplied by a custom
+    // build. Ordinary loops await tool results before rebuilding; a custom
+    // build declaring an in-flight gap must wait and rebuild before sending.
+    if (buildResult.ready === false) {
+      throw new MembraneNotReadyError(activeFormatter.name);
+    }
+
     // Byte-wall policy point (2026-07-12): transformRequest serves BOTH
     // complete() and the streaming path through EVERY adapter. Oversize
     // requests FAIL LOUDLY here, before the API round-trip, unless the
@@ -2783,6 +2796,8 @@ export class Membrane {
   }
 
   private attachRawRequest(error: unknown, rawRequest: unknown): Error {
+    // Native streaming can refuse a shared formatter build before sending.
+    if (error instanceof MembraneNotReadyError) return error;
     const errorInfo = classifyError(error);
     errorInfo.rawRequest = rawRequest;
     return new MembraneError(errorInfo);
