@@ -905,7 +905,7 @@ export function fromOpenRouterMessage(message: OpenRouterMessage): ContentBlock[
     } else if (Array.isArray(message.content)) {
       // cache_control is request-only; text and images are response content.
       for (const block of message.content) {
-        if (block?.type === 'text') {
+        if (block?.type === 'text' && typeof block.text === 'string') {
           result.push({ type: 'text', text: block.text });
         } else if (block?.type === 'image_url') {
           const url = readImageUrl(block);
