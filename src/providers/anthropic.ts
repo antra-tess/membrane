@@ -26,6 +26,7 @@ import {
   withRawRequest,
   unsupportedError,
 } from '../types/index.js';
+import { statusForProviderCode } from '../types/errors.js';
 import { flattenRootSchemaUnion } from './anthropic-tool-schema.js';
 import { assertTerminalEventObserved } from './utils.js';
 import { fetchWithCredentials, validateCredential, type CredentialContext, type CredentialResolver } from './credentials.js';
@@ -883,16 +884,34 @@ export class AnthropicAdapter implements ProviderAdapter {
         rawError: error,
         rawRequest,
       });
-      if (classified.type !== 'unknown') return classified;
 
-      // Gateway prose is a fallback only when neither the actual HTTP status
-      // nor the provider code established a classification. Routing metadata
-      // must not turn auth/quota failures into retries or erase rate hints.
-      if (gw.includes("providermetadata") || gw.includes("fallbacksavailable") ||
-          gw.includes("modelattempts") || gw.includes("temporarily unavailable") ||
-          gw.includes("no_providers_available")) {
-        return serverError(message, error.status ?? 503, error, rawRequest);
+      // Vercel AI Gateway wraps transient upstream outages (a fallback
+      // provider 503, routing churn on a sunsetting model) in non-5xx
+      // aggregate errors whose body carries gateway routing metadata. The
+      // SAME request frequently succeeds on retry once a live provider is
+      // picked, so such an aggregate stays a retryable server error whatever
+      // other status it reports. This exception belongs to this adapter alone.
+      // Statuses that describe the caller's own request or account — 400, 401
+      // and 429 (terminal quota included), sent or implied by the provider
+      // code — still classify normally, and a 5xx is retryable either way. The
+      // exception keeps the provider code, retry hint and raw evidence.
+      const status = error.status ?? statusForProviderCode(classified.providerErrorCode);
+      const gatewayAggregate = gw.includes("providermetadata") || gw.includes("fallbacksavailable") ||
+        gw.includes("modelattempts") || gw.includes("temporarily unavailable") ||
+        gw.includes("no_providers_available");
+      if (gatewayAggregate && status !== 400 && status !== 401 && status !== 429 && !(status !== undefined && status >= 500)) {
+        return new MembraneError({
+          type: 'server',
+          message,
+          retryable: true,
+          httpStatus: gw.includes('overloaded') ? 529 : status ?? 503,
+          retryAfterMs: classified.retryAfterMs,
+          providerErrorCode: classified.providerErrorCode,
+          rawError: error,
+          rawRequest,
+        });
       }
+      if (classified.type !== 'unknown') return classified;
 
       // Safety net: if the SSE error body wasn't parseable JSON, neither
       // status nor body type resolves — match the message itself rather

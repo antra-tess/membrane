@@ -475,6 +475,19 @@ function classifyByStatus(
 }
 
 /**
+ * The HTTP status a provider's own error code implies, when the shared table
+ * knows the code. Adapters with a provider-specific precedence rule use it to
+ * read the same status errorFromProviderStatus would classify by.
+ */
+export function statusForProviderCode(code: string | undefined): number | undefined {
+  const key = code?.toLowerCase();
+  // Own keys only: a provider code such as "constructor" is not a table entry.
+  return key !== undefined && Object.prototype.hasOwnProperty.call(PROVIDER_ERROR_CODE_STATUS, key)
+    ? PROVIDER_ERROR_CODE_STATUS[key]
+    : undefined;
+}
+
+/**
  * Build a MembraneError from a provider failure whose status may have to be
  * recovered from the error code (in-band error object, or an SDK error that
  * carries no status).
@@ -492,7 +505,7 @@ export function errorFromProviderStatus(params: {
 }): MembraneError {
   const fields = extractProviderErrorFields(params.body);
   const code = fields.code;
-  const status = params.status ?? PROVIDER_ERROR_CODE_STATUS[code?.toLowerCase() ?? ''] ?? params.fallbackStatus;
+  const status = params.status ?? statusForProviderCode(code) ?? params.fallbackStatus;
   const detail = firstString(params.message, fields.message) ?? renderBody(params.body);
   const message =
     params.message ??

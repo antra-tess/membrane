@@ -70,10 +70,9 @@ describe('fetch failures preserve transport retryability', () => {
   });
 });
 
-describe('Anthropic gateway metadata does not override provider status', () => {
+describe('Anthropic gateway metadata does not override an authoritative status', () => {
   const cases = [
     [401, 'authentication_error', 'auth', false],
-    [403, 'permission_error', 'auth', false],
     [400, 'invalid_request_error', 'invalid_request', false],
     [429, 'insufficient_quota', 'rate_limit', false],
     [429, 'rate_limit_error', 'rate_limit', true],
