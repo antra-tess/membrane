@@ -133,10 +133,9 @@ export interface StopInfo {
   wasTruncated: boolean;
 
   /**
-   * The provider's own stop token, verbatim. Populated whenever the adapter
-   * reported one — including reasons membrane has no member for, which
-   * normalize to `end_turn` and would otherwise be indistinguishable from a
-   * clean completion.
+   * The provider's own stop token, verbatim, from ProviderResponse.providerStopReason.
+   * Omitted when the provider supplied none or a custom adapter did not report it.
+   * This can differ from the normalized reason (for example, OpenAI's length).
    */
   providerReason?: string;
 

@@ -290,7 +290,7 @@ export class OpenAIAdapter implements ProviderAdapter {
       const decoder = new TextDecoder();
       const sseParser = new SSELineParser();
       let accumulated = '';
-      let finishReason = 'stop';
+      let finishReason: string | undefined;
       let sawTerminalEvent = false;
       let toolCalls: OpenAIToolCall[] = [];
       let streamUsage: OpenAIResponse['usage'] | undefined;
@@ -634,6 +634,7 @@ export class OpenAIAdapter implements ProviderAdapter {
     return {
       content: this.messageToContent(message),
       stopReason: this.mapFinishReason(choice?.finish_reason),
+      providerStopReason: choice?.finish_reason ?? undefined,
       stopSequence: undefined,
       usage: {
         inputTokens: response.usage?.prompt_tokens ?? 0,
@@ -650,7 +651,7 @@ export class OpenAIAdapter implements ProviderAdapter {
 
   private parseStreamedResponse(
     message: OpenAIMessage,
-    finishReason: string,
+    finishReason: string | undefined,
     requestedModel: string,
     streamUsage?: OpenAIResponse['usage'],
     rawRequest?: unknown
@@ -661,6 +662,7 @@ export class OpenAIAdapter implements ProviderAdapter {
     return {
       content: this.messageToContent(message),
       stopReason: this.mapFinishReason(finishReason),
+      providerStopReason: finishReason,
       stopSequence: undefined,
       usage: {
         inputTokens: streamUsage?.prompt_tokens ?? 0,
@@ -669,7 +671,7 @@ export class OpenAIAdapter implements ProviderAdapter {
       },
       model: requestedModel,
       rawRequest,
-      raw: { message, finish_reason: finishReason, usage: streamUsage },
+      raw: { message, finish_reason: finishReason ?? 'stop', usage: streamUsage },
     };
   }
 

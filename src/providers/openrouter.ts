@@ -249,7 +249,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
       const sseParser = new SSELineParser();
       const contentParts: OpenRouterContentBlock[] = [];
       const readImageUrl = createImageUrlReader();
-      let finishReason = 'stop';
+      let finishReason: string | undefined;
       let sawTerminalEvent = false;
       let toolCalls: OpenRouterToolCall[] = [];
       let streamUsage: OpenRouterResponse['usage'] | undefined;
@@ -688,6 +688,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
     return {
       content: this.messageToContent(message),
       stopReason: this.mapFinishReason(choice?.finish_reason),
+      providerStopReason: choice?.finish_reason ?? undefined,
       stopSequence: undefined,
       usage: {
         inputTokens: response.usage?.prompt_tokens ?? 0,
@@ -704,7 +705,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
 
   private parseStreamedResponse(
     message: OpenRouterMessage,
-    finishReason: string,
+    finishReason: string | undefined,
     requestedModel: string,
     streamUsage?: OpenRouterResponse['usage'],
     rawRequest?: unknown
@@ -719,6 +720,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
     return {
       content: this.messageToContent(message),
       stopReason: this.mapFinishReason(finishReason),
+      providerStopReason: finishReason,
       stopSequence: undefined,
       usage: {
         inputTokens: streamUsage?.prompt_tokens ?? 0,
@@ -729,7 +731,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
       },
       model: requestedModel,
       rawRequest,
-      raw: { message, finish_reason: finishReason, usage: streamUsage },
+      raw: { message, finish_reason: finishReason ?? 'stop', usage: streamUsage },
     };
   }
 

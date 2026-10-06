@@ -203,7 +203,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
       const decoder = new TextDecoder();
       const sseParser = new SSELineParser();
       let accumulated = '';
-      let finishReason = 'stop';
+      let finishReason: string | undefined;
       let sawTerminalEvent = false;
       let streamUsage: CompletionsResponse['usage'] | undefined;
 
@@ -258,7 +258,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
                 // The adapter's own end-of-turn token IS a terminal
                 // observation: the turn ended where this layer said it ends.
                 sawTerminalEvent = true;
-                finishReason = 'stop';
+                finishReason = undefined;
                 return;
               }
               // Emit all but a held-back tail that could be a partial token
@@ -539,6 +539,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
     return {
       content: this.textToContent(text),
       stopReason: this.mapFinishReason(choice?.finish_reason),
+      providerStopReason: choice?.finish_reason ?? undefined,
       stopSequence: undefined,
       usage: {
         inputTokens: response.usage?.prompt_tokens ?? 0,
@@ -552,7 +553,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
 
   private buildStreamedResponse(
     accumulated: string,
-    finishReason: string,
+    finishReason: string | undefined,
     requestedModel: string,
     streamUsage?: CompletionsResponse['usage'],
     rawRequest?: unknown
@@ -560,6 +561,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
     return {
       content: this.textToContent(accumulated),
       stopReason: this.mapFinishReason(finishReason),
+      providerStopReason: finishReason,
       stopSequence: undefined,
       usage: {
         // Zeros only as the genuinely-absent fallback: an endpoint that
@@ -569,7 +571,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
       },
       model: requestedModel,
       rawRequest,
-      raw: { text: accumulated, finish_reason: finishReason, usage: streamUsage },
+      raw: { text: accumulated, finish_reason: finishReason ?? 'stop', usage: streamUsage },
     };
   }
 

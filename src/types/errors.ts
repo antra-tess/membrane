@@ -433,7 +433,11 @@ export function extractProviderErrorFields(body: unknown): ProviderErrorFields {
 
   return {
     message: firstString(errorNode.message, errorNode.Message, root.message, root.Message, errorNode.detail),
-    code: firstString(errorNode.code, errorNode.status, errorNode.type, root.__type, root.code),
+    // A numeric code can be an HTTP-shaped status or a provider-local number.
+    // Prefer a symbolic classification token; the original scalar stays in rawError.
+    code: firstString(...[errorNode.code, errorNode.status, errorNode.type, root.__type, root.code]
+      .filter(value => typeof value === 'string' && !/^\d+$/.test(value.trim())))
+      ?? firstString(errorNode.code, errorNode.status, errorNode.type, root.__type, root.code),
     param: firstString(errorNode.param),
     retryAfterMs: retryAfterFromBody(root, errorNode),
   };
@@ -478,6 +482,8 @@ function classifyByStatus(
 export function errorFromProviderStatus(params: {
   provider: string;
   status?: number | undefined;
+  /** Provider-specific structured-token inference, after explicit status or a known code. */
+  fallbackStatus?: number | undefined;
   body?: unknown;
   message?: string;
   retryAfterMs?: number | undefined;
@@ -486,7 +492,7 @@ export function errorFromProviderStatus(params: {
 }): MembraneError {
   const fields = extractProviderErrorFields(params.body);
   const code = fields.code;
-  const status = params.status ?? PROVIDER_ERROR_CODE_STATUS[code?.toLowerCase() ?? ''];
+  const status = params.status ?? PROVIDER_ERROR_CODE_STATUS[code?.toLowerCase() ?? ''] ?? params.fallbackStatus;
   const detail = firstString(params.message, fields.message) ?? renderBody(params.body);
   const message =
     params.message ??
@@ -627,7 +633,7 @@ function classifyMessage(rawMessage: string): {
     return { type: 'auth', retryable: false, httpStatus: 401 };
   }
 
-  if (/network|econnreset|econnrefused|socket/.test(message)) {
+  if (/network|econnreset|econnrefused|socket|\bfetch failed\b|\bfailed to fetch\b/.test(message)) {
     return { type: 'network', retryable: true };
   }
 

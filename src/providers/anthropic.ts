@@ -424,6 +424,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       let inferenceGeo: string | undefined;
       let serviceTier: string | undefined;
       let stopReason: string = 'end_turn';
+      let providerStopReason: string | undefined;
       let sawTerminalEvent = false;
       let stopSequence: string | undefined;
       let stopDetails: unknown;
@@ -549,6 +550,7 @@ export class AnthropicAdapter implements ProviderAdapter {
             stop_details?: unknown;
           };
           stopReason = delta.stop_reason ?? 'end_turn';
+          providerStopReason = delta.stop_reason ?? undefined;
           sawTerminalEvent = true;
           stopSequence = delta.stop_sequence ?? undefined;
           // stop_details carries refusal metadata (e.g., category: 'reasoning_extraction')
@@ -593,6 +595,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       return {
         content: contentBlocks,
         stopReason,
+        providerStopReason,
         stopSequence,
         usage: {
           inputTokens,
@@ -832,6 +835,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     return {
       content: response.content,
       stopReason: response.stop_reason ?? 'end_turn',
+      providerStopReason: response.stop_reason ?? undefined,
       stopSequence: response.stop_sequence ?? undefined,
       usage: {
         inputTokens: response.usage.input_tokens,
@@ -863,18 +867,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     if (error instanceof Anthropic.APIError) {
       const message = error.message;
 
-      // Vercel AI Gateway wraps transient upstream outages (a fallback
-      // provider 503, routing churn on a sunsetting model) in non-5xx
-      // aggregate errors whose body carries gateway routing metadata. The
-      // SAME request frequently succeeds on retry once a live provider is
-      // picked, so classify these as retryable instead of terminal. Checked
-      // before the status table precisely because the status lies here.
       const gw = message.toLowerCase();
-      if (gw.includes("providermetadata") || gw.includes("fallbacksavailable") ||
-          gw.includes("modelattempts") || gw.includes("temporarily unavailable") ||
-          gw.includes("no_providers_available")) {
-        return serverError(message, error.status ?? 503, error, rawRequest);
-      }
 
       // Mid-stream SSE `error` events are rethrown by the SDK as APIError
       // with status === undefined (sdk core/streaming.js) — overloaded_error
@@ -891,6 +884,15 @@ export class AnthropicAdapter implements ProviderAdapter {
         rawRequest,
       });
       if (classified.type !== 'unknown') return classified;
+
+      // Gateway prose is a fallback only when neither the actual HTTP status
+      // nor the provider code established a classification. Routing metadata
+      // must not turn auth/quota failures into retries or erase rate hints.
+      if (gw.includes("providermetadata") || gw.includes("fallbacksavailable") ||
+          gw.includes("modelattempts") || gw.includes("temporarily unavailable") ||
+          gw.includes("no_providers_available")) {
+        return serverError(message, error.status ?? 503, error, rawRequest);
+      }
 
       // Safety net: if the SSE error body wasn't parseable JSON, neither
       // status nor body type resolves — match the message itself rather

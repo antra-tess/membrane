@@ -21,7 +21,7 @@ class FixedStopReasonAdapter extends MockAdapter {
 
   override async complete(request: ProviderRequest, options?: ProviderRequestOptions): Promise<ProviderResponse> {
     const response = await super.complete(request, options);
-    return { ...response, stopReason: this.providerStopReason };
+    return { ...response, stopReason: this.providerStopReason, providerStopReason: this.providerStopReason };
   }
 }
 
@@ -160,6 +160,6 @@ describe('gemini surfaces the safety enums it used to drop', () => {
     const membrane = new Membrane(geminiAdapter());
     const response = await membrane.complete(zzRequest);
     expect(response.stopReason).toBe('refusal');
-    expect(response.details.stop.providerReason).toBe('refusal');
+    expect(response.details.stop.providerReason).toBe('BLOCKLIST');
   });
 });

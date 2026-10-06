@@ -533,6 +533,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
       content,
       outputItems,
       stopReason: this.getStopReason(response, outputItems),
+      providerStopReason: response.incomplete_details?.reason ?? response.status,
       stopSequence: undefined,
       usage: {
         inputTokens: response.usage?.input_tokens ?? 0,

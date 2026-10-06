@@ -53,6 +53,7 @@ import {
   classifyError,
   isOverloadedError,
   isTypedAbortError,
+  withRawRequest,
   isTimeoutAbortError,
   isTextContent,
   isAbortedResponse,
@@ -354,12 +355,12 @@ export class Membrane {
         // A not-ready build never reached the provider. Preserve its public
         // wait-and-rebuild subtype instead of wrapping it as a transport error.
         if (error instanceof MembraneNotReadyError) throw error;
-        const errorInfo = classifyError(error);
-        errorInfo.rawRequest = rawRequest;
+        const classifiedError = this.attachRawRequest(error, rawRequest);
+        const errorInfo = classifyError(classifiedError);
 
-        // Rate limits (429) always retry up to 5 attempts regardless of
-        // config, and overloaded (529) always retries on its own longer
-        // schedule — both are transient by definition, and the default
+        // Retryable rate limits (429) get up to 5 attempts regardless of
+        // config, while overload (529) uses its own longer schedule. Terminal
+        // billing/quota codes are excluded by classification. The default
         // maxRetries of 0 would otherwise turn a capacity blip into a dead
         // turn. Other retryable errors only retry when maxRetries > 0.
         // overloaded.maxRetries: 0 disables the dedicated policy entirely;
@@ -373,7 +374,7 @@ export class Membrane {
           if (this.config.hooks?.onError) {
             const decision = await this.config.hooks.onError(errorInfo, attempts);
             if (decision === 'abort') {
-              throw new MembraneError(errorInfo);
+              throw classifiedError;
             }
           }
 
@@ -390,7 +391,7 @@ export class Membrane {
           continue;
         }
 
-        throw new MembraneError(errorInfo);
+        throw classifiedError;
       }
     }
   }
@@ -908,7 +909,7 @@ export class Membrane {
         onResponse?.(rawResponse);
 
         lastStopReason = this.mapStopReason(streamResult.stopReason);
-        lastProviderStopReason = streamResult.stopReason;
+        lastProviderStopReason = streamResult.providerStopReason;
         lastStopSequence = streamResult.stopSequence ?? undefined;
 
         // Accumulate usage (including cache metrics), priced at this round's
@@ -1410,7 +1411,7 @@ export class Membrane {
         onResponse?.(rawResponse);
 
         lastStopReason = this.mapStopReason(streamResult.stopReason);
-        lastProviderStopReason = streamResult.stopReason;
+        lastProviderStopReason = streamResult.providerStopReason;
         lastStopSequence = streamResult.stopSequence ?? undefined;
 
         // Accumulate usage (including cache metrics), priced at this round's
@@ -2543,7 +2544,7 @@ export class Membrane {
       stopReason,
       usage,
       details: {
-        stop: { ...this.buildStopInfo(stopReason, providerResponse.stopReason, providerResponse.stopSequence), unclosedToolBlock },
+        stop: { ...this.buildStopInfo(stopReason, providerResponse.providerStopReason, providerResponse.stopSequence), unclosedToolBlock },
         usage,
         timing: {
           totalDurationMs: durationMs,
@@ -2796,8 +2797,8 @@ export class Membrane {
         // enums grow, and the last time this default swallowed a member it
         // hid safety refusals in production.
         console.warn(
-          `[membrane] Unmapped provider stop reason '${providerReason}' normalized to end_turn ` +
-            '(see details.stop.providerReason)'
+          `[membrane] Unmapped adapter stop reason '${providerReason}' normalized to end_turn ` +
+            '(details.stop.providerReason is present when the adapter supplies the raw provider token)'
         );
         return 'end_turn';
     }
@@ -2909,9 +2910,10 @@ export class Membrane {
     return { isRateLimit, isOverloaded, effectiveMax };
   }
 
-  private attachRawRequest(error: unknown, rawRequest: unknown): Error {
+  private attachRawRequest(error: unknown, rawRequest: unknown): MembraneError {
     // Native streaming can refuse a shared formatter build before sending.
     if (error instanceof MembraneNotReadyError) return error;
+    if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
     const errorInfo = classifyError(error);
     errorInfo.rawRequest = rawRequest;
     return new MembraneError(errorInfo);
@@ -3325,7 +3327,7 @@ export class Membrane {
 
         rawResponse = streamResult.raw;
         lastStopReason = this.mapStopReason(streamResult.stopReason);
-        lastProviderStopReason = streamResult.stopReason;
+        lastProviderStopReason = streamResult.providerStopReason;
         lastStopSequence = streamResult.stopSequence ?? undefined;
 
         // Accumulate usage (including cache metrics), priced at this round's model
@@ -3865,7 +3867,7 @@ export class Membrane {
 
         rawResponse = streamResult.raw;
         lastStopReason = this.mapStopReason(streamResult.stopReason);
-        lastProviderStopReason = streamResult.stopReason;
+        lastProviderStopReason = streamResult.providerStopReason;
         lastStopSequence = streamResult.stopSequence ?? undefined;
 
         // Attempts this round re-issued past a refusal are billed calls whose

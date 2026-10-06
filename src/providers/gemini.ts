@@ -315,6 +315,7 @@ export class GeminiAdapter implements ProviderAdapter {
           streamState.candidateFinishReason,
           streamState.promptFeedback
         ),
+        providerStopReason: streamState.candidateFinishReason ?? (!streamState.sawCandidateData ? streamState.promptFeedback?.blockReason : undefined),
         stopSequence: undefined,
         usage: geminiUsageToProviderUsage(streamState.lastUsage),
         model: streamState.lastModelVersion ?? request.model,
@@ -648,6 +649,7 @@ export class GeminiAdapter implements ProviderAdapter {
         candidate?.finishReason,
         response.promptFeedback
       ),
+      providerStopReason: candidate?.finishReason ?? (candidate === undefined ? response.promptFeedback?.blockReason : undefined),
       stopSequence: undefined,
       usage: geminiUsageToProviderUsage(response.usageMetadata),
       model: response.modelVersion ?? requestedModel,

@@ -382,7 +382,7 @@ export class BedrockAdapter implements ProviderAdapter {
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
-      const response = await this.invokeModel(bedrockModelId, bedrockRequest, combinedSignal);
+      const response = await this.invokeModel(bedrockModelId, bedrockRequest, combinedSignal, fullRequest);
       return this.parseResponse(response, fullRequest);
     } catch (error) {
       throw this.handleError(error, fullRequest);
@@ -404,7 +404,7 @@ export class BedrockAdapter implements ProviderAdapter {
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
-      return await this.invokeModelWithStream(bedrockModelId, bedrockRequest, callbacks, combinedSignal);
+      return await this.invokeModelWithStream(bedrockModelId, bedrockRequest, callbacks, combinedSignal, fullRequest);
     } catch (error) {
       throw this.handleError(error, fullRequest);
     } finally {
@@ -550,7 +550,8 @@ export class BedrockAdapter implements ProviderAdapter {
   private async invokeModel(
     modelId: string,
     request: BedrockMessageRequest,
-    signal?: AbortSignal
+    signal: AbortSignal | undefined,
+    rawRequest: unknown
   ): Promise<BedrockMessageResponse> {
     const url = new URL(
       `${this.baseURL ?? `https://bedrock-runtime.${this.region}.amazonaws.com`}/model/${encodeURIComponent(modelId)}/invoke`
@@ -582,7 +583,7 @@ export class BedrockAdapter implements ProviderAdapter {
     });
 
     if (!response.ok) {
-      throw errorFromHttpResponse(this.name, response, await response.text(), request);
+      throw errorFromHttpResponse(this.name, response, await response.text(), rawRequest);
     }
 
     return response.json() as Promise<BedrockMessageResponse>;
@@ -592,7 +593,8 @@ export class BedrockAdapter implements ProviderAdapter {
     modelId: string,
     request: BedrockMessageRequest,
     callbacks: StreamCallbacks,
-    signal?: AbortSignal
+    signal: AbortSignal | undefined,
+    rawRequest: unknown
   ): Promise<ProviderResponse> {
     const url = new URL(
       `${this.baseURL ?? `https://bedrock-runtime.${this.region}.amazonaws.com`}/model/${encodeURIComponent(modelId)}/invoke-with-response-stream`
@@ -624,7 +626,7 @@ export class BedrockAdapter implements ProviderAdapter {
     });
 
     if (!response.ok) {
-      throw errorFromHttpResponse(this.name, response, await response.text(), request);
+      throw errorFromHttpResponse(this.name, response, await response.text(), rawRequest);
     }
 
     // Parse the binary event stream
@@ -635,7 +637,7 @@ export class BedrockAdapter implements ProviderAdapter {
     let outputTokens = 0;
     let cacheCreationTokens: number | undefined;
     let cacheReadTokens: number | undefined;
-    let stopReason: string = 'end_turn';
+    let stopReason: string | undefined;
     let sawTerminalEvent = false;
     let stopSequence: string | undefined;
     let fullText = '';
@@ -893,7 +895,7 @@ export class BedrockAdapter implements ProviderAdapter {
         return { type: b.type as 'text', text: b.text };
       }),
       model: modelId,
-      stop_reason: stopReason as BedrockMessageResponse['stop_reason'],
+      stop_reason: (stopReason ?? 'end_turn') as BedrockMessageResponse['stop_reason'],
       stop_sequence: stopSequence ?? null,
       usage: {
         input_tokens: inputTokens,
@@ -903,7 +905,7 @@ export class BedrockAdapter implements ProviderAdapter {
       },
     };
 
-    return this.parseResponse(finalMessage, { modelId, ...request, stream: true });
+    return { ...this.parseResponse(finalMessage, rawRequest), providerStopReason: stopReason };
   }
 
   private parseResponse(response: BedrockMessageResponse, rawRequest: unknown): ProviderResponse {
@@ -936,6 +938,7 @@ export class BedrockAdapter implements ProviderAdapter {
     return {
       content,
       stopReason: response.stop_reason ?? 'end_turn',
+      providerStopReason: response.stop_reason ?? undefined,
       stopSequence: response.stop_sequence ?? undefined,
       usage: {
         inputTokens: response.usage.input_tokens,

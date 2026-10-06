@@ -328,8 +328,15 @@ export interface ProviderResponse {
   /** Raw response content */
   content: unknown;
   
-  /** Stop reason in provider format */
+  /** Adapter-level stop reason, which may already be normalized. */
   stopReason: string;
+
+  /**
+   * Verbatim terminal reason reported by the provider, before normalization.
+   * Omit when no reason was reported. Custom adapters opt in by supplying it;
+   * Membrane does not infer it from stopReason or parse adapter-specific raw data.
+   */
+  providerStopReason?: string;
   
   /** Which stop sequence triggered */
   stopSequence?: string;
