@@ -587,21 +587,27 @@ function renderBody(body: unknown): string {
 
 /**
  * Provider capacity exhaustion — Anthropic 529 overloaded_error, whichever
- * path it arrived by (structured status from the provider handler, or the
- * message-matched fallbacks in classifyError). Used only to CHOOSE the retry
- * schedule among already-retryable errors, never to decide retryability.
- * Matches the same deliberately narrow tokens as classifyError's fallback
- * (status/`529`/exact `overloaded_error`) — a bare 'overloaded' in prose
- * (e.g. "worker pool overloaded") must not put an unrelated error onto the
- * ~10-minute schedule. The 529 arm is word-boundary anchored because an
- * unanchored one promoted ordinary retryable errors whose text merely
- * contained the digits ("timeout after 5290 ms", "req-98529abc"). The
- * provider handlers' own bare-'overloaded' safety nets attach httpStatus
- * 529, so those still land here via the status check.
+ * path it arrived by. Used only to CHOOSE the retry schedule among
+ * already-retryable errors, never to decide retryability.
+ *
+ * A status in hand decides: only 529 is an overload. Every structured overload
+ * path already carries it — an HTTP 529, an `overloaded_error` code resolved
+ * through the shared code table, an SSE frame's overloaded tokens when the
+ * frame states no other error status, and the provider handlers'
+ * bare-'overloaded' safety nets. Reading prose past a known
+ * status let an explicit 429 take the overload schedule, and gave a 5xx whose
+ * body merely mentioned an upstream 529 the overload retry allowance even with
+ * `maxRetries: 0`.
+ *
+ * Only a status-less error falls back to the message, with the same narrow
+ * tokens as classifyError (`529` word-boundary anchored, exact
+ * `overloaded_error`): a bare 'overloaded' in prose ("worker pool overloaded")
+ * or digits inside another number ("timeout after 5290 ms", "req-98529abc")
+ * must not put an unrelated error onto the ~10-minute schedule.
  */
 export function isOverloadedError(info: ErrorInfo): boolean {
   if (!info.retryable) return false;
-  if (info.httpStatus === 529) return true;
+  if (info.httpStatus !== undefined) return info.httpStatus === 529;
   return OVERLOADED_PATTERN.test(info.message);
 }
 
