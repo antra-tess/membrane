@@ -21,6 +21,7 @@ import type {
 } from '../types/index.js';
 import type {
   PrefillFormatter,
+  ContentParseContext,
   StreamParser,
   BuildOptions,
   BuildResult,
@@ -183,6 +184,10 @@ class CompletionsStreamParser implements StreamParser {
 export class CompletionsFormatter implements PrefillFormatter {
   readonly name = 'completions';
   readonly usesPrefill = true;
+  /** This formatter does not encode provider-native tool definitions. */
+  readonly supportsNativeTools = false;
+  /** The prompt formatter does not inject XML tool definitions either. */
+  readonly supportsXmlTools = false;
 
   private config: Required<Omit<CompletionsFormatterConfig, 'unsupportedMedia' | 'warnOnStrip'>> & {
     unsupportedMedia: 'strip'; // Always strip for completions
@@ -236,7 +241,7 @@ export class CompletionsFormatter implements PrefillFormatter {
 
     // Add context prefix after system prompt (for simulacrum seeding)
     if (contextPrefix) {
-      const assistantPrefix = this.config.nameFormat.replace('{name}', assistantParticipant);
+      const assistantPrefix = this.config.nameFormat.replace('{name}', () => assistantParticipant);
       parts.push(`${assistantPrefix}${contextPrefix}${this.config.eotToken}`);
     }
 
@@ -255,7 +260,7 @@ export class CompletionsFormatter implements PrefillFormatter {
       }
 
       // Format: "Participant: content<eot>"
-      const prefix = this.config.nameFormat.replace('{name}', message.participant);
+      const prefix = this.config.nameFormat.replace('{name}', () => message.participant);
       const eot = this.config.eotToken;
       parts.push(`${prefix}${text}${eot}`);
     }
@@ -266,7 +271,7 @@ export class CompletionsFormatter implements PrefillFormatter {
     }
 
     // Add final assistant prefix (no EOT - model generates this)
-    const assistantPrefix = this.config.nameFormat.replace('{name}', assistantParticipant);
+    const assistantPrefix = this.config.nameFormat.replace('{name}', () => assistantParticipant);
     parts.push(assistantPrefix.trimEnd()); // Remove trailing space for cleaner completion
 
     // Join all parts into single prompt
@@ -321,9 +326,11 @@ export class CompletionsFormatter implements PrefillFormatter {
     return false;
   }
 
-  parseContentBlocks(content: string): ContentBlock[] {
-    // Trim leading whitespace (model often starts with space after prefix)
-    const trimmed = content.replace(/^\s+/, '');
+  parseContentBlocks(content: string, _tools?: ToolDefinition[], context?: ContentParseContext): ContentBlock[] {
+    // Prefix trimming belongs to the whole visible response. A thinking
+    // boundary does not turn an internal space/newline into a new prefix.
+    const atResponseStart = !context || !/\S/.test(context.visibleText.slice(0, context.offset));
+    const trimmed = atResponseStart ? content.replace(/^\s+/, '') : content;
 
     if (!trimmed) {
       return [];
@@ -370,13 +377,13 @@ export class CompletionsFormatter implements PrefillFormatter {
       if (count >= maxParticipants) break;
 
       // Add both "\n\nName:" and "\nName:" variants
-      const prefix = this.config.nameFormat.replace('{name}', participant).trimEnd();
+      const prefix = this.config.nameFormat.replace('{name}', () => participant).trimEnd();
       stops.push(`\n\n${prefix}`);
       stops.push(`\n${prefix}`);
 
       // Add lowercased variants if casing differs (for models that generate mixed-case names)
       if (this.config.caseInsensitiveStops) {
-        const lower = this.config.nameFormat.replace('{name}', participant.toLowerCase()).trimEnd();
+        const lower = this.config.nameFormat.replace('{name}', () => participant.toLowerCase()).trimEnd();
         if (lower !== prefix) {
           stops.push(`\n\n${lower}`);
           stops.push(`\n${lower}`);

@@ -86,11 +86,15 @@ describe('getDefaultPricing', () => {
   });
 
   it('longest-prefix-matches versioned families (opus 4.6 vs opus 4)', () => {
+    // Both rows read 15 when this test was written, so it could not actually
+    // distinguish longest-prefix matching from a table-wide constant. The
+    // 2026-08-25 price-page check found Opus 4.6 at 5/25 against retired
+    // Opus 4's 15/75, which makes the two rows genuinely discriminating.
     const opus46 = getDefaultPricing('claude-opus-4-6-20250725');
     const opus4 = getDefaultPricing('claude-opus-4-20250514');
     expect(opus46).toBeDefined();
     expect(opus4).toBeDefined();
-    expect(opus46!.inputPerMillion).toBe(15);
+    expect(opus46!.inputPerMillion).toBe(5);
     expect(opus4!.inputPerMillion).toBe(15);
   });
 

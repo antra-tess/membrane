@@ -9,6 +9,10 @@
  * exposes the response's ordered output array verbatim for the next turn.
  */
 
+import { createHash, randomUUID } from 'node:crypto';
+import { normalizeResponsesInput } from './responses-input.js';
+import { fetchWithCredentials, type CredentialResolver } from './credentials.js';
+
 import type {
   ContentBlock,
   ProviderAdapter,
@@ -27,7 +31,7 @@ import {
   networkError,
   withRawRequest,
 } from '../types/index.js';
-import { createCombinedSignal, SSELineParser, safeParseJson } from './utils.js';
+import { createCombinedSignal, SSELineParser, safeParseJson, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame } from './utils.js';
 
 // ============================================================================
 // Provider-native Responses API types
@@ -115,7 +119,26 @@ export interface OpenAIResponsesAPIProviderResponse extends Omit<ProviderRespons
 export interface OpenAIResponsesAPIAdapterConfig {
   /** API key (defaults to OPENAI_API_KEY). */
   apiKey?: string;
-  /** API base URL (default: https://api.openai.com/v1). */
+  /** Resolve a bearer token and associated headers for each request/401 retry.
+   * Overrides apiKey; acquiring and persisting credentials belongs to the caller. */
+  credentials?: CredentialResolver;
+  /** ChatGPT subscription transport requires credentials and always uses SSE. */
+  mode?: 'api' | 'subscription';
+  /** Request priority service in subscription mode (default: false). */
+  fastMode?: boolean;
+  /** Called once if a subscription response reports a non-priority tier. */
+  onFastModeFallback?: (serviceTier: string) => void;
+  /** Subscription mode: base of the prompt-cache routing id sent as the
+   * `session_id` header and as `prompt_cache_key`. Each request appends a digest
+   * of its instructions and first input item, which groups requests by
+   * serialized head: requests that share a head share an id (and a prefix, so
+   * that is the right grouping), tools and later items are not considered.
+   * Streams that need isolation beyond that (same-head forks or subagents on
+   * one adapter) should set `extra.prompt_cache_key`, which is used instead.
+   * Defaults to a random id held for the adapter's lifetime, so a restart
+   * pays one uncached read per head; pin it to survive restarts. */
+  sessionId?: string;
+  /** API base URL (defaults to the selected mode's endpoint). */
   baseURL?: string;
   /** Optional OpenAI organization ID. */
   organization?: string;
@@ -127,14 +150,39 @@ export interface OpenAIResponsesAPIAdapterConfig {
   extraHeaders?: Record<string, string>;
 }
 
+/** A cache key is any JSON string, a header value is not: anything beyond
+ * short visible ASCII is sent as a digest, which is just as stable. */
+function headerSafeSessionId(key: string): string {
+  return /^[\x21-\x7e]{1,128}$/.test(key)
+    ? key
+    : createHash('sha256').update(key).digest('hex').slice(0, 32);
+}
+
 // ============================================================================
 // Adapter
 // ============================================================================
 
 export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
-  readonly name = 'openai-responses-api';
+  readonly name: string = 'openai-responses-api';
+
+  /**
+   * Reads `usage.input_tokens_details.cached_tokens` from OpenAI's account-wide
+   * automatic prompt caching — the same mechanism verified live on
+   * /v1/chat/completions on 2026-08-25 (prompt_tokens constant at 1732 across a
+   * hit reporting cached_tokens 1664, so cached is a subset). A same-day probe
+   * of /v1/responses did not itself produce a cache hit to confirm on that
+   * endpoint.
+   */
+  readonly usageCacheConvention = 'cache-inclusive' as const;
 
   private readonly apiKey: string;
+  private readonly credentials?: CredentialResolver;
+  private readonly subscription: boolean;
+  readonly requiresNativeResponsesInput: boolean;
+  private fastMode: boolean;
+  private readonly onFastModeFallback?: (serviceTier: string) => void;
+  private warnedFastFallback = false;
+  private readonly sessionId: string;
   private readonly baseURL: string;
   private readonly organization?: string;
   private readonly project?: string;
@@ -142,41 +190,54 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
   private readonly extraHeaders: Record<string, string>;
 
   constructor(config: OpenAIResponsesAPIAdapterConfig = {}) {
+    this.subscription = config.mode === 'subscription';
+    this.requiresNativeResponsesInput = !this.subscription;
+    this.credentials = config.credentials;
+    if (this.subscription && !this.credentials) {
+      throw new Error('Subscription mode requires a credential resolver');
+    }
+    this.fastMode = config.fastMode ?? false;
+    this.onFastModeFallback = config.onFastModeFallback;
+    this.sessionId = config.sessionId ?? randomUUID();
     this.apiKey = config.apiKey ?? process.env.OPENAI_API_KEY ?? '';
-    this.baseURL = (config.baseURL ?? 'https://api.openai.com/v1').replace(/\/$/, '');
+    this.baseURL = (config.baseURL ?? (this.subscription ? 'https://chatgpt.com/backend-api/codex' : 'https://api.openai.com/v1')).replace(/\/$/, '');
     this.organization = config.organization;
     this.project = config.project;
     this.defaultMaxTokens = config.defaultMaxTokens ?? 4096;
     this.extraHeaders = config.extraHeaders ?? {};
 
-    if (!this.apiKey) {
+    if (!this.apiKey && !this.credentials) {
       throw new Error('OpenAI API key not provided');
     }
   }
 
-  supportsModel(_modelId: string): boolean {
-    return true;
+  supportsModel(modelId: string): boolean {
+    return !this.subscription || modelId.startsWith('gpt-') || modelId.includes('codex');
+  }
+
+  isFastMode(): boolean {
+    return this.fastMode;
+  }
+
+  setFastMode(enabled: boolean): void {
+    this.fastMode = enabled;
   }
 
   async complete(
     request: ProviderRequest,
     options?: ProviderRequestOptions
   ): Promise<OpenAIResponsesAPIProviderResponse> {
+    if (this.subscription) return this.stream(request, { onChunk: () => {} }, options);
     const responsesRequest = this.buildRequest(request);
     options?.onRequest?.(responsesRequest);
 
     const { signal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
-      const response = await fetch(`${this.baseURL}/responses`, {
-        method: 'POST',
-        headers: this.getHeaders(),
-        body: JSON.stringify(responsesRequest),
-        signal,
-      });
+      const response = await this.fetchResponse(responsesRequest, signal);
 
       await this.assertSuccessfulHTTPResponse(response, responsesRequest);
       const data = (await response.json()) as OpenAIResponsesAPIResponse;
-      this.assertSuccessfulAPIResponse(data, responsesRequest);
+      this.assertSuccessfulAPIResponse(data, responsesRequest, 'response error');
       return this.parseResponse(data, request.model, responsesRequest);
     } catch (error) {
       throw this.handleError(error, responsesRequest);
@@ -196,19 +257,14 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
 
     const { signal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
-      const response = await fetch(`${this.baseURL}/responses`, {
-        method: 'POST',
-        headers: this.getHeaders(),
-        body: JSON.stringify(responsesRequest),
-        signal,
-      });
+      const response = await this.fetchResponse(responsesRequest, signal);
 
       await this.assertSuccessfulHTTPResponse(response, responsesRequest);
       const reader = response.body?.getReader();
       if (!reader) throw new Error('OpenAI Responses API returned no response body');
 
       const decoder = new TextDecoder();
-      const parser = new SSELineParser();
+      const parser = new SSELineParser({ multiline: true });
       const events: unknown[] = [];
       const output: OpenAIResponsesOutputItem[] = [];
       let terminalResponse: OpenAIResponsesAPIResponse | undefined;
@@ -243,36 +299,41 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
         ) {
           terminalResponse = event.response;
         } else if (event.type === 'response.failed') {
+          // This adapter dispatches on event.type rather than running the
+          // shared SSE line loop, but its error frames are the same class of
+          // payload: a structured code the caller's retry policy needs. Route
+          // both throw sites through the one classifier so the token lists
+          // have a single source of truth. A response.failed carrying no error
+          // object at all falls through to the loud generic below.
           const failed = event.response as OpenAIResponsesAPIResponse | undefined;
-          throw errorFromProviderStatus({
-            provider: this.name,
-            body: failed,
-            message:
-              `OpenAI Responses API error: ${failed?.error?.code ?? 'response_failed'} ` +
-              `${failed?.error?.message ?? 'Response failed'}`,
-            rawRequest: responsesRequest,
-          });
+          throwOnStreamErrorFrame(failed, 'OpenAI Responses API', responsesRequest);
+          throw new Error('OpenAI Responses API stream error (response_failed): Response failed');
         } else if (event.type === 'error') {
-          throw errorFromProviderStatus({
-            provider: this.name,
-            body: { error: { code: event.code, message: event.message } },
-            message:
-              `OpenAI Responses API error: ${event.code ?? 'stream_error'} ` +
-              `${event.message ?? 'Streaming request failed'}`,
-            rawRequest: responsesRequest,
-          });
+          // The event's own `type` is the SSE event name ('error'), not a
+          // provider classification, so only code and message are handed over.
+          // The payload object is always present, so this always throws.
+          throwOnStreamErrorFrame(
+            { error: event.error ?? { code: event.code, message: event.message ?? 'Streaming request failed' } },
+            'OpenAI Responses API',
+            responsesRequest
+          );
         }
       };
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        for (const data of parser.feed(decoder.decode(value, { stream: true }))) {
-          processData(data);
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          for (const data of parser.feed(decoder.decode(value, { stream: true }))) {
+            processData(data);
+          }
         }
+        for (const data of parser.feed(decoder.decode())) processData(data);
+        for (const data of parser.flush()) processData(data);
+      } finally {
+        void reader.cancel().catch(() => {});
+        reader.releaseLock();
       }
-      for (const data of parser.feed(decoder.decode())) processData(data);
-      for (const data of parser.flush()) processData(data);
 
       // A well-formed stream always ends with a terminal event
       // (response.completed / response.incomplete; response.failed and error
@@ -291,6 +352,18 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
 
       this.assertSuccessfulAPIResponse(terminalResponse, responsesRequest);
 
+      // Codex may deliver authoritative items only via output_item.done.
+      // A non-empty terminal output remains authoritative when supplied.
+      if (!terminalResponse.output?.length) {
+        terminalResponse = { ...terminalResponse, output: output.filter(Boolean) };
+      }
+      const returnedTier = terminalResponse.service_tier;
+      if (this.subscription && responsesRequest.service_tier === 'priority' &&
+          typeof returnedTier === 'string' && returnedTier && returnedTier !== 'priority' &&
+          !this.warnedFastFallback) {
+        this.warnedFastFallback = true;
+        this.onFastModeFallback?.(returnedTier);
+      }
       const parsed = this.parseResponse(terminalResponse, request.model, responsesRequest);
       parsed.content.forEach((block, index) => callbacks.onContentBlock?.(index, block));
       return parsed;
@@ -305,14 +378,32 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
   // Request construction
   // --------------------------------------------------------------------------
 
-  private getHeaders(): Record<string, string> {
-    return {
-      Authorization: `Bearer ${this.apiKey}`,
-      'Content-Type': 'application/json',
-      ...(this.organization ? { 'OpenAI-Organization': this.organization } : {}),
-      ...(this.project ? { 'OpenAI-Project': this.project } : {}),
-      ...this.extraHeaders,
-    };
+  private async fetchResponse(
+    request: OpenAIResponsesAPIRequest,
+    signal?: AbortSignal,
+  ): Promise<Response> {
+    // Built with set() because header names are case-insensitive: spreading into
+    // an object lets `Session_Id` in extraHeaders coexist with the computed
+    // `session_id`, and Headers then joins the two into one comma-separated value.
+    const headers = new Headers({ 'Content-Type': 'application/json' });
+    if (this.organization) headers.set('OpenAI-Organization', this.organization);
+    if (this.project) headers.set('OpenAI-Project', this.project);
+    if (this.subscription) {
+      // The subscription backend keys its prompt cache on this header and
+      // ignores the body's prompt_cache_key: without it every response gets a
+      // fresh random key and a byte-stable prefix still reads cached_tokens 0
+      // (probed live 2026-09-21: 0 of 9.2k without, 9088 of 9256 with). Warm
+      // calls still miss sporadically whatever the id: 3 of 28 on a dedicated
+      // id, 3 of 13 on one shared by two interleaved prefixes.
+      headers.set('session_id', headerSafeSessionId(String(request.prompt_cache_key)));
+    }
+    for (const [name, value] of Object.entries(this.extraHeaders)) headers.set(name, value);
+    return fetchWithCredentials(`${this.baseURL}/responses`, {
+      method: 'POST',
+      body: JSON.stringify(request),
+      signal,
+      headers,
+    }, this.credentials ?? { token: this.apiKey });
   }
 
   private buildRequest(request: ProviderRequest): OpenAIResponsesAPIRequest {
@@ -357,9 +448,26 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
 
     // These invariants define the adapter's stateless native-item contract and
     // cannot be overridden through provider params.
-    responsesRequest.input = request.messages as OpenAIResponsesInputItem[];
+    responsesRequest.input = this.subscription
+      ? normalizeResponsesInput(request.messages)
+      : request.messages as OpenAIResponsesInputItem[];
     responsesRequest.store = false;
     responsesRequest.include = this.mergeEncryptedReasoningInclude(responsesRequest.include);
+    if (this.subscription) {
+      for (const key of ['temperature', 'top_p', 'top_k', 'max_output_tokens', 'max_tokens', 'max_completion_tokens']) {
+        delete responsesRequest[key];
+      }
+      if (this.fastMode) responsesRequest.service_tier = 'priority';
+      else delete responsesRequest.service_tier;
+      if (typeof responsesRequest.prompt_cache_key !== 'string' || !responsesRequest.prompt_cache_key) {
+        const head = createHash('sha256')
+          .update(this.sessionId)
+          .update(JSON.stringify([responsesRequest.instructions ?? '', responsesRequest.input[0] ?? null]))
+          .digest('hex')
+          .slice(0, 12);
+        responsesRequest.prompt_cache_key = `${this.sessionId}:${head}`;
+      }
+    }
     return responsesRequest;
   }
 
@@ -601,21 +709,17 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
     throw errorFromHttpResponse(this.name, response, await response.text(), rawRequest);
   }
 
-  private assertSuccessfulAPIResponse(response: OpenAIResponsesAPIResponse, rawRequest: unknown): void {
+  private assertSuccessfulAPIResponse(
+    response: OpenAIResponsesAPIResponse,
+    rawRequest?: unknown,
+    errorNoun?: string
+  ): void {
     if (!response.error) return;
-    // An error object inside an HTTP 200 carries no status of its own; the
-    // shared table recovers one from the provider's error code.
-    throw errorFromProviderStatus({
-      provider: this.name,
-      body: response,
-      message:
-        `OpenAI Responses API error: ${response.error.code ?? 'api_error'} ` +
-        `${response.error.message ?? 'Unknown error'}`,
-      rawRequest,
-    });
+    throwOnStreamErrorFrame(response, 'OpenAI Responses API', rawRequest, errorNoun);
   }
 
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
+    if (isDeadlineAbort(error)) return deadlineTimeoutError(error, rawRequest);
     if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
     if (isTypedAbortError(error)) return abortError(undefined, rawRequest);
 

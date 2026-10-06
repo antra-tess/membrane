@@ -25,6 +25,7 @@ export {
   createInitialState,
   defaultTokenEstimator,
   DEFAULT_CONTEXT_CONFIG,
+  MembraneContextIdentityError,
 } from './types.js';
 
 export type {

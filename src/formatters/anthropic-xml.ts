@@ -8,6 +8,7 @@
  * - <thinking> blocks for extended thinking
  */
 
+import { NativeFormatter } from './native.js';
 import type {
   NormalizedMessage,
   ContentBlock,
@@ -31,10 +32,12 @@ import {
   formatToolResults as formatToolResultsXml,
   parseAccumulatedIntoBlocks,
   formatToolDefinitions,
-  type ToolDefinitionForPrompt,
+  toolDefinitionForPrompt,
 } from '../utils/tool-parser.js';
 import { IncrementalXmlParser } from '../utils/stream-parser.js';
-import { isAcceptedImageMediaType, strippedImagePlaceholder } from '../utils/image-media.js';
+import { assertCacheMarkersWithinLimit, clampCacheMarkers } from '../utils/cache-marker-budget.js';
+import { lastCacheableBlockIndex } from './native.js';
+import { resolveImageMediaType, isAcceptedImageMediaType, strippedImagePlaceholder } from '../utils/image-media.js';
 
 // ============================================================================
 // Configuration
@@ -117,10 +120,16 @@ function toToolResult(block: ToolResultContent): ToolResult {
 export class AnthropicXmlFormatter implements PrefillFormatter {
   readonly name = 'anthropic-xml';
   readonly usesPrefill = true;
+  readonly supportsNativeTools = true;
+  readonly supportsXmlTools = true;
+
+  /** See PrefillFormatter.configuredToolMode — undefined when the caller left the mode to Membrane. */
+  readonly configuredToolMode: 'xml' | 'native' | undefined;
 
   private config: Required<AnthropicXmlFormatterConfig>;
 
   constructor(config: AnthropicXmlFormatterConfig = {}) {
+    this.configuredToolMode = config.toolMode;
     this.config = {
       toolMode: config.toolMode ?? 'xml',
       toolInjectionMode: config.toolInjectionMode ?? 'conversation',
@@ -137,17 +146,30 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
   // ==========================================================================
 
   buildMessages(messages: NormalizedMessage[], options: BuildOptions): BuildResult {
+    // Native mode is a native conversation, not an XML transcript with a tools
+    // array attached. Keep explicit XML's prefill/continuation protocol separate.
+    if ((options.toolMode ?? this.config.toolMode) === 'native') {
+      return new NativeFormatter({
+        unsupportedMedia: this.config.unsupportedMedia,
+        warnOnStrip: this.config.warnOnStrip,
+      }).buildMessages(messages, options);
+    }
     const {
       assistantParticipant,
       tools,
       thinking,
       systemPrompt,
       promptCaching = false,
+      cacheMarkers = 'membrane-system',
       cacheTtl,
       contextPrefix,
       prefillUserMessage,
       hasCacheMarker,
     } = options;
+
+    // Membrane resolves the mode per request and passes it here; the
+    // constructor-time mode is the fallback for direct callers only.
+    const toolMode = options.toolMode ?? this.config.toolMode;
 
     // Build cache_control object (with optional TTL for extended caching)
     const cacheControl: Record<string, unknown> = { type: 'ephemeral' };
@@ -165,42 +187,66 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     // message continues the same turn, so it must not get a fresh label.
     let lastWasToolResults = false;
 
-    // Track cache markers applied
-    let cacheMarkersApplied = 0;
 
     // Calculate tool injection point
     const totalMessages = messages.length;
     const toolInjectionIndex = Math.max(0, totalMessages - this.config.toolInjectionPosition);
     let toolsInjected = false;
     const hasToolsForConversation =
-      this.config.toolMode === 'xml' &&
+      toolMode === 'xml' &&
       this.config.toolInjectionMode === 'conversation' &&
       tools &&
       tools.length > 0;
     const toolsText = hasToolsForConversation ? this.formatToolsForInjection(tools!) : '';
 
-    // Build system content
-    let systemText = typeof systemPrompt === 'string' ? systemPrompt : '';
-    if (Array.isArray(systemPrompt)) {
-      systemText = systemPrompt
-        .filter((b): b is ContentBlock & { type: 'text' } => b.type === 'text')
-        .map(b => b.text)
-        .join('\n');
-    }
+    // Build system content. A caller-supplied system ARRAY keeps its block
+    // structure and its per-block cache_control: `request.system` explicitly
+    // accepts caller-marked blocks, and flattening them into one text block
+    // discarded every marker the caller placed (three in, one out) — the
+    // caller's stable prefixes then re-paid full input price forever.
+    const callerSystemBlocks = Array.isArray(systemPrompt)
+      ? systemPrompt
+          .filter((b): b is ContentBlock & { type: 'text' } => b.type === 'text')
+          .map((b) => {
+            const callerMarker = (b as unknown as { cache_control?: unknown }).cache_control;
+            const block: Record<string, unknown> = { type: 'text', text: b.text };
+            if (callerMarker) block.cache_control = callerMarker;
+            return block;
+          })
+      : undefined;
+    const systemBlocks = callerSystemBlocks?.length ? callerSystemBlocks : undefined;
+
+    let systemText = typeof systemPrompt === 'string'
+      ? systemPrompt
+      : (systemBlocks?.map((b) => b.text as string).join('\n') ?? '');
 
     // Inject tools into system if configured
-    if (this.config.toolMode === 'xml' && this.config.toolInjectionMode === 'system' && tools?.length) {
+    if (toolMode === 'xml' && this.config.toolInjectionMode === 'system' && tools?.length) {
       const toolsXml = this.formatToolDefinitionsXml(tools);
       systemText = this.injectToolsIntoSystem(systemText, toolsXml);
+      if (systemBlocks) {
+        // Append to the LAST block only — appending to the join would
+        // collapse the array and take every earlier block's marker with it.
+        const tail = systemBlocks[systemBlocks.length - 1]!;
+        tail.text = this.injectToolsIntoSystem(tail.text as string, toolsXml);
+      }
     }
 
     // Build system content with optional cache control
     let systemContent: unknown;
-    if (systemText) {
+    if (systemBlocks) {
+      // The caller's own markers are authoritative: adding one beside them
+      // spends a slot the caller already allocated.
+      const callerMarkedAny = systemBlocks.some((b) => b.cache_control);
+      if (promptCaching && !callerMarkedAny) {
+        const bpIdx = lastCacheableBlockIndex(systemBlocks);
+        if (bpIdx >= 0) systemBlocks[bpIdx]!.cache_control = cacheControl;
+      }
+      systemContent = systemBlocks;
+    } else if (systemText) {
       const systemBlock: Record<string, unknown> = { type: 'text', text: systemText };
-      if (promptCaching) {
+      if (promptCaching && cacheMarkers === 'membrane-system') {
         systemBlock.cache_control = cacheControl;
-        cacheMarkersApplied++;
       }
       systemContent = [systemBlock];
     }
@@ -208,9 +254,8 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     // Add context prefix as first cached assistant message (for simulacrum seeding)
     if (contextPrefix) {
       const prefixBlock: Record<string, unknown> = { type: 'text', text: contextPrefix };
-      if (promptCaching) {
+      if (promptCaching && cacheMarkers === 'membrane-system') {
         prefixBlock.cache_control = cacheControl;
-        cacheMarkersApplied++;
       }
       providerMessages.push({
         role: 'assistant',
@@ -276,7 +321,6 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
           const content = currentConversation.join(joiner);
           const contentBlock: Record<string, unknown> = { type: 'text', text: content };
           contentBlock.cache_control = cacheControl;
-          cacheMarkersApplied++;
           providerMessages.push({
             role: 'assistant',
             content: [contentBlock],
@@ -344,7 +388,6 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         const content = currentConversation.join(joiner);
         const contentBlock: Record<string, unknown> = { type: 'text', text: content };
         contentBlock.cache_control = cacheControl;
-        cacheMarkersApplied++;
         providerMessages.push({
           role: 'assistant',
           content: [contentBlock],
@@ -394,9 +437,8 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
           type: 'text',
           text: 'The assistant is in CLI simulation mode, and responds to the user\'s CLI commands only with the output of the command.',
         };
-        if (promptCaching) {
+        if (promptCaching && cacheMarkers === 'membrane-system') {
           cliSystemBlock.cache_control = cacheControl;
-          cacheMarkersApplied++;
         }
         systemContent = [cliSystemBlock];
         providerMessages.unshift({
@@ -416,9 +458,21 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     const stopSequences = this.buildStopSequences(messages, assistantParticipant, options);
 
     // Native tools if configured
-    const nativeTools = this.config.toolMode === 'native' && tools?.length
+    const nativeTools = toolMode === 'native' && tools?.length
       ? this.convertToNativeTools(tools)
       : undefined;
+
+    // Budget. Five sites above attach cache_control (system, contextPrefix,
+    // hasCacheMarker flush, cacheBreakpoint flush, CLI-simulation system) and
+    // multiple cacheBreakpoints are documented input, so a prefill turn with
+    // three marked messages reaches five markers — one over Anthropic's hard
+    // limit, which rejects the request outright. Clamping here, once, on the
+    // finished artifacts is the only count that can see all five sites; the
+    // reported tally is that same recount, so it can never drift from the wire.
+    const cacheSurfaces = { messages: providerMessages, system: systemContent, tools: nativeTools };
+    const budget = cacheMarkers === 'cm-owned'
+      ? { total: assertCacheMarkersWithinLimit(cacheSurfaces, 'anthropic-xml') }
+      : clampCacheMarkers(cacheSurfaces, 'anthropic-xml');
 
     return {
       messages: providerMessages,
@@ -428,7 +482,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         : undefined,
       stopSequences,
       nativeTools,
-      cacheMarkersApplied,
+      cacheMarkersApplied: budget.total,
     };
   }
 
@@ -448,8 +502,8 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     return new IncrementalXmlParser();
   }
 
-  parseToolCalls(content: string): ToolCall[] {
-    const result = parseToolCallsXml(content);
+  parseToolCalls(content: string, tools?: ToolDefinition[]): ToolCall[] {
+    const result = parseToolCallsXml(content, tools ? { tools } : undefined);
     return result?.calls ?? [];
   }
 
@@ -457,8 +511,8 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     return /<(antml:)?function_calls>/.test(content);
   }
 
-  parseContentBlocks(content: string): ContentBlock[] {
-    const { blocks } = parseAccumulatedIntoBlocks(content);
+  parseContentBlocks(content: string, tools?: ToolDefinition[]): ContentBlock[] {
+    const { blocks } = parseAccumulatedIntoBlocks(content, tools ? { tools } : undefined);
     return blocks;
   }
 
@@ -480,14 +534,15 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         parts.push(block.text);
       } else if (block.type === 'image') {
         if (block.source.type === 'base64') {
-          if (!isAcceptedImageMediaType(block.source.mediaType)) {
-            parts.push(strippedImagePlaceholder(block.source.mediaType).text);
+          const mediaType = resolveImageMediaType(block.source.data, block.source.mediaType);
+          if (!isAcceptedImageMediaType(mediaType)) {
+            parts.push(strippedImagePlaceholder(mediaType).text);
           } else {
             images.push({
               type: 'image',
               source: {
                 type: 'base64',
-                media_type: block.source.mediaType,
+                media_type: mediaType,
                 data: block.source.data,
               },
             });
@@ -592,13 +647,20 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
    * Reconstruct canonical <function_calls> XML for legacy tool_use blocks
    * stored without rawXml. Lossy (whitespace, parameter order, antml:
    * prefix are gone) but consistent with the parser and the instructions.
+   *
+   * A string value that begins or ends with a newline gets one more there:
+   * the parser reads one newline on each side of a string parameter as
+   * layout, so this is how that value is written to read back as itself.
    */
   private formatLegacyToolUseXml(blocks: ToolUseContent[]): string {
     const lines = ['<function_calls>'];
     for (const block of blocks) {
       lines.push(`<invoke name="${block.name}">`);
       for (const [name, value] of Object.entries(block.input)) {
-        const text = typeof value === 'string' ? value : JSON.stringify(value);
+        const text =
+          typeof value === 'string'
+            ? `${value.startsWith('\n') ? '\n' : ''}${value}${value.endsWith('\n') ? '\n' : ''}`
+            : JSON.stringify(value);
         lines.push(`<parameter name="${name}">${text}</parameter>`);
       }
       lines.push('</invoke>');
@@ -608,25 +670,10 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
   }
 
   private formatToolDefinitionsXml(tools: ToolDefinition[]): string {
-    const toolsForPrompt: ToolDefinitionForPrompt[] = tools.map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.inputSchema.properties
-        ? Object.fromEntries(
-            Object.entries(tool.inputSchema.properties).map(([name, schema]) => [
-              name,
-              {
-                type: schema.type,
-                description: schema.description,
-                required: tool.inputSchema.required?.includes(name),
-                enum: schema.enum,
-              },
-            ])
-          )
-        : {},
-    }));
-
-    return formatToolDefinitions(toolsForPrompt);
+    // Each parameter's type, nullability and requiredness come from the SAME
+    // reading of the schema the XML parameter parser applies, so what the model
+    // is told a parameter is and how its value is parsed cannot drift apart.
+    return formatToolDefinitions(tools.map(toolDefinitionForPrompt));
   }
 
   private formatToolsForInjection(tools: ToolDefinition[]): string {

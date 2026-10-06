@@ -12,6 +12,8 @@
  * Uses the standard OpenAI chat completions format with tool_calls support.
  */
 
+import { assertMessagePrefillSupported } from './request-capabilities.js';
+
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -29,7 +31,7 @@ import {
   isTypedAbortError,
   withRawRequest,
 } from '../types/index.js';
-import { safeParseJson, createCombinedSignal, SSELineParser } from './utils.js';
+import { safeParseJson, textOnlyToolResultContent, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
 
 // ============================================================================
 // Types
@@ -50,7 +52,24 @@ interface OpenAIMessage {
    *  channel from `content`). Captured into a thinking block, and re-sent on
    *  prior assistant turns to preserve chain-of-thought. */
   reasoning?: string;
+  /** Same trace under the DeepSeek spelling, used e.g. by Xiaomi's official
+   *  MiMo API in both messages and stream deltas. Read as an alias of
+   *  `reasoning`; `reasoning` wins when a backend sends both. */
+  reasoning_content?: string;
   reasoning_details?: unknown;
+}
+
+/**
+ * The reasoning trace of a message or stream delta, under either spelling.
+ * `reasoning` wins unless it is blank while `reasoning_content` has substance —
+ * a whitespace-only `reasoning` must not hide the real trace. Whitespace is not
+ * trimmed away otherwise: a lone ' ' or '\n' stream delta is part of the trace.
+ */
+function reasoningOf(m: { reasoning?: unknown; reasoning_content?: unknown } | undefined): string | undefined {
+  const reasoning = typeof m?.reasoning === 'string' ? m.reasoning : undefined;
+  const alias = typeof m?.reasoning_content === 'string' ? m.reasoning_content : undefined;
+  if (reasoning && (reasoning.trim() || !alias?.trim())) return reasoning;
+  return alias ?? reasoning;
 }
 
 /**
@@ -128,6 +147,14 @@ export interface OpenAICompatibleAdapterConfig {
 
 export class OpenAICompatibleAdapter implements ProviderAdapter {
   readonly name: string;
+
+  /**
+   * NOT ESTABLISHED, and not establishable per-adapter: this fronts arbitrary
+   * OpenAI-shaped third-party endpoints whose caching semantics vary by vendor.
+   * Moot today — the adapter never populates `cacheReadTokens`, so the warn
+   * never fires; it becomes live the moment cache reporting is added here.
+   */
+  readonly usageCacheConvention = 'unknown' as const;
   private baseURL: string;
   private apiKey: string;
   private defaultMaxTokens: number;
@@ -156,6 +183,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
     const openAIRequest = this.buildRequest(request);
+    assertMessagePrefillSupported(openAIRequest.model, openAIRequest.messages, options, this.name, openAIRequest);
     options?.onRequest?.(openAIRequest);
 
     try {
@@ -173,6 +201,10 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   ): Promise<ProviderResponse> {
     const openAIRequest = this.buildRequest(request);
     openAIRequest.stream = true;
+    // Ask for usage in the stream — without this the endpoint sends no usage
+    // frame at all and every streamed call reports 0/0 tokens.
+    openAIRequest.stream_options = { include_usage: true };
+    assertMessagePrefillSupported(openAIRequest.model, openAIRequest.messages, options, this.name, openAIRequest);
     options?.onRequest?.(openAIRequest);
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
@@ -198,59 +230,96 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       let accumulated = '';
       let reasoning = '';
       let finishReason = 'stop';
+      let sawTerminalEvent = false;
       let toolCalls: OpenAIToolCall[] = [];
+      let streamUsage: OpenAIResponse['usage'] | undefined;
+
+      // One frame handler for both the streamed lines and the EOF flush — the
+      // trailing buffer carries real terminal frames, not leftovers.
+      const processDataLine = (data: string): void => {
+        if (data === '[DONE]') {
+          sawTerminalEvent = true;
+          return;
+        }
+
+        // Parse first; only JSON noise is ignorable. Everything after the
+        // parse must NOT be swallowed by the catch below.
+        let parsed: Record<string, any>;
+        try {
+          parsed = JSON.parse(data);
+        } catch {
+          return; // Ignore parse errors (partial/keep-alive lines)
+        }
+
+        throwOnStreamErrorFrame(parsed, this.name, openAIRequest);
+
+        try {
+          const delta = parsed.choices?.[0]?.delta;
+
+          if (delta?.content) {
+            accumulated += delta.content;
+            callbacks.onChunk(delta.content);
+          }
+
+          // Reasoning-model trace arrives on its own channel (not `content`),
+          // as `reasoning` or `reasoning_content` depending on the backend.
+          const reasoningDelta = reasoningOf(delta);
+          if (reasoningDelta !== undefined) {
+            reasoning += reasoningDelta;
+          }
+
+          // Handle streaming tool calls
+          if (delta?.tool_calls) {
+            for (const tc of delta.tool_calls) {
+              const index = tc.index ?? 0;
+              if (!toolCalls[index]) {
+                toolCalls[index] = {
+                  id: tc.id ?? '',
+                  type: 'function',
+                  function: { name: '', arguments: '' },
+                };
+              }
+              if (tc.id) toolCalls[index].id = tc.id;
+              if (tc.function?.name) toolCalls[index].function.name = tc.function.name;
+              if (tc.function?.arguments) {
+                toolCalls[index].function.arguments += tc.function.arguments;
+              }
+            }
+          }
+
+          if (parsed.choices?.[0]?.finish_reason) {
+            finishReason = parsed.choices[0].finish_reason;
+            sawTerminalEvent = true;
+          }
+
+          // Usage rides the final chunk when stream_options.include_usage is set
+          if (parsed.usage) {
+            streamUsage = parsed.usage;
+          }
+        } catch {
+          // Ignore parse errors in stream
+        }
+      };
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
         const chunk = decoder.decode(value, { stream: true });
-        const dataLines = sseParser.feed(chunk);
-
-        for (const data of dataLines) {
-          if (data === '[DONE]') continue;
-
-          try {
-            const parsed = JSON.parse(data);
-            const delta = parsed.choices?.[0]?.delta;
-
-            if (delta?.content) {
-              accumulated += delta.content;
-              callbacks.onChunk(delta.content);
-            }
-
-            // Reasoning-model trace arrives on its own channel (not `content`).
-            if (typeof delta?.reasoning === 'string') {
-              reasoning += delta.reasoning;
-            }
-
-            // Handle streaming tool calls
-            if (delta?.tool_calls) {
-              for (const tc of delta.tool_calls) {
-                const index = tc.index ?? 0;
-                if (!toolCalls[index]) {
-                  toolCalls[index] = {
-                    id: tc.id ?? '',
-                    type: 'function',
-                    function: { name: '', arguments: '' },
-                  };
-                }
-                if (tc.id) toolCalls[index].id = tc.id;
-                if (tc.function?.name) toolCalls[index].function.name = tc.function.name;
-                if (tc.function?.arguments) {
-                  toolCalls[index].function.arguments += tc.function.arguments;
-                }
-              }
-            }
-
-            if (parsed.choices?.[0]?.finish_reason) {
-              finishReason = parsed.choices[0].finish_reason;
-            }
-          } catch {
-            // Ignore parse errors in stream
-          }
+        for (const data of sseParser.feed(chunk)) {
+          processDataLine(data);
         }
       }
+
+      // A final `data:` line that arrived without its trailing newline is still
+      // buffered here. Servers and proxies do close right after writing the
+      // last event, so dropping it would report a finished turn as a dropped
+      // connection at the guard below.
+      for (const data of sseParser.flush()) {
+        processDataLine(data);
+      }
+
+      assertTerminalEventObserved(sawTerminalEvent, this.name, openAIRequest);
 
       // Build response with accumulated data
       const message: OpenAIMessage = {
@@ -264,7 +333,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         message.tool_calls = toolCalls;
       }
 
-      return this.parseStreamedResponse(message, finishReason, request.model, openAIRequest);
+      return this.parseStreamedResponse(message, finishReason, request.model, streamUsage, openAIRequest);
 
     } catch (error) {
       throw this.handleError(error, openAIRequest);
@@ -402,7 +471,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
             toolResults.push({
               role: 'tool' as const,
               tool_call_id: block.tool_use_id || block.toolUseId,
-              content: typeof block.content === 'string' ? block.content : JSON.stringify(block.content),
+              content: textOnlyToolResultContent(block.content),
             });
           }
         }
@@ -519,6 +588,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     message: OpenAIMessage,
     finishReason: string,
     requestedModel: string,
+    streamUsage?: OpenAIResponse['usage'],
     rawRequest?: unknown
   ): ProviderResponse {
     return {
@@ -526,12 +596,14 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       stopReason: this.mapFinishReason(finishReason),
       stopSequence: undefined,
       usage: {
-        inputTokens: 0, // Not available in streaming
-        outputTokens: 0,
+        // Zeros only as the genuinely-absent fallback: an endpoint that
+        // ignores stream_options sends no usage frame.
+        inputTokens: streamUsage?.prompt_tokens ?? 0,
+        outputTokens: streamUsage?.completion_tokens ?? 0,
       },
       model: requestedModel,
       rawRequest,
-      raw: { message, finish_reason: finishReason },
+      raw: { message, finish_reason: finishReason, usage: streamUsage },
     };
   }
 
@@ -541,7 +613,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     const content: ContentBlock[] = [];
 
     // Reasoning trace first (mirrors Anthropic thinking-block ordering).
-    const reasoning = (message as OpenAIMessage).reasoning;
+    const reasoning = reasoningOf(message);
     if (typeof reasoning === 'string' && reasoning.trim()) {
       content.push({ type: 'thinking', thinking: reasoning } as ContentBlock);
     }
@@ -587,6 +659,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
    * aborts and non-HTTP throwables — through the shared last-resort table.
    */
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
+    if (isDeadlineAbort(error)) return deadlineTimeoutError(error, rawRequest);
     if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
     if (isTypedAbortError(error)) return abortError(undefined, rawRequest);
 
@@ -633,7 +706,7 @@ export function toOpenAIMessages(
       } else if (block.type === 'tool_result') {
         toolResults.push({
           id: block.toolUseId,
-          content: typeof block.content === 'string' ? block.content : JSON.stringify(block.content),
+          content: textOnlyToolResultContent(block.content),
         });
       }
     }
@@ -672,7 +745,7 @@ export function toOpenAIMessages(
 export function fromOpenAIMessage(message: OpenAIMessage): ContentBlock[] {
   const result: ContentBlock[] = [];
 
-  const reasoning = message.reasoning;
+  const reasoning = reasoningOf(message);
   if (typeof reasoning === 'string' && reasoning.trim()) {
     result.push({ type: 'thinking', thinking: reasoning } as ContentBlock);
   }

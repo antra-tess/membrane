@@ -73,7 +73,10 @@ export type {
 export type {
   StopReason,
   BasicUsage,
+  CallUsage,
   DetailedUsage,
+  TurnRoundUsage,
+  DiscardedAttemptsUsage,
   CostBreakdown,
   StopInfo,
   ModelInfo,
@@ -99,8 +102,10 @@ export type {
   ProviderAdapter,
   ProviderRequest,
   ProviderRequestOptions,
+  ProviderRequestContext,
   ProviderResponse,
   StreamCallbacks,
+  UsageCacheConvention,
 } from './provider.js';
 
 // Streaming
@@ -154,6 +159,7 @@ export type {
 
 export {
   MembraneError,
+  MembraneNotReadyError,
   serializeError,
   rateLimitError,
   contextLengthError,
@@ -163,6 +169,8 @@ export {
   networkError,
   timeoutError,
   abortError,
+  TimeoutAbortError,
+  isTimeoutAbortError,
   safetyError,
   unsupportedError,
   classifyError,

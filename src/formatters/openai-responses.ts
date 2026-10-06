@@ -22,6 +22,9 @@ import type {
   StreamEmission,
   StreamParser,
 } from './types.js';
+import { responsesToolOutputParts } from '../providers/responses-input.js';
+
+import { resolveImageMediaType } from '../utils/image-media.js';
 
 export const OPENAI_RESPONSES_ITEMS_METADATA_KEY = 'openaiResponsesItems';
 
@@ -74,6 +77,8 @@ type NativeItem = { type?: string; id?: string; [key: string]: unknown };
 export class OpenAIResponsesFormatter implements PrefillFormatter {
   readonly name = 'openai-responses';
   readonly usesPrefill = false;
+  readonly supportsNativeTools = true;
+  readonly supportsXmlTools = false;
 
   buildMessages(messages: NormalizedMessage[], options: BuildOptions): BuildResult {
     const items: NativeItem[] = [];
@@ -176,7 +181,7 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
         const source = block.source;
         messageParts.push(source.type === 'url'
           ? { type: 'input_image', image_url: source.url }
-          : { type: 'input_image', image_url: `data:${source.mediaType};base64,${source.data}` });
+          : { type: 'input_image', image_url: `data:${resolveImageMediaType(source.data, source.mediaType)};base64,${source.data}` });
       } else if (block.type === 'tool_use') {
         flushMessage();
         out.push({
@@ -190,13 +195,16 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
         out.push({
           type: 'function_call_output',
           call_id: block.toolUseId,
+          // Image-bearing results go out as native input_text/input_image
+          // parts (see responsesToolOutputParts); image-free ones keep the
+          // legacy string form.
           output: typeof block.content === 'string'
             ? block.content
-            : JSON.stringify(block.content),
+            : responsesToolOutputParts(block.content) ?? JSON.stringify(block.content),
         });
       } else if (block.type === 'redacted_thinking') {
         flushMessage();
-        out.push({ type: 'reasoning', encrypted_content: block.data });
+        out.push({ type: 'reasoning', encrypted_content: block.data, summary: [] });
       }
     }
     flushMessage();

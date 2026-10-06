@@ -4,6 +4,8 @@
  * Handles OpenAI-compatible API with tool_calls format
  */
 
+import { assertMessagePrefillSupported } from './request-capabilities.js';
+
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -12,6 +14,7 @@ import type {
   StreamCallbacks,
   ContentBlock,
   ToolDefinition,
+  UsageCacheConvention,
 } from '../types/index.js';
 import {
   MembraneError,
@@ -22,7 +25,7 @@ import {
   isTypedAbortError,
   withRawRequest,
 } from '../types/index.js';
-import { safeParseJson, createCombinedSignal, SSELineParser } from './utils.js';
+import { safeParseJson, textOnlyToolResultContent, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
 
 // ============================================================================
 // Types
@@ -77,6 +80,8 @@ interface OpenRouterMessage {
   content?: string | null | OpenRouterContentBlock[];
   tool_calls?: OpenRouterToolCall[];
   tool_call_id?: string;
+  /** Image-generation responses can carry images beside content. */
+  images?: Array<{ image_url: { url: string } }>;
 }
 
 interface OpenRouterToolCall {
@@ -144,8 +149,33 @@ export interface OpenRouterAdapterConfig {
 // OpenRouter Adapter
 // ============================================================================
 
+/**
+ * Which convention the tokens OpenRouter just handed back are in. OpenRouter
+ * passes the routed provider's usage payload through, so an Anthropic-routed
+ * call reports `cache_read_input_tokens` (disjoint from prompt_tokens) while an
+ * OpenAI-routed one reports `prompt_tokens_details.cached_tokens` (a subset of
+ * it). The field that carried the number therefore identifies the convention.
+ */
+function resolveRoutedCacheConvention(
+  anthropicShapedCacheRead: number | undefined,
+  resolvedCacheRead: number | undefined,
+): UsageCacheConvention | undefined {
+  if (resolvedCacheRead == null) return undefined;
+  return anthropicShapedCacheRead != null ? 'cache-excluded' : 'cache-inclusive';
+}
+
 export class OpenRouterAdapter implements ProviderAdapter {
   readonly name = 'openrouter';
+
+  /**
+   * OpenRouter fronts BOTH conventions: it passes through Anthropic's
+   * `cache_read_input_tokens` (cache-excluded) or OpenAI's
+   * `prompt_tokens_details.cached_tokens` (cache-inclusive) depending on which
+   * provider it routed to. The convention is therefore a per-response fact —
+   * each parse sets `usage.cacheConvention` from the field it actually read,
+   * and this adapter-level value is only the no-cache-tokens fallback.
+   */
+  readonly usageCacheConvention = 'unknown' as const;
   private apiKey: string;
   private baseURL: string;
   private httpReferer: string;
@@ -174,6 +204,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
     const openRouterRequest = this.buildRequest(request);
+    assertMessagePrefillSupported(openRouterRequest.model, openRouterRequest.messages, options, this.name, openRouterRequest);
     options?.onRequest?.(openRouterRequest);
 
     try {
@@ -193,6 +224,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
     openRouterRequest.stream = true;
     // Request usage data in stream for cache metrics
     openRouterRequest.stream_options = { include_usage: true };
+    assertMessagePrefillSupported(openRouterRequest.model, openRouterRequest.messages, options, this.name, openRouterRequest);
     options?.onRequest?.(openRouterRequest);
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
@@ -215,105 +247,141 @@ export class OpenRouterAdapter implements ProviderAdapter {
 
       const decoder = new TextDecoder();
       const sseParser = new SSELineParser();
-      let accumulated = '';
+      const contentParts: OpenRouterContentBlock[] = [];
+      const readImageUrl = createImageUrlReader();
       let finishReason = 'stop';
+      let sawTerminalEvent = false;
       let toolCalls: OpenRouterToolCall[] = [];
       let streamUsage: OpenRouterResponse['usage'] | undefined;
+      // The model the provider actually served, echoed on every SSE
+      // chunk. Reporting the requested id instead hides alias
+      // resolution (and, on OpenRouter, which provider it routed to).
+      let servedModel: string | undefined;
+
+      // One frame handler for both the streamed lines and the EOF flush — the
+      // trailing buffer carries real terminal frames, not leftovers.
+      const processDataLine = (data: string): void => {
+        if (data === '[DONE]') {
+          sawTerminalEvent = true;
+          return;
+        }
+
+        // Parse first; only JSON noise is ignorable. Everything after the
+        // parse must NOT be swallowed by the catch below.
+        let parsed: Record<string, any>;
+        try {
+          parsed = JSON.parse(data);
+        } catch {
+          return; // Ignore parse errors (partial/keep-alive lines)
+        }
+
+        // OpenRouter delivers mid-stream failures (e.g. upstream 429s) as an
+        // SSE data line with an `error` payload. Silently ignoring it would
+        // yield a fake-successful empty completion — surface it instead so
+        // retry logic can handle it. Shared with every other SSE adapter.
+        throwOnStreamErrorFrame(parsed, 'OpenRouter', openRouterRequest);
+
+        try {
+          const delta = parsed.choices?.[0]?.delta;
+
+          // Text remains a text-only callback stream. Keep image parts in
+          // order instead of coercing content arrays into "[object Object]".
+          const appendPart = (part: unknown): void => {
+            if (!part || typeof part !== 'object') return;
+            const block = part as { type?: unknown; text?: unknown };
+            if (block.type === 'text' && typeof block.text === 'string' && block.text !== '') {
+              const previous = contentParts[contentParts.length - 1];
+              if (previous?.type === 'text') previous.text += block.text;
+              else contentParts.push({ type: 'text', text: block.text });
+              callbacks.onChunk(block.text);
+            } else if (block.type === 'image_url') {
+              const url = readImageUrl(part);
+              if (url === undefined) return;
+              contentParts.push(part as OpenRouterContentBlock);
+              callbacks.onContentBlock?.(contentParts.length - 1, imageFromUrl(url));
+            }
+          };
+          if (typeof delta?.content === 'string' && delta.content) {
+            appendPart({ type: 'text', text: delta.content });
+          } else if (Array.isArray(delta?.content)) {
+            for (const part of delta.content) appendPart(part);
+          }
+          if (Array.isArray(delta?.images)) {
+            for (const image of delta.images) {
+              appendPart({ type: 'image_url', image_url: image?.image_url });
+            }
+          }
+
+          // Handle streaming tool calls
+          if (delta?.tool_calls) {
+            for (const tc of delta.tool_calls) {
+              const index = tc.index ?? 0;
+              if (!toolCalls[index]) {
+                toolCalls[index] = {
+                  id: tc.id ?? '',
+                  type: 'function',
+                  function: { name: '', arguments: '' },
+                };
+              }
+              if (tc.id) toolCalls[index].id = tc.id;
+              if (tc.function?.name) toolCalls[index].function.name = tc.function.name;
+              if (tc.function?.arguments) {
+                toolCalls[index].function.arguments += tc.function.arguments;
+              }
+            }
+          }
+
+          if (parsed.choices?.[0]?.finish_reason) {
+            finishReason = parsed.choices[0].finish_reason;
+            sawTerminalEvent = true;
+          }
+
+          // Capture usage data (comes in final chunk when stream_options.include_usage is set)
+          if (parsed.usage) {
+            streamUsage = parsed.usage;
+          }
+
+          if (parsed.model) {
+            servedModel = parsed.model;
+          }
+        } catch (e) {
+          // Ignore parse errors
+        }
+      };
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
         const chunk = decoder.decode(value, { stream: true });
-        const dataLines = sseParser.feed(chunk);
-
-        for (const data of dataLines) {
-          if (data === '[DONE]') continue;
-
-          // Parse first; only JSON noise is ignorable. Everything after the
-          // parse must NOT be swallowed by the catch below.
-          let parsed: Record<string, any>;
-          try {
-            parsed = JSON.parse(data);
-          } catch {
-            continue; // Ignore parse errors (partial/keep-alive lines)
-          }
-
-          // OpenRouter delivers mid-stream failures (e.g. upstream 429s) as an
-          // SSE data line with an `error` payload. Silently ignoring it would
-          // yield a fake-successful empty completion — surface it instead so
-          // retry logic can handle it.
-          if (typeof parsed === 'object' && parsed !== null && parsed.error) {
-            const err = parsed.error as { code?: number | string; message?: string };
-            // The event carries the upstream status in `code`; classify off it
-            // rather than off the rendered message.
-            const upstreamStatus =
-              typeof err.code === 'number'
-                ? err.code
-                : typeof err.code === 'string' && /^\d{3}$/.test(err.code)
-                  ? Number(err.code)
-                  : undefined;
-            throw errorFromProviderStatus({
-              provider: this.name,
-              status: upstreamStatus,
-              body: parsed,
-              message: `OpenRouter stream error${err.code !== undefined ? ` (${err.code})` : ''}: ${err.message ?? JSON.stringify(err)}`,
-              rawRequest: openRouterRequest,
-            });
-          }
-
-          try {
-            const delta = parsed.choices?.[0]?.delta;
-
-            if (delta?.content) {
-              accumulated += delta.content;
-              callbacks.onChunk(delta.content);
-            }
-
-            // Handle streaming tool calls
-            if (delta?.tool_calls) {
-              for (const tc of delta.tool_calls) {
-                const index = tc.index ?? 0;
-                if (!toolCalls[index]) {
-                  toolCalls[index] = {
-                    id: tc.id ?? '',
-                    type: 'function',
-                    function: { name: '', arguments: '' },
-                  };
-                }
-                if (tc.id) toolCalls[index].id = tc.id;
-                if (tc.function?.name) toolCalls[index].function.name = tc.function.name;
-                if (tc.function?.arguments) {
-                  toolCalls[index].function.arguments += tc.function.arguments;
-                }
-              }
-            }
-
-            if (parsed.choices?.[0]?.finish_reason) {
-              finishReason = parsed.choices[0].finish_reason;
-            }
-
-            // Capture usage data (comes in final chunk when stream_options.include_usage is set)
-            if (parsed.usage) {
-              streamUsage = parsed.usage;
-            }
-          } catch (e) {
-            // Ignore parse errors
-          }
+        for (const data of sseParser.feed(chunk)) {
+          processDataLine(data);
         }
       }
+
+      // A final `data:` line that arrived without its trailing newline is still
+      // buffered here. Servers and proxies do close right after writing the
+      // last event, so dropping it would report a finished turn as a dropped
+      // connection at the guard below.
+      for (const data of sseParser.flush()) {
+        processDataLine(data);
+      }
+
+      assertTerminalEventObserved(sawTerminalEvent, 'OpenRouter', openRouterRequest);
 
       // Build response with accumulated data
       const message: OpenRouterMessage = {
         role: 'assistant',
-        content: accumulated || null,
+        content: contentParts.some(part => part.type === 'image_url')
+          ? contentParts
+          : contentParts.filter(part => part.type === 'text').map(part => part.text).join('') || null,
       };
 
       if (toolCalls.length > 0) {
         message.tool_calls = toolCalls;
       }
 
-      return this.parseStreamedResponse(message, finishReason, request.model, streamUsage, openRouterRequest);
+      return this.parseStreamedResponse(message, finishReason, servedModel ?? request.model, streamUsage, openRouterRequest);
 
     } catch (error) {
       throw this.handleError(error, openRouterRequest);
@@ -520,7 +588,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
             toolResults.push({
               role: 'tool' as const,
               tool_call_id: block.tool_use_id || block.toolUseId,
-              content: typeof block.content === 'string' ? block.content : JSON.stringify(block.content),
+              content: textOnlyToolResultContent(block.content),
             });
           }
         }
@@ -612,8 +680,10 @@ export class OpenRouterAdapter implements ProviderAdapter {
     // Anthropic: cache_creation_input_tokens, cache_read_input_tokens
     // OpenAI: prompt_tokens_details.cached_tokens
     const cacheCreationTokens = response.usage?.cache_creation_input_tokens;
-    const cacheReadTokens = response.usage?.cache_read_input_tokens
+    const anthropicShapedCacheRead = response.usage?.cache_read_input_tokens;
+    const cacheReadTokens = anthropicShapedCacheRead
       ?? response.usage?.prompt_tokens_details?.cached_tokens;
+    const cacheConvention = resolveRoutedCacheConvention(anthropicShapedCacheRead, cacheReadTokens);
 
     return {
       content: this.messageToContent(message),
@@ -624,6 +694,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
         outputTokens: response.usage?.completion_tokens ?? 0,
         cacheCreationTokens: cacheCreationTokens ?? undefined,
         cacheReadTokens: cacheReadTokens ?? undefined,
+        cacheConvention,
       },
       model: response.model ?? requestedModel,
       rawRequest,
@@ -640,8 +711,10 @@ export class OpenRouterAdapter implements ProviderAdapter {
   ): ProviderResponse {
     // Extract cache tokens if available from stream usage
     const cacheCreationTokens = streamUsage?.cache_creation_input_tokens;
-    const cacheReadTokens = streamUsage?.cache_read_input_tokens
+    const anthropicShapedCacheRead = streamUsage?.cache_read_input_tokens;
+    const cacheReadTokens = anthropicShapedCacheRead
       ?? streamUsage?.prompt_tokens_details?.cached_tokens;
+    const cacheConvention = resolveRoutedCacheConvention(anthropicShapedCacheRead, cacheReadTokens);
 
     return {
       content: this.messageToContent(message),
@@ -652,6 +725,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
         outputTokens: streamUsage?.completion_tokens ?? 0,
         cacheCreationTokens: cacheCreationTokens ?? undefined,
         cacheReadTokens: cacheReadTokens ?? undefined,
+        cacheConvention,
       },
       model: requestedModel,
       rawRequest,
@@ -659,35 +733,8 @@ export class OpenRouterAdapter implements ProviderAdapter {
     };
   }
 
-  private messageToContent(message: OpenRouterMessage | undefined): any {
-    if (!message) return [];
-    
-    const content: any[] = [];
-    
-    if (message.content) {
-      if (typeof message.content === 'string') {
-        content.push({ type: 'text', text: message.content });
-      } else if (Array.isArray(message.content)) {
-        for (const block of message.content) {
-          if (block.type === 'text') {
-            content.push({ type: 'text', text: block.text });
-          }
-        }
-      }
-    }
-    
-    if (message.tool_calls) {
-      for (const tc of message.tool_calls) {
-        content.push({
-          type: 'tool_use',
-          id: tc.id,
-          name: tc.function.name,
-          input: safeParseJson(tc.function.arguments),
-        });
-      }
-    }
-    
-    return content;
+  private messageToContent(message: OpenRouterMessage | undefined): ContentBlock[] {
+    return message ? fromOpenRouterMessage(message) : [];
   }
 
   private mapFinishReason(reason: string | undefined): string {
@@ -711,6 +758,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
    * aborts and non-HTTP throwables — through the shared last-resort table.
    */
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
+    if (isDeadlineAbort(error)) return deadlineTimeoutError(error, rawRequest);
     if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
     if (isTypedAbortError(error)) return abortError(undefined, rawRequest);
 
@@ -752,7 +800,7 @@ export function toOpenRouterMessages(
       } else if (block.type === 'tool_result') {
         toolResults.push({
           id: block.toolUseId,
-          content: typeof block.content === 'string' ? block.content : JSON.stringify(block.content),
+          content: textOnlyToolResultContent(block.content),
         });
       }
     }
@@ -782,25 +830,65 @@ export function toOpenRouterMessages(
   return result;
 }
 
+/** A malformed image is local to that entry, not a failed response. Warn
+ * once per response without logging provider content or image URLs. */
+function createImageUrlReader(): (entry: unknown) => string | undefined {
+  let warned = false;
+  return (entry) => {
+    const url = (entry as { image_url?: { url?: unknown } } | null)?.image_url?.url;
+    if (typeof url === 'string') return url;
+    if (!warned) {
+      warned = true;
+      console.warn('[membrane:openrouter] skipped image entry: expected a string image_url.url');
+    }
+    return undefined;
+  };
+}
+
+/** Keep inline base64 data as media data and other URLs as references.
+ * Response normalization never fetches a provider-supplied URL. */
+function imageFromUrl(url: string): ContentBlock {
+  const inline = /^data:([^,]*),([\s\S]*)$/i.exec(url);
+  const [mediaType, ...parameters] = inline?.[1]?.split(';') ?? [];
+  const base64 = mediaType && parameters.some(parameter => parameter.toLowerCase() === 'base64');
+  return {
+    type: 'image',
+    source: inline && base64
+      ? { type: 'base64', mediaType, data: inline[2]! }
+      : { type: 'url', url },
+  };
+}
+
 /**
  * Convert OpenRouter response to normalized content blocks
  */
 export function fromOpenRouterMessage(message: OpenRouterMessage): ContentBlock[] {
   const result: ContentBlock[] = [];
+  const readImageUrl = createImageUrlReader();
   
   if (message.content) {
     if (typeof message.content === 'string') {
       result.push({ type: 'text', text: message.content });
     } else if (Array.isArray(message.content)) {
-      // Content blocks array - extract text (cache_control is for requests only)
+      // cache_control is request-only; text and images are response content.
       for (const block of message.content) {
-        if (block.type === 'text') {
+        if (block?.type === 'text' && typeof block.text === 'string') {
           result.push({ type: 'text', text: block.text });
+        } else if (block?.type === 'image_url') {
+          const url = readImageUrl(block);
+          if (url !== undefined) result.push(imageFromUrl(url));
         }
       }
     }
   }
   
+  if (Array.isArray(message.images)) {
+    for (const image of message.images) {
+      const url = readImageUrl(image);
+      if (url !== undefined) result.push(imageFromUrl(url));
+    }
+  }
+
   if (message.tool_calls) {
     for (const tc of message.tool_calls) {
       result.push({

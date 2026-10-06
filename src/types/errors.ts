@@ -125,6 +125,35 @@ export class MembraneError extends Error {
   }
 }
 
+/**
+ * A build reported `ready: false` — the caller declared one of the request's
+ * `tool_use` ids still in flight (`BuildOptions.pendingToolCallIds`), so the
+ * tool-pair normalizer left it unmatched rather than papering over it with a
+ * synthetic `[pending]` result. Shipping that request would produce exactly
+ * the 400 the normalizer exists to prevent.
+ *
+ * Not retryable as-is: the request is deterministic, and the fix is to wait
+ * for the in-flight result to land, append it, and rebuild.
+ */
+export class MembraneNotReadyError extends MembraneError {
+  readonly formatterName: string;
+
+  constructor(formatterName: string) {
+    super({
+      type: 'invalid_request',
+      message:
+        `Request is not ready to send: formatter '${formatterName}' returned ready=false, ` +
+        `meaning a tool_use in this request has no result yet and its id was declared ` +
+        `in-flight via pendingToolCallIds. Wait for the in-flight tool result, append it to ` +
+        `the conversation, and rebuild — sending now would ship an unmatched tool_use.`,
+      retryable: false,
+      rawError: undefined,
+    });
+    this.name = 'MembraneNotReadyError';
+    this.formatterName = formatterName;
+  }
+}
+
 // ============================================================================
 // Error Factory Functions
 // ============================================================================
@@ -213,6 +242,34 @@ export function abortError(message: string = 'Request was aborted', rawRequest?:
     rawError: undefined,
     rawRequest,
   });
+}
+
+/**
+ * A request cancelled by the adapter's OWN deadline (`timeoutMs`), as opposed
+ * to a caller's signal or a stray abort.
+ *
+ * It is both facts at once, and callers need both: a timeout by `type` (so
+ * `classifyError` and the abort-reason ladder report `'timeout'`), and an
+ * abort by provenance (so the streaming paths still hand back an
+ * `AbortedResponse` with whatever partial content arrived, rather than
+ * throwing). Non-retryable: the deadline that fired belongs to this call, and
+ * retrying inside it would only spend the caller's budget again.
+ */
+export class TimeoutAbortError extends MembraneError {
+  constructor(message: string = 'Request timed out', raw?: unknown, rawRequest?: unknown) {
+    super({
+      type: 'timeout',
+      message,
+      retryable: false,
+      rawError: raw,
+      rawRequest,
+    });
+    this.name = 'TimeoutAbortError';
+  }
+}
+
+export function isTimeoutAbortError(error: unknown): error is TimeoutAbortError {
+  return error instanceof TimeoutAbortError;
 }
 
 export function safetyError(message: string, raw?: unknown, rawRequest?: unknown): MembraneError {
@@ -481,7 +538,13 @@ export function errorFromHttpResponse(
  */
 export function withRawRequest(error: MembraneError, rawRequest: unknown): MembraneError {
   if (rawRequest === undefined || error.rawRequest !== undefined) return error;
-  return new MembraneError({ ...error.toErrorInfo(), rawRequest });
+  // Preserve object identity, subclass fields and private-field brands. Credential
+  // resolvers and deadline handling use the original classified error as evidence.
+  // An immutable caller-owned error remains authoritative even without this hint.
+  try {
+    Object.defineProperty(error, 'rawRequest', { value: rawRequest, enumerable: true, configurable: true });
+  } catch { /* A frozen error still propagates unchanged. */ }
+  return error;
 }
 
 /**

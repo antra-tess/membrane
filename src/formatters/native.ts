@@ -9,6 +9,9 @@
  * - 'multiuser': Multiple participants, names prefixed to content
  */
 
+import { sanitizeToolName } from '../utils/tool-names.js';
+import { unsupportedError } from '../types/errors.js';
+
 import type {
   NormalizedMessage,
   ContentBlock,
@@ -18,6 +21,7 @@ import type {
 } from '../types/index.js';
 import type {
   PrefillFormatter,
+  ContentParseContext,
   StreamParser,
   BuildOptions,
   BuildResult,
@@ -29,7 +33,8 @@ import type {
   StreamEmission,
 } from './types.js';
 import { normalizeToolPairs, mergeConsecutiveRoles } from './normalize-tool-pairs.js';
-import { isAcceptedImageMediaType, strippedImagePlaceholder } from '../utils/image-media.js';
+import { resolveImageMediaType, isAcceptedImageMediaType, strippedImagePlaceholder } from '../utils/image-media.js';
+import { assertCacheMarkersWithinLimit, countWireCacheMarkers } from '../utils/cache-marker-budget.js';
 
 /** Index of the last content block that can carry cache_control. Anthropic
  *  rejects cache_control on thinking / redacted_thinking blocks, so a cache
@@ -161,12 +166,15 @@ class PassthroughParser implements StreamParser {
 export class NativeFormatter implements PrefillFormatter {
   readonly name = 'native';
   readonly usesPrefill = false;
+  readonly supportsNativeTools = true;
+  readonly supportsXmlTools = false;
 
-  private config: Required<NativeFormatterConfig>;
+  readonly nameFormat: string;
+  private config: Required<FormatterConfig>;
 
   constructor(config: NativeFormatterConfig = {}) {
+    this.nameFormat = config.nameFormat ?? '{name}: ';
     this.config = {
-      nameFormat: config.nameFormat ?? '{name}: ',
       unsupportedMedia: config.unsupportedMedia ?? 'error',
       warnOnStrip: config.warnOnStrip ?? true,
     };
@@ -184,6 +192,7 @@ export class NativeFormatter implements PrefillFormatter {
       tools,
       systemPrompt,
       promptCaching = false,
+      cacheMarkers = 'membrane-system',
       cacheTtl,
       hasCacheMarker,
       contextPrefix,
@@ -209,7 +218,7 @@ export class NativeFormatter implements PrefillFormatter {
     // Add context prefix as first assistant message (for simulacrum seeding)
     if (contextPrefix) {
       const prefixBlock: Record<string, unknown> = { type: 'text', text: contextPrefix };
-      if (promptCaching && cacheControl) {
+      if (promptCaching && cacheControl && cacheMarkers === 'membrane-system') {
         prefixBlock.cache_control = cacheControl;
         markedBreakpoints++;
       }
@@ -247,6 +256,13 @@ export class NativeFormatter implements PrefillFormatter {
       const content = this.convertContent(message.content, message.participant, {
         includeNames: participantMode === 'multiuser' && !isAssistant,
       });
+
+      if (
+        cacheMarkers === 'cm-owned' &&
+        content.some((block) => Boolean((block as Record<string, unknown>).cache_control))
+      ) {
+        throw new Error('cm-owned cache markers reject imported block-level cache_control');
+      }
 
       if (content.length === 0) {
         continue; // Skip empty messages
@@ -302,7 +318,13 @@ export class NativeFormatter implements PrefillFormatter {
     // Build system content. Cache the system block only as a fallback — when no
     // message breakpoint was marked (see note above; otherwise a message
     // breakpoint already caches tools+system as part of its prefix).
-    const cacheSystem = cacheControl && markedBreakpoints === 0 ? cacheControl : undefined;
+    // The complete request budget is enforced after hooks in Membrane. This
+    // formatter's message-only count cannot include later system/tool additions.
+    markedBreakpoints = countWireCacheMarkers({ messages: mergedMessages, system: systemPrompt });
+    const cacheSystem =
+      cacheMarkers === 'membrane-system' && cacheControl && markedBreakpoints === 0
+        ? cacheControl
+        : undefined;
     let systemContent: unknown;
     if (typeof systemPrompt === 'string') {
       if (cacheSystem) {
@@ -327,6 +349,12 @@ export class NativeFormatter implements PrefillFormatter {
 
     // Native tools
     const nativeTools = tools?.length ? this.convertToNativeTools(tools) : undefined;
+    if (cacheMarkers === 'cm-owned' || !options.deferCacheBudgetCheck) {
+      assertCacheMarkersWithinLimit(
+        { messages: mergedMessages, system: systemContent, tools: nativeTools },
+        'native'
+      );
+    }
 
     return {
       messages: mergedMessages,
@@ -366,9 +394,10 @@ export class NativeFormatter implements PrefillFormatter {
     return false;
   }
 
-  parseContentBlocks(content: string): ContentBlock[] {
-    // Native mode - content is plain text
-    if (!content.trim()) {
+  parseContentBlocks(content: string, _tools?: ToolDefinition[], context?: ContentParseContext): ContentBlock[] {
+    // Only a wholly blank response is omitted. Whitespace-only spans of a
+    // nonblank response are still its text, including before thinking.
+    if (!content || !(context?.visibleText ?? content).trim()) {
       return [];
     }
     return [{ type: 'text', text: content }];
@@ -388,10 +417,14 @@ export class NativeFormatter implements PrefillFormatter {
         typeof item === 'object' &&
         (item as { type?: string }).type === 'image'
       ) {
-        const src = (item as { source?: { media_type?: string } }).source;
-        if (!isAcceptedImageMediaType(src?.media_type)) {
-          return strippedImagePlaceholder(src?.media_type);
+        const src = (item as { source?: { type?: string; data?: string; mediaType?: string; media_type?: string } }).source;
+        if (src?.type === 'url') return item;
+        const mediaType = resolveImageMediaType(src?.data, src?.mediaType ?? src?.media_type);
+        if (!isAcceptedImageMediaType(mediaType)) {
+          return strippedImagePlaceholder(mediaType);
         }
+        const { mediaType: _declared, ...source } = src ?? {};
+        return { ...item, source: { ...source, media_type: mediaType } };
       }
       return item;
     });
@@ -404,6 +437,7 @@ export class NativeFormatter implements PrefillFormatter {
   ): unknown[] {
     const result: unknown[] = [];
     let hasUnsupportedMedia = false;
+    let hasText = false;
 
     for (const block of content) {
       if (block.type === 'text') {
@@ -413,10 +447,11 @@ export class NativeFormatter implements PrefillFormatter {
         // name prefix below would make them non-empty.
         if (block.text === '') continue;
         let text = block.text;
-        if (options.includeNames) {
-          const prefix = this.config.nameFormat.replace('{name}', participant);
+        if (options.includeNames && !hasText) {
+          const prefix = this.nameFormat.replace('{name}', () => participant);
           text = prefix + text;
         }
+        hasText = true;
         const textBlock: Record<string, unknown> = { type: 'text', text };
         if (block.cache_control) {
           textBlock.cache_control = block.cache_control;
@@ -424,16 +459,17 @@ export class NativeFormatter implements PrefillFormatter {
         result.push(textBlock);
       } else if (block.type === 'image') {
         if (block.source.type === 'base64') {
-          if (!isAcceptedImageMediaType(block.source.mediaType)) {
+          const mediaType = resolveImageMediaType(block.source.data, block.source.mediaType);
+          if (!isAcceptedImageMediaType(mediaType)) {
             // Unacceptable media type (e.g. image/svg): degrade to a text
             // placeholder instead of poisoning the whole request.
-            result.push(strippedImagePlaceholder(block.source.mediaType));
+            result.push(strippedImagePlaceholder(mediaType));
           } else {
             const imageBlock: Record<string, unknown> = {
               type: 'image',
               source: {
                 type: 'base64',
-                media_type: block.source.mediaType,
+                media_type: mediaType,
                 data: block.source.data,
               },
             };
@@ -462,7 +498,7 @@ export class NativeFormatter implements PrefillFormatter {
         result.push({
           type: 'tool_use',
           id: block.id,
-          name: block.name,
+          name: sanitizeToolName(block.name),
           input: block.input,
         });
       } else if (block.type === 'tool_result') {
@@ -504,10 +540,14 @@ export class NativeFormatter implements PrefillFormatter {
   }
 
   private convertToNativeTools(tools: ToolDefinition[]): unknown[] {
-    return tools.map(tool => ({
-      name: tool.name,
-      description: tool.description,
-      input_schema: tool.inputSchema,
-    }));
+    const names = new Set<string>();
+    return tools.map(tool => {
+      const name = sanitizeToolName(tool.name);
+      if (names.has(name)) {
+        throw unsupportedError('Native tool names collide after colon escaping: "' + name + '". Choose distinct wire names.');
+      }
+      names.add(name);
+      return { name, description: tool.description, input_schema: tool.inputSchema };
+    });
   }
 }

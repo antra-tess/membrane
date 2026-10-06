@@ -4,6 +4,8 @@
  * Uses the Anthropic Messages API format through AWS Bedrock.
  */
 
+import { assertMessagePrefillSupported } from './request-capabilities.js';
+
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -14,6 +16,7 @@ import type {
 } from '../types/index.js';
 import {
   MembraneError,
+  invalidRequestError,
   abortError,
   classifyError,
   errorFromHttpResponse,
@@ -21,7 +24,8 @@ import {
   isTypedAbortError,
   withRawRequest,
 } from '../types/index.js';
-import { createCombinedSignal } from './utils.js';
+import { stripEmptyTextRequest } from '../utils/empty-text.js';
+import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, assertTerminalEventObserved } from './utils.js';
 import {
   INTERLEAVED_THINKING_BETA,
   needsInterleavedThinkingBeta,
@@ -273,6 +277,16 @@ async function signRequest(
 
 export class BedrockAdapter implements ProviderAdapter {
   readonly name = 'bedrock';
+  readonly cacheReceiptBasis = 'wire-request' as const;
+
+  /**
+   * Bedrock serves Anthropic models over the Anthropic Messages payload shape
+   * and this adapter reads Anthropic's own field names
+   * (`cache_read_input_tokens` / `cache_creation_input_tokens`), so it inherits
+   * the convention verified live against api.anthropic.com on 2026-08-25.
+   * Derived from the wire contract, not measured against Bedrock directly.
+   */
+  readonly usageCacheConvention = 'cache-excluded' as const;
 
   private accessKeyId: string;
   private secretAccessKey: string;
@@ -363,6 +377,7 @@ export class BedrockAdapter implements ProviderAdapter {
     const bedrockModelId = this.toBedrockModelId(request.model);
     const bedrockRequest = this.buildRequest(request, bedrockModelId);
     const fullRequest = { modelId: bedrockModelId, ...bedrockRequest };
+    assertMessagePrefillSupported(bedrockModelId, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
@@ -384,6 +399,7 @@ export class BedrockAdapter implements ProviderAdapter {
     const bedrockModelId = this.toBedrockModelId(request.model);
     const bedrockRequest = this.buildRequest(request, bedrockModelId);
     const fullRequest = { modelId: bedrockModelId, ...bedrockRequest, stream: true };
+    assertMessagePrefillSupported(bedrockModelId, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
@@ -506,6 +522,16 @@ export class BedrockAdapter implements ProviderAdapter {
       Object.assign(params, rest);
     }
 
+    // Validate independently of the beta gate: a malformed caller value must
+    // neither disappear during the merge nor reach Bedrock on newer models.
+    const consumerBetas: unknown = params.anthropic_beta;
+    if (consumerBetas !== undefined && (
+      !Array.isArray(consumerBetas) ||
+      [...consumerBetas].some(beta => typeof beta !== 'string')
+    )) {
+      throw invalidRequestError('Bedrock anthropic_beta must be an array of strings.');
+    }
+
     // Interleaved thinking on pre-4.6 Claude 4: same gate as the Anthropic
     // adapter, but bedrock-runtime takes betas as the `anthropic_beta` body
     // field rather than an HTTP header. Runs after the extra-assign so a
@@ -513,10 +539,11 @@ export class BedrockAdapter implements ProviderAdapter {
     // The gate only matches Claude 4 <4.6 ids, so legacy 3.x models (which
     // reject unknown beta flags) never receive the field.
     if (thinkingEnabled(request) && needsInterleavedThinkingBeta(request.model)) {
-      const existing = Array.isArray(params.anthropic_beta) ? params.anthropic_beta : [];
+      const existing = params.anthropic_beta ?? [];
       params.anthropic_beta = [...new Set([...existing, INTERLEAVED_THINKING_BETA])];
     }
 
+    stripEmptyTextRequest(params);
     return params;
   }
 
@@ -609,6 +636,7 @@ export class BedrockAdapter implements ProviderAdapter {
     let cacheCreationTokens: number | undefined;
     let cacheReadTokens: number | undefined;
     let stopReason: string = 'end_turn';
+    let sawTerminalEvent = false;
     let stopSequence: string | undefined;
     let fullText = '';
 
@@ -781,6 +809,7 @@ export class BedrockAdapter implements ProviderAdapter {
                   }
                   callbacks.onContentBlock?.(blockIdx, contentBlocks[blockIdx]);
                 } else if (eventData.type === 'message_delta') {
+                  sawTerminalEvent = true;
                   if (eventData.usage) {
                     outputTokens = eventData.usage.output_tokens;
                     // message_delta carries cumulative cache metrics — use as
@@ -831,6 +860,11 @@ export class BedrockAdapter implements ProviderAdapter {
         'Bedrock returned empty response: no content blocks, 0 input/output tokens. This may indicate a transient service issue.'
       );
     }
+
+    // The empty-response guard above only catches a stream that produced
+    // NOTHING; a stream truncated after any content passed it and was
+    // reported as a clean end_turn. message_delta is the terminal event.
+    assertTerminalEventObserved(sawTerminalEvent, 'Bedrock', { modelId, ...request });
 
     // Build response from accumulated data
     finalMessage = {
@@ -922,6 +956,7 @@ export class BedrockAdapter implements ProviderAdapter {
    * throwable.
    */
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
+    if (isDeadlineAbort(error)) return deadlineTimeoutError(error, rawRequest);
     if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
     if (isTypedAbortError(error)) return abortError(undefined, rawRequest);
 

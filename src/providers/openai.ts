@@ -12,6 +12,8 @@
  * - Direct API integration with proper error handling
  */
 
+import { assertMessagePrefillSupported } from './request-capabilities.js';
+
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -28,7 +30,7 @@ import {
   isTypedAbortError,
   withRawRequest,
 } from '../types/index.js';
-import { safeParseJson, createCombinedSignal, SSELineParser } from './utils.js';
+import { safeParseJson, textOnlyToolResultContent, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
 
 // ============================================================================
 // Types
@@ -112,11 +114,35 @@ export interface OpenAIAdapterConfig {
 // ============================================================================
 
 /**
+ * Major version of a first-party GPT chat model id (`gpt-5` → 5,
+ * `gpt-5.4-mini` → 5, `gpt-6-astra` → 6, `gpt-4o` / `gpt-4.1` → 4). Leading
+ * digits only, no delimiter required, so a digit-plus-letter name (`gpt-4o`,
+ * a future `gpt-6o`) is classified by its generation too. Anything not
+ * `gpt-<digits>` (o-series, chatgpt-*, third-party ids) → undefined.
+ */
+function gptGeneration(model: string): number | undefined {
+  const m = /^gpt-(\d+)/.exec(model);
+  return m ? Number(m[1]) : undefined;
+}
+
+/**
+ * GPT-5 and every later generation share the reasoning-model parameter
+ * surface (max_completion_tokens, default-only temperature/top_p, no stop).
+ * Matched by generation rather than by listing each release so a new one
+ * (gpt-6-astra, 2026-09) does not fall through to the legacy parameters and
+ * 400 at the wire: "Unsupported parameter: 'max_tokens' is not supported with
+ * this model. Use 'max_completion_tokens' instead."
+ */
+function isReasoningGenerationGpt(model: string): boolean {
+  const gen = gptGeneration(model);
+  return gen !== undefined && gen >= 5;
+}
+
+/**
  * Models that require max_completion_tokens instead of max_tokens
+ * (in addition to every GPT-5+ generation model, see isReasoningGenerationGpt)
  */
 const COMPLETION_TOKENS_MODELS = [
-  'gpt-5',
-  'gpt-5-mini',
   'o1',
   'o1-mini',
   'o1-preview',
@@ -129,15 +155,14 @@ const COMPLETION_TOKENS_MODELS = [
  * Check if a model requires max_completion_tokens parameter
  */
 function requiresCompletionTokens(model: string): boolean {
-  return COMPLETION_TOKENS_MODELS.some(prefix => model.startsWith(prefix));
+  return isReasoningGenerationGpt(model) || COMPLETION_TOKENS_MODELS.some(prefix => model.startsWith(prefix));
 }
 
 /**
  * Models that don't support custom temperature (only default 1.0)
  */
 const NO_TEMPERATURE_MODELS = [
-  'gpt-5',       // Base GPT-5 models
-  'gpt-5-mini',
+  // GPT-5+ generations are covered by isReasoningGenerationGpt
   'o1',          // Reasoning models
   'o1-mini',
   'o1-preview',
@@ -150,7 +175,7 @@ const NO_TEMPERATURE_MODELS = [
  * Check if a model doesn't support custom temperature
  */
 function noTemperatureSupport(model: string): boolean {
-  return NO_TEMPERATURE_MODELS.some(prefix => model.startsWith(prefix));
+  return isReasoningGenerationGpt(model) || NO_TEMPERATURE_MODELS.some(prefix => model.startsWith(prefix));
 }
 
 /**
@@ -163,12 +188,7 @@ function noTemperatureSupport(model: string): boolean {
  * included here as they use a different API path entirely.
  */
 const NO_STOP_MODELS = [
-  // GPT-5.x chat models (all variants)
-  'gpt-5',
-  'gpt-5-mini',
-  'gpt-5-nano',
-  'gpt-5.1',
-  'gpt-5.2',
+  // GPT-5+ chat models (all variants) are covered by isReasoningGenerationGpt
   // Reasoning models that still don't support stop
   'o3',          // o3 (full) doesn't support stop, but o3-mini does!
   'o4-mini',
@@ -178,7 +198,7 @@ const NO_STOP_MODELS = [
  * Check if a model doesn't support stop sequences
  */
 function noStopSupport(model: string): boolean {
-  return NO_STOP_MODELS.some(prefix => model.startsWith(prefix));
+  return isReasoningGenerationGpt(model) || NO_STOP_MODELS.some(prefix => model.startsWith(prefix));
 }
 
 // ============================================================================
@@ -187,6 +207,14 @@ function noStopSupport(model: string): boolean {
 
 export class OpenAIAdapter implements ProviderAdapter {
   readonly name = 'openai';
+
+  /**
+   * Verified live 2026-08-25 (gpt-4o-mini, 1,732-token prompt): prompt_tokens
+   * stayed at 1732 across a cache hit reporting
+   * prompt_tokens_details.cached_tokens 1664 — the cached span is a SUBSET of
+   * prompt_tokens, not an addition to it.
+   */
+  readonly usageCacheConvention = 'cache-inclusive' as const;
   private apiKey: string;
   private baseURL: string;
   private organization?: string;
@@ -218,6 +246,7 @@ export class OpenAIAdapter implements ProviderAdapter {
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
     const openAIRequest = this.buildRequest(request);
+    assertMessagePrefillSupported(openAIRequest.model, openAIRequest.messages, options, this.name, openAIRequest);
     options?.onRequest?.(openAIRequest);
 
     try {
@@ -237,6 +266,7 @@ export class OpenAIAdapter implements ProviderAdapter {
     openAIRequest.stream = true;
     // Request usage data in stream for cache metrics
     openAIRequest.stream_options = { include_usage: true };
+    assertMessagePrefillSupported(openAIRequest.model, openAIRequest.messages, options, this.name, openAIRequest);
     options?.onRequest?.(openAIRequest);
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
@@ -261,60 +291,97 @@ export class OpenAIAdapter implements ProviderAdapter {
       const sseParser = new SSELineParser();
       let accumulated = '';
       let finishReason = 'stop';
+      let sawTerminalEvent = false;
       let toolCalls: OpenAIToolCall[] = [];
       let streamUsage: OpenAIResponse['usage'] | undefined;
+      // The model the provider actually served, echoed on every SSE
+      // chunk. Reporting the requested id instead hides alias
+      // resolution (and, on OpenRouter, which provider it routed to).
+      let servedModel: string | undefined;
+
+      // One frame handler for both the streamed lines and the EOF flush — the
+      // trailing buffer carries real terminal frames, not leftovers.
+      const processDataLine = (data: string): void => {
+        if (data === '[DONE]') {
+          sawTerminalEvent = true;
+          return;
+        }
+
+        // Parse first; only JSON noise is ignorable. Everything after the
+        // parse must NOT be swallowed by the catch below.
+        let parsed: Record<string, any>;
+        try {
+          parsed = JSON.parse(data);
+        } catch {
+          return; // Ignore parse errors (partial/keep-alive lines)
+        }
+
+        throwOnStreamErrorFrame(parsed, 'OpenAI', openAIRequest);
+
+        try {
+          const delta = parsed.choices?.[0]?.delta;
+
+          if (delta?.content) {
+            accumulated += delta.content;
+            callbacks.onChunk(delta.content);
+          }
+
+          // Handle streaming tool calls
+          if (delta?.tool_calls) {
+            for (const tc of delta.tool_calls) {
+              const index = tc.index ?? 0;
+              if (!toolCalls[index]) {
+                toolCalls[index] = {
+                  id: tc.id ?? '',
+                  type: 'function',
+                  function: { name: '', arguments: '' },
+                };
+              }
+              if (tc.id) toolCalls[index].id = tc.id;
+              if (tc.function?.name) toolCalls[index].function.name = tc.function.name;
+              if (tc.function?.arguments) {
+                toolCalls[index].function.arguments += tc.function.arguments;
+              }
+            }
+          }
+
+          if (parsed.choices?.[0]?.finish_reason) {
+            finishReason = parsed.choices[0].finish_reason;
+            sawTerminalEvent = true;
+          }
+
+          // Capture usage data (comes in final chunk with stream_options.include_usage)
+          if (parsed.usage) {
+            streamUsage = parsed.usage;
+          }
+
+          if (parsed.model) {
+            servedModel = parsed.model;
+          }
+        } catch {
+          // Ignore parse errors in stream
+        }
+      };
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
         const chunk = decoder.decode(value, { stream: true });
-        const dataLines = sseParser.feed(chunk);
-
-        for (const data of dataLines) {
-          if (data === '[DONE]') continue;
-
-          try {
-            const parsed = JSON.parse(data);
-            const delta = parsed.choices?.[0]?.delta;
-
-            if (delta?.content) {
-              accumulated += delta.content;
-              callbacks.onChunk(delta.content);
-            }
-
-            // Handle streaming tool calls
-            if (delta?.tool_calls) {
-              for (const tc of delta.tool_calls) {
-                const index = tc.index ?? 0;
-                if (!toolCalls[index]) {
-                  toolCalls[index] = {
-                    id: tc.id ?? '',
-                    type: 'function',
-                    function: { name: '', arguments: '' },
-                  };
-                }
-                if (tc.id) toolCalls[index].id = tc.id;
-                if (tc.function?.name) toolCalls[index].function.name = tc.function.name;
-                if (tc.function?.arguments) {
-                  toolCalls[index].function.arguments += tc.function.arguments;
-                }
-              }
-            }
-
-            if (parsed.choices?.[0]?.finish_reason) {
-              finishReason = parsed.choices[0].finish_reason;
-            }
-
-            // Capture usage data (comes in final chunk with stream_options.include_usage)
-            if (parsed.usage) {
-              streamUsage = parsed.usage;
-            }
-          } catch {
-            // Ignore parse errors in stream
-          }
+        for (const data of sseParser.feed(chunk)) {
+          processDataLine(data);
         }
       }
+
+      // A final `data:` line that arrived without its trailing newline is still
+      // buffered here. Servers and proxies do close right after writing the
+      // last event, so dropping it would report a finished turn as a dropped
+      // connection at the guard below.
+      for (const data of sseParser.flush()) {
+        processDataLine(data);
+      }
+
+      assertTerminalEventObserved(sawTerminalEvent, 'OpenAI', openAIRequest);
 
       // Build response with accumulated data
       const message: OpenAIMessage = {
@@ -326,7 +393,7 @@ export class OpenAIAdapter implements ProviderAdapter {
         message.tool_calls = toolCalls;
       }
 
-      return this.parseStreamedResponse(message, finishReason, request.model, streamUsage, openAIRequest);
+      return this.parseStreamedResponse(message, finishReason, servedModel ?? request.model, streamUsage, openAIRequest);
 
     } catch (error) {
       throw this.handleError(error, openAIRequest);
@@ -465,7 +532,7 @@ export class OpenAIAdapter implements ProviderAdapter {
             toolResults.push({
               role: 'tool' as const,
               tool_call_id: block.tool_use_id || block.toolUseId,
-              content: typeof block.content === 'string' ? block.content : JSON.stringify(block.content),
+              content: textOnlyToolResultContent(block.content),
             });
           }
         }
@@ -652,6 +719,7 @@ export class OpenAIAdapter implements ProviderAdapter {
    * aborts and non-HTTP throwables — through the shared last-resort table.
    */
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
+    if (isDeadlineAbort(error)) return deadlineTimeoutError(error, rawRequest);
     if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
     if (isTypedAbortError(error)) return abortError(undefined, rawRequest);
 

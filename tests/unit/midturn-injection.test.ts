@@ -291,6 +291,9 @@ describe('XML yielding: injectedMessages are ignored with a warning', () => {
         messages: [{ participant: 'User', content: [{ type: 'text', text: 'go' }] }],
         config: { model: 'test-model', maxTokens: 1000 },
         tools: [noopTool],
+        // This case is about the XML yielding path; native is the default
+        // tool mode now, so the XML path is an explicit opt-in.
+        toolMode: 'xml',
       };
 
       const events = await drive(membrane, request, (stream, event) => {
