@@ -245,22 +245,22 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
 
           if (text) {
             accumulated += text;
-            if (eot) {
-              const idx = accumulated.indexOf(eot);
-              if (idx !== -1) {
-                // Truncate at the token, flush the un-emitted prefix, stop
-                accumulated = accumulated.slice(0, idx);
-                if (accumulated.length > emittedLen) {
-                  callbacks.onChunk(accumulated.slice(emittedLen));
-                }
-                emittedLen = accumulated.length;
-                eotFound = true;
-                // The adapter's own end-of-turn token IS a terminal
-                // observation: the turn ended where this layer said it ends.
-                sawTerminalEvent = true;
-                finishReason = undefined;
-                return;
+            const idx = eot ? accumulated.indexOf(eot) : -1;
+            if (idx !== -1) {
+              // Truncate at the token, flush the un-emitted prefix, stop
+              accumulated = accumulated.slice(0, idx);
+              if (accumulated.length > emittedLen) {
+                callbacks.onChunk(accumulated.slice(emittedLen));
               }
+              emittedLen = accumulated.length;
+              eotFound = true;
+              // The adapter's own end-of-turn token IS a terminal
+              // observation: the turn ended where this layer said it ends.
+              // The normalized reason is end_turn whatever the provider says;
+              // a finish_reason and usage this same frame carried are still
+              // read below. Later frames are not waited for.
+              sawTerminalEvent = true;
+            } else if (eot) {
               // Emit all but a held-back tail that could be a partial token
               const safeLen = Math.max(emittedLen, accumulated.length - (eot.length - 1));
               if (safeLen > emittedLen) {
@@ -320,7 +320,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
 
       assertTerminalEventObserved(sawTerminalEvent, this.name, completionsRequest);
 
-      return this.buildStreamedResponse(accumulated, finishReason, request.model, streamUsage, completionsRequest);
+      return this.buildStreamedResponse(accumulated, finishReason, request.model, streamUsage, completionsRequest, eotFound);
 
     } catch (error) {
       throw this.handleError(error, completionsRequest);
@@ -556,11 +556,14 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
     finishReason: string | undefined,
     requestedModel: string,
     streamUsage?: CompletionsResponse['usage'],
-    rawRequest?: unknown
+    rawRequest?: unknown,
+    endedAtEot = false
   ): ProviderResponse {
     return {
       content: this.textToContent(accumulated),
-      stopReason: this.mapFinishReason(finishReason),
+      // The adapter's own end-of-turn token ends the turn whatever the
+      // provider reports; a token it did send is still disclosed beside it.
+      stopReason: endedAtEot ? 'end_turn' : this.mapFinishReason(finishReason),
       providerStopReason: finishReason,
       stopSequence: undefined,
       usage: {
