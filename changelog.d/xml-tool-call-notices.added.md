@@ -5,8 +5,7 @@
   pointing to CDATA). In both XML loops the injected `<function_results>`
   carries the round's notices after its results, as
   `<tool_call_notice invoke tool kind>` elements. `ToolContext.notices` holds
-  them, and `formatToolResults` and `formatToolResultsForSplitTurn` take them
-  as a second argument.
+  them, and `formatToolResults` takes them as a second argument.
 - A round in which every invoke was refused does not call the executor.
   Membrane answers the block with a notices-only envelope, recorded for
   continuation and replay, and continues once. The continuation counts
@@ -45,8 +44,8 @@
   hide the call from `complete()`), only their results are tool results (a
   lookalike is the model's own text), and only their notices are read and
   decide their block's refusals. Without provenance, as for an outside caller
-  of `parseToolCalls` or `parseAccumulatedIntoBlocks` on a raw transcript,
-  results spans are read as before, but no notices or recorded refusals are
-  taken from them. `parseToolCalls` never selects a block that ends in the
+  of `parseToolCalls` or a formatter's `parseContentBlocks` on a raw
+  transcript, results spans are read as before, but no notices or recorded
+  refusals are taken from them. `parseToolCalls` never selects a block that ends in the
   history `historyLength` covers, so a stray closer in the live text cannot
   re-run an earlier turn's call.
