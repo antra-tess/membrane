@@ -160,6 +160,8 @@ class PassthroughParser implements StreamParser {
 // ============================================================================
 
 export class NativeFormatter implements PrefillFormatter {
+  /** buildMessages records every consumer message it doesn't carry verbatim (utils/fidelity.ts). */
+  readonly reportsAlterations = true;
   readonly name = 'native';
   readonly usesPrefill = false;
 
@@ -246,9 +248,10 @@ export class NativeFormatter implements PrefillFormatter {
 
       const role: 'user' | 'assistant' = isAssistant ? 'assistant' : 'user';
 
-      // Convert content
+      // Convert content (recording alterations against this message's index)
       const content = this.convertContent(message.content, message.participant, {
         includeNames: participantMode === 'multiuser' && !isAssistant,
+        ...(options.fidelity ? { onAltered: () => options.fidelity!.alter(i) } : {}),
       });
 
       if (
@@ -303,7 +306,19 @@ export class NativeFormatter implements PrefillFormatter {
     // merge sees role-correct envelopes.
     const normalized = normalizeToolPairs(providerMessages, {
       pendingToolCallIds: options.pendingToolCallIds,
-      onEvent: options.onNormalize,
+      onEvent: (event) => {
+        // An orphan tool_result rewritten as text is not carried verbatim:
+        // attribute it to the consumer message that held that result.
+        if (options.fidelity && event.kind === 'orphan_tool_result_textified') {
+          const toolUseId = (event as { toolUseId?: string }).toolUseId;
+          const owner = messages.findIndex((m) => m.content.some(
+            (b) => b.type === 'tool_result' && (b as { toolUseId?: string }).toolUseId === toolUseId,
+          ));
+          if (owner >= 0) options.fidelity.alter(owner);
+          else options.fidelity.unattributed = true;
+        }
+        options.onNormalize?.(event);
+      },
     });
 
     // Merge consecutive same-role messages (API requires alternating)
@@ -401,8 +416,9 @@ export class NativeFormatter implements PrefillFormatter {
   // ==========================================================================
 
   /** Replace API-unacceptable image blocks nested in tool_result content with
-   *  text placeholders. Non-array content passes through untouched. */
-  private static sanitizeToolResultContent(content: unknown): unknown {
+   *  text placeholders. Non-array content passes through untouched.
+   *  `onAltered` hears each placeholder substitution. */
+  private static sanitizeToolResultContent(content: unknown, onAltered?: () => void): unknown {
     if (!Array.isArray(content)) return content;
     return content.map((item) => {
       if (
@@ -414,6 +430,7 @@ export class NativeFormatter implements PrefillFormatter {
         if (src?.type === 'url') return item;
         const mediaType = resolveImageMediaType(src?.data, src?.mediaType ?? src?.media_type);
         if (!isAcceptedImageMediaType(mediaType)) {
+          onAltered?.();
           return strippedImagePlaceholder(mediaType);
         }
         const { mediaType: _declared, ...source } = src ?? {};
@@ -426,11 +443,13 @@ export class NativeFormatter implements PrefillFormatter {
   private convertContent(
     content: ContentBlock[],
     participant: string,
-    options: { includeNames: boolean }
+    options: { includeNames: boolean; onAltered?: () => void }
   ): unknown[] {
     const result: unknown[] = [];
     let hasUnsupportedMedia = false;
     let hasText = false;
+    // Any non-empty block not carried verbatim alters the consumer message.
+    const altered = () => options.onAltered?.();
 
     for (const block of content) {
       if (block.type === 'text') {
@@ -457,6 +476,7 @@ export class NativeFormatter implements PrefillFormatter {
             // Unacceptable media type (e.g. image/svg): degrade to a text
             // placeholder instead of poisoning the whole request.
             result.push(strippedImagePlaceholder(mediaType));
+            altered();
           } else {
             const imageBlock: Record<string, unknown> = {
               type: 'image',
@@ -472,6 +492,8 @@ export class NativeFormatter implements PrefillFormatter {
             }
             result.push(imageBlock);
           }
+        } else {
+          altered(); // a non-base64 image source has no branch here
         }
       } else if (block.type === 'audio') {
         // Pass audio through in the same shape as images — the provider
@@ -486,6 +508,8 @@ export class NativeFormatter implements PrefillFormatter {
               data: block.source.data,
             },
           });
+        } else {
+          altered();
         }
       } else if (block.type === 'tool_use') {
         result.push({
@@ -498,7 +522,7 @@ export class NativeFormatter implements PrefillFormatter {
         result.push({
           type: 'tool_result',
           tool_use_id: block.toolUseId,
-          content: NativeFormatter.sanitizeToolResultContent(block.content),
+          content: NativeFormatter.sanitizeToolResultContent(block.content, options.onAltered),
           is_error: block.isError,
         });
       } else if (block.type === 'thinking') {
@@ -518,6 +542,10 @@ export class NativeFormatter implements PrefillFormatter {
         result.push({ ...(block as unknown as Record<string, unknown>) });
       } else if (block.type === 'document') {
         hasUnsupportedMedia = true;
+        altered();
+      } else {
+        // A block type this formatter does not convert is left out.
+        altered();
       }
     }
 

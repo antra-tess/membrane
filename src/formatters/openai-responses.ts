@@ -77,12 +77,16 @@ type NativeItem = { type?: string; id?: string; [key: string]: unknown };
 export class OpenAIResponsesFormatter implements PrefillFormatter {
   readonly name = 'openai-responses';
   readonly usesPrefill = false;
+  /** buildMessages records every consumer message it doesn't carry verbatim (utils/fidelity.ts). */
+  readonly reportsAlterations = true;
 
   buildMessages(messages: NormalizedMessage[], options: BuildOptions): BuildResult {
     const items: NativeItem[] = [];
     let hasImportedItems = false;
 
-    for (const message of messages) {
+    for (let index = 0; index < messages.length; index++) {
+      const message = messages[index]!;
+      const onAltered = options.fidelity ? () => options.fidelity!.alter(index) : undefined;
       const nativeItems = message.metadata?.[OPENAI_RESPONSES_ITEMS_METADATA_KEY];
       if (Array.isArray(nativeItems)) {
         items.push(...nativeItems as NativeItem[]);
@@ -94,7 +98,7 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
       let pendingParts: ContentBlock[] = [];
       const flushPending = () => {
         if (pendingParts.length === 0) return;
-        items.push(...this.convertBlocks(message, pendingParts, options.assistantParticipant));
+        items.push(...this.convertBlocks(message, pendingParts, options.assistantParticipant, onAltered));
         pendingParts = [];
       };
 
@@ -154,6 +158,7 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
     message: NormalizedMessage,
     blocks: ContentBlock[],
     assistantParticipant: string,
+    onAltered?: () => void,
   ): NativeItem[] {
     const isAssistant = message.participant === assistantParticipant;
     const out: NativeItem[] = [];
@@ -203,6 +208,10 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
       } else if (block.type === 'redacted_thinking') {
         flushMessage();
         out.push({ type: 'reasoning', encrypted_content: block.data, summary: [] });
+      } else {
+        // An assistant image, a thinking block without its provider item, and
+        // any other block type have no input form here: left out.
+        onAltered?.();
       }
     }
     flushMessage();

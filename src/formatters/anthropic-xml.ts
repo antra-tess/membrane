@@ -117,6 +117,8 @@ function toToolResult(block: ToolResultContent): ToolResult {
 // ============================================================================
 
 export class AnthropicXmlFormatter implements PrefillFormatter {
+  /** buildMessages records every consumer message it doesn't carry verbatim (utils/fidelity.ts). */
+  readonly reportsAlterations = true;
   readonly name = 'anthropic-xml';
   readonly usesPrefill = true;
 
@@ -260,8 +262,9 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
       const isLastMessage = i === messages.length - 1;
       const isAssistant = message.participant === assistantParticipant;
 
-      // Extract content
-      const { text, images, hasUnsupportedMedia } = this.extractContent(message.content, message.participant);
+      // Extract content (recording alterations against this message's index)
+      const onAltered = options.fidelity ? () => options.fidelity!.alter(i) : undefined;
+      const { text, images, hasUnsupportedMedia } = this.extractContent(message.content, message.participant, onAltered);
       const hasImages = images.length > 0;
       const isEmpty = !text.trim() && !hasImages;
 
@@ -298,8 +301,10 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         continue;
       }
 
-      // Skip empty messages except last
+      // Skip empty messages except last. Whitespace-only text is content:
+      // skipping a message that held some is an alteration.
       if (isEmpty && !isLastMessage) {
+        if (message.content.some((b) => b.type === 'text' && b.text !== '')) onAltered?.();
         continue;
       }
 
@@ -511,7 +516,8 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
 
   private extractContent(
     content: ContentBlock[],
-    participant: string
+    participant: string,
+    onAltered?: () => void,
   ): { text: string; images: unknown[]; hasUnsupportedMedia: boolean } {
     const parts: string[] = [];
     const images: unknown[] = [];
@@ -526,6 +532,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
           const mediaType = resolveImageMediaType(block.source.data, block.source.mediaType);
           if (!isAcceptedImageMediaType(mediaType)) {
             parts.push(strippedImagePlaceholder(mediaType).text);
+            onAltered?.();
           } else {
             images.push({
               type: 'image',
@@ -536,6 +543,8 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
               },
             });
           }
+        } else {
+          onAltered?.(); // a non-base64 image source has no branch here
         }
       } else if (block.type === 'tool_use') {
         // Collect the run of consecutive tool_use blocks so calls parsed
@@ -557,6 +566,11 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         parts.push(...this.renderToolResultRun(run));
       } else if (block.type === 'document' || block.type === 'audio') {
         hasUnsupportedMedia = true;
+        onAltered?.();
+      } else {
+        // Thinking carriers and any other block type have no rendering in the
+        // prefill transcript: left out.
+        onAltered?.();
       }
     }
 

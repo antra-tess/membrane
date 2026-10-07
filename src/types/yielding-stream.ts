@@ -47,10 +47,51 @@ export interface ToolCallsEvent {
 
 /**
  * Usage update event - token counts updated.
+ *
+ * On the yielding paths it is emitted once per provider round whose response
+ * stands (after any refusal retries), and then carries `round`: that round's
+ * own report. Streams created with `emitUsage: false` emit no usage events,
+ * so no round reports either.
  */
 export interface UsageEvent {
   type: 'usage';
+  /** Turn total so far (cumulative across rounds). */
   usage: DetailedUsage;
+  /** The round that just stood (yielding paths). */
+  round?: RoundReport;
+}
+
+/**
+ * One provider round whose response stands, as its producer saw it.
+ *
+ * Coordinates: `altered.messages` indexes the `NormalizedRequest.messages`
+ * the consumer submitted. Injected messages are addressed as `[batch, index]`:
+ * a batch is one non-empty `injectedMessages` array supplied to
+ * `provideToolResults`, numbered from 0 in supply order within the stream;
+ * `index` is the position within that array. Every batch still retained in
+ * the round's request is reported, not only the newest.
+ */
+export interface RoundReport {
+  /** Zero-based index of this returned round (refusal re-issues within a round are not rounds). */
+  index: number;
+  /** Mapped stop reason of the attempt that stands. 'refusal' is a provider refusal. */
+  stopReason: StopReason;
+  /** This round's own usage as the adapter reported it: an unreported field is absent, not 0. */
+  usage: DetailedUsage;
+  /**
+   * The newest injected batch and how much of it, as an ordered prefix, this
+   * round's request carried: 0 on the XML prefill path, which carries none.
+   */
+  injectedBatch?: { batch: number; applied: number };
+  /** Consumer messages this round's request did not carry verbatim (known alterations). */
+  altered: { messages: number[]; injected: Array<[number, number]> };
+  /**
+   * 'established' when every step of the build and transport reports its
+   * alterations and none was unattributable; 'unknown' otherwise (an
+   * uninstrumented path, opt-in image shedding, a beforeRequest hook that
+   * changed the request). With 'unknown', an empty `altered` proves nothing.
+   */
+  fidelity: 'established' | 'unknown';
 }
 
 /**

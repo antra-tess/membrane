@@ -177,6 +177,12 @@ export class TurnUsageAccumulator {
     return this.lastServed;
   }
 
+  /** The latest round's own usage (a copy), or undefined before any round. */
+  get lastRound(): TurnRoundUsage | undefined {
+    const round = this.rounds[this.rounds.length - 1];
+    return round ? { model: round.model, usage: { ...round.usage } } : undefined;
+  }
+
   /** One entry per provider round, in order — the audit trail behind the summed total. */
   get perRound(): TurnRoundUsage[] {
     return this.rounds.map((round) => ({ model: round.model, usage: { ...round.usage } }));

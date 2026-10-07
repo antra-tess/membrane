@@ -130,6 +130,7 @@ export type {
   StreamBlockEvent,
   ToolCallsEvent,
   UsageEvent,
+  RoundReport,
   CompleteEvent,
   ErrorEvent,
   AbortedEvent,

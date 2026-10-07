@@ -92,6 +92,7 @@ import {
   shedImagesToFitByteBudget, assertWithinByteBudget,
 } from './utils/image-media.js';
 import { getDefaultPricing } from './registry/default-pricing.js';
+import { FidelityNotes, requestFingerprint } from './utils/fidelity.js';
 
 // ============================================================================
 // Membrane Class
@@ -1553,14 +1554,15 @@ export class Membrane {
     request: NormalizedRequest,
     messages: typeof request.messages,
     toolLoopRebuild = false,
-    activeFormatter: PrefillFormatter = this.formatter
+    activeFormatter: PrefillFormatter = this.formatter,
+    fidelity?: FidelityNotes,
   ): any {
     // Provider-native formatters own their complete input-item shape. The
     // legacy implementation below is intentionally Anthropic-specific; using
     // it for Responses would normalize away item IDs, encrypted reasoning,
     // assistant phases, and compaction items.
     if (activeFormatter.name === 'openai-responses') {
-      return this.transformRequest({ ...request, messages }, activeFormatter).providerRequest;
+      return this.transformRequest({ ...request, messages }, activeFormatter, fidelity).providerRequest;
     }
 
     // Convert messages to provider format
@@ -1582,11 +1584,13 @@ export class Membrane {
     // (see below), never a running tally: a running tally cannot see a
     // caller-marked system block, and double-counts a message breakpoint that
     // lands on a block already carrying stale cache_control.
-    for (const msg of messages) {
+    for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
+      const msg = messages[messageIndex]!;
       const isAssistant = msg.participant === assistantName;
       const role = isAssistant ? 'assistant' : 'user';
 
-      // Convert content blocks
+      // Convert content blocks. Any non-empty block this loop does not carry
+      // verbatim is recorded as an alteration of this message (fidelity).
       const content: any[] = [];
       const includeNamePrefix = !isAssistant;
       let hasText = false;
@@ -1648,6 +1652,7 @@ export class Membrane {
               // loud text placeholder instead of poisoning the whole request
               // (one bad stored block otherwise 400s every compile forever).
               content.push(strippedImagePlaceholder(mediaType));
+              fidelity?.alter(messageIndex);
             } else {
               const imageBlock: Record<string, unknown> = {
                 type: 'image',
@@ -1663,7 +1668,14 @@ export class Membrane {
               }
               content.push(imageBlock);
             }
+          } else {
+            // A non-base64 image source has no wire branch here: left out.
+            fidelity?.alter(messageIndex);
           }
+        } else {
+          // A block type this builder does not convert (document, audio,
+          // video, …) is left out of the request.
+          fidelity?.alter(messageIndex);
         }
       }
 
@@ -1723,6 +1735,16 @@ export class Membrane {
     const normalized = normalizeToolPairs(providerMessages, {
       onEvent: (e) => {
         if (PREFIX_REWRITING_NORMALIZE_EVENT_KINDS.has(e.kind)) prefixRewritten = true;
+        // An orphan tool_result rewritten as text is not carried verbatim:
+        // attribute it to the consumer message that held that result.
+        if (fidelity && e.kind === 'orphan_tool_result_textified') {
+          const toolUseId = (e as { toolUseId?: string }).toolUseId;
+          const owner = messages.findIndex((m) => m.content.some(
+            (b) => b.type === 'tool_result' && (b as { toolUseId?: string }).toolUseId === toolUseId,
+          ));
+          if (owner >= 0) fidelity.alter(owner);
+          else fidelity.unattributed = true;
+        }
       },
     });
     const mergedMessages = mergeConsecutiveRoles(normalized.messages);
@@ -1837,9 +1859,11 @@ export class Membrane {
     const temperature = alwaysOnThinking ? undefined : (thinking ? 1 : request.config.temperature);
 
     // Byte-wall policy point (see transformRequest): loud failure unless the
-    // caller explicitly owns image loss.
+    // caller explicitly owns image loss. Shedding runs after role merging, so
+    // what it removed can't be attributed to a consumer message.
     if (request.shedOversizeImages) {
-      shedImagesToFitByteBudget(mergedMessages, undefined, 'buildNativeToolRequest');
+      const shed = shedImagesToFitByteBudget(mergedMessages, undefined, 'buildNativeToolRequest');
+      if (shed > 0 && fidelity) fidelity.unattributed = true;
     } else {
       assertWithinByteBudget(mergedMessages, undefined, 'buildNativeToolRequest');
     }
@@ -2202,10 +2226,17 @@ export class Membrane {
    * a re-derivation so that the formatter which BUILDS is the same one that
    * resolved the tool mode and drives the loop.
    */
-  private transformRequest(request: NormalizedRequest, activeFormatter: PrefillFormatter = this.formatter): {
+  private transformRequest(
+    request: NormalizedRequest,
+    activeFormatter: PrefillFormatter = this.formatter,
+    fidelity?: FidelityNotes,
+  ): {
     providerRequest: any;
     prefillResult: BuildResult;
   } {
+    // A formatter that does not report its alterations leaves the round's
+    // fidelity unknown: an empty alteration list from it would prove nothing.
+    if (fidelity && !activeFormatter.reportsAlterations) fidelity.uninstrumented = true;
     // Extract user-provided stop sequences
     const additionalStopSequences = Array.isArray(request.stopSequences)
       ? request.stopSequences
@@ -2234,6 +2265,7 @@ export class Membrane {
       maxParticipantsForStop,
       contextPrefix: request.contextPrefix,
       prefillUserMessage: request.prefillUserMessage,
+      ...(fidelity ? { fidelity } : {}),
     });
 
     // Byte-wall policy point (2026-07-12): transformRequest serves BOTH
@@ -2242,7 +2274,8 @@ export class Membrane {
     // caller explicitly owns image loss via `shedOversizeImages` (and the
     // shed itself reports at error grade). No silent transport mutation.
     if (request.shedOversizeImages) {
-      shedImagesToFitByteBudget(buildResult.messages, undefined, 'transformRequest');
+      const shed = shedImagesToFitByteBudget(buildResult.messages, undefined, 'transformRequest');
+      if (shed > 0 && fidelity) fidelity.unattributed = true;
     } else {
       assertWithinByteBudget(buildResult.messages, undefined, 'transformRequest');
     }
