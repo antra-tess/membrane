@@ -6,7 +6,11 @@
   unconditionally required and the call lacks, text inside an invoke outside
   every parameter (a value cut short at a literal closing tag, or a parameter
   never closed), and text after a CDATA value's last section all refuse the
-  invoke. A refused invoke is never a `ToolCall` or a `tool_use`. A value
+  invoke. Text after a CDATA value runs to the value's closer and is part of
+  that value: an `<invoke>` or `<function_calls>` opener written there starts
+  no call of its own and is refused with the invoke that holds it, rather than
+  re-anchoring the parse onto a call inside the value. A refused invoke is
+  never a `ToolCall` or a `tool_use`. A value
   that contains markup for an optional declared parameter the call doesn't
   otherwise include keeps the call as parsed, with a warning: membrane's loops
   dispatch it, and a no-loop result returns it as a call. Before, a
@@ -31,9 +35,13 @@
   skips a stop sequence inside one, so the chunk is kept rather than truncated
   into a continuation. A provider stop inside a payload is restored exactly
   once and the turn resumes under the existing stall and round guards. A
-  payload left unterminated in history ends at the history boundary. One left
-  unterminated in the turn keeps its block unclosed, so nothing in it is
-  dispatched, and is reported with the parameter named.
+  payload left unterminated in history ends at the history boundary, and so
+  does a value history left open after its payload. One left unterminated in
+  the turn keeps its block unclosed, so nothing in it is dispatched, and is
+  reported with the parameter named. A thinking or results block that history
+  left unclosed does not stop the turn's own calls from being read as calls,
+  so their payloads are recognized while they stream, as the complete-text
+  parse reads them.
 - Legacy `tool_use` blocks without `rawXml` are reconstructed without the
   schema, so that a value reads back exactly, type included, under any
   declaration it satisfies and when undeclared. Strings are written as CDATA,

@@ -14,11 +14,27 @@ import { hasUnclosedToolBlock } from '../../src/utils/tool-parser.js';
 
 const CALLS_OPEN = '<' + 'function_calls>';
 const CALLS_CLOSE = '</' + 'function_calls>';
+const RESULTS_OPEN = '<' + 'function_results>';
 
 const payload = `${CALLS_CLOSE} and <thinking> and </parameter></invoke> and ]] then >`;
 const call =
   `${CALLS_OPEN}\n<invoke name="note">\n<parameter name="text"><![CDATA[${payload}]]></parameter>\n` +
   `<parameter name="also">\n<![CDATA[a]]]]><![CDATA[>b]]>\n</parameter>\n</invoke>\n${CALLS_CLOSE}`;
+// Markup written after a payload, before the value's closer: its suffix. The
+// openers in it are the value's text, so the parameter after it is still the
+// outer invoke's, and its payload is one.
+const suffixed =
+  `${CALLS_OPEN}\n<invoke name="note">\n<parameter name="text"><![CDATA[a]]> <thinking> ${CALLS_OPEN}` +
+  `<invoke name="other"><parameter name="text">b</parameter>\n<parameter name="also">\n<![CDATA[c ${CALLS_CLOSE}]]>\n` +
+  `</parameter>\n</invoke>\n${CALLS_CLOSE}`;
+
+/**
+ * Whether the complete-text parser reads `text` as ending inside a payload:
+ * a block closer appended there closes the block unless it lands in one.
+ */
+function endsInPayload(text: string): boolean {
+  return hasUnclosedToolBlock(text + CALLS_CLOSE);
+}
 
 function streamed(text: string, chunkSize: number): IncrementalXmlParser {
   const parser = new IncrementalXmlParser();
@@ -56,12 +72,23 @@ describe('a CDATA payload in the incremental parser', () => {
     }
   });
 
-  it('knows, at every point of the text, whether it is inside a payload — as the complete-text parser does', () => {
-    for (let end = 1; end <= call.length; end++) {
-      const prefix = call.slice(0, end);
+  it.each([
+    ['a call', '', call],
+    ['a call after a thinking block history left open', '<thinking>left open by an earlier turn\n', call],
+    ['a call after a results block history left open', `${RESULTS_OPEN}\nleft open\n`, call],
+    ['markup after a payload', '', suffixed],
+  ])('%s: knows at every point of the text whether it is inside a block and a payload, as the complete-text parser does', (_name, history, turn) => {
+    for (let end = 1; end <= turn.length; end++) {
+      const prefix = turn.slice(0, end);
       for (const size of [1, 5, 64]) {
-        const parser = streamed(prefix, size);
-        expect(parser.isInsideFunctionCalls()).toBe(hasUnclosedToolBlock(prefix));
+        const parser = new IncrementalXmlParser();
+        if (history) {
+          parser.push(history);
+          parser.endHistory();
+        }
+        for (let at = 0; at < prefix.length; at += size) parser.processChunk(prefix.slice(at, at + size));
+        expect(parser.isInsideFunctionCalls()).toBe(hasUnclosedToolBlock(history + prefix));
+        expect(parser.isInsidePayload()).toBe(endsInPayload(history + prefix));
       }
     }
   });
@@ -114,6 +141,51 @@ describe('a CDATA payload in the incremental parser', () => {
     // The turn's own tags are structure again.
     parser.processChunk(`${CALLS_CLOSE}\n${CALLS_OPEN}`);
     expect(parser.getDepths().functionCalls).toBeGreaterThan(0);
+  });
+
+  it('ends a value history left open after its payload where history ends, so the turn’s call is structure', () => {
+    const parser = new IncrementalXmlParser();
+    parser.push(`${CALLS_OPEN}<invoke name="t"><parameter name="x"><![CDATA[done]]> and then cut off`);
+    parser.endHistory();
+    parser.processChunk(`\n${CALLS_OPEN}<invoke name="t"><parameter name="x"><![CDATA[ ${CALLS_CLOSE}`);
+    expect(parser.isInsidePayload()).toBe(true);
+  });
+
+  it.each([
+    ['thinking', '<thinking>'],
+    ['results', RESULTS_OPEN],
+  ])('does not count a %s block history left open as the turn’s container', (_kind, opener) => {
+    const parser = new IncrementalXmlParser();
+    parser.push(`${opener}left open by an earlier turn\n`);
+    parser.endHistory();
+    parser.processChunk(`${CALLS_OPEN}<invoke name="t"><parameter name="x"><![CDATA[ ${CALLS_CLOSE}`);
+    expect(parser.isInsidePayload()).toBe(true);
+    // The depths still say where history left the text, for typing and for the loops.
+    expect(parser.isInsideBlock()).toBe(true);
+  });
+
+  it('counts only the turn’s own containers, and closing one history left open takes nothing from them', () => {
+    const parser = new IncrementalXmlParser();
+    parser.push('<thinking>left open');
+    parser.endHistory();
+    // The turn closes history's thinking, then opens its own and quotes a call in it.
+    parser.processChunk(`</thinking>\n<thinking>quoting ${CALLS_OPEN}<invoke name="t"><parameter name="x"><![CDATA[`);
+    expect(parser.isInsidePayload()).toBe(false);
+    parser.processChunk(`]]></parameter></invoke>${CALLS_CLOSE}</thinking>\n${CALLS_OPEN}<invoke name="t"><parameter name="x"><![CDATA[`);
+    expect(parser.isInsidePayload()).toBe(true);
+  });
+
+  it('reads a payload’s suffix as data: no opener in it moves a depth or starts a value, and only a closer ends it', () => {
+    const parser = new IncrementalXmlParser();
+    parser.processChunk(
+      `${CALLS_OPEN}<invoke name="t"><parameter name="x"><![CDATA[a]]> <thinking> ${CALLS_OPEN}<invoke name="u"><parameter name="y"><![CDATA[`,
+    );
+    expect(parser.isInsidePayload()).toBe(false);
+    expect(parser.getDepths()).toEqual({ functionCalls: 1, functionResults: 0, thinking: 0 });
+
+    // The closer ends the value; the next parameter is the outer invoke's.
+    parser.processChunk(`b</parameter><parameter name="z"><![CDATA[c`);
+    expect(parser.isInsidePayload()).toBe(true);
   });
 
   it('reads an element by name: a parameter named thinking is not a thinking tag', () => {

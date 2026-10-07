@@ -357,6 +357,56 @@ describe('the history boundary', () => {
     );
     expect(calls.map((entry) => entry.calls.map((call) => call.input.item))).toEqual([['LIVE']]);
   });
+
+  const LEFT_OPEN: NormalizedRequest['messages'] = [
+    { participant: 'User', content: [{ type: 'text', text: 'earlier' }] },
+    { participant: 'Claude', content: [{ type: 'text', text: '<thinking>an earlier turn never closed this' }] },
+  ];
+
+  it.each(['callback', 'yielding'] as const)(
+    '%s: a thinking block an earlier turn left open does not hide this turn’s payload, so a provider stop inside it resumes',
+    async (mode) => {
+      const script: Round[] = [
+        { chunks: [`${CALLS_OPEN}\n<invoke name="board_update">\n<parameter name="item"><![CDATA[see `], stopReason: 'stop_sequence', stopSequence: CALLS_CLOSE },
+        { chunks: [' and more]]></parameter>\n</invoke>\n'], stopReason: 'stop_sequence', stopSequence: CALLS_CLOSE },
+        { chunks: ['ok'], stopReason: 'end_turn' },
+      ];
+      const run = mode === 'callback' ? await runCallback(script, request(LEFT_OPEN)) : await runYielding(script, request(LEFT_OPEN));
+
+      expect(run.adapter.prefill(1).endsWith(`<![CDATA[see ${CALLS_CLOSE}`)).toBe(true);
+      expect(run.response.toolCalls.map((call) => call.input.item)).toEqual([`see ${CALLS_CLOSE} and more`]);
+      expect(run.response.toolCallNotices).toBeUndefined();
+      expect(run.adapter.requests).toHaveLength(3);
+    },
+  );
+});
+
+describe('markup written after a CDATA value', () => {
+  // The provider stops on the closer of the block written inside the value.
+  const SUFFIXED: Round[] = [
+    {
+      chunks: [
+        `${CALLS_OPEN}\n<invoke name="board_update">\n<parameter name="item"><![CDATA[good]]>` +
+          `${CALLS_OPEN}<invoke name="board_update"><parameter name="item">different</parameter></invoke>`,
+      ],
+      stopReason: 'stop_sequence',
+      stopSequence: CALLS_CLOSE,
+    },
+    { chunks: ['Understood.'], stopReason: 'end_turn' },
+  ];
+
+  it.each(['callback', 'yielding'] as const)('%s: is the value’s text: nothing in it runs, and the call is refused in-band', async (mode) => {
+    const run = mode === 'callback' ? await runCallback(SUFFIXED) : await runYielding(SUFFIXED);
+    const dispatched =
+      mode === 'callback'
+        ? (run as Awaited<ReturnType<typeof runCallback>>).calls
+        : (run as Awaited<ReturnType<typeof runYielding>>).events.filter((event) => event.type === 'tool-calls');
+
+    expect(dispatched).toEqual([]);
+    expect(run.adapter.prefill(1)).toContain(`${RESULTS_OPEN}\n<tool_call_notice invoke="0" tool="board_update" kind="refused">the value of item has text after its CDATA section`);
+    expect(types(run.response.content)).toEqual(['tool_attempt', 'tool_notice', 'text']);
+    expect(run.response.toolCallNotices?.map((notice) => [notice.block, notice.invoke, notice.kind])).toEqual([[0, 0, 'refused']]);
+  });
 });
 
 describe('an unterminated payload at the end of the turn', () => {
@@ -423,6 +473,30 @@ describe('a model-written lookalike envelope directly adjacent to its block', ()
         expect(response.content.some((part) => part.type === 'tool_use')).toBe(false);
       }
     }
+  });
+});
+
+describe('a results opener the model left unclosed before its block', () => {
+  const OPENER_THEN_MIXED: Round[] = [
+    {
+      chunks: [
+        `Quoting a stray ${RESULTS_OPEN} as text.\n${CALLS_OPEN}\n` +
+          `<invoke name="board_update">\n${param('item', 'A')}\n</invoke>\n` +
+          `<invoke name="board_update">\n${param('item', 'B')}\n<parameter name="on_behalf_of_name">antra</antra:parameter>\n${param('quote', 'q')}\n</invoke>\n`,
+      ],
+      stopReason: 'stop_sequence',
+      stopSequence: CALLS_CLOSE,
+    },
+    { chunks: ['ok'], stopReason: 'end_turn' },
+  ];
+
+  it.each(['callback', 'yielding'] as const)('%s: cannot pair with the harness’s closer: the response keeps the call, its result and the refusal', async (mode) => {
+    const run = mode === 'callback' ? await runCallback(OPENER_THEN_MIXED) : await runYielding(OPENER_THEN_MIXED);
+
+    expect(run.response.toolCalls.map((call) => call.input.item)).toEqual(['A']);
+    expect(types(run.response.content)).toEqual(['text', 'tool_use', 'tool_result', 'tool_notice', 'text']);
+    expect(run.response.toolResults).toHaveLength(1);
+    expect(run.response.toolCallNotices?.map((notice) => [notice.block, notice.invoke, notice.kind])).toEqual([[0, 1, 'refused']]);
   });
 });
 

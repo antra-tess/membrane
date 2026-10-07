@@ -43,7 +43,12 @@
   a call because the model wrote a lookalike envelope after it, which used to
   hide the call from `complete()`), only their results are tool results (a
   lookalike is the model's own text), and only their notices are read and
-  decide their block's refusals. Without provenance, as for an outside caller
+  decide their block's refusals. Each envelope is also a speaker boundary:
+  markup the model wrote before it never pairs with a tag inside or after it,
+  so a results or thinking opener the model left unclosed cannot take the
+  call the envelope answers, its results or its notices out of the response.
+  Offsets that do not span exactly one results element are not an envelope.
+  Without provenance, as for an outside caller
   of `parseToolCalls` or a formatter's `parseContentBlocks` on a raw
   transcript, results spans are read as before, but no notices or recorded
   refusals are taken from them. `parseToolCalls` never selects a block that ends in the

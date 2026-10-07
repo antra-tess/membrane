@@ -57,13 +57,23 @@ export interface ProcessChunkResult {
  *   text, so a parameter-looking opener starts nothing.
  * - `cdata`: inside a CDATA section. Nothing here is a tag.
  * - `between`: just after a section's `]]>`; another section may follow.
+ * - `suffix`: after the payload, text before the value's closer, which refuses
+ *   the call. Only a closer — `</parameter>`, `</invoke>`, `</function_calls>`
+ *   — is a tag here; an opener starts no invoke, block or container.
  */
-type ValueState = 'none' | 'leading' | 'raw' | 'cdata' | 'between';
+type ValueState = 'none' | 'leading' | 'raw' | 'cdata' | 'between' | 'suffix';
 
 interface ParserState {
   functionCallsDepth: number;
   functionResultsDepth: number;
   thinkingDepth: number;
+  /**
+   * The thinking and results containers opened since history ended (see
+   * endHistory) and still open. These, not the depths, decide whether a tag
+   * is structure: a container history left open is not the turn's, and the
+   * complete-text walker reads an unclosed one as no container at all.
+   */
+  turnContainers: { thinking: number; results: number };
   accumulated: string;
   blockIndex: number;
   currentBlockStarted: boolean;
@@ -97,6 +107,7 @@ function createInitialState(): ParserState {
     functionCallsDepth: 0,
     functionResultsDepth: 0,
     thinkingDepth: 0,
+    turnContainers: { thinking: 0, results: 0 },
     accumulated: '',
     blockIndex: 0,
     currentBlockStarted: false,
@@ -123,6 +134,10 @@ function createInitialState(): ParserState {
 
 // For matching complete membrane tags. Group 1 = closing slash, 2 = element name.
 const COMPLETE_MEMBRANE_TAG = /^<(\/?)(?:antml:)?(function_calls|function_results|thinking|invoke|parameter)(?:\s[^>]*)?>$/;
+
+// The closers that end a parameter value: its own, or the invoke's or block's
+// that end it unclosed. The only tags in a payload's suffix.
+const ENDS_VALUE = /^<\/(?:antml:)?(?:parameter|invoke|function_calls)>$/;
 
 // Known membrane tag prefixes: every element, with and without the antml
 // namespace, as an opener's start and a whole closer. Assembled, so the source
@@ -159,18 +174,23 @@ export class IncrementalXmlParser {
   }
 
   /**
-   * The text pushed so far is history the turn did not write. A payload it
-   * left open ends here: one forgotten `]]>` in an earlier turn must not turn
-   * this turn's text into data. Depths are left as they are, as for any
-   * unclosed block in history.
+   * The text pushed so far is history the turn did not write. A value it left
+   * open after a payload began ends here, payload or suffix: one forgotten
+   * `]]>` or closer in an earlier turn must not turn this turn's text into
+   * data. Depths are left as they are, as for any unclosed block in history,
+   * and still type the turn's text; but a thinking or results container
+   * history left open is not the turn's, so it no longer keeps the turn's
+   * calls from being structure (see turnContainers).
    */
   endHistory(): void {
-    if (this.state.value === 'cdata' || this.state.value === 'between' || this.state.value === 'leading') {
+    const state = this.state;
+    if (state.value === 'cdata' || state.value === 'between' || state.value === 'suffix' || state.value === 'leading') {
       this.closeOpenPayload();
-      this.state.value = 'none';
+      state.value = 'none';
     }
-    this.state.inInvoke = false;
-    this.state.cdataOpenBuffer = '';
+    state.inInvoke = false;
+    state.cdataOpenBuffer = '';
+    state.turnContainers = { thinking: 0, results: 0 };
   }
 
   /** The accumulated text ends inside a parameter's CDATA payload. */
@@ -382,6 +402,9 @@ export class IncrementalXmlParser {
           pos++;
           continue;
         }
+        // Not a section: before any payload the value is ordinary text from
+        // here; after one, it is the payload's suffix.
+        const rest: ValueState = state.value === 'leading' ? 'raw' : 'suffix';
         if (state.cdataOpenBuffer !== '' || char === '<') {
           const candidate = state.cdataOpenBuffer + char;
           if (CDATA_OPEN.startsWith(candidate)) {
@@ -397,15 +420,15 @@ export class IncrementalXmlParser {
             }
             continue;
           }
-          // Not a section after all: the value is ordinary text from here. What
-          // was held began with `<`, so it is read on as a possible tag — it may
-          // be the parameter's closer — and this character is read after it.
+          // Not a section after all. What was held began with `<`, so it is
+          // read on as a possible tag — it may be the parameter's closer — and
+          // this character is read after it.
           state.tagBuffer = state.cdataOpenBuffer;
           state.cdataOpenBuffer = '';
-          state.value = 'raw';
+          state.value = rest;
           continue;
         }
-        state.value = 'raw';
+        state.value = rest;
         continue;
       }
 
@@ -418,7 +441,13 @@ export class IncrementalXmlParser {
         if (state.tagBuffer.endsWith('>') && tag) {
           const tagText = state.tagBuffer;
           state.tagBuffer = '';
-          this.handleMembraneTag(tagText, tag[1] === '/', tag[2]!, sink);
+          if (state.value === 'suffix' && !ENDS_VALUE.test(tagText)) {
+            // A payload's suffix is data, as the accumulated parser masks it:
+            // only a closer that ends the value is a tag there.
+            emitText(tagText);
+          } else {
+            this.handleMembraneTag(tagText, tag[1] === '/', tag[2]!, sink);
+          }
         } else if (this.cantBeMembraneTag(state.tagBuffer)) {
           const text = state.tagBuffer;
           state.tagBuffer = '';
@@ -488,6 +517,11 @@ export class IncrementalXmlParser {
         // block re-anchors the call there, as the accumulated parser reads it.
         state.inInvoke = false;
         state.value = 'none';
+      } else {
+        const container = element === 'thinking' ? 'thinking' : 'results';
+        state.turnContainers[container] = opening
+          ? state.turnContainers[container] + 1
+          : Math.max(0, state.turnContainers[container] - 1);
       }
       const blockType: MembraneBlockType =
         element === 'thinking' ? 'thinking' : element === 'function_calls' ? 'tool_call' : 'tool_result';
@@ -512,8 +546,10 @@ export class IncrementalXmlParser {
       return;
     }
 
+    // Only the turn's own containers count here: a call after a thinking block
+    // history left unclosed is structure, as the accumulated parser reads it.
     const structural =
-      state.functionCallsDepth > 0 && state.thinkingDepth === 0 && state.functionResultsDepth === 0;
+      state.functionCallsDepth > 0 && state.turnContainers.thinking === 0 && state.turnContainers.results === 0;
 
     if (element === 'invoke') {
       if (isClosing) {

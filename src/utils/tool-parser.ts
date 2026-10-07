@@ -49,7 +49,11 @@ import { encodeCdata, readPayload } from './xml-payload.js';
  * empty), only these envelopes speak for the harness: only they answer a
  * block (parseToolCalls selects among the blocks they have not answered), only
  * their results are tool results, and only their notices are read, their
- * recorded refusals deciding their block. Any other results span is the
+ * recorded refusals deciding their block. Each is also a speaker boundary:
+ * markup the model wrote before an envelope never pairs with a tag inside or
+ * after it, so an opener the model left unclosed cannot swallow the call an
+ * envelope answers, or the envelope. An offset pair that does not span exactly
+ * one results element is not an envelope. Any other results span is the
  * model's own text, and the boundary rules decide every other block. Left
  * out, results spans are read as they always were — one directly after a block
  * answers it, its results are tool results — but no envelope carries notices
@@ -765,11 +769,15 @@ const WALK_INVOKE =
   /(?<invokeClose><\/(?:antml:)?invoke>)|(?<blockClose><\/(?:antml:)?function_calls>)|(?<blockOpen><(?:antml:)?function_calls>)|(?<invokeOpen><(?:antml:)?invoke\s+name=)|(?<paramOpen><(?:antml:)?parameter\s+name="[^"]+">)/g;
 const WALK_VALUE =
   /(?<paramClose><\/(?:antml:)?parameter>)|(?<invokeClose><\/(?:antml:)?invoke>)|(?<blockClose><\/(?:antml:)?function_calls>)|(?<blockOpen><(?:antml:)?function_calls>)|(?<invokeOpen><(?:antml:)?invoke\s+name=)/g;
+// What ends a value after its CDATA payload: a closer, and nothing else. An
+// opener there is suffix text, so it starts no invoke and no block.
+const WALK_SUFFIX = /(?<paramClose><\/(?:antml:)?parameter>)|(?<invokeClose><\/(?:antml:)?invoke>)|(?<blockClose><\/(?:antml:)?function_calls>)/g;
 // An invoke head as INVOKE_REGEX accepts one, read where an opener was found.
 const WALK_INVOKE_HEAD = /<(?:antml:)?invoke\s+name=(["'])((?:(?!\1).)+)\1\s*(\/?)>/y;
 
-/** What the walker found: the payload ranges, and an unterminated one. */
+/** What the walker found: the data ranges, and an unterminated payload. */
 interface PayloadScan {
+  /** Each CDATA-led value's data: its payload and any suffix after it. */
   ranges: Array<{ start: number; end: number }>;
   /**
    * The payload the text ends inside, when one opened in the turn's own text
@@ -780,22 +788,32 @@ interface PayloadScan {
 }
 
 /**
- * Where the CDATA payloads are: every parameter-leading CDATA payload of every
- * structural parameter, as `[start, end)` from its first `<![CDATA[` to just
- * past its last `]]>`.
+ * Where the CDATA-led values' data is: for every structural parameter whose
+ * value begins with a CDATA payload, `[start, end)` from its first
+ * `<![CDATA[` to the closer that ends the value, so the payload and anything
+ * written after it.
  *
  * The walk reads the text in order, the way the structural scans will read it
- * once the payloads are masked: outside blocks, a closed thinking or results
- * span is a container and is skipped whole; inside a block, invokes; inside an
+ * once that data is masked: outside blocks, a closed thinking or results span
+ * is a container and is skipped whole; inside a block, invokes; inside an
  * invoke, parameters; a raw value runs to the first recognized parameter
  * closer, and the openers it holds — parameter-looking or CDATA — are text. An
- * invoke opener inside a body is a head that swallowed the call after it, and a
- * block opener inside a block re-anchors there, as the scans resolve them.
+ * invoke opener inside a raw value or between parameters is a head that
+ * swallowed the call after it, and a block opener inside a block re-anchors
+ * there, as the scans resolve them.
+ *
+ * Text between a payload and the value's closer is its suffix, which refuses
+ * the call (see {@link parseInvokeParameters}). It is masked with the payload,
+ * so no opener in it re-anchors an invoke or a block: an invoke written after
+ * a CDATA value is part of that value, refused with it, never a call of its
+ * own. Only a closer ends the value — `</parameter>`, or the `</invoke>` or
+ * `</function_calls>` that ends it unclosed.
  *
  * A payload with no terminator runs to the end of the text, so nothing after
- * it is structure: its block never closes and nothing in it is dispatched. One
- * opened in history (before `historyLength`) ends where history ends instead,
- * and the turn's own text is read afresh from there.
+ * it is structure: its block never closes and nothing in it is dispatched. A
+ * value whose payload began in history (before `historyLength`) ends where
+ * history ends instead, payload or suffix, and the turn's own text is read
+ * afresh from there.
  */
 function findPayloadRanges(text: string, historyLength = 0): PayloadScan {
   const ranges: Array<{ start: number; end: number }> = [];
@@ -862,12 +880,10 @@ function findPayloadRanges(text: string, historyLength = 0): PayloadScan {
         state = 'top';
       } else {
         // A parameter opener: its value may be a CDATA payload.
-        state = 'value';
         const bound = cursor < historyLength ? historyLength : text.length;
         const payload = readPayload(text, cursor, bound);
-        if (payload.kind === 'cdata') {
-          ranges.push({ start: payload.start, end: payload.end });
-          cursor = payload.end;
+        if (payload.kind === 'raw') {
+          state = 'value';
         } else if (payload.kind === 'unterminated') {
           ranges.push({ start: payload.start, end: bound });
           if (bound === text.length) {
@@ -878,6 +894,25 @@ function findPayloadRanges(text: string, historyLength = 0): PayloadScan {
           }
           cursor = bound;
           state = 'top';
+        } else {
+          // The value runs on from its payload to a closer; what lies between
+          // is its suffix, data like the payload.
+          WALK_SUFFIX.lastIndex = payload.end;
+          const closer = WALK_SUFFIX.exec(text);
+          if (closer === null || closer.index >= bound) {
+            // No closer before the readable text ends: the value's data runs to
+            // the end of the text, or to the end of history, which ends it.
+            ranges.push({ start: payload.start, end: bound });
+            if (bound === text.length) break;
+            cursor = bound;
+            state = 'top';
+          } else {
+            ranges.push({ start: payload.start, end: closer.index });
+            cursor = closer.index + closer[0].length;
+            if (closer.groups?.paramClose !== undefined) state = 'invoke';
+            else if (closer.groups?.invokeClose !== undefined) state = 'block';
+            else state = 'top';
+          }
         }
       }
     } else {
@@ -904,13 +939,95 @@ function findPayloadRanges(text: string, historyLength = 0): PayloadScan {
 const PAYLOAD_MASK = '\u0000';
 
 /**
- * The text twice: as written, and with every CDATA payload masked, at the
- * same offsets. Every structural scan runs on the masked text, so a tag inside
- * a payload is never structure; every value, block and quote is read from the
- * written text.
+ * An envelope the caller injected (see ToolParseOptions.harnessEnvelopes),
+ * checked against the text: exactly one results element spans its offsets.
  */
-function structuralView(text: string, historyLength?: number): ScanText & Pick<PayloadScan, 'unterminated'> {
-  const { ranges, unterminated } = findPayloadRanges(text, historyLength);
+interface RecordedEnvelope {
+  start: number;
+  end: number;
+  innerContent: string;
+  rawXml: string;
+}
+
+// One results element, read where a recorded envelope says one begins.
+const RESULTS_ELEMENT_AT = /<(?:antml:)?function_results>([\s\S]*?)<\/(?:antml:)?function_results>/y;
+
+/**
+ * The caller's recorded envelopes that are what they claim to be, in document
+ * order: in range, not overlapping one another, and each exactly one results
+ * element. Undefined when the caller supplied no provenance, which keeps the
+ * legacy reading; an offset that names anything else is not an envelope.
+ */
+function recordedEnvelopes(
+  text: string,
+  harnessEnvelopes: ToolParseOptions['harnessEnvelopes']
+): RecordedEnvelope[] | undefined {
+  if (harnessEnvelopes === undefined) return undefined;
+  const recorded: RecordedEnvelope[] = [];
+  let previousEnd = 0;
+  for (const { start, end } of [...harnessEnvelopes].sort((a, b) => a.start - b.start)) {
+    if (start < previousEnd || end > text.length) continue;
+    RESULTS_ELEMENT_AT.lastIndex = start;
+    const element = RESULTS_ELEMENT_AT.exec(text);
+    if (element === null || start + element[0].length !== end) continue;
+    const innerStart = start + element[0].indexOf('>') + 1;
+    recorded.push({
+      start,
+      end,
+      innerContent: text.slice(innerStart, innerStart + (element[1] ?? '').length),
+      rawXml: element[0],
+    });
+    previousEnd = end;
+  }
+  return recorded;
+}
+
+/**
+ * The model's own text between the recorded envelopes, as `[start, end)`
+ * ranges; the whole text when there are none.
+ *
+ * An injected envelope is a speaker boundary: whatever the model's markup
+ * opens before one, it cannot close inside or after it. So every structural
+ * reading — the payload walk, and the thinking, calls and results sweeps —
+ * runs within these segments, and an opener the model left unclosed (a
+ * lookalike results opener, an unclosed thinking) stays inside its own
+ * segment instead of pairing with a closer the harness wrote, or one the model
+ * wrote after the harness spoke.
+ */
+function modelSegments(length: number, envelopes: readonly RecordedEnvelope[] = []): Array<{ start: number; end: number }> {
+  const segments: Array<{ start: number; end: number }> = [];
+  let cursor = 0;
+  for (const envelope of envelopes) {
+    segments.push({ start: cursor, end: envelope.start });
+    cursor = envelope.end;
+  }
+  segments.push({ start: cursor, end: length });
+  return segments;
+}
+
+/**
+ * The text twice: as written, and with every CDATA-led value's data masked
+ * (see {@link findPayloadRanges}), at the same offsets. Every structural scan
+ * runs on the masked text, so a tag inside a payload or its suffix is never
+ * structure; every value, block and quote is read from the written text.
+ *
+ * With recorded envelopes, the walk runs within each model segment (see
+ * {@link modelSegments}); the envelopes themselves are not walked. Only the
+ * last segment's unterminated payload is reported: that is where the text ends.
+ */
+function structuralView(
+  text: string,
+  historyLength = 0,
+  envelopes?: readonly RecordedEnvelope[]
+): ScanText & Pick<PayloadScan, 'unterminated'> {
+  const ranges: Array<{ start: number; end: number }> = [];
+  let unterminated: PayloadScan['unterminated'];
+  for (const segment of modelSegments(text.length, envelopes)) {
+    const segmentHistory = Math.min(Math.max(historyLength - segment.start, 0), segment.end - segment.start);
+    const scan = findPayloadRanges(text.slice(segment.start, segment.end), segmentHistory);
+    for (const range of scan.ranges) ranges.push({ start: range.start + segment.start, end: range.end + segment.start });
+    unterminated = scan.unterminated;
+  }
   if (ranges.length === 0) return { masked: text, original: text, unterminated };
   let masked = '';
   let cursor = 0;
@@ -1017,9 +1134,9 @@ function resultsOpenerAfter(text: string, afterPos: number): number | undefined 
 /**
  * Whether results already answered the block ending at `blockEnd`.
  *
- * With provenance (`harnessEnvelopes` supplied, even empty), only an envelope
- * the caller injected answers a block: a lookalike the model wrote after its
- * own call leaves the call pending, so it is neither hidden nor lost. Without
+ * With provenance (recorded envelopes, even none), only an envelope the
+ * caller injected answers a block: a lookalike the model wrote after its own
+ * call leaves the call pending, so it is neither hidden nor lost. Without
  * provenance, any results span directly after the block answers it — the
  * reading raw transcripts have always had, kept for callers that cannot say
  * which envelopes they wrote; a lookalike can hide a call from them.
@@ -1027,11 +1144,11 @@ function resultsOpenerAfter(text: string, afterPos: number): number | undefined 
 function isAnswered(
   masked: string,
   blockEnd: number,
-  harnessEnvelopes: ToolParseOptions['harnessEnvelopes']
+  envelopes: readonly RecordedEnvelope[] | undefined
 ): boolean {
   const opener = resultsOpenerAfter(masked, blockEnd);
   if (opener === undefined) return false;
-  return harnessEnvelopes === undefined || harnessEnvelopes.some((envelope) => envelope.start === opener);
+  return envelopes === undefined || envelopes.some((envelope) => envelope.start === opener);
 }
 
 /**
@@ -1049,7 +1166,8 @@ function isAnswered(
  * no calls, so the caller can answer it.
  */
 export function parseToolCalls(text: string, options?: ToolParseOptions): ParsedToolCalls | null {
-  const view = structuralView(text, options?.historyLength);
+  const envelopes = recordedEnvelopes(text, options?.harnessEnvelopes);
+  const view = structuralView(text, options?.historyLength, envelopes);
 
   // Pick the last unexecuted block among those that survive containment: a
   // block quoted inside thinking or echoed in a tool result is content, and
@@ -1060,9 +1178,9 @@ export function parseToolCalls(text: string, options?: ToolParseOptions): Parsed
   const historyLength = options?.historyLength ?? 0;
   let lastUnexecutedBlock: ResolvedToolBlock | null = null;
 
-  for (const block of collectLiveToolBlocks(view)) {
+  for (const block of collectLiveToolBlocks(view, envelopes)) {
     if (block.end <= historyLength) continue;
-    if (!isAnswered(view.masked, block.end, options?.harnessEnvelopes)) {
+    if (!isAnswered(view.masked, block.end, envelopes)) {
       lastUnexecutedBlock = block;
     }
   }
@@ -1446,25 +1564,54 @@ function retainOutermostSpans(spans: CandidateSpan[]): CandidateSpan[] {
 }
 
 /**
- * The text left once every retained span is cut out — the document's own
- * structural level.
- *
- * Structural diagnostics read this rather than the raw text, because a tool
- * tag QUOTED inside a thinking block or a tool result is content, not
- * structure: counting it made a model that merely described an unclosed block
- * indistinguishable from one whose block was truncated mid-write.
- */
-/**
  * Every span the three block sweeps find, unfiltered and unregistered.
  *
  * Both parse entry points read the document through this one census, so the
  * dispatch path and the block path can never disagree about which blocks are
  * real.
+ *
+ * With recorded envelopes, each one is a results span exactly where it was
+ * injected, and the sweeps run only within the model's text between them (see
+ * {@link modelSegments}): no span the model's markup forms can cross an
+ * envelope, so an opener the model left unclosed can neither swallow the call
+ * an envelope answers nor hide the envelope itself.
  */
-function collectCandidateSpans(view: ScanText): CandidateSpan[] {
+function collectCandidateSpans(view: ScanText, envelopes?: readonly RecordedEnvelope[]): CandidateSpan[] {
   const spans: CandidateSpan[] = [];
-  // Spans are found in the masked text, so no tag inside a CDATA payload opens
-  // or closes one; what a span holds is read from the text as written.
+  for (const segment of modelSegments(view.masked.length, envelopes)) {
+    const segmentView = sliceScanText(view, segment.start, segment.end);
+    for (const span of sweepSpans(segmentView)) spans.push(shiftSpan(span, segment.start));
+  }
+  for (const envelope of envelopes ?? []) {
+    spans.push({
+      kind: 'results',
+      start: envelope.start,
+      end: envelope.end,
+      innerContent: envelope.innerContent,
+      rawXml: envelope.rawXml,
+    });
+  }
+  return spans;
+}
+
+/** A span found in a segment, placed at its offset in the whole text. */
+function shiftSpan(span: CandidateSpan, by: number): CandidateSpan {
+  if (by === 0) return span;
+  if (span.kind !== 'calls') return { ...span, start: span.start + by, end: span.end + by };
+  return {
+    ...span,
+    start: span.start + by,
+    end: span.end + by,
+    resolvedBlock: { ...span.resolvedBlock, start: span.resolvedBlock.start + by, end: span.resolvedBlock.end + by },
+  };
+}
+
+/** The three block sweeps over one stretch of text. */
+function sweepSpans(view: ScanText): CandidateSpan[] {
+  const spans: CandidateSpan[] = [];
+  // Spans are found in the masked text, so no tag inside a CDATA payload or
+  // its suffix opens or closes one; what a span holds is read from the text as
+  // written.
   const text = view.masked;
 
   THINKING_BLOCK_REGEX.lastIndex = 0;
@@ -1526,14 +1673,23 @@ function collectCandidateSpans(view: ScanText): CandidateSpan[] {
  * dispatched it — a model that named a tool and explicitly declined to use it
  * had it executed anyway.
  */
-function collectLiveToolBlocks(view: ScanText): ResolvedToolBlock[] {
+function collectLiveToolBlocks(view: ScanText, envelopes?: readonly RecordedEnvelope[]): ResolvedToolBlock[] {
   const live: ResolvedToolBlock[] = [];
-  for (const span of retainOutermostSpans(collectCandidateSpans(view))) {
+  for (const span of retainOutermostSpans(collectCandidateSpans(view, envelopes))) {
     if (span.kind === 'calls') live.push(span.resolvedBlock);
   }
   return live;
 }
 
+/**
+ * The text left once every retained span is cut out — the document's own
+ * structural level.
+ *
+ * Structural diagnostics read this rather than the raw text, because a tool
+ * tag QUOTED inside a thinking block or a tool result is content, not
+ * structure: counting it made a model that merely described an unclosed block
+ * indistinguishable from one whose block was truncated mid-write.
+ */
 function textOutsideSpans(text: string, spans: CandidateSpan[]): string {
   let residue = '';
   let cursor = 0;
@@ -1631,11 +1787,13 @@ export function parseAccumulatedIntoBlocks(
   // The envelopes the caller injected, in processedText's offsets, and those
   // found answering a block.
   const prepended = processedText.length - text.length;
-  const harnessEnvelopeStarts = new Map(
-    (options?.harnessEnvelopes ?? []).map((envelope) => [envelope.start + prepended, envelope.end + prepended])
+  const envelopes = recordedEnvelopes(
+    processedText,
+    options?.harnessEnvelopes?.map((envelope) => ({ start: envelope.start + prepended, end: envelope.end + prepended }))
   );
+  const harnessEnvelopeStarts = new Map((envelopes ?? []).map((envelope) => [envelope.start, envelope.end]));
   const isHarnessEnvelope = (span: CandidateSpan): boolean => harnessEnvelopeStarts.get(span.start) === span.end;
-  const provenanceSupplied = options?.harnessEnvelopes !== undefined;
+  const provenanceSupplied = envelopes !== undefined;
   const harnessAnswers = new Set<CandidateSpan>();
 
   // Track positions of all special blocks to extract plain text between them
@@ -1671,9 +1829,10 @@ export function parseAccumulatedIntoBlocks(
   // containment has decided which spans are real. Registering first and
   // filtering after produced a call site that a legacy result could claim and
   // that the filter then deleted, leaving a tool_result addressed to a
-  // tool_use no longer in the response.
-  const view = structuralView(processedText, options?.historyLength);
-  const candidateSpans = collectCandidateSpans(view);
+  // tool_use no longer in the response. Recorded envelopes bound every sweep
+  // (see collectCandidateSpans), the payload walk included.
+  const view = structuralView(processedText, options?.historyLength, envelopes);
+  const candidateSpans = collectCandidateSpans(view, envelopes);
 
   // ── Pass 2: containment ──────────────────────────────────────────────────
   //

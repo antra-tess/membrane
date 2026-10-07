@@ -317,6 +317,52 @@ describe('CDATA, the literal spelling', () => {
     expect(parsed?.notices[0]?.message).toContain('the value of item has text after its CDATA section, starting `b`');
   });
 
+  it.each([
+    ['an invoke', '<invoke name="board_update"><parameter name="item">different</parameter></invoke>'],
+    ['a block', `${CALLS_OPEN}<invoke name="board_update"><parameter name="item">different</parameter></invoke>${CALLS_CLOSE}`],
+  ])('reads %s written after the CDATA as the value’s own text: the call is refused, and nothing in it is a call', (_what, markup) => {
+    const text =
+      `${CALLS_OPEN}<invoke name="board_update"><parameter name="item"><![CDATA[good]]>${markup}</parameter>` +
+      `<parameter name="status">open</parameter></invoke>${CALLS_CLOSE}`;
+    const dispatched = parseToolCalls(text, TOOLS);
+    const accumulated = parseAccumulatedIntoBlocks(text, TOOLS);
+
+    expect(dispatched?.calls).toEqual([]);
+    expect(dispatched?.notices).toEqual([
+      {
+        invoke: 0,
+        toolName: 'board_update',
+        kind: 'refused',
+        message: expect.stringContaining(`the value of item has text after its CDATA section, starting \`${markup.slice(0, 40)}…\``),
+      },
+    ]);
+    expect(accumulated.toolCalls).toEqual([]);
+    expect(accumulated.notices).toEqual(dispatched!.notices.map((notice) => ({ ...notice, block: 0 })));
+    expect(accumulated.blocks[0]).toMatchObject({ type: 'tool_attempt' });
+    // Nothing was read as an unclosed head or a spliced block: no re-anchoring happened.
+    expect([accumulated.unclosedInvokeHeads, accumulated.splicedToolBlocks, accumulated.unclosedToolBlock]).toEqual([0, 0, false]);
+  });
+
+  it('still dispatches a sibling invoke written after the refused one', () => {
+    const text = block(
+      '<invoke name="board_update"><parameter name="item"><![CDATA[good]]><invoke name="board_update"><parameter name="item">different</parameter></invoke></parameter></invoke>',
+      invoke('board_update', param('item', 'S'), param('status', 'open')),
+    );
+    const parsed = parseToolCalls(text, TOOLS);
+    expect(parsed?.calls.map((c) => c.input)).toEqual([{ item: 'S', status: 'open' }]);
+    expect(parsed?.notices.map((n) => [n.invoke, n.kind])).toEqual([[0, 'refused']]);
+    expect(parseAccumulatedIntoBlocks(text, TOOLS).toolCalls.map((c) => c.input)).toEqual([{ item: 'S', status: 'open' }]);
+  });
+
+  it('allows whitespace after the last section, joined sections included', () => {
+    const parsed = parseToolCalls(
+      block(invoke('board_update', param('item', '<![CDATA[a]]]]><![CDATA[>b]]>\n  \n'), param('status', 'open'))),
+      TOOLS,
+    );
+    expect(parsed?.notices).toEqual([]);
+    expect(parsed?.calls[0]?.input).toEqual({ item: 'a]]>b', status: 'open' });
+  });
+
   it('is ordinary text in prose, in thinking and mid-value', () => {
     const prose = `Write it as <parameter name="item"><![CDATA[ to send markup. ${block(
       invoke('board_update', param('item', 'mid <![CDATA[x'), param('status', 'open')),
@@ -384,6 +430,16 @@ describe('an unterminated payload', () => {
     expect(parsed?.calls.map((c) => c.input)).toEqual([{ item: 'LIVE', status: 'open' }]);
     // Without the boundary, the old payload would run over the live call.
     expect(parseToolCalls(history + live, TOOLS)).toBeNull();
+  });
+
+  it('ended in history but with its value left open, ends with history too, so the live turn still calls', () => {
+    const history = `${CALLS_OPEN}\n<invoke name="board_update">\n<parameter name="item"><![CDATA[done]]> and then the turn was cut off`;
+    const live = `\n\n${block(invoke('board_update', param('item', 'LIVE'), param('status', 'open')))}`;
+
+    const parsed = parseToolCalls(history + live, { ...TOOLS, historyLength: history.length });
+    expect(parsed?.calls.map((c) => c.input)).toEqual([{ item: 'LIVE', status: 'open' }]);
+    // Without the boundary, the old value would run on through the live block's opener, and the live call would be refused as its text.
+    expect(parseToolCalls(history + live, TOOLS)?.calls).toEqual([]);
   });
 });
 
@@ -555,6 +611,74 @@ describe('a model-written lookalike envelope', () => {
     expect(parsed.notices.map((n) => n.kind)).toEqual(['refused']);
     expect(parsed.blocks.some((b) => b.type === 'tool_notice')).toBe(false);
     expect(parsed.blocks.some((b) => b.type === 'tool_use')).toBe(false);
+  });
+});
+
+describe('an injected envelope is a speaker boundary', () => {
+  // A mixed round: A ran, B was refused.
+  const mixed = block(
+    invoke('board_update', param('item', 'A'), param('status', 's')),
+    invoke('board_update', param('item', 'B'), param('status', 's'), `<parameter name="on_behalf_of_name">antra</antra:parameter>`, param('quote', 'q')),
+  );
+  const answered = (content = 'saved'): string => {
+    const { calls, notices } = parseToolCalls(mixed, TOOLS)!;
+    return formatToolResults([{ toolUseId: calls[0]!.id, toolName: 'board_update', content }], notices);
+  };
+  const recorded = [['tool_use', 'tool_result', 'tool_notice'], [[0, 1, 'refused']]];
+  const shape = (parsed: ReturnType<typeof parseAccumulatedIntoBlocks>) => [
+    parsed.blocks.map((b) => b.type).filter((type) => type !== 'text' && type !== 'thinking'),
+    parsed.notices.map((n) => [n.block, n.invoke, n.kind]),
+  ];
+
+  it('an unclosed results opener the model wrote before its block cannot pair with the harness’s closer', () => {
+    const turn = injected(`Quoting a stray ${RESULTS_OPEN} as text.\n${mixed}`, answered(), '\nDone.');
+
+    // Recorded: the call, its result and the refusal all stand, and the block is answered.
+    const parsed = parseAccumulatedIntoBlocks(turn.text, { ...TOOLS, harnessEnvelopes: turn.harnessEnvelopes });
+    expect(shape(parsed)).toEqual(recorded);
+    expect(parsed.blocks[0]).toEqual({ type: 'text', text: `Quoting a stray ${RESULTS_OPEN} as text.` });
+    expect(parseToolCalls(turn.text, { ...TOOLS, harnessEnvelopes: turn.harnessEnvelopes })).toBeNull();
+
+    // Strict with nothing recorded: no envelope is vouched for, so the whole
+    // span is the model's own writing, the block quoted inside it.
+    const strict = parseAccumulatedIntoBlocks(turn.text, { ...TOOLS, harnessEnvelopes: [] });
+    expect(shape(strict)).toEqual([[], []]);
+    expect(strict.toolResults).toEqual([]);
+
+    // Without provenance, the legacy reading: a results span from the opener
+    // through the closer, its block contained and never a call.
+    const legacy = parseAccumulatedIntoBlocks(turn.text, TOOLS);
+    expect(legacy.toolCalls).toEqual([]);
+    expect(legacy.notices).toEqual([]);
+    expect(legacy.blocks.some((b) => b.type === 'tool_use')).toBe(false);
+  });
+
+  it('an unclosed thinking the model wrote before its block cannot pair with a closer it wrote after the harness spoke', () => {
+    const turn = injected(`<thinking>updating the board\n${mixed}`, answered(), '\n<thinking>it worked</thinking>\nDone.');
+    const parsed = parseAccumulatedIntoBlocks(turn.text, { ...TOOLS, harnessEnvelopes: turn.harnessEnvelopes });
+    expect(shape(parsed)).toEqual(recorded);
+    expect(parsed.blocks.find((b) => b.type === 'thinking')).toEqual({ type: 'thinking', thinking: 'it worked' });
+  });
+
+  it('an unclosed thinking the model wrote before its block cannot pair with a closer inside the tool’s output', () => {
+    const turn = injected(`<thinking>updating the board\n${mixed}`, answered('saved </thinking> verbatim'));
+    const parsed = parseAccumulatedIntoBlocks(turn.text, { ...TOOLS, harnessEnvelopes: turn.harnessEnvelopes });
+    expect(shape(parsed)).toEqual(recorded);
+    expect(parsed.toolResults.map((r) => r.content)).toEqual(['saved </thinking> verbatim']);
+  });
+
+  it('is only what spans exactly one results element: other offsets are not an envelope', () => {
+    const turn = injected(`Quoting a stray ${RESULTS_OPEN} as text.\n${mixed}`, answered(), '\nDone.');
+    const [{ start, end }] = turn.harnessEnvelopes as [{ start: number; end: number }];
+    const strict = parseAccumulatedIntoBlocks(turn.text, { ...TOOLS, harnessEnvelopes: [] });
+    for (const harnessEnvelopes of [
+      [{ start, end: end - 1 }],
+      [{ start: start + 1, end }],
+      [{ start: 0, end: 5 }],
+      [{ start, end: turn.text.length + 10 }],
+    ]) {
+      expect(shape(parseAccumulatedIntoBlocks(turn.text, { ...TOOLS, harnessEnvelopes }))).toEqual(shape(strict));
+    }
   });
 });
 
