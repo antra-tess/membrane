@@ -193,9 +193,14 @@ export function serializeError(error: unknown): unknown {
       if (stack) serialized.stack = typeof stack === 'string' ? boundErrorText(stack) : stack;
     }
 
-    // Copy any additional enumerable properties (like status, code, etc.)
+    // Copy any additional enumerable properties (like status, code, etc.).
+    // name, message and stack were read above. An Error can carry them as own
+    // enumerable properties (assigned after a message-less super(), or by
+    // Object.assign), and copying them again would replace the bounded
+    // message and stack, and bring the stack back in production.
     const keys = read(() => Object.keys(error));
     for (const key of Array.isArray(keys) ? keys as string[] : []) {
+      if (key === 'name' || key === 'message' || key === 'stack') continue;
       serialized[key] = read(() => (error as unknown as Record<string, unknown>)[key]);
     }
 

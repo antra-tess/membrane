@@ -238,4 +238,41 @@ describe('the bound', () => {
     expect(serialized.message.length).toBeLessThanOrEqual(MAX_ERROR_MESSAGE_CHARS);
     expect((serialized.stack ?? '').length).toBeLessThanOrEqual(MAX_ERROR_MESSAGE_CHARS);
   });
+
+  /** An Error carrying its message and stack as own enumerable properties. */
+  const enumerableError = (message: string, stack: string) => {
+    // A message-less Error has no own message, so Object.assign creates an
+    // enumerable one; the runtime's own stack is redefined as enumerable.
+    const error = Object.assign(new Error(), { message, status: 400 });
+    Object.defineProperty(error, 'stack', { value: stack, enumerable: true, configurable: true, writable: true });
+    return error;
+  };
+
+  it('keeps those bounds when message and stack are own enumerable properties', () => {
+    class AssignedMessageError extends Error {
+      constructor(text: string) {
+        super();
+        this.message = text;
+      }
+    }
+    for (const source of [enumerableError(echo(500_000), echo(500_000)), new AssignedMessageError(echo(500_000))]) {
+      expect(Object.keys(source)).toContain('message');
+      const serialized = serializeError(source) as Record<string, unknown>;
+      expect((serialized.message as string).length).toBeLessThanOrEqual(MAX_ERROR_MESSAGE_CHARS);
+      expect(((serialized.stack as string | undefined) ?? '').length).toBeLessThanOrEqual(MAX_ERROR_MESSAGE_CHARS);
+    }
+    // Other enumerable fields are still copied.
+    expect((serializeError(enumerableError('zz-small', 'zz-stack')) as Record<string, unknown>).status).toBe(400);
+  });
+
+  it('leaves an enumerable stack out in production', () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    try {
+      const serialized = serializeError(enumerableError('zz-small', echo(500_000))) as Record<string, unknown>;
+      expect(serialized).not.toHaveProperty('stack');
+      expect(serialized).toMatchObject({ message: 'zz-small', status: 400 });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 });
