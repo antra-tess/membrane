@@ -2,6 +2,131 @@
  * Error types for membrane
  */
 
+import { createHash } from 'node:crypto';
+
+// ============================================================================
+// Bounding provider-derived text
+// ============================================================================
+
+/**
+ * Longest message a MembraneError carries, in UTF-16 code units.
+ *
+ * A provider's error body is arbitrary remote text, and some providers echo
+ * the entire rejected request in it: one OpenAI-compatible 400 returned a
+ * ~1.7 MB body. Whatever the boundary puts in `message` then travels
+ * everywhere the error does: the stack trace, `onError` hooks, stderr, call
+ * logs, and the failure notice a framework stores in an agent's own context.
+ * The head keeps what every boundary writes first (provider, status, code,
+ * the provider's own explanation); the tail keeps a provider's closing detail.
+ */
+export const MAX_ERROR_MESSAGE_CHARS = 2_000;
+
+/**
+ * Aggregate bound on a MembraneError's `rawError`, in characters of its JSON
+ * serialization: nested bodies, headers and any other enumerable properties
+ * all count toward it. A value within the bound is kept exactly as it is.
+ */
+export const MAX_RAW_ERROR_JSON_CHARS = 16 * 1024;
+
+/** Longest provider error code kept verbatim; real codes are short tokens. */
+export const MAX_PROVIDER_ERROR_CODE_CHARS = 128;
+
+/** Characters of serialized JSON kept as `head` when a rawError is summarized. */
+const RAW_ERROR_SUMMARY_HEAD_CHARS = 2_048;
+
+/** Move a cut point off the low half of a surrogate pair. */
+function cutBefore(text: string, index: number): number {
+  const code = text.charCodeAt(index);
+  return index > 0 && code >= 0xdc00 && code <= 0xdfff ? index - 1 : index;
+}
+
+/**
+ * `text` when it fits within `max` characters; otherwise its head and tail
+ * around a marker that states how much was omitted from how much, the whole
+ * no longer than `max`. The marker makes the excerpt self-describing wherever
+ * it ends up: a reader of a log line or a failure notice can see that the
+ * provider said more than this. Bounding bounded text returns it unchanged.
+ */
+export function boundErrorText(text: string, max: number = MAX_ERROR_MESSAGE_CHARS): string {
+  if (text.length <= max) return text;
+  // The omitted count has at most as many digits as the total length.
+  const markerLength = ` …[${text.length} of ${text.length} characters omitted]… `.length;
+  const budget = Math.max(0, max - markerLength);
+  const tailLength = Math.floor(budget / 4);
+  const headEnd = cutBefore(text, budget - tailLength);
+  const tailStart = cutBefore(text, text.length - tailLength);
+  const omitted = tailStart - headEnd;
+  return `${text.slice(0, headEnd)} …[${omitted} of ${text.length} characters omitted]… ${text.slice(tailStart)}`;
+}
+
+/** A provider error code, verbatim when it is token-sized; otherwise its head and length. */
+function boundProviderErrorCode(code: string | undefined): string | undefined {
+  if (code === undefined || code.length <= MAX_PROVIDER_ERROR_CODE_CHARS) return code;
+  return `${code.slice(0, cutBefore(code, 64))}…[${code.length} characters]`;
+}
+
+/**
+ * JSON.stringify that survives cycles and BigInt: a value already open on the
+ * path to the current one is written as "[Circular]", and a BigInt as its
+ * decimal string. Repeated non-cyclic references serialize normally.
+ */
+function stringifyAcyclic(value: unknown): string | undefined {
+  const ancestors: unknown[] = [];
+  return JSON.stringify(value, function (this: unknown, _key: string, current: unknown) {
+    if (typeof current === 'bigint') return current.toString();
+    if (typeof current !== 'object' || current === null) return current;
+    while (ancestors.length > 0 && ancestors[ancestors.length - 1] !== this) ancestors.pop();
+    if (ancestors.includes(current)) return '[Circular]';
+    ancestors.push(current);
+    return current;
+  });
+}
+
+/**
+ * Enforce `MAX_RAW_ERROR_JSON_CHARS` on a rawError, measured on its JSON
+ * serialization. Within the bound, the value is returned unchanged. Beyond
+ * it, a summary replaces it: the length and sha256 of what was received (so
+ * identical bodies are recognizable without being kept) and its first
+ * `RAW_ERROR_SUMMARY_HEAD_CHARS` characters. A string body (the usual raw
+ * HTTP body) is summarized as text, `chars`; anything else as its JSON,
+ * `jsonChars`. A cyclic value is replaced by its acyclic JSON form (bounded
+ * the same way), and a value that cannot be serialized at all by a short
+ * description, so a pathological error object can never break the error path.
+ */
+export function boundRawError(value: unknown): unknown {
+  if (value === undefined || value === null) return value;
+  let json: string | undefined;
+  let rewritten = false;
+  try {
+    json = JSON.stringify(value);
+  } catch {
+    rewritten = true;
+    try {
+      json = stringifyAcyclic(value);
+    } catch (error) {
+      const reason = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+      return { truncated: true, unserializable: boundErrorText(reason, 200), valueType: typeof value };
+    }
+  }
+  // Functions, symbols and undefined have no JSON form and take no space in one.
+  if (json === undefined) return value;
+  if (json.length <= MAX_RAW_ERROR_JSON_CHARS) return rewritten ? JSON.parse(json) : value;
+  if (typeof value === 'string') {
+    return {
+      truncated: true,
+      chars: value.length,
+      sha256: createHash('sha256').update(value).digest('hex'),
+      head: value.slice(0, cutBefore(value, RAW_ERROR_SUMMARY_HEAD_CHARS)),
+    };
+  }
+  return {
+    truncated: true,
+    jsonChars: json.length,
+    sha256: createHash('sha256').update(json).digest('hex'),
+    head: json.slice(0, cutBefore(json, RAW_ERROR_SUMMARY_HEAD_CHARS)),
+  };
+}
+
 // ============================================================================
 // Error Serialization Helper
 // ============================================================================
@@ -9,6 +134,8 @@
 /**
  * Serialize an error for storage in rawError field.
  * Error objects don't JSON.stringify well (become {}), so we extract key properties.
+ * The message and stack are bounded like a MembraneError's own message; the
+ * aggregate size of the result is bounded where a MembraneError stores it.
  */
 export function serializeError(error: unknown): unknown {
   if (error === undefined || error === null) {
@@ -18,12 +145,12 @@ export function serializeError(error: unknown): unknown {
   if (error instanceof Error) {
     const serialized: Record<string, unknown> = {
       name: error.name,
-      message: error.message,
+      message: boundErrorText(error.message),
     };
 
     // Include stack trace in non-production
     if (process.env.NODE_ENV !== 'production' && error.stack) {
-      serialized.stack = error.stack;
+      serialized.stack = boundErrorText(error.stack);
     }
 
     // Copy any additional enumerable properties (like status, code, etc.)
@@ -99,15 +226,18 @@ export class MembraneError extends Error {
   readonly rawRequest?: unknown;
 
   constructor(info: ErrorInfo) {
-    super(info.message);
+    // Bounded here, the one place every adapter, stream-frame classifier, SDK
+    // error and membrane rethrow passes through. The classification fields are
+    // decided before construction and are never derived from the bounded text.
+    super(boundErrorText(info.message));
     this.name = 'MembraneError';
     this.type = info.type;
     this.retryable = info.retryable;
     this.retryAfterMs = info.retryAfterMs;
     this.httpStatus = info.httpStatus;
-    this.providerErrorCode = info.providerErrorCode;
+    this.providerErrorCode = boundProviderErrorCode(info.providerErrorCode);
     // Serialize error objects so they don't become {} when JSON.stringify'd
-    this.rawError = serializeError(info.rawError);
+    this.rawError = boundRawError(serializeError(info.rawError));
     this.rawRequest = info.rawRequest;
   }
 
