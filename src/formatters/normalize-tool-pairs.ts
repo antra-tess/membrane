@@ -868,12 +868,13 @@ function resolveOrphans(
  * Where the result for `useIds[useIdIndex]` belongs in the cycle's user
  * envelope: immediately after the result of the nearest earlier call that
  * already landed, or at the front when no earlier call has one. Every phase
- * that puts a result into a cycle envelope — synthesis (phase 4) and
- * relocation (phase 3.5) alike — routes through here, so the envelope's
- * tool_results end up in call order no matter which phase placed them or in
- * what sequence. Anchoring on landed neighbours rather than on a running
- * counter is what makes it order-independent: a stray arriving before its
- * earlier siblings still lands ahead of the later ones already present.
+ * that puts a result into a cycle envelope (synthesis in phase 4, relocation
+ * in phase 3.5) routes through here. Only the inserted result is placed:
+ * results already in the envelope keep their order. So an envelope whose
+ * results are in call order stays in call order whichever phase inserts and
+ * in whatever sequence, because each insertion anchors on landed neighbours
+ * rather than a running counter; one whose results arrived out of call order
+ * keeps them as they are.
  */
 function callOrderInsertionIndex(
   envelope: Envelope,
