@@ -148,6 +148,56 @@ describe('keepalive model holds', () => {
   });
 });
 
+/** The keepalive's private hold map, read only to check what it retains. */
+const holdsOf = (ka: CacheKeepalive) => (ka as unknown as { holds: Map<string, number> }).holds;
+
+describe('keepalive holds are kept only while their wait is outstanding', () => {
+  it('passed holds are dropped before a new hold is set, with no lineage and no timer (foreground-only traffic)', async () => {
+    const { ka } = setup(vi.fn().mockResolvedValue(hit));
+    // Nothing is recorded, so no timer ever ticks; only foreground failures hold models.
+    ka.holdModel('claude-long', 60 * MIN, 'zz 429 long');
+    for (let i = 0; i < 50; i++) ka.holdModel(`claude-${i}`, MIN, 'zz 429');
+    await vi.advanceTimersByTimeAsync(2 * MIN);
+    ka.holdModel('claude-next', MIN, 'zz 429');
+    expect(new Set(holdsOf(ka).keys())).toEqual(new Set(['claude-long', 'claude-next']));
+  });
+
+  it('a tick drops a passed hold whose model has no lineage left to check it, and keeps an outstanding one', async () => {
+    const send = vi.fn().mockResolvedValue(hit);
+    const { ka } = setup(send, { maxIdleMs: 60 * MIN });
+    ka.record(wire('claude-a'), undefined, 'stream');
+    ka.holdModel('claude-a', 90 * MIN, 'zz 429');
+    ka.holdModel('claude-never-recorded', 180 * MIN, 'zz 429 long');
+    // The lineage idles out at 60 min, before the wait passes at 90; the timer keeps ticking.
+    await vi.advanceTimersByTimeAsync(100 * MIN);
+    expect([...holdsOf(ka).keys()]).toEqual(['claude-never-recorded']);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('an outstanding hold outlives its model\'s lineages: one recorded later inside the wait is not poked until it passes', async () => {
+    const send = vi.fn().mockResolvedValue(hit);
+    const { ka } = setup(send, { maxLineages: 1 });
+    ka.record(wire('claude-a'), undefined, 'stream');
+    ka.holdModel('claude-a', 180 * MIN, 'zz 429');
+    ka.record(wire('claude-b'), undefined, 'stream');            // evicts claude-a's lineage
+    await vi.advanceTimersByTimeAsync(60 * MIN);                   // ticks run with claude-a held and lineage-less
+    expect(holdsOf(ka).has('claude-a')).toBe(true);
+    ka.record(wire('claude-a', 'later'), undefined, 'stream');   // a new lineage of the held model, due at 105 min
+    await vi.advanceTimersByTimeAsync(110 * MIN);
+    expect(sentModels(send)).not.toContain('claude-a');
+    await vi.advanceTimersByTimeAsync(20 * MIN);                   // the wait passes at 180 min
+    expect(sentModels(send)).toContain('claude-a');
+  });
+
+  it('stop() releases every hold, including one held until stop', () => {
+    const { ka } = setup(vi.fn().mockResolvedValue(hit));
+    ka.holdModel('claude-a', Number.POSITIVE_INFINITY, 'unbounded');
+    ka.holdModel('claude-b', 60 * MIN, 'zz 429');
+    ka.stop();
+    expect(holdsOf(ka).size).toBe(0);
+  });
+});
+
 describe('the Anthropic adapter holds its keepalive on stated waits', () => {
   const ok = {
     id: 'response', type: 'message', role: 'assistant', model: 'claude-sonnet-4-5',

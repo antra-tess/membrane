@@ -273,8 +273,13 @@ export class CacheKeepalive {
    * Per model, the instant before which no lineage of that model is poked:
    * the maximum outstanding provider wait stated by any call to the model,
    * foreground or keepalive (Infinity when a stated wait cannot be held as an
-   * instant: held until stop()). A wait passing is the only thing that ends
-   * one; another caller's release of its own admission does not.
+   * instant: held until stop()). While the keepalive runs, a wait passing is
+   * the only thing that ends one; another caller's release of its own
+   * admission does not. An outstanding hold is kept whether or not its model
+   * has a lineage, since one can be recorded inside the wait. Passed holds are
+   * dropped at each tick and before each new hold, so calls that never start
+   * the timer (foreground-only or ineligible traffic) cannot accumulate them;
+   * stop() drops every hold.
    */
   private holds = new Map<string, number>();
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -307,23 +312,27 @@ export class CacheKeepalive {
    */
   holdModel(model: string, retryAfterMs: unknown, reason: string): void {
     if (this.stopped) return;
-    const until = holdDeadline(retryAfterMs, Date.now());
+    const now = Date.now();
+    const until = holdDeadline(retryAfterMs, now);
     if (until === undefined) return;
+    this.dropPassedHolds(now);
     const current = this.holds.get(model);
     if (current !== undefined && current >= until) return;
     this.holds.set(model, until);
     this.emit({ type: 'held', model, until: Number.isFinite(until) ? until : null, reason });
   }
 
-  /** The hold binding `model` at `now`, if any; a passed one is dropped. */
-  private heldUntil(model: string, now: number): number | undefined {
+  /** Whether a stated wait still holds `model` at `now`. */
+  private isHeld(model: string, now: number): boolean {
     const until = this.holds.get(model);
-    if (until === undefined) return undefined;
-    if (now >= until) {
-      this.holds.delete(model);
-      return undefined;
+    return until !== undefined && now < until;
+  }
+
+  /** Forget every hold whose wait has passed by `now`; outstanding ones stay. */
+  private dropPassedHolds(now: number): void {
+    for (const [model, until] of this.holds) {
+      if (now >= until) this.holds.delete(model);
     }
-    return until;
   }
 
   /** Record a real outbound request. Cheap; called on every LLM call. */
@@ -377,6 +386,8 @@ export class CacheKeepalive {
     this.ticking = true;
     try {
       const now = Date.now();
+      // Apart from the lineages below: a held model may have none left.
+      this.dropPassedHolds(now);
       for (const [key, lin] of [...this.lineages]) {
         if (this.stopped) break;
         // The keepalive window is measured from the last REAL request, so pokes
@@ -392,7 +403,7 @@ export class CacheKeepalive {
         if (now - lin.lastTouchAt < this.cfg.refreshAfterMs) continue;
         // A stated wait on this lineage's model, including one a poke of
         // another lineage of the same model received earlier in this tick.
-        if (this.heldUntil(String(lin.wire.model ?? ''), now) !== undefined) continue;
+        if (this.isHeld(String(lin.wire.model ?? ''), now)) continue;
         await this.refresh(key, lin);
       }
     } finally {
@@ -532,5 +543,6 @@ export class CacheKeepalive {
       this.timer = null;
     }
     this.lineages.clear();
+    this.holds.clear();
   }
 }
