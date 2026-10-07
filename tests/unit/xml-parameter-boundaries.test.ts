@@ -412,11 +412,20 @@ describe('a block the text ends inside', () => {
     expect(parsed.notices.map((n) => [n.block, n.kind, n.answered])).toEqual([[0, 'refused', false]]);
   });
 
-  it('follows every closed block: a stale opener a later block re-anchored past is not one', () => {
+  it('follows every resolved block: a stale opener a later block re-anchored past is not one', () => {
+    // `<function_calls> unfinished <function_calls>…valid…</function_calls>`,
+    // executed and answered: the inner block and its results stand.
     const later = block(invoke('board_update', param('item', 'A'), param('status', 's')));
-    const parsed = parseAccumulatedIntoBlocks(`${CALLS_OPEN}\n<invoke name="board_update">\n${later}\nafter`, TOOLS);
-    expect(parsed.blocks.map((b) => b.type)).not.toContain('tool_attempt');
+    const stale = `${CALLS_OPEN}\n<invoke name="board_update">\nunfinished\n${later}`;
+    const { calls } = parseToolCalls(stale, TOOLS)!;
+    expect(calls.map((c) => c.input.item)).toEqual(['A']);
+    expect(hasUnclosedToolBlock(stale)).toBe(true);
+
+    const turn = injected(stale, formatToolResults([{ toolUseId: calls[0]!.id, toolName: 'board_update', content: 'done' }]), '\nafter');
+    const parsed = parseAccumulatedIntoBlocks(turn.text, { ...TOOLS, harnessEnvelopes: turn.harnessEnvelopes });
+    expect(parsed.blocks.map((b) => b.type)).toEqual(['text', 'tool_use', 'tool_result', 'text']);
     expect(parsed.toolCalls.map((c) => c.input.item)).toEqual(['A']);
+    expect(parsed.toolResults.map((r) => r.content)).toEqual(['done']);
   });
 });
 
