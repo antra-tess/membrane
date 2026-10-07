@@ -256,8 +256,9 @@ export class CompletionsFormatter implements PrefillFormatter {
       if (leftOut) options.fidelity?.alter(index);
 
       // Skip empty messages (except if it's the final completion target).
-      // Empty-text removal (whitespace only) is not an alteration.
+      // Whitespace-only text is content: skipping it is an alteration.
       if (!text.trim()) {
+        if (text !== '') options.fidelity?.alter(index);
         continue;
       }
 

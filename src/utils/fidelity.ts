@@ -10,13 +10,17 @@
  * An alteration is any non-empty consumer block not carried verbatim: a
  * placeholder substituted for an image, an image or block stripped, an
  * unsupported block left out, a tool carrier skipped, a tool_result rewritten
- * as text. Empty-text removal (text that is empty or whitespace only, as
- * utils/empty-text defines it) is not an alteration; neither is the
- * faithful rendering of harness or attempt blocks, or a block moved between
- * provider messages.
+ * as text, nested tool-result media rendered as a note, whitespace-only text
+ * removed by a cleanup policy. Removing an exactly empty text block ('')
+ * carries nothing and is not an alteration; neither is the faithful
+ * rendering of harness or attempt blocks, or a block moved between provider
+ * messages.
  *
  * Builders record alterations by the index of the message in the array they
- * were handed. When content changes in a way no index can be attached to
+ * were handed, and register the blocks they emit (`own`), so an adapter that
+ * reports altering a block (`ProviderRequestOptions.onContentAltered`) is
+ * attributed to the message that block came from. When content changes in a
+ * way no index can be attached to
  * (opt-in image shedding after role merging, a beforeRequest hook that
  * changed the request), the notes are marked unattributed; when any part of
  * the build or transport does not report alterations at all, they are marked
@@ -30,22 +34,60 @@ export class FidelityNotes {
   unattributed = false;
   /** Some part of the build or transport does not report alterations. */
   uninstrumented = false;
+  /**
+   * A beforeRequest hook changed, in place, the request object it was handed.
+   * That object shares structure with membrane's retained build state (an XML
+   * stream's prefill messages) or with the consumer's own blocks, so the
+   * change can outlive this round: loops keep later rounds unknown.
+   */
+  mutatedInPlace = false;
+
+  /** Request blocks the builder emitted (and nested tool-result blocks), by owning message. */
+  constructor(private readonly owners = new WeakMap<object, number>()) {}
 
   alter(index: number): void {
     this.altered.add(index);
+  }
+
+  /** Remember that `block`, as sent on the request, came from message `index`. */
+  own(block: unknown, index: number): void {
+    if (block !== null && typeof block === 'object') this.owners.set(block, index);
+  }
+
+  /** An adapter altered `block` (or an unknown part, when absent): attribute it, or mark the round unattributed. */
+  alterBlock(block?: unknown): void {
+    const index = block !== null && typeof block === 'object' ? this.owners.get(block) : undefined;
+    if (index === undefined) this.unattributed = true;
+    else this.alter(index);
   }
 
   get established(): boolean {
     return !this.unattributed && !this.uninstrumented;
   }
 
-  /** An independent copy: a round that carries an earlier build's conversions starts from its notes. */
+  /** A copy for a round that carries an earlier build's conversions: same notes, same block owners. */
   copy(): FidelityNotes {
-    const notes = new FidelityNotes();
+    const notes = new FidelityNotes(this.owners);
     for (const index of this.altered) notes.alter(index);
     notes.unattributed = this.unattributed;
     notes.uninstrumented = this.uninstrumented;
     return notes;
+  }
+}
+
+/**
+ * Register a built message's blocks (and the blocks nested in its tool
+ * results, which builders pass through by reference) as coming from message
+ * `index`, so an adapter's report about one of them is attributed.
+ */
+export function ownBlocks(fidelity: FidelityNotes | undefined, blocks: readonly unknown[], index: number): void {
+  if (!fidelity) return;
+  for (const block of blocks) {
+    fidelity.own(block, index);
+    const value = block as { type?: unknown; content?: unknown } | null;
+    if (value?.type === 'tool_result' && Array.isArray(value.content)) {
+      for (const nested of value.content) fidelity.own(nested, index);
+    }
   }
 }
 

@@ -9,6 +9,7 @@
  * - 'multiuser': Multiple participants, names prefixed to content
  */
 
+import { ownBlocks } from '../utils/fidelity.js';
 import type {
   NormalizedMessage,
   ContentBlock,
@@ -264,6 +265,8 @@ export class NativeFormatter implements PrefillFormatter {
       if (content.length === 0) {
         continue; // Skip empty messages
       }
+      // An adapter's report about one of these blocks names this message.
+      ownBlocks(options.fidelity, content, i);
 
       // hasCacheMarker: cache boundary is BEFORE this message — tag previous message's last block
       if (hasCacheMarker && hasCacheMarker(message, i) && cacheControl && providerMessages.length > 0) {

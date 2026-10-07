@@ -131,6 +131,7 @@ export type {
   ToolCallsEvent,
   UsageEvent,
   RoundReport,
+  RoundUsage,
   CompleteEvent,
   ErrorEvent,
   AbortedEvent,

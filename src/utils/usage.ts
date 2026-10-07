@@ -98,6 +98,18 @@ export function resetUnconvertibleProviderItemWarnings(): void {
  * The four tool loops (callback/yielding × XML/native) each carried their own
  * copy of the accumulate-and-price block; this is the single one they share.
  */
+/**
+ * `ProviderResponse.unreportedUsage` for a provider's raw input and output
+ * counts: each that is not a number is unreported (its usage value is a 0
+ * default). Spread into a ProviderResponse.
+ */
+export function unreportedUsage(input: unknown, output: unknown): { unreportedUsage?: Array<'inputTokens' | 'outputTokens'> } {
+  const missing: Array<'inputTokens' | 'outputTokens'> = [];
+  if (typeof input !== 'number') missing.push('inputTokens');
+  if (typeof output !== 'number') missing.push('outputTokens');
+  return missing.length > 0 ? { unreportedUsage: missing } : {};
+}
+
 export class TurnUsageAccumulator {
   private readonly rounds: TurnRoundUsage[] = [];
   private readonly tokens: DetailedUsage = { inputTokens: 0, outputTokens: 0 };

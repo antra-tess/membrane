@@ -61,6 +61,9 @@ export interface UsageEvent {
   round?: RoundReport;
 }
 
+/** A round's usage, every count present only when the provider reported it. */
+export type RoundUsage = Partial<DetailedUsage>;
+
 /**
  * One provider round whose response stands, as its producer saw it.
  *
@@ -80,8 +83,12 @@ export interface RoundReport {
    * tool invocations a parser declined.
    */
   stopReason: StopReason;
-  /** This round's own usage as the adapter reported it: an unreported field is absent, not 0. */
-  usage: DetailedUsage;
+  /**
+   * This round's own usage as the provider reported it: a count it did not
+   * report is absent, not 0 (even where accounting keeps a 0 default), and a
+   * reported 0 is 0.
+   */
+  usage: RoundUsage;
   /**
    * The newest injected batch and how much of it, as an ordered prefix, this
    * round's request carried: 0 on the XML prefill path, which carries none.

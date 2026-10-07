@@ -301,10 +301,11 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         continue;
       }
 
-      // Skip empty messages except last. Empty-text removal (whitespace
-      // only, as utils/empty-text defines it) is not an alteration; any block
-      // that was dropped on the way here was recorded by extractContent.
+      // Skip empty messages except last. Whitespace-only text is content
+      // (only an exactly empty '' block carries nothing), so skipping a
+      // message that held some is an alteration.
       if (isEmpty && !isLastMessage) {
+        if (message.content.some((b) => b.type === 'text' && typeof b.text === 'string' && b.text !== '')) onAltered?.();
         continue;
       }
 
@@ -563,6 +564,9 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
           i++;
         }
         i--;
+        // The transcript renders a result's text; nested media becomes a
+        // note ([Image: …]) and other nested blocks have no rendering.
+        if (run.some((r) => Array.isArray(r.content) && r.content.some((sub) => sub.type !== 'text'))) onAltered?.();
         parts.push(...this.renderToolResultRun(run));
       } else if (block.type === 'document' || block.type === 'audio') {
         hasUnsupportedMedia = true;

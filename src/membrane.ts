@@ -70,6 +70,7 @@ import type {
   StreamEvent,
   ToolCallsEvent,
   RoundReport,
+  RoundUsage,
 } from './types/yielding-stream.js';
 import type { PrefillFormatter, StreamParser } from './formatters/types.js';
 import { AnthropicXmlFormatter } from './formatters/anthropic-xml.js';
@@ -93,7 +94,7 @@ import {
   shedImagesToFitByteBudget, assertWithinByteBudget,
 } from './utils/image-media.js';
 import { getDefaultPricing } from './registry/default-pricing.js';
-import { FidelityNotes, requestFingerprint, type MessageOrigin } from './utils/fidelity.js';
+import { FidelityNotes, ownBlocks, requestFingerprint, type MessageOrigin } from './utils/fidelity.js';
 
 // ============================================================================
 // Membrane Class
@@ -1699,6 +1700,8 @@ export class Membrane {
         }
       }
 
+      // An adapter's report about one of these blocks names this message.
+      ownBlocks(fidelity, content, messageIndex);
       providerMessages.push({ role, content });
     }
 
@@ -2317,6 +2320,8 @@ export class Membrane {
     index: number;
     stopReason: StopReason;
     usage: DetailedUsage | undefined;
+    /** Counts the provider did not report (ProviderResponse.unreportedUsage): left out. */
+    unreported?: ReadonlyArray<'inputTokens' | 'outputTokens'>;
     fidelity: FidelityNotes;
     origins?: readonly MessageOrigin[];
     injectedBatch?: { batch: number; applied: number };
@@ -2330,10 +2335,12 @@ export class Membrane {
     }
     messages.sort((a, b) => a - b);
     injected.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    const usage: RoundUsage = { ...input.usage };
+    for (const field of input.unreported ?? []) delete usage[field];
     return {
       index: input.index,
       stopReason: input.stopReason,
-      usage: input.usage ?? { inputTokens: 0, outputTokens: 0 },
+      usage,
       ...(input.injectedBatch ? { injectedBatch: input.injectedBatch } : {}),
       altered: { messages, injected },
       fidelity: input.fidelity.established ? 'established' : 'unknown',
@@ -2405,10 +2412,17 @@ export class Membrane {
     // normalized form into every adapter's options.
     const { normalizedRequest, refusalRetries, onRetrying, onWireCacheMarkers, fidelity, ...adapterOptions } = options;
     // Fingerprint around the hook only when both a hook and a reader exist:
-    // an observer or a no-op hook keeps fidelity established.
+    // an observer or a no-op hook keeps fidelity established. A change made
+    // in place to the object the hook was handed is also remembered, since
+    // that object shares structure with state later rounds reuse.
     const beforeHook = fidelity && this.config.hooks?.beforeRequest ? requestFingerprint(request) : undefined;
     const finalRequest = (await this.applyBeforeRequestHook(normalizedRequest, request)) as typeof request;
-    if (beforeHook !== undefined && requestFingerprint(finalRequest) !== beforeHook) fidelity!.unattributed = true;
+    if (beforeHook !== undefined) {
+      const handed = requestFingerprint(request);
+      if (handed !== beforeHook) fidelity!.mutatedInPlace = true;
+      const sent = finalRequest === request ? handed : requestFingerprint(finalRequest);
+      if (sent !== beforeHook) fidelity!.unattributed = true;
+    }
     if (fidelity && !this.adapter.reportsContentAlterations) fidelity.uninstrumented = true;
 
     // Check every streaming path's post-hook representation. Only adapters
@@ -2427,7 +2441,7 @@ export class Membrane {
     const observedOptions = {
       ...adapterOptions,
       ...(receiptGuard ? { signal: receiptGuard.signal } : {}),
-      ...(fidelity ? { onContentAltered: () => { fidelity.unattributed = true; } } : {}),
+      ...(fidelity ? { onContentAltered: (block?: unknown) => fidelity.alterBlock(block) } : {}),
       onRequest: (wireRequest: unknown) => {
         if (useWireReceipt) {
           const wireCount = countWireCacheMarkers(wireRequest as Parameters<typeof countWireCacheMarkers>[0]);
@@ -3291,6 +3305,9 @@ export class Membrane {
     let { providerRequest, prefillResult } = this.transformRequest(request, formatter, buildFidelity);
     // Injected batches supplied to this stream; this path carries none of them.
     let injectedBatches = 0;
+    // Set once a beforeRequest hook changed its request in place: later
+    // continuations reuse that state, so their fidelity stays unknown.
+    let hookAlteredState = false;
 
     // Initialize parser with prefill content
     let initialPrefillLength = 0;
@@ -3454,6 +3471,8 @@ export class Membrane {
 
         // Accumulate usage (including cache metrics), priced at this round's model
         const usageSoFar = turnUsage.addRound(streamResult.model, streamResult.usage);
+        if (roundFidelity.mutatedInPlace) hookAlteredState = true;
+        if (hookAlteredState) roundFidelity.unattributed = true;
         if (emitUsage) {
           stream.emit({
             type: 'usage',
@@ -3462,6 +3481,7 @@ export class Membrane {
               index: rounds - 1,
               stopReason: lastStopReason,
               usage: turnUsage.lastRound?.usage,
+              unreported: streamResult.unreportedUsage,
               fidelity: roundFidelity,
               // The prefill transcript carries no injected message.
               ...(injectedBatches > 0 ? { injectedBatch: { batch: injectedBatches - 1, applied: 0 } } : {}),
@@ -3892,6 +3912,10 @@ export class Membrane {
     // Injected batches supplied to this stream; the newest one's size.
     let injectedBatches = 0;
     let newestBatchSize = 0;
+    // Set once a beforeRequest hook changed its request in place: nested
+    // blocks are shared with the consumer's messages, so later rounds stay
+    // unknown.
+    let hookAlteredState = false;
     let allContentBlocks: ContentBlock[] = [];
     let markersInLastRequest = 0;
 
@@ -4002,6 +4026,8 @@ export class Membrane {
 
         // Accumulate usage (including cache metrics), priced at this round's model
         const usageSoFar = turnUsage.addRound(streamResult.model, streamResult.usage);
+        if (roundFidelity.mutatedInPlace) hookAlteredState = true;
+        if (hookAlteredState) roundFidelity.unattributed = true;
         if (emitUsage) {
           stream.emit({
             type: 'usage',
@@ -4010,6 +4036,7 @@ export class Membrane {
               index: rounds - 1,
               stopReason: lastStopReason,
               usage: turnUsage.lastRound?.usage,
+              unreported: streamResult.unreportedUsage,
               fidelity: roundFidelity,
               origins,
               ...(carriedBatch ? { injectedBatch: carriedBatch } : {}),

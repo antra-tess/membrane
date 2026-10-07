@@ -9,6 +9,7 @@
  * exposes the response's ordered output array verbatim for the next turn.
  */
 
+import { unreportedUsage } from '../utils/usage.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { normalizeResponsesInput } from './responses-input.js';
 import { fetchWithCredentials, type CredentialResolver } from './credentials.js';
@@ -407,7 +408,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
     }, this.credentials ?? { token: this.apiKey });
   }
 
-  private buildRequest(request: ProviderRequest, onContentAltered?: () => void): OpenAIResponsesAPIRequest {
+  private buildRequest(request: ProviderRequest, onContentAltered?: (block?: unknown) => void): OpenAIResponsesAPIRequest {
     if (!Array.isArray(request.messages)) {
       throw new Error('OpenAI Responses API input must be a provider-native input-item array');
     }
@@ -541,6 +542,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
         outputTokens: response.usage?.output_tokens ?? 0,
         ...(typeof cachedTokens === 'number' ? { cacheReadTokens: cachedTokens } : {}),
       },
+      ...unreportedUsage(response.usage?.input_tokens, response.usage?.output_tokens),
       model: response.model ?? requestedModel,
       rawRequest,
       raw: response,

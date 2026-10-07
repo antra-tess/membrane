@@ -18,3 +18,15 @@
   along with the capability. All built-in formatters, and the Anthropic,
   Bedrock, Responses API and mock adapters, declare it; an undeclared path
   makes rounds `unknown`.
+- **Provider adapters:** `ProviderRequestOptions.onContentAltered(block?)`
+  takes the request's own block when one block was altered, and membrane
+  attributes it to the message that block came from. Declaring adapters
+  report through the final body, passthrough parameters and cleanup
+  included. Anthropic and Bedrock now report whitespace-only text removed by
+  their empty-text cleanup (an exactly empty `''` block is still no loss), a
+  passthrough `messages` that replaces the built messages, and nested
+  tool-result blocks with no wire form.
+- `ProviderResponse.unreportedUsage` names the required counts
+  (`inputTokens`, `outputTokens`) a provider did not report. Their 0 in
+  `usage` stays for accounting, and round reports leave them out. Every
+  built-in adapter sets it.

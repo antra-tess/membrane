@@ -133,6 +133,22 @@ function reasoningInputItem(block: JsonObject): unknown {
  * the image). Returns null for image-free content so callers keep their
  * legacy string form and existing replay bytes don't change.
  */
+/**
+ * Whether a tool result's content loses something on its way to a Responses
+ * `function_call_output`: a nested block that is neither text nor an image
+ * the output can carry (it is JSON-stringified or replaced by a note).
+ */
+export function responsesToolOutputLoses(content: unknown): boolean {
+  if (!Array.isArray(content)) return false;
+  return content.some((block) => {
+    if (typeof block === 'string') return false;
+    if (!isObject(block)) return true;
+    if (block.type === 'text' || block.type === 'input_text' || block.type === 'input_image') return false;
+    if (block.type === 'image') return !responsesImageUrl(block);
+    return true;
+  });
+}
+
 export function responsesToolOutputParts(content: unknown): unknown[] | null {
   if (!Array.isArray(content)) return null;
   if (!content.some((block) => isObject(block) && (block.type === 'image' || block.type === 'input_image'))) {

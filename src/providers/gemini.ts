@@ -99,6 +99,15 @@ interface GeminiResponse {
  * Google's own total is the independent witness, and a mismatch means a
  * usageMetadata field membrane does not read is carrying tokens.
  */
+/**
+ * Gemini's usageMetadata follows proto3 JSON, which omits zero-valued counts:
+ * when the object is present, a missing count is a reported 0. Only a
+ * response with no usageMetadata at all leaves the counts unreported.
+ */
+function geminiUnreportedUsage(usageMetadata: GeminiResponse['usageMetadata']): { unreportedUsage?: Array<'inputTokens' | 'outputTokens'> } {
+  return usageMetadata ? {} : { unreportedUsage: ['inputTokens', 'outputTokens'] };
+}
+
 function geminiUsageToProviderUsage(
   usageMetadata: GeminiResponse['usageMetadata']
 ): ProviderResponse['usage'] {
@@ -340,6 +349,7 @@ export class GeminiAdapter implements ProviderAdapter {
         stopReason: this.mapFinishReason(finishReason),
         stopSequence: undefined,
         usage: geminiUsageToProviderUsage(lastUsage),
+        ...geminiUnreportedUsage(lastUsage),
         model: lastModelVersion ?? request.model,
         rawRequest: geminiRequest,
         raw: { finishReason, usage: lastUsage },
@@ -603,6 +613,7 @@ export class GeminiAdapter implements ProviderAdapter {
       stopReason: this.mapFinishReason(candidate?.finishReason),
       stopSequence: undefined,
       usage: geminiUsageToProviderUsage(response.usageMetadata),
+      ...geminiUnreportedUsage(response.usageMetadata),
       model: response.modelVersion ?? requestedModel,
       rawRequest,
       raw: response,

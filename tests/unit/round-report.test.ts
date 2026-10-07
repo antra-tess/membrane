@@ -409,7 +409,7 @@ describe('usage at the adapter boundary: a reported 0 is 0, an unreported count 
 });
 
 describe('adapters report the content they leave out', () => {
-  it('Anthropic: a nested tool-result block with no Anthropic form, but not empty-text cleanup', () => {
+  it('Anthropic: a nested tool-result block with no Anthropic form, or whitespace text cleaned away, but not an exactly empty block', () => {
     const adapter = new AnthropicAdapter({ apiKey: 'test', cacheKeepalive: { enabled: false } }) as any;
     const request = (nested: unknown[]) => ({
       model: 'claude-sonnet-4-5', maxTokens: 64,
@@ -419,10 +419,12 @@ describe('adapters report the content they leave out', () => {
       ],
     });
     let altered = 0;
-    adapter.buildRequest(request([{ type: 'text', text: 'result' }, { type: 'text', text: ' ' }]), () => altered++);
+    adapter.buildRequest(request([{ type: 'text', text: 'result' }, { type: 'text', text: '' }]), () => altered++);
     expect(altered).toBe(0);
-    adapter.buildRequest(request([{ type: 'text', text: 'result' }, { type: 'document', source: { type: 'base64', mediaType: 'application/pdf', data: 'JVBERi0=' } }]), () => altered++);
+    adapter.buildRequest(request([{ type: 'text', text: 'result' }, { type: 'text', text: ' ' }]), () => altered++);
     expect(altered).toBe(1);
+    adapter.buildRequest(request([{ type: 'text', text: 'result' }, { type: 'document', source: { type: 'base64', mediaType: 'application/pdf', data: 'JVBERi0=' } }]), () => altered++);
+    expect(altered).toBe(2);
   });
 
   it('Responses input normalization: an assistant image and a non-object block', () => {
@@ -435,5 +437,121 @@ describe('adapters report the content they leave out', () => {
       { role: 'assistant', content: [{ type: 'text', text: 'see' }, { type: 'image', source: { type: 'url', url: 'https://example.invalid/a.png' } }, 'stray'] },
     ] as any, () => dropped++);
     expect(dropped).toBe(2);
+  });
+});
+
+/** The real Anthropic request builder; only the network response is scripted. */
+class ScriptedAnthropic extends AnthropicAdapter {
+  sent: any[] = [];
+  constructor(private turns: Array<{ content: unknown[]; stopReason: string; usage?: Record<string, unknown> }>) {
+    super({ apiKey: 'test', cacheKeepalive: { enabled: false } });
+  }
+  override async stream(request: ProviderRequest, callbacks: StreamCallbacks, options?: ProviderRequestOptions): Promise<ProviderResponse> {
+    const wire = (this as any).buildRequest(request, options?.onContentAltered);
+    this.sent.push(JSON.parse(JSON.stringify(wire)));
+    options?.onRequest?.(wire);
+    const turn = this.turns.shift()!;
+    for (const b of turn.content as Array<{ type: string; text?: string }>) if (b.type === 'text') callbacks.onChunk(b.text!);
+    return { content: turn.content, stopReason: turn.stopReason, usage: { inputTokens: 10, outputTokens: 2 }, model: request.model, rawRequest: wire, raw: {} };
+  }
+}
+
+describe('producer-boundary losses (Hugo, room-220 #45131 and #45179)', () => {
+  const nativeAnthropicRequest = (extra: Partial<NormalizedRequest> = {}): NormalizedRequest => ({
+    messages: [{ participant: 'User', content: [{ type: 'text', text: 'ORIGINAL' }] }],
+    config: { model: 'claude-sonnet-4-5', maxTokens: 1000 },
+    tools: [noopTool], toolMode: 'native', promptCaching: false, ...extra,
+  });
+
+  it('a hook\'s in-place edit that continuations keep carrying stays unknown on later rounds (XML)', async () => {
+    const adapter = new MockAdapter({ streamChunkDelayMs: 0, completeDelayMs: 0, responseQueue: ['<function_calls><invoke name="noop"></invoke></function_calls>', 'done.'] });
+    const sent: string[] = [];
+    let calls = 0;
+    const membrane = new Membrane(adapter, {
+      hooks: {
+        beforeRequest: (_normalized, provider: any) => {
+          if (calls++ === 0) provider.messages.find((m: any) => m.role === 'user').content = 'CHANGED';
+          sent.push(JSON.stringify(provider.messages));
+          return undefined;
+        },
+      },
+    });
+    const { rounds } = await drive(membrane, {
+      messages: [{ participant: 'User', content: [{ type: 'text', text: 'ORIGINAL' }] }],
+      config: { model: 'test-model', maxTokens: 1000 }, tools: [noopTool], promptCaching: false,
+    });
+    expect(sent.every((m) => m.includes('CHANGED'))).toBe(true);
+    expect(rounds.map((r) => r.fidelity)).toEqual(['unknown', 'unknown']);
+  });
+
+  it('a passthrough that replaces the built messages makes the round unknown (Anthropic, Bedrock)', async () => {
+    const adapter = new ScriptedAnthropic([{ content: [{ type: 'text', text: 'done' }], stopReason: 'end_turn' }]);
+    const { rounds } = await drive(new Membrane(adapter), nativeAnthropicRequest({
+      providerParams: { messages: [{ role: 'user', content: [{ type: 'text', text: 'REPLACEMENT' }] }] },
+    }));
+    expect(adapter.sent[0].messages[0].content[0].text).toBe('REPLACEMENT');
+    expect(rounds[0]!.fidelity).toBe('unknown');
+
+    const { BedrockAdapter } = await import('../../src/providers/bedrock.js');
+    const bedrock = new BedrockAdapter({ accessKeyId: 'test', secretAccessKey: 'test', region: 'us-west-2' }) as any;
+    let altered = 0;
+    bedrock.buildRequest({ model: 'claude', maxTokens: 10, messages: [{ role: 'user', content: [{ type: 'text', text: 'x' }] }], extra: { messages: [] } }, undefined, () => altered++);
+    expect(altered).toBe(1);
+  });
+
+  it('whitespace text the Anthropic cleanup removes is reported against the injected message that held it', async () => {
+    const adapter = new ScriptedAnthropic([
+      { content: [{ type: 'tool_use', id: 't1', name: 'noop', input: {} }], stopReason: 'tool_use' },
+      { content: [{ type: 'text', text: 'done' }], stopReason: 'end_turn' },
+    ]);
+    const { rounds } = await drive(new Membrane(adapter), nativeAnthropicRequest(), {
+      inject: [[{ participant: 'Visitor', content: [{ type: 'text', text: 'body' }, { type: 'text', text: '   ' }] }]],
+    });
+    expect(JSON.stringify(adapter.sent[1].messages)).not.toContain('"   "');
+    expect(rounds[1]!.injectedBatch).toEqual({ batch: 0, applied: 1 });
+    expect(rounds[1]!.altered).toEqual({ messages: [], injected: [[0, 0]] });
+    expect(rounds[1]!.fidelity).toBe('established');
+  });
+
+  it('whitespace removal is attributed for compiled messages too, and an exactly empty block is not a loss', async () => {
+    const adapter = new ScriptedAnthropic([{ content: [{ type: 'text', text: 'done' }], stopReason: 'end_turn' }]);
+    const { rounds } = await drive(new Membrane(adapter), nativeAnthropicRequest({
+      messages: [
+        { participant: 'Alice', content: [{ type: 'text', text: 'kept' }, { type: 'text', text: '' }] },
+        { participant: 'Bob', content: [{ type: 'text', text: 'kept' }, { type: 'text', text: ' \n' }] },
+      ],
+    }));
+    expect(rounds[0]!.altered).toEqual({ messages: [1], injected: [] });
+    expect(rounds[0]!.fidelity).toBe('established');
+  });
+
+  it('XML history: nested tool-result media rendered as a note is reported against its message', async () => {
+    const adapter = new MockAdapter({ streamChunkDelayMs: 0, completeDelayMs: 0, responseQueue: ['done.'] });
+    const { rounds } = await drive(new Membrane(adapter), {
+      config: { model: 'test-model', maxTokens: 1000 }, promptCaching: false,
+      messages: [
+        { participant: 'Claude', content: [{ type: 'tool_use', id: 't1', name: 'noop', input: {} }] },
+        { participant: 'User', content: [{ type: 'tool_result', toolUseId: 't1', content: [{ type: 'text', text: 'picture' }, { type: 'image', source: { type: 'base64', mediaType: 'image/png', data: 'iVBORw0KGgo=' } }] }] },
+        { participant: 'User', content: [{ type: 'text', text: 'continue' }] },
+      ],
+    } as NormalizedRequest);
+    expect(rounds[0]!.altered.messages).toEqual([1]);
+    expect(rounds[0]!.fidelity).toBe('established');
+  });
+
+  it('an unreported count is absent from the round\'s usage, though accounting keeps its 0', async () => {
+    const adapter = new OpenAIResponsesAPIAdapter({ apiKey: 'test' }) as any;
+    const parsed = adapter.parseResponse({ id: 'r', model: 'gpt-test', status: 'completed', output: [] }, 'gpt-test', {});
+    expect(parsed.usage).toMatchObject({ inputTokens: 0, outputTokens: 0 });
+    expect(parsed.unreportedUsage).toEqual(['inputTokens', 'outputTokens']);
+    const reported = adapter.parseResponse({ id: 'r', model: 'gpt-test', status: 'completed', output: [], usage: { input_tokens: 0, output_tokens: 3 } }, 'gpt-test', {});
+    expect(reported.unreportedUsage).toBeUndefined();
+
+    const silent = new ScriptedAdapter([finalTurn()]);
+    const origStream = silent.stream.bind(silent);
+    silent.stream = async (...args: Parameters<ScriptedAdapter['stream']>) => ({ ...(await origStream(...args)), unreportedUsage: ['inputTokens'] });
+    const { rounds } = await drive(new Membrane(silent), nativeRequest([{ participant: 'User', content: [{ type: 'text', text: 'hi' }] }]));
+    expect('inputTokens' in rounds[0]!.usage).toBe(false);
+    expect(rounds[0]!.usage.outputTokens).toBe(10);
   });
 });

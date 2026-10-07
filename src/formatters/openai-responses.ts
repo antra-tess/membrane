@@ -22,7 +22,7 @@ import type {
   StreamEmission,
   StreamParser,
 } from './types.js';
-import { responsesToolOutputParts } from '../providers/responses-input.js';
+import { responsesToolOutputLoses, responsesToolOutputParts } from '../providers/responses-input.js';
 
 import { resolveImageMediaType } from '../utils/image-media.js';
 
@@ -195,6 +195,7 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
         });
       } else if (block.type === 'tool_result') {
         flushMessage();
+        if (responsesToolOutputLoses(block.content)) onAltered?.();
         out.push({
           type: 'function_call_output',
           call_id: block.toolUseId,

@@ -12,6 +12,7 @@
  * - Direct API integration with proper error handling
  */
 
+import { unreportedUsage } from '../utils/usage.js';
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -642,6 +643,7 @@ export class OpenAIAdapter implements ProviderAdapter {
         // Note: OpenAI doesn't have separate "creation" tokens - it's automatic
         ...(typeof cachedTokens === 'number' ? { cacheReadTokens: cachedTokens } : {}),
       },
+      ...unreportedUsage(response.usage?.prompt_tokens, response.usage?.completion_tokens),
       model: response.model ?? requestedModel,
       rawRequest,
       raw: response,
@@ -667,6 +669,7 @@ export class OpenAIAdapter implements ProviderAdapter {
         outputTokens: streamUsage?.completion_tokens ?? 0,
         ...(typeof cachedTokens === 'number' ? { cacheReadTokens: cachedTokens } : {}),
       },
+      ...unreportedUsage(streamUsage?.prompt_tokens, streamUsage?.completion_tokens),
       model: requestedModel,
       rawRequest,
       raw: { message, finish_reason: finishReason, usage: streamUsage },
