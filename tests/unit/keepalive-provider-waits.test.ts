@@ -154,13 +154,15 @@ describe('the Anthropic adapter holds its keepalive on stated waits', () => {
     content: [{ type: 'text', text: 'hi' }], stop_reason: 'end_turn', stop_sequence: null,
     usage: { input_tokens: 12, output_tokens: 1, cache_read_input_tokens: 1000, cache_creation_input_tokens: 0 },
   };
-  const rateLimited = (retryAfterSeconds: string) => new Response(
+  const rateLimitedWith = (headers: Record<string, string>) => new Response(
     JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'zz slow down' } }),
-    { status: 429, headers: { 'content-type': 'application/json', 'retry-after': retryAfterSeconds } },
+    { status: 429, headers: { 'content-type': 'application/json', ...headers } },
   );
+  const rateLimited = (retryAfterSeconds: string) => rateLimitedWith({ 'retry-after': retryAfterSeconds });
+  const pokeAnswered = () => new Response(JSON.stringify({ ...ok, content: [], stop_reason: 'max_tokens' }), { headers: { 'content-type': 'application/json' } });
   const request = { model: 'claude-sonnet-4-5', maxTokens: 1024, system: wire().system, messages: wire().messages, extra: { thinking: { type: 'adaptive' } } } as never;
 
-  function adapter(respond: (body: Record<string, unknown>) => Response, events: KeepaliveEvent[]) {
+  function adapter(respond: (body: Record<string, unknown>) => Response, events: KeepaliveEvent[], lanes: CacheKeepaliveConfig['lanes'] = ['complete']) {
     const bodies: Array<Record<string, unknown>> = [];
     vi.stubGlobal('fetch', vi.fn(async (_input: unknown, init: { body: string }) => {
       const body = JSON.parse(init.body) as Record<string, unknown>;
@@ -169,7 +171,7 @@ describe('the Anthropic adapter holds its keepalive on stated waits', () => {
     }));
     const a = new AnthropicAdapter({
       apiKey: 'test-key',
-      cacheKeepalive: { lanes: ['complete'], refreshAfterMs: 45 * MIN, checkIntervalMs: 5 * MIN, maxIdleMs: 24 * 60 * MIN, onEvent: (e) => events.push(e) },
+      cacheKeepalive: { lanes, refreshAfterMs: 45 * MIN, checkIntervalMs: 5 * MIN, maxIdleMs: 24 * 60 * MIN, onEvent: (e) => events.push(e) },
     });
     keepalives.push(a.cacheKeepalive!);
     return { a, bodies };
@@ -203,5 +205,32 @@ describe('the Anthropic adapter holds its keepalive on stated waits', () => {
     expect(pokes).toBeGreaterThan(3);
     expect(events.some((e) => e.type === 'disabled')).toBe(false);
     expect(new Set((events.filter((e) => e.type === 'error') as Array<{ consecutive: number }>).map((e) => e.consecutive))).toEqual(new Set([0]));
+  });
+
+  it("a foreground wait stated only in retry-after-ms holds the model's pokes, from complete() and from stream()", async () => {
+    for (const lane of ['complete', 'stream'] as const) {
+      const events: KeepaliveEvent[] = [];
+      const { a, bodies } = adapter((body) => (body.max_tokens === 0 ? pokeAnswered() : rateLimitedWith({ 'retry-after-ms': '7200000' })), events, [lane]);
+      const call = lane === 'complete' ? a.complete(request) : a.stream(request, { onChunk: () => {} });
+      await expect(call, lane).rejects.toMatchObject({ type: 'rate_limit', retryAfterMs: 7_200_000 });
+      expect(events.filter((e) => e.type === 'held'), lane).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(115 * MIN);
+      expect(bodies.filter((b) => b.max_tokens === 0), lane).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(10 * MIN);
+      expect(bodies.filter((b) => b.max_tokens === 0), lane).toHaveLength(1);
+      a.cacheKeepalive!.stop();
+    }
+  });
+
+  it("its own refused pokes with a wait stated only in retry-after-ms never trip the breaker", async () => {
+    const events: KeepaliveEvent[] = [];
+    const { a, bodies } = adapter((body) => (body.max_tokens === 0
+      ? rateLimitedWith({ 'retry-after-ms': '600000' })
+      : new Response(JSON.stringify(ok), { headers: { 'content-type': 'application/json' } })), events);
+    await a.complete(request);
+    await vi.advanceTimersByTimeAsync(12 * 60 * MIN);
+    expect(bodies.filter((b) => b.max_tokens === 0).length).toBeGreaterThan(3);
+    expect(events.filter((e) => e.type === 'held').length).toBeGreaterThan(3);
+    expect(events.some((e) => e.type === 'disabled')).toBe(false);
   });
 });
