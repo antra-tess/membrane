@@ -8,11 +8,13 @@
   never closed), and text after a CDATA value's last section all refuse the
   invoke. A refused invoke is never a `ToolCall` or a `tool_use`. A value
   that contains markup for an optional declared parameter the call doesn't
-  otherwise include is still sent as parsed, with a warning. Before, a
+  otherwise include keeps the call as parsed, with a warning: membrane's loops
+  dispatch it, and a no-loop result returns it as a call. Before, a
   miskeyed closer read through to the next well-formed one, and the call
   dispatched with the next parameter swallowed into the previous value. Both
   `parseToolCalls` and `parseAccumulatedIntoBlocks` apply the same rules. Each
-  refusal and warning is a notice the model reads in the results (see Added).
+  refusal and warning is a notice, recorded in the results the loop injects
+  and on the response (see Added).
 - **CDATA is the literal spelling for a parameter value.** One or more
   consecutive CDATA sections directly after a parameter's opening tag (one
   framing newline allowed), followed only by whitespace before the closer,

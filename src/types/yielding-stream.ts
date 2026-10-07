@@ -50,8 +50,9 @@ export interface ToolCallsEvent {
  * and the parser refused every invoke in it, so there is nothing to execute.
  * It is not a request: the stream does not pause, and no results are
  * expected. Membrane has already answered the block in-band with the notices
- * (a `<function_results>` holding only them) and continues the turn, so the
- * model reads why its call was not sent.
+ * (a `<function_results>` holding only them), recorded for continuation and
+ * replay, and continues the turn unless `maxToolDepth` or the resumption cap
+ * ends it there; when it continues, the model reads why its call was not sent.
  *
  * A consumer persisting rounds keeps the attempt as a `tool_attempt` block in
  * the round's assistant content (the round's text is in `context`) and the

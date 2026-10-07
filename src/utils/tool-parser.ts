@@ -412,7 +412,7 @@ interface ParsedParameters {
   input: Record<string, unknown>;
   /** Why the call must not be sent, when it must not. */
   refusal?: string;
-  /** Oddities of a call that is sent as parsed. Empty when refused. */
+  /** Oddities of a call that is kept as parsed. Empty when refused. */
   warnings: string[];
 }
 
@@ -455,7 +455,8 @@ const UNRECOGNIZED_PARAMETER_CLOSER_AT_END = /<\/([^\s<>/:]+):parameter>\s*$/;
  *     closing tag, or a parameter never closed);
  *   - text after a CDATA value's last section, before its closer.
  * A raw value holding an opener for an optional declared parameter the call
- * lacks is sent as parsed, with a warning that makes no claim about intent.
+ * lacks keeps the call as parsed, with a warning that makes no claim about
+ * intent.
  * CDATA payloads are never inspected: they are what the caller meant.
  *
  * `toolName` is the name the invoke actually dispatches under — for a
@@ -1183,9 +1184,9 @@ function renderResultContentString(result: ToolResult): string {
  *
  * `notices` are the parser's notices about the block these results answer
  * (refused invokes, and warnings about calls that ran). They follow every
- * result, one element each, so the model reads why a call it made has no
- * result; see {@link formatToolCallNotice}. An envelope may hold notices only,
- * when every invoke was refused.
+ * result, one element each, so that when the turn continues the model reads
+ * why a call it made has no result; see {@link formatToolCallNotice}. An
+ * envelope may hold notices only, when every invoke was refused.
  */
 export function formatToolResults(results: ToolResult[], notices: readonly ToolCallNotice[] = []): string {
   const parts: string[] = ['<function_results>'];

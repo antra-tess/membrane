@@ -169,8 +169,9 @@ export interface ToolResultContent {
  * It is the model's own text, kept so replay shows the attempt exactly as
  * written. It is not a call — nothing ran, and no tool_result answers it — so
  * it is never a tool_use, and it is not prose either: it is never outward
- * speech. When at least one invoke in a block was dispatched, the tool_use
- * blocks carry the block's `rawXml` instead and no tool_attempt is needed.
+ * speech. When at least one invoke in a block is a call (dispatched, or
+ * eligible for dispatch), the tool_use blocks carry the block's `rawXml`
+ * instead and no tool_attempt is needed.
  * Prefill formatters replay `rawXml` verbatim; other formatters render it as
  * the assistant's text.
  */

@@ -145,9 +145,10 @@ export interface ToolContext {
  * malformed in a way that would change the caller's arguments (a miskeyed or
  * missing closing tag swallowed a required parameter, a value was cut at a
  * literal closing tag, text follows a CDATA value). It never becomes a
- * ToolCall or a tool_use. A `warning` invoke was dispatched as parsed, with the
- * parse's oddity stated (a value contains markup for an optional parameter the
- * call doesn't otherwise include). `message` is written for the model that
+ * ToolCall or a tool_use. A `warning` invoke is a call as parsed — dispatched
+ * in membrane's loops, eligible for dispatch in a parse result a caller acts
+ * on — with the parse's oddity stated (a value contains markup for an optional
+ * parameter the call doesn't otherwise include). `message` is written for the model that
  * made the call; it says what was observed and, for a refusal, how to send the
  * text as data.
  */
