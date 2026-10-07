@@ -33,6 +33,22 @@ import { resolveImageMediaType, isAcceptedImageMediaType, strippedImagePlacehold
 import { assertCacheMarkersWithinLimit } from '../utils/cache-marker-budget.js';
 import { toolCallNoticesText } from '../utils/tool-parser.js';
 
+/**
+ * A provider message with its tool_notice blocks as text: the form the wire
+ * takes once the role split has placed them on the harness side.
+ */
+function noticesAsText<M extends { content: unknown }>(message: M): M {
+  if (!Array.isArray(message.content)) return message;
+  if (!message.content.some((block) => (block as { type?: unknown }).type === 'tool_notice')) return message;
+  return {
+    ...message,
+    // Everything else on the block (a cache_control marker) stays.
+    content: message.content.map((block) =>
+      (block as { type?: unknown }).type === 'tool_notice' ? { ...(block as object), type: 'text' } : block
+    ),
+  };
+}
+
 /** Index of the last content block that can carry cache_control. Anthropic
  *  rejects cache_control on thinking / redacted_thinking blocks, so a cache
  *  breakpoint must attach to the last NON-thinking block. Returns -1 when the
@@ -307,8 +323,9 @@ export class NativeFormatter implements PrefillFormatter {
       onEvent: options.onNormalize,
     });
 
-    // Merge consecutive same-role messages (API requires alternating)
-    const mergedMessages = mergeConsecutiveRoles(normalized.messages);
+    // Merge consecutive same-role messages (API requires alternating). A
+    // tool_notice has its side now; on the wire it is text.
+    const mergedMessages = mergeConsecutiveRoles(normalized.messages.map(noticesAsText));
 
     // Build system content. Cache the system block only as a fallback — when no
     // message breakpoint was marked (see note above; otherwise a message
@@ -523,11 +540,13 @@ export class NativeFormatter implements PrefillFormatter {
         // tool_use — nothing ran and nothing answers it.
         result.push({ type: 'text', text: block.rawXml });
       } else if (block.type === 'tool_notice') {
-        // The harness's notice about refused or warned invokes, as attributed
-        // text after any tool_result blocks (which must come first). No name
-        // prefix: it is nobody's utterance.
+        // The harness's notice about refused or warned invokes: attributed
+        // text on the harness side, after any tool_result blocks. It travels
+        // as a tool_notice block until the role split has put it on the user
+        // side (requiredRoleOf), then goes out as text (see buildMessages).
+        // No name prefix: it is nobody's utterance.
         const text = toolCallNoticesText(block.notices);
-        if (text) result.push({ type: 'text', text });
+        if (text) result.push({ type: 'tool_notice', text });
       } else if (block.type === 'document') {
         hasUnsupportedMedia = true;
       }

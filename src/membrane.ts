@@ -26,6 +26,7 @@ import type {
   ToolContext,
   RetryConfig,
   ToolDefinition,
+  TurnToolCallNotice,
 } from './types/index.js';
 import { lastCacheableBlockIndex } from './formatters/native.js';
 import {
@@ -69,6 +70,7 @@ import type {
   YieldingStreamOptions,
   StreamEvent,
   ToolCallsEvent,
+  ToolAttemptEvent,
 } from './types/yielding-stream.js';
 import type { PrefillFormatter, StreamParser } from './formatters/types.js';
 import { AnthropicXmlFormatter } from './formatters/anthropic-xml.js';
@@ -697,6 +699,8 @@ export class Membrane {
     let initialBlockType: 'thinking' | 'tool_call' | 'tool_result' | null = null;
     if (prefillResult.assistantPrefill) {
       parser.push(prefillResult.assistantPrefill);
+      // The prefill is history: a CDATA payload it left open ends here.
+      parser.endHistory?.();
       initialPrefillLength = prefillResult.assistantPrefill.length;
       roundStartLen = initialPrefillLength;
       // Capture what block type we're inside after prefill (if any)
@@ -712,6 +716,12 @@ export class Membrane {
     // blocks inherited from prefill context (e.g., unclosed <thinking> from other bots)
     // from blocks the model itself opened during generation
     const prefillDepths = parser.getDepths();
+
+    // Every <function_results> envelope this loop injects, by its offsets in
+    // the accumulated text: the evidence that an envelope is the harness
+    // speaking, which the final parse needs (ToolParseOptions.harnessEnvelopes).
+    const harnessEnvelopes: Array<{ start: number; end: number }> = [];
+    const turnEnvelopes = () => rebaseEnvelopes(harnessEnvelopes, initialPrefillLength);
 
     // Resumption spin guards (issue #39). Observed live on Ash 2026-07-26:
     // each automatic resumption re-sent ~172k input tokens, streamed ~6
@@ -791,7 +801,7 @@ export class Membrane {
               const newContent = accumulated.slice(checkFromIndex);
 
               for (const stopSeq of prefillResult.stopSequences) {
-                const idx = newContent.indexOf(stopSeq);
+                const idx = firstStopOutsidePayload(parser, newContent, stopSeq, checkFromIndex);
                 if (idx !== -1) {
                   // Found stop sequence - mark it and truncate
                   const absoluteIdx = checkFromIndex + idx;
@@ -848,8 +858,7 @@ export class Membrane {
 
         // If we detected stop sequence manually, fix up the parser and result
         if (detectedStopSequence && truncatedAccumulated !== null) {
-          parser.reset();
-          parser.push(truncatedAccumulated);
+          rebuildParser(parser, truncatedAccumulated, initialPrefillLength);
           streamResult.stopReason = 'stop_sequence';
           streamResult.stopSequence = detectedStopSequence;
         }
@@ -921,14 +930,55 @@ export class Membrane {
         prevRoundStopSequence = lastStopSequence;
         enteredViaResumption = false;
 
+        // A stop inside a CDATA payload is data, not a stop: it is restored
+        // below and the turn resumes; dispatch waits for a closer outside it.
+        const stoppedInPayload =
+          lastStopReason === 'stop_sequence' && (parser.isInsidePayload?.() ?? false);
+        // The consumed stop text goes back exactly once.
+        let restoredStop = false;
+
         // Check for tool calls (if handler provided)
-        if (onToolCalls && streamResult.stopSequence === '</function_calls>') {
+        if (onToolCalls && streamResult.stopSequence === '</function_calls>' && !stoppedInPayload) {
           // Append the closing tag (we truncated before it, or API stopped before it)
           const closeTag = '</function_calls>';
           parser.push(closeTag);
+          restoredStop = true;
           // Note: closing tag is structural XML, not emitted via onChunk (invisible)
 
-          const parsed = parseToolCalls(parser.getAccumulated(), { tools: request.tools });
+          const parsed = parseToolCalls(parser.getAccumulated(), {
+            tools: request.tools,
+            historyLength: initialPrefillLength,
+          });
+
+          if (parsed && parsed.calls.length === 0 && parsed.notices.length > 0) {
+            // Every invoke was refused: there is nothing to execute. The
+            // harness answers the block with the notices alone, so the model
+            // reads why nothing was sent, and the turn continues. This is an
+            // automatic continuation, bounded by the resumption cap as well
+            // as maxToolDepth.
+            if (!registerResumptionRound()) {
+              lastStopReason = 'round_limit';
+              break;
+            }
+            const preToolNew = parsed.beforeText.slice(initialPrefillLength);
+            if (onPreToolContent && preToolNew.trim()) {
+              await onPreToolContent(preToolNew);
+            }
+            injectEnvelope(parser, harnessEnvelopes, formatToolResults([], parsed.notices));
+            if (request.config.thinking?.enabled) {
+              parser.push('\n<thinking>');
+            }
+            prefillResult.assistantPrefill = parser.getAccumulated();
+            providerRequest = this.buildContinuationRequest(
+              request,
+              prefillResult,
+              parser.getAccumulated()
+            );
+            roundStartLen = parser.getAccumulated().length;
+            parser.resetForNewIteration();
+            toolDepth++;
+            continue;
+          }
 
           if (parsed && parsed.calls.length > 0) {
             // Notify about pre-tool content
@@ -982,6 +1032,7 @@ export class Membrane {
               depth: toolDepth,
               previousResults: executedToolResults,
               accumulated: parser.getAccumulated().slice(initialPrefillLength),
+              notices: parsed.notices,
             };
 
             const results = await onToolCalls(parsed.calls, context);
@@ -1005,7 +1056,8 @@ export class Membrane {
             // Check if results contain images (requires split-turn injection)
             if (hasImageInToolResults(results)) {
               // Use split-turn injection for images
-              const splitContent = formatToolResultsForSplitTurn(results);
+              const splitContent = formatToolResultsForSplitTurn(results, parsed.notices);
+              const envelopeStart = parser.getAccumulated().length;
 
               // Emit block events for tool results (image path)
               const toolResultBlockIndex = parser.getBlockIndex();
@@ -1061,13 +1113,19 @@ export class Membrane {
               // Also add afterImageXml to accumulated for complete rawAssistantText
               // Note: afterImageXml is internal prefill (closing tags), not emitted via onChunk
               parser.push(afterImageXml);
+              // The envelope is both parts, without a following <thinking>.
+              harnessEnvelopes.push({
+                start: envelopeStart,
+                end: envelopeStart + splitContent.beforeImageXml.length + splitContent.afterImageXml.length,
+              });
               prefillResult.assistantPrefill = parser.getAccumulated();
 
               // Reset parser state for new streaming iteration
               parser.resetForNewIteration();
             } else {
-              // Standard path: no images, use simple XML injection
-              const resultsXml = formatToolResults(results);
+              // Standard path: no images, use simple XML injection. The
+              // round's parser notices close the envelope, after the results.
+              const resultsXml = formatToolResults(results, parsed.notices);
 
               // Emit block events for tool results
               const toolResultBlockIndex = parser.getBlockIndex();
@@ -1078,7 +1136,7 @@ export class Membrane {
               });
 
               // Push XML to parser for prefill (internal), but emit clean content via onChunk
-              parser.push(resultsXml);
+              injectEnvelope(parser, harnessEnvelopes, resultsXml);
 
               // Emit chunk and block complete for each tool result (without XML wrapper)
               for (const result of results) {
@@ -1145,10 +1203,10 @@ export class Membrane {
           currentDepths.functionResults > prefillDepths.functionResults ||
           currentDepths.thinking > prefillDepths.thinking;
 
-        if (lastStopReason === 'stop_sequence' && modelOpenedNewBlock) {
+        if (lastStopReason === 'stop_sequence' && (modelOpenedNewBlock || stoppedInPayload)) {
           // False positive! The stop sequence (e.g., "\nUser:") appeared inside XML content
-          // Re-add the consumed stop sequence and resume streaming
-          if (streamResult.stopSequence) {
+          // Re-add the consumed stop sequence (once) and resume streaming
+          if (streamResult.stopSequence && !restoredStop) {
             parser.push(streamResult.stopSequence);
             const meta: ChunkMeta = {
               type: parser.getCurrentBlockType(),
@@ -1203,6 +1261,7 @@ export class Membrane {
         executedToolResults,
         initialBlockType,
         lastStopSequence,
+        turnEnvelopes(),
       );
 
       // Append non-text content blocks (e.g., generated_image) that the XML parser can't handle
@@ -1230,7 +1289,8 @@ export class Membrane {
           executedToolResults,
           this.abortReason(error, signal),
           initialBlockType,
-          request.tools
+          request.tools,
+          turnEnvelopes()
         );
       }
       // Re-throw with rawRequest attached for logging
@@ -2624,15 +2684,18 @@ export class Membrane {
     // Parse XML tool calls from text if no native tool_use blocks were found
     // This handles prefill mode where tools are XML in the text
     let emptyToolBlocks = 0;
+    let toolCallNotices: TurnToolCallNotice[] = [];
     if (toolCalls.length === 0 && rawAssistantText.includes('<function_calls>')) {
       const parsed = parseToolCalls(rawAssistantText, { tools: request.tools });
       if (parsed?.calls.length) {
         for (const tc of parsed.calls) {
           toolCalls.push(tc);
         }
-      } else if (parsed) {
+      } else if (parsed && parsed.notices.length === 0) {
         emptyToolBlocks = 1;
       }
+      // complete() runs no loop: the caller answers these with its results.
+      toolCallNotices = parseAccumulatedIntoBlocks(rawAssistantText, { tools: request.tools }).notices;
     }
     const unclosedToolBlock = endsWithPartialToolBlock(rawAssistantText);
 
@@ -2657,6 +2720,7 @@ export class Membrane {
       rawAssistantText,
       toolCalls,
       toolResults: [], // complete() doesn't execute tools
+      ...(toolCallNotices.length > 0 ? { toolCallNotices } : {}),
       stopReason,
       usage,
       details: {
@@ -2761,6 +2825,7 @@ export class Membrane {
     executedToolResults: ToolResult[] = [],
     startInsideBlock: 'thinking' | 'tool_call' | 'tool_result' | null = null,
     triggeredSequence?: string,
+    harnessEnvelopes: ReadonlyArray<{ start: number; end: number }> = [],
   ): NormalizedResponse {
     const usage = turnUsage.total;
     // Parse accumulated text into structured content blocks
@@ -2770,6 +2835,7 @@ export class Membrane {
     let toolResults: ToolResult[];
 
     let unclosedToolBlock = false;
+    let toolCallNotices: TurnToolCallNotice[] | undefined;
 
     if (contentBlocks.length > 0) {
       // Native mode - content blocks already structured
@@ -2779,9 +2845,12 @@ export class Membrane {
     } else {
       // XML mode - parse accumulated text into blocks
       // If we started inside a block (from prefill), pass that context so the parser
-      // can correctly handle closing tags without corresponding opening tags
+      // can correctly handle closing tags without corresponding opening tags.
+      // The envelopes the loop injected are the only ones that speak for the
+      // harness (their notices and recorded refusals).
       const parseOptions = {
         tools: request.tools,
+        harnessEnvelopes,
         ...(startInsideBlock ? { startInsideBlock } : {}),
       };
       const parsed = parseAccumulatedIntoBlocks(accumulated, parseOptions);
@@ -2789,6 +2858,7 @@ export class Membrane {
       toolCalls = parsed.toolCalls.length > 0 ? parsed.toolCalls : executedToolCalls;
       toolResults = parsed.toolResults.length > 0 ? parsed.toolResults : executedToolResults;
       unclosedToolBlock = parsed.unclosedToolBlock;
+      toolCallNotices = parsed.notices;
       this.reportToolParseDiagnostics(parsed, stopReason);
     }
 
@@ -2799,6 +2869,7 @@ export class Membrane {
       rawAssistantText: accumulated,
       toolCalls,
       toolResults,
+      ...(toolCallNotices?.length ? { toolCallNotices } : {}),
       stopReason,
       usage,
       details: {
@@ -3037,12 +3108,14 @@ export class Membrane {
     toolResults: ToolResult[],
     reason: 'user' | 'timeout' | 'error',
     startInsideBlock: 'thinking' | 'tool_call' | 'tool_result' | null = null,
-    tools?: ToolDefinition[]
+    tools?: ToolDefinition[],
+    harnessEnvelopes: ReadonlyArray<{ start: number; end: number }> = []
   ): AbortedResponse {
     // Parse accumulated text into content blocks for partial content
     // If we started inside a block (from prefill), pass that context
     const parseOptions = {
       tools,
+      harnessEnvelopes,
       ...(startInsideBlock ? { startInsideBlock } : {}),
     };
     const { blocks } = parseAccumulatedIntoBlocks(accumulated, parseOptions);
@@ -3215,6 +3288,8 @@ export class Membrane {
     let initialBlockType: 'thinking' | 'tool_call' | 'tool_result' | null = null;
     if (prefillResult.assistantPrefill) {
       parser.push(prefillResult.assistantPrefill);
+      // The prefill is history: a CDATA payload it left open ends here.
+      parser.endHistory?.();
       initialPrefillLength = prefillResult.assistantPrefill.length;
       roundStartLen = initialPrefillLength;
       if (parser.isInsideBlock()) {
@@ -3229,6 +3304,11 @@ export class Membrane {
     // blocks inherited from prefill context (e.g., unclosed <thinking> from other bots)
     // from blocks the model itself opened during generation
     const prefillDepths = parser.getDepths();
+
+    // Every <function_results> envelope this loop injects, by offset — see
+    // streamWithXmlTools.
+    const harnessEnvelopes: Array<{ start: number; end: number }> = [];
+    const turnEnvelopes = () => rebaseEnvelopes(harnessEnvelopes, initialPrefillLength);
 
     /** Count an automatic resumption; emits the visibility warning at the
      *  threshold and returns false when the cap says the turn should end. */
@@ -3262,7 +3342,10 @@ export class Membrane {
           stream.emit({
             type: 'aborted',
             reason: 'user',
-            partialContent: parseAccumulatedIntoBlocks(newContent, { tools: request.tools }).blocks,
+            partialContent: parseAccumulatedIntoBlocks(newContent, {
+              tools: request.tools,
+              harnessEnvelopes: turnEnvelopes(),
+            }).blocks,
             rawAssistantText: newContent,
             toolCalls: executedToolCalls,
             toolResults: executedToolResults,
@@ -3292,7 +3375,7 @@ export class Membrane {
               const newContent = accumulated.slice(checkFromIndex);
 
               for (const stopSeq of prefillResult.stopSequences) {
-                const idx = newContent.indexOf(stopSeq);
+                const idx = firstStopOutsidePayload(parser, newContent, stopSeq, checkFromIndex);
                 if (idx !== -1) {
                   const absoluteIdx = checkFromIndex + idx;
                   detectedStopSequence = stopSeq;
@@ -3347,8 +3430,7 @@ export class Membrane {
 
         // If we detected stop sequence manually, fix up the parser and result
         if (detectedStopSequence && truncatedAccumulated !== null) {
-          parser.reset();
-          parser.push(truncatedAccumulated);
+          rebuildParser(parser, truncatedAccumulated, initialPrefillLength);
           streamResult.stopReason = 'stop_sequence';
           streamResult.stopSequence = detectedStopSequence;
         }
@@ -3406,12 +3488,63 @@ export class Membrane {
         prevRoundStopSequence = lastStopSequence;
         enteredViaResumption = false;
 
+        // A stop inside a CDATA payload is data, not a stop: it is restored
+        // below and the turn resumes; dispatch waits for a closer outside it.
+        const stoppedInPayload =
+          lastStopReason === 'stop_sequence' && (parser.isInsidePayload?.() ?? false);
+        // The consumed stop text goes back exactly once.
+        let restoredStop = false;
+
         // Check for tool calls
-        if (streamResult.stopSequence === '</function_calls>') {
+        if (streamResult.stopSequence === '</function_calls>' && !stoppedInPayload) {
           const closeTag = '</function_calls>';
           parser.push(closeTag);
+          restoredStop = true;
 
-          const parsed = parseToolCalls(parser.getAccumulated(), { tools: request.tools });
+          const parsed = parseToolCalls(parser.getAccumulated(), {
+            tools: request.tools,
+            historyLength: initialPrefillLength,
+          });
+
+          if (parsed && parsed.calls.length === 0 && parsed.notices.length > 0) {
+            // Every invoke was refused: nothing to execute, so the executor is
+            // not asked. The consumer hears of the attempt; the harness answers
+            // the block with the notices alone and the turn continues — an
+            // automatic continuation, bounded by the resumption cap.
+            if (!registerResumptionRound()) {
+              lastStopReason = 'round_limit';
+              break;
+            }
+            const attemptEvent: ToolAttemptEvent = {
+              type: 'tool-attempt',
+              rawXml: parsed.fullMatch,
+              notices: parsed.notices,
+              context: {
+                rawText: parsed.fullMatch,
+                preamble: parsed.beforeText.slice(initialPrefillLength),
+                roundPreamble: parsed.beforeText.slice(roundStartLen),
+                depth: toolDepth,
+                previousResults: executedToolResults,
+                accumulated: parser.getAccumulated().slice(initialPrefillLength),
+                notices: parsed.notices,
+              },
+            };
+            stream.emit(attemptEvent);
+            injectEnvelope(parser, harnessEnvelopes, formatToolResults([], parsed.notices));
+            if (request.config.thinking?.enabled) {
+              parser.push('\n<thinking>');
+            }
+            prefillResult.assistantPrefill = parser.getAccumulated();
+            providerRequest = this.buildContinuationRequest(
+              request,
+              prefillResult,
+              parser.getAccumulated()
+            );
+            roundStartLen = parser.getAccumulated().length;
+            parser.resetForNewIteration();
+            toolDepth++;
+            continue;
+          }
 
           if (parsed && parsed.calls.length > 0) {
             // Emit block events for each tool call
@@ -3465,6 +3598,7 @@ export class Membrane {
               depth: toolDepth,
               previousResults: executedToolResults,
               accumulated: parser.getAccumulated().slice(initialPrefillLength),
+              notices: parsed.notices,
             };
 
             // Yield control for tool execution
@@ -3503,7 +3637,8 @@ export class Membrane {
 
             // Check if results contain images
             if (hasImageInToolResults(results)) {
-              const splitContent = formatToolResultsForSplitTurn(results);
+              const splitContent = formatToolResultsForSplitTurn(results, parsed.notices);
+              const envelopeStart = parser.getAccumulated().length;
 
               // Emit block events for tool results
               if (emitBlocks) {
@@ -3567,11 +3702,17 @@ export class Membrane {
               );
 
               parser.push(afterImageXml);
+              // The envelope is both parts, without a following <thinking>.
+              harnessEnvelopes.push({
+                start: envelopeStart,
+                end: envelopeStart + splitContent.beforeImageXml.length + splitContent.afterImageXml.length,
+              });
               prefillResult.assistantPrefill = parser.getAccumulated();
               parser.resetForNewIteration();
             } else {
-              // Standard path: no images
-              const resultsXml = formatToolResults(results);
+              // Standard path: no images. The round's parser notices close
+              // the envelope, after the results.
+              const resultsXml = formatToolResults(results, parsed.notices);
 
               if (emitBlocks) {
                 stream.emit({
@@ -3584,7 +3725,7 @@ export class Membrane {
                 });
               }
 
-              parser.push(resultsXml);
+              injectEnvelope(parser, harnessEnvelopes, resultsXml);
 
               for (const result of results) {
                 const resultContent = typeof result.content === 'string'
@@ -3652,8 +3793,9 @@ export class Membrane {
           currentDepths.functionResults > prefillDepths.functionResults ||
           currentDepths.thinking > prefillDepths.thinking;
 
-        if (lastStopReason === 'stop_sequence' && modelOpenedNewBlock) {
-          if (streamResult.stopSequence) {
+        if (lastStopReason === 'stop_sequence' && (modelOpenedNewBlock || stoppedInPayload)) {
+          // Re-add the consumed stop sequence (once) and resume streaming.
+          if (streamResult.stopSequence && !restoredStop) {
             parser.push(streamResult.stopSequence);
             if (emitTokens) {
               const meta: ChunkMeta = {
@@ -3707,6 +3849,7 @@ export class Membrane {
         executedToolResults,
         initialBlockType,
         lastStopSequence,
+        turnEnvelopes(),
       );
 
       // Merge provider thinking signatures into parser-derived thinking blocks
@@ -3723,7 +3866,10 @@ export class Membrane {
         stream.emit({
           type: 'aborted',
           reason: this.abortReason(error, stream.signal),
-          partialContent: parseAccumulatedIntoBlocks(newContent, { tools: request.tools }).blocks,
+          partialContent: parseAccumulatedIntoBlocks(newContent, {
+            tools: request.tools,
+            harnessEnvelopes: turnEnvelopes(),
+          }).blocks,
           rawAssistantText: newContent,
           toolCalls: executedToolCalls,
           toolResults: executedToolResults,
@@ -4053,6 +4199,59 @@ export class Membrane {
       }
     }
   }
+}
+
+// ============================================================================
+// XML tool loops: payloads and envelopes
+// ============================================================================
+
+/**
+ * The first occurrence of `stopSeq` in the round's new text that is a real
+ * stop: one inside a parameter's CDATA payload is data, and the chunk that
+ * carried it is kept rather than truncated there.
+ */
+function firstStopOutsidePayload(
+  parser: StreamParser,
+  newContent: string,
+  stopSeq: string,
+  checkFromIndex: number
+): number {
+  let idx = newContent.indexOf(stopSeq);
+  while (idx !== -1 && parser.isPayloadAt?.(checkFromIndex + idx)) {
+    idx = newContent.indexOf(stopSeq, idx + 1);
+  }
+  return idx;
+}
+
+/**
+ * Rebuild the parser over `text` after a local stop truncated it, keeping the
+ * history boundary: a payload the prefill left open ends where the prefill
+ * ends, exactly as when the parser was first seeded.
+ */
+function rebuildParser(parser: StreamParser, text: string, historyLength: number): void {
+  parser.reset();
+  parser.push(text.slice(0, historyLength));
+  if (historyLength > 0) parser.endHistory?.();
+  parser.push(text.slice(historyLength));
+}
+
+/** Push an envelope the loop wrote, recording where it sits as the harness's own. */
+function injectEnvelope(
+  parser: StreamParser,
+  harnessEnvelopes: Array<{ start: number; end: number }>,
+  envelope: string
+): void {
+  const start = parser.getAccumulated().length;
+  parser.push(envelope);
+  harnessEnvelopes.push({ start, end: start + envelope.length });
+}
+
+/** The recorded envelopes in the turn's own text, which starts after the prefill. */
+function rebaseEnvelopes(
+  harnessEnvelopes: ReadonlyArray<{ start: number; end: number }>,
+  historyLength: number
+): Array<{ start: number; end: number }> {
+  return harnessEnvelopes.map(({ start, end }) => ({ start: start - historyLength, end: end - historyLength }));
 }
 
 // Native tool names must match ^[a-zA-Z0-9_-]{1,128}$.

@@ -135,6 +135,7 @@ export type {
   TokensEvent,
   StreamBlockEvent,
   ToolCallsEvent,
+  ToolAttemptEvent,
   UsageEvent,
   CompleteEvent,
   ErrorEvent,
@@ -149,6 +150,7 @@ export type {
 export {
   isTokensEvent,
   isToolCallsEvent,
+  isToolAttemptEvent,
   isCompleteEvent,
   isErrorEvent,
   isAbortedEvent,

@@ -121,6 +121,16 @@ export interface ToolContext {
    * same turn or the next request fails API validation.
    */
   roundContent?: import('./content.js').ContentBlock[];
+
+  /**
+   * XML mode: the parser's notices about this round's `<function_calls>`
+   * block — one per refused or warned invoke, `invoke` indexing the block's
+   * invoke openers. A refused invoke is not among the calls. Membrane also
+   * writes the notices into the `<function_results>` it injects after the
+   * results, so the model reads them; a consumer persisting the round keeps
+   * them as a `tool_notice` block after its tool_results.
+   */
+  notices?: ToolCallNotice[];
 }
 
 // ============================================================================
