@@ -968,11 +968,22 @@ export class AnthropicAdapter implements ProviderAdapter {
   }
 
   /**
-   * `retry-after` off the response headers first — the authoritative source,
+   * The stated wait off the response headers first — the authoritative source,
    * and the one nobody was reading — with the message regex kept only for
    * errors that carry no headers (mid-stream SSE rethrows).
+   *
+   * `retry-after-ms` comes before `retry-after`, the order `@anthropic-ai/sdk`
+   * reads them in. With the SDK's own retries off (`maxRetries: 0`), this is
+   * the only reader, so a wait stated only in milliseconds would otherwise be
+   * lost. Zero is a stated wait of zero. A value that is not a non-negative
+   * finite number states nothing, and `retry-after` is read instead.
    */
   private parseRetryAfter(error: { message: string; headers?: Headers }): number | undefined {
+    const millis = error.headers?.get?.('retry-after-ms')?.trim();
+    if (millis) {
+      const ms = Number(millis);
+      if (Number.isFinite(ms) && ms >= 0) return Math.round(ms);
+    }
     const header = error.headers?.get?.('retry-after');
     if (header) {
       const seconds = Number(header.trim());
