@@ -22,7 +22,9 @@ import {
   classifyError,
   errorFromProviderStatus,
   isTypedAbortError,
+  networkError,
   serverError,
+  timeoutError,
   withRawRequest,
   unsupportedError,
 } from '../types/index.js';
@@ -227,6 +229,15 @@ export class AnthropicAdapter implements ProviderAdapter {
     const clientOptions: ClientOptions = {
       baseURL: config.baseURL,
       defaultHeaders: config.defaultHeaders,
+      // Membrane's retry policy is the only retry policy inside a call, as it
+      // is for every fetch-based adapter. Left at its default (two retries of
+      // 408/409/429/5xx and connection failures before Membrane saw the
+      // error), the SDK replaced a stated retry-after of 60 s or more with its
+      // own backoff of about a second, slept through shorter waits beyond
+      // Membrane's maxRetryDelayMs, retried what Membrane's default policy
+      // leaves to the caller, and multiplied the attempt counts Membrane
+      // documents by up to three.
+      maxRetries: 0,
     };
     this.defaultBeta = extractBetaHeader(config.defaultHeaders);
     this.dynamicHeaders = config.dynamicHeaders;
@@ -289,9 +300,11 @@ export class AnthropicAdapter implements ProviderAdapter {
             failure = error instanceof MembraneError ? error : authError(
               `Credential resolution failed: ${error instanceof Error ? error.message : String(error)}`, error,
             );
-            // SDK 0.52 retries thrown fetch errors as connection failures.
-            // Abort this operation to bypass that loop, then restore the
-            // original error at the complete/stream/keepalive boundary.
+            // SDK 0.52 treats a thrown fetch error as a connection failure,
+            // which it retries whenever its own retries are enabled (this
+            // client disables them). Abort this operation so it ends here
+            // either way, then restore the original error at the
+            // complete/stream/keepalive boundary.
             abort.abort(failure);
             throw failure;
           }
@@ -863,6 +876,20 @@ export class AnthropicAdapter implements ProviderAdapter {
     // the stream catch throws its typed timeout before calling handleError.
     if (error instanceof Anthropic.APIUserAbortError || isTypedAbortError(error)) {
       return abortError(undefined, rawRequest);
+    }
+
+    // A connection failure is a type too. The SDK wraps a fetch that threw
+    // (reset, refused, DNS) as APIConnectionError, whose fixed message
+    // "Connection error." carries no status, body or network word, and its
+    // own request timeout as the APIConnectionTimeoutError subclass. Classify
+    // them as the fetch adapters classify a failed fetch, so a caller's retry
+    // policy sees a retryable failure. The SDK's own retries used to absorb
+    // most of these before they reached here.
+    if (error instanceof Anthropic.APIConnectionTimeoutError) {
+      return timeoutError(error.message, error, rawRequest);
+    }
+    if (error instanceof Anthropic.APIConnectionError) {
+      return networkError(error.message, error, rawRequest);
     }
 
     if (error instanceof Anthropic.APIError) {

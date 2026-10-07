@@ -214,19 +214,19 @@ describe('Anthropic adapter receipt integration', () => {
     expect(metadataToJSON).toHaveBeenCalledTimes(2);
   });
 
-  it('reports one terminal receipt for a poke with an SDK-internal HTTP retry', async () => {
+  it('reports one terminal receipt for a refused poke, after one HTTP attempt', async () => {
+    // The adapter's SDK makes no retries of its own, even for a wait it could
+    // honor, so a poke the provider refuses is one request and one error
+    // receipt; the keepalive's own backoff and breaker decide what follows.
     const calls: KeepaliveCall[] = [];
     const requests: any[] = [];
-    let httpCalls = 0;
     const terminal = {
       id: 'poke_response', type: 'message', role: 'assistant', model: 'claude-sonnet-4-5',
       content: [], stop_reason: 'max_tokens', stop_sequence: null, usage,
-      vendor_extension: { retained: true },
     };
     vi.stubGlobal('fetch', vi.fn(async (_input, init) => {
       requests.push(JSON.parse(init.body));
-      httpCalls++;
-      if (httpCalls === 2) {
+      if (requests.length === 2) {
         return new Response(JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'Try again' } }), {
           status: 429, headers: { 'content-type': 'application/json', 'retry-after-ms': '20' },
         });
@@ -248,16 +248,15 @@ describe('Anthropic adapter receipt integration', () => {
     });
     expect(calls).toEqual([]); // Foreground calls already have their own observers.
     await vi.advanceTimersByTimeAsync(150);
-    expect(httpCalls).toBe(3); // One foreground call, two attempts for one poke.
+    expect(requests).toHaveLength(2); // One foreground call, one attempt for the poke.
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({
-      outcome: 'success', lane: 'complete', response: terminal,
-      startedAt: START + 100, durationMs: 20,
+      outcome: 'error', error: { status: 429 }, lane: 'complete',
+      startedAt: START + 100, durationMs: 0,
     });
     const { stream: _stream, ...seed } = requests[0];
     expect(requests[1]).toEqual({ ...seed, max_tokens: 0 });
-    expect(requests[2]).toEqual(requests[1]);
-    expect(calls[0]!.request).toEqual(requests[2]);
+    expect(calls[0]!.request).toEqual(requests[1]);
     expect(calls[0]).not.toHaveProperty('headers');
   });
 });

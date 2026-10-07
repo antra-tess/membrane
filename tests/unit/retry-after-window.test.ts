@@ -13,10 +13,12 @@
  * configured cap above that is taken in steps, still abort-aware.
  */
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
+import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import { MockAdapter } from '../../src/providers/mock.js';
-import { MembraneError } from '../../src/types/errors.js';
+import { MembraneError, authError } from '../../src/types/errors.js';
+import type { RetryConfigInput } from '../../src/types/config.js';
 import type { NormalizedRequest } from '../../src/types/index.js';
 import type { ProviderRequest, ProviderRequestOptions, ProviderResponse } from '../../src/types/provider.js';
 import type { StreamCallbacks } from '../../src/types/streaming.js';
@@ -186,5 +188,170 @@ describe('sleep() past the timer limit', () => {
     const sleep = sleepOf(new Membrane(new MockAdapter()));
     await expect(sleep(0)).resolves.toBeUndefined();
     await expect(sleep(-5)).resolves.toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The same contract through the real Anthropic adapter and SDK. The SDK sits
+// beneath Membrane's retry loop and, left at its defaults, retried 408, 409,
+// 429, 5xx and connection failures twice on its own before Membrane saw an
+// error. It honored a stated wait only below 60 s, replacing a longer one
+// with a backoff of about a second, and it knew nothing of Membrane's budget.
+// These cases script fetch, run every wait on a fake clock, and assert what
+// went over the network and when, rather than counting adapter calls.
+// ---------------------------------------------------------------------------
+
+const claudeRequest: NormalizedRequest = {
+  messages: [{ participant: 'User', content: [{ type: 'text', text: 'zz-prompt' }] }],
+  config: { model: 'claude-sonnet-4-6', maxTokens: 64 },
+};
+const claudeMessage = {
+  id: 'msg_zz', type: 'message', role: 'assistant', model: 'claude-sonnet-4-6',
+  content: [{ type: 'text', text: 'zz-recovered' }], stop_reason: 'end_turn', stop_sequence: null,
+  usage: { input_tokens: 3, output_tokens: 2 },
+};
+const errorTypes: Record<number, string> = { 429: 'rate_limit_error', 500: 'api_error', 529: 'overloaded_error' };
+const refused = (status: number, headers: Record<string, string> = {}) => () => new Response(
+  JSON.stringify({ type: 'error', error: { type: errorTypes[status], message: `zz-refused ${status}` } }),
+  { status, headers: { 'content-type': 'application/json', ...headers } },
+);
+const completed = () => new Response(JSON.stringify(claudeMessage), { headers: { 'content-type': 'application/json' } });
+const streamed = () => new Response([
+  { type: 'message_start', message: { ...claudeMessage, content: [], stop_reason: null } },
+  { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+  { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'zz-recovered' } },
+  { type: 'content_block_stop', index: 0 },
+  { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 2 } },
+  { type: 'message_stop' },
+].map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream' } });
+const unreachable = () => { throw new TypeError('fetch failed', { cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }) }); };
+
+/**
+ * Script the network: each attempt is answered by the next entry, the last
+ * one repeating. Returns the fake-clock time of every attempt, from the start.
+ */
+function network(script: Array<() => Response>): number[] {
+  const sent: number[] = [];
+  const start = Date.now();
+  vi.stubGlobal('fetch', vi.fn(async () => {
+    sent.push(Date.now() - start);
+    return script[Math.min(sent.length, script.length) - 1]!();
+  }));
+  return sent;
+}
+
+/** A real Membrane over the real Anthropic adapter; build it after scripting fetch. */
+const overClaude = (retry?: RetryConfigInput) => new Membrane(
+  new AnthropicAdapter({ apiKey: 'zz-key', cacheKeepalive: { enabled: false } }),
+  { retry },
+);
+
+/** Run a call to its end on the fake clock, every timer it sets elapsing. */
+async function settle<T>(call: Promise<T>): Promise<{ value?: T; error?: unknown }> {
+  const outcome = call.then((value) => ({ value }), (error: unknown) => ({ error }));
+  await vi.runAllTimersAsync();
+  return outcome;
+}
+
+describe('through the real Anthropic adapter: no retry beneath Membrane', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('complete(): a wait beyond the budget goes out once, and the call ends with it intact', async () => {
+    const sent = network([refused(429, { 'retry-after': '120' }), completed]);
+    const { error } = await settle(overClaude().complete(claudeRequest));
+    expect(error).toMatchObject({ type: 'rate_limit', retryAfterMs: 120_000 });
+    expect(sent).toEqual([0]);
+  });
+
+  it('complete(): a wait under 60 s but beyond the budget ends the call too, instead of being slept through', async () => {
+    const sent = network([refused(429, { 'retry-after': '45' }), completed]);
+    const { error } = await settle(overClaude().complete(claudeRequest));
+    expect(error).toMatchObject({ type: 'rate_limit', retryAfterMs: 45_000 });
+    expect(sent).toEqual([0]);
+  });
+
+  it('complete(): a fitting wait is exactly the time between attempts (control)', async () => {
+    const sent = network([refused(429, { 'retry-after': '20' }), completed]);
+    const { value } = await settle(overClaude().complete(claudeRequest));
+    expect(value?.content[0]).toMatchObject({ type: 'text', text: 'zz-recovered' });
+    expect(sent).toEqual([0, 20_000]);
+  });
+
+  it('complete(): a persisting rate limit makes the five documented attempts, each after max(backoff, wait)', async () => {
+    const sent = network([refused(429, { 'retry-after': '2' })]);
+    const { error } = await settle(overClaude().complete(claudeRequest));
+    expect(error).toMatchObject({ type: 'rate_limit', retryAfterMs: 2_000 });
+    expect(sent).toEqual([0, 2_000, 4_000, 8_000, 16_000]);
+  });
+
+  it('complete(): a persisting 529 makes the seven attempts of the overload schedule', async () => {
+    // Pin the overload schedule's jitter at its floor, half of each delay.
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    const sent = network([refused(529)]);
+    const { error } = await settle(overClaude().complete(claudeRequest));
+    expect(error).toMatchObject({ type: 'server', httpStatus: 529 });
+    expect(sent).toEqual([0, 5_000, 15_000, 35_000, 75_000, 155_000, 305_000]);
+  });
+
+  it('complete(): a 500 under the default policy goes out once, as on every fetch adapter', async () => {
+    const sent = network([refused(500), completed]);
+    const { error } = await settle(overClaude().complete(claudeRequest));
+    expect(error).toMatchObject({ type: 'server', httpStatus: 500, retryable: true });
+    expect(sent).toEqual([0]);
+  });
+
+  it('complete(): a connection failure reaches the caller once, as a retryable network error', async () => {
+    const sent = network([unreachable]);
+    const { error } = await settle(overClaude().complete(claudeRequest));
+    expect(error).toBeInstanceOf(MembraneError);
+    expect(error).toMatchObject({ type: 'network', retryable: true });
+    expect(sent).toEqual([0]);
+  });
+
+  it('complete(): an enabled retry policy retries a connection failure on its own schedule', async () => {
+    const sent = network([unreachable, completed]);
+    const { value } = await settle(overClaude({ maxRetries: 2, retryDelayMs: 1_000 }).complete(claudeRequest));
+    expect(value?.content[0]).toMatchObject({ type: 'text', text: 'zz-recovered' });
+    expect(sent).toEqual([0, 1_000]);
+  });
+
+  it('complete(): a credential resolver failure is still the error the caller gets, with nothing sent', async () => {
+    const sent = network([completed]);
+    const failure = authError('zz-login required');
+    const membrane = new Membrane(new AnthropicAdapter({
+      credentials: () => { throw failure; },
+      cacheKeepalive: { enabled: false },
+    }), { retry: { maxRetries: 2, retryDelayMs: 1_000 } });
+    const { error } = await settle(membrane.complete(claudeRequest));
+    expect(error).toMatchObject({ type: 'auth', retryable: false, message: 'zz-login required' });
+    expect(sent).toEqual([]);
+  });
+
+  it('stream(): a connection failure goes out once even under an enabled policy, which retries only rate limits and overloads before output', async () => {
+    const sent = network([unreachable, streamed]);
+    const { error } = await settle(overClaude({ maxRetries: 2, retryDelayMs: 1_000 }).stream(claudeRequest, { onChunk: () => {} }));
+    expect(error).toMatchObject({ type: 'network', retryable: true });
+    expect(sent).toEqual([0]);
+  });
+
+  it('stream(): a wait beyond the budget goes out once, and the call ends with it intact', async () => {
+    const sent = network([refused(429, { 'retry-after': '120' }), streamed]);
+    const { error } = await settle(overClaude().stream(claudeRequest, { onChunk: () => {} }));
+    expect(error).toMatchObject({ type: 'rate_limit', retryAfterMs: 120_000 });
+    expect(sent).toEqual([0]);
+  });
+
+  it('stream(): a fitting wait is exactly the time between attempts (control)', async () => {
+    const sent = network([refused(429, { 'retry-after': '20' }), streamed]);
+    const chunks: string[] = [];
+    const { value } = await settle(overClaude().stream(claudeRequest, { onChunk: (chunk) => { chunks.push(chunk); } }));
+    expect(value?.content[0]).toMatchObject({ type: 'text', text: 'zz-recovered' });
+    expect(chunks.join('')).toBe('zz-recovered');
+    expect(sent).toEqual([0, 20_000]);
   });
 });
