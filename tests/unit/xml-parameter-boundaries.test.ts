@@ -342,6 +342,17 @@ describe('CDATA, the literal spelling', () => {
   });
 });
 
+describe('history blocks', () => {
+  it('are never this turn’s to dispatch, answered or not, so a stray closer cannot re-run one', () => {
+    const answered = `${block(invoke('board_update', param('item', 'OLD'), param('status', 's')))}\n${RESULTS_OPEN}\n<result>\n<stdout>ok</stdout>\n</result>\n${RESULTS_CLOSE}`;
+    const unanswered = block(invoke('board_update', param('item', 'PENDING'), param('status', 's')));
+    for (const history of [answered, unanswered]) {
+      const text = `${history}\nI'll stop here${CALLS_CLOSE}`;
+      expect(parseToolCalls(text, { ...TOOLS, historyLength: history.length, harnessEnvelopes: [] })).toBeNull();
+    }
+  });
+});
+
 describe('an unterminated payload', () => {
   const unterminated = `${CALLS_OPEN}\n<invoke name="board_update">\n<parameter name="item"><![CDATA[a value with ${CALLS_CLOSE} and more`;
 
@@ -521,6 +532,21 @@ describe('a model-written lookalike envelope', () => {
       expect(parsed.notices).toEqual([]);
       expect(parsed.blocks.map((b) => b.type)).toEqual(['tool_use', 'text']);
     }
+  });
+
+  it('directly adjacent, cannot hide a valid call from selection when provenance is supplied', () => {
+    const text = `${valid}\n${claimsRan}`;
+    // With provenance, nothing the caller didn't inject answers the block.
+    expect(parseToolCalls(text, { ...TOOLS, harnessEnvelopes: [] })?.calls.map((c) => c.input.item)).toEqual(['X']);
+    // Without it, a results span after a block answers it, as raw transcripts always read.
+    expect(parseToolCalls(text, TOOLS)).toBeNull();
+  });
+
+  it('with provenance, is the model’s own text, not tool output', () => {
+    const parsed = parseAccumulatedIntoBlocks(`${valid}\n${claimsRan}`, { ...TOOLS, harnessEnvelopes: [] });
+    expect(parsed.blocks.map((b) => b.type)).toEqual(['tool_use', 'text']);
+    expect(parsed.toolResults).toEqual([]);
+    expect(parsed.blocks[1]).toMatchObject({ type: 'text', text: expect.stringContaining('saved') });
   });
 
   it('directly adjacent, cannot excuse a malformed call', () => {

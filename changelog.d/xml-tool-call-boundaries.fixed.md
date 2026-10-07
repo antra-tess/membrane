@@ -21,8 +21,9 @@
   string under every declaration except a single non-string type, which gets
   the usual schema-directed JSON parsing. A CDATA opener anywhere else (in
   prose, in thinking, mid-value) is ordinary text. The XML tool instructions
-  gain one line saying so, which changes the instruction bytes once, so each
-  XML-mode deployment takes one prompt-cache miss.
+  (conversation and system placement, and `getToolInstructions`) gain one
+  line saying so, `CDATA_INSTRUCTION`, so their bytes change, and so does
+  every cached prefix that includes them.
 - **Streaming respects CDATA payloads.** The incremental parser's depth
   tracking and chunk typing ignore tags inside a payload. Local stop detection
   skips a stop sequence inside one, so the chunk is kept rather than truncated
@@ -31,11 +32,21 @@
   payload left unterminated in history ends at the history boundary. One left
   unterminated in the turn keeps its block unclosed, so nothing in it is
   dispatched, and is reported with the parameter named.
-- Legacy `tool_use` blocks without `rawXml` are reconstructed so every value
-  reads back exactly with its type, under any declaration and without the
-  schema: strings as CDATA, other values as JSON with `<` escaped, and a
-  top-level number whose JSON is 16 or more digits in exponent form.
+- Legacy `tool_use` blocks without `rawXml` are reconstructed without the
+  schema, so that a value reads back exactly, type included, under any
+  declaration it satisfies and when undeclared. Strings are written as CDATA,
+  other values as JSON with `<` escaped, and a top-level number whose JSON is
+  16 or more digits in exponent form. A stored value that contradicts its
+  declaration cannot round-trip by any spelling. A number under a declared
+  `string`, for example, reads back as a string.
 - The incremental parser reads tags by element name, so a parameter named
   `thinking_budget` no longer moves the thinking depth. It now also counts
   `antml:`-prefixed openers as it streams; before, `processChunk` emitted them
   as visible text.
+- `onPreToolContent` (XML mode, callback loop) receives only the current
+  round's model text, the same slice as `ToolContext.roundPreamble`. Before,
+  from the second round on, it received everything after the prefill: earlier
+  rounds' text and the `<function_results>` the harness injected.
+- `complete()` reads `antml:`-prefixed tool-call blocks. Before, it parsed
+  only the unprefixed spelling, so a namespaced call returned neither
+  `toolCalls` nor notices.

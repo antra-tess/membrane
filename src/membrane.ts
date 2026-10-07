@@ -28,7 +28,7 @@ import type {
   ToolDefinition,
   TurnToolCallNotice,
 } from './types/index.js';
-import { lastCacheableBlockIndex } from './formatters/native.js';
+import { lastCacheableBlockIndex, carriersAsText } from './formatters/native.js';
 import {
   sameThinkingText,
   findSpanningProviderRun,
@@ -61,6 +61,7 @@ import {
   endsWithPartialToolBlock,
   hasImageInToolResults,
   formatToolResultsForSplitTurn,
+  toolCallNoticesText,
   type ProviderImageBlock,
 } from './utils/tool-parser.js';
 import { IncrementalXmlParser, type ProcessChunkResult } from './utils/stream-parser.js';
@@ -948,6 +949,7 @@ export class Membrane {
           const parsed = parseToolCalls(parser.getAccumulated(), {
             tools: request.tools,
             historyLength: initialPrefillLength,
+            harnessEnvelopes,
           });
 
           if (parsed && parsed.calls.length === 0 && parsed.notices.length > 0) {
@@ -957,7 +959,8 @@ export class Membrane {
             // round is answered, so the record is the same whether or not it
             // continues; the continuation is automatic, so it is bounded by
             // the resumption cap as well as maxToolDepth.
-            const preToolNew = parsed.beforeText.slice(initialPrefillLength);
+            // This round's model text only (see the dispatch path below).
+            const preToolNew = parsed.beforeText.slice(roundStartLen);
             if (onPreToolContent && preToolNew.trim()) {
               await onPreToolContent(preToolNew);
             }
@@ -982,10 +985,13 @@ export class Membrane {
           }
 
           if (parsed && parsed.calls.length > 0) {
-            // Notify about pre-tool content
-            // Slice the seeded prefill off: beforeText starts with the whole
-            // flattened document in XML mode (see ToolContext note below).
-            const preToolNew = parsed.beforeText.slice(initialPrefillLength);
+            // Notify about pre-tool content: THIS round's model text, as
+            // ToolContext.roundPreamble. beforeText starts with the whole
+            // flattened document in XML mode (see ToolContext note below), and
+            // past the prefill it holds every earlier round's text and the
+            // envelopes the harness injected — results and parser notices,
+            // which are not the model's prose.
+            const preToolNew = parsed.beforeText.slice(roundStartLen);
             if (onPreToolContent && preToolNew.trim()) {
               await onPreToolContent(preToolNew);
             }
@@ -1701,6 +1707,18 @@ export class Membrane {
           });
         } else if (block.type === 'redacted_thinking') {
           content.push({ ...(block as unknown as Record<string, unknown>) });
+        } else if (block.type === 'tool_attempt') {
+          // An XML tool-call block that dispatched nothing: the assistant's
+          // own words. Carried as a tool_attempt so the role split below keeps
+          // it on the assistant side whatever message held it, then sent as
+          // text (carriersAsText; as NativeFormatter). Never a tool_use.
+          content.push({ type: 'tool_attempt', text: block.rawXml });
+        } else if (block.type === 'tool_notice') {
+          // The harness's notice: carried as a tool_notice so the role split
+          // below puts it on the user side after any tool_result, then sent
+          // as text (carriersAsText; as NativeFormatter).
+          const text = toolCallNoticesText(block.notices);
+          if (text) content.push({ type: 'tool_notice', text });
         } else if (block.type === 'image') {
           if (block.source.type === 'base64') {
             const mediaType = resolveImageMediaType(block.source.data, block.source.mediaType);
@@ -1786,7 +1804,7 @@ export class Membrane {
         if (PREFIX_REWRITING_NORMALIZE_EVENT_KINDS.has(e.kind)) prefixRewritten = true;
       },
     });
-    const mergedMessages = mergeConsecutiveRoles(normalized.messages);
+    const mergedMessages = mergeConsecutiveRoles(normalized.messages.map(carriersAsText));
 
     // ONE recount of the constructed wire artifacts, taken BEFORE the
     // tools/system fallback decision so the fallback and the float share a
@@ -2686,8 +2704,12 @@ export class Membrane {
     // This handles prefill mode where tools are XML in the text
     let emptyToolBlocks = 0;
     let toolCallNotices: TurnToolCallNotice[] = [];
-    if (toolCalls.length === 0 && rawAssistantText.includes('<function_calls>')) {
-      const parsed = parseToolCalls(rawAssistantText, { tools: request.tools });
+    if (toolCalls.length === 0 && /<(antml:)?function_calls>/.test(rawAssistantText)) {
+      // complete() injects nothing, so no envelope in this text is the
+      // harness's: a lookalike the model wrote after its call leaves the call
+      // pending rather than hiding it.
+      const parseOptions = { tools: request.tools, harnessEnvelopes: [] };
+      const parsed = parseToolCalls(rawAssistantText, parseOptions);
       if (parsed?.calls.length) {
         for (const tc of parsed.calls) {
           toolCalls.push(tc);
@@ -2696,7 +2718,7 @@ export class Membrane {
         emptyToolBlocks = 1;
       }
       // complete() runs no loop: the caller answers these with its results.
-      toolCallNotices = parseAccumulatedIntoBlocks(rawAssistantText, { tools: request.tools }).notices;
+      toolCallNotices = parseAccumulatedIntoBlocks(rawAssistantText, parseOptions).notices;
     }
     const unclosedToolBlock = endsWithPartialToolBlock(rawAssistantText);
 
@@ -3505,6 +3527,7 @@ export class Membrane {
           const parsed = parseToolCalls(parser.getAccumulated(), {
             tools: request.tools,
             historyLength: initialPrefillLength,
+            harnessEnvelopes,
           });
 
           if (parsed && parsed.calls.length === 0 && parsed.notices.length > 0) {

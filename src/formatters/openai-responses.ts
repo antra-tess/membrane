@@ -206,8 +206,14 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
         out.push({ type: 'reasoning', encrypted_content: block.data, summary: [] });
       } else if (block.type === 'tool_attempt') {
         // An XML tool-call block that dispatched nothing: the model's own
-        // words, kept as its text. Never a function_call: nothing ran.
-        messageParts.push({ type: isAssistant ? 'output_text' : 'input_text', text: block.rawXml });
+        // words, kept as its text — on the assistant side even when a
+        // mis-roled message holds it. Never a function_call: nothing ran.
+        if (isAssistant) {
+          messageParts.push({ type: 'output_text', text: block.rawXml });
+        } else {
+          flushMessage();
+          out.push({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: block.rawXml }] });
+        }
       } else if (block.type === 'tool_notice') {
         // The harness's notice about refused or warned invokes: attributed
         // text on the harness side, after any function_call_output items.

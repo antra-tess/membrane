@@ -305,8 +305,9 @@ function requiredRoleOf(block: ProviderBlock): RequiredRole {
     case 'tool_use':
     case 'thinking':
     case 'redacted_thinking':
-    // Formatters render these two as text before the wire; listed so one that
-    // ever reaches here keeps its speaker's side.
+    // XML-history carriers: native builders send them through here so each
+    // keeps its speaker's side whatever message held it, then send them as
+    // text (carriersAsText in formatters/native.ts).
     case 'tool_attempt':
       return 'assistant';
     case 'tool_result':

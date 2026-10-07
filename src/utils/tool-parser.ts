@@ -45,10 +45,17 @@ import { encodeCdata, readPayload } from './xml-payload.js';
  * `harnessEnvelopes` are the `<function_results>` envelopes the caller itself
  * injected into this text, by offset: the evidence that an envelope is the
  * harness speaking. Markup alone can't establish a speaker — a model can write
- * a lookalike envelope, even right after its own block — so a parser notice is
- * read only from an envelope listed here that answers a block, and only such
- * an envelope's recorded refusals speak for that block. Left out, no envelope
- * carries notices and the boundary rules decide every block.
+ * a lookalike envelope, even right after its own block. Supplied (even
+ * empty), only these envelopes speak for the harness: only they answer a
+ * block (parseToolCalls selects among the blocks they have not answered), only
+ * their results are tool results, and only their notices are read, their
+ * recorded refusals deciding their block. Any other results span is the
+ * model's own text, and the boundary rules decide every other block. Left
+ * out, results spans are read as they always were — one directly after a block
+ * answers it, its results are tool results — but no envelope carries notices
+ * or authority; a caller that cannot say which envelopes it wrote gets the
+ * legacy reading for what predates notices, and nothing it can't vouch for
+ * beyond that. Membrane supplies them on every parse of its own.
  */
 export interface ToolParseOptions {
   tools?: ToolDefinition[];
@@ -192,8 +199,9 @@ function matchesDeclaredType(value: unknown, declaredType: string): boolean {
 
 /**
  * Write one parameter value so that the XML parser reads back exactly this
- * value, under whatever declaration the parameter has — written without the
- * schema, by the value's own type:
+ * value, type included, under any declaration the value satisfies and when the
+ * parameter is undeclared — written without the schema, by the value's own
+ * type:
  *   - a string is CDATA (see {@link encodeCdata}), which every declaration reads
  *     as exactly its text: markup, edge whitespace, `null` and JSON-looking
  *     text included;
@@ -203,7 +211,9 @@ function matchesDeclaredType(value: unknown, declaredType: string): boolean {
  *     of 16+ digits, which the snowflake guard keeps as text, is written in
  *     exponent form instead: the shortest exact spelling of the same number.
  * `undefined` is not a JSON value; such a parameter is left out, as the JSON
- * wire leaves it out.
+ * wire leaves it out. A value that contradicts its declaration — a number
+ * stored under a declared string — cannot round-trip by any spelling: a
+ * declared string always parses as a string.
  */
 export function encodeParameterValue(value: unknown): string | undefined {
   if (value === undefined) return undefined;
@@ -991,11 +1001,36 @@ const SINGLE_WHITESPACE_REGEX = /\s/;
  * marked a live call as spent.
  */
 function isFollowedByResults(text: string, afterPos: number): boolean {
+  return resultsOpenerAfter(text, afterPos) !== undefined;
+}
+
+/** Where the `<function_results>` opener directly after `afterPos` (whitespace allowed) begins, if one does. */
+function resultsOpenerAfter(text: string, afterPos: number): number | undefined {
   let scan = afterPos;
   while (scan < text.length && SINGLE_WHITESPACE_REGEX.test(text[scan]!)) scan++;
-  return FUNCTION_RESULTS_START_ANCHORED.test(
-    text.slice(scan, scan + FUNCTION_RESULTS_OPENER_MAX_LENGTH)
-  );
+  return FUNCTION_RESULTS_START_ANCHORED.test(text.slice(scan, scan + FUNCTION_RESULTS_OPENER_MAX_LENGTH))
+    ? scan
+    : undefined;
+}
+
+/**
+ * Whether results already answered the block ending at `blockEnd`.
+ *
+ * With provenance (`harnessEnvelopes` supplied, even empty), only an envelope
+ * the caller injected answers a block: a lookalike the model wrote after its
+ * own call leaves the call pending, so it is neither hidden nor lost. Without
+ * provenance, any results span directly after the block answers it — the
+ * reading raw transcripts have always had, kept for callers that cannot say
+ * which envelopes they wrote; a lookalike can hide a call from them.
+ */
+function isAnswered(
+  masked: string,
+  blockEnd: number,
+  harnessEnvelopes: ToolParseOptions['harnessEnvelopes']
+): boolean {
+  const opener = resultsOpenerAfter(masked, blockEnd);
+  if (opener === undefined) return false;
+  return harnessEnvelopes === undefined || harnessEnvelopes.some((envelope) => envelope.start === opener);
 }
 
 /**
@@ -1017,11 +1052,16 @@ export function parseToolCalls(text: string, options?: ToolParseOptions): Parsed
 
   // Pick the last unexecuted block among those that survive containment: a
   // block quoted inside thinking or echoed in a tool result is content, and
-  // dispatching from it runs a call the model never made.
+  // dispatching from it runs a call the model never made. A block that ends in
+  // history was the business of the turn that wrote it — answered then or not,
+  // it is never this turn's to dispatch (a stray closer in the live text must
+  // not re-run an earlier turn's call).
+  const historyLength = options?.historyLength ?? 0;
   let lastUnexecutedBlock: ResolvedToolBlock | null = null;
 
   for (const block of collectLiveToolBlocks(view)) {
-    if (!isFollowedByResults(view.masked, block.end)) {
+    if (block.end <= historyLength) continue;
+    if (!isAnswered(view.masked, block.end, options?.harnessEnvelopes)) {
       lastUnexecutedBlock = block;
     }
   }
@@ -1594,6 +1634,7 @@ export function parseAccumulatedIntoBlocks(
     (options?.harnessEnvelopes ?? []).map((envelope) => [envelope.start + prepended, envelope.end + prepended])
   );
   const isHarnessEnvelope = (span: CandidateSpan): boolean => harnessEnvelopeStarts.get(span.start) === span.end;
+  const provenanceSupplied = options?.harnessEnvelopes !== undefined;
   const harnessAnswers = new Set<CandidateSpan>();
 
   // Track positions of all special blocks to extract plain text between them
@@ -1733,6 +1774,10 @@ export function parseAccumulatedIntoBlocks(
       }
       continue;
     }
+
+    // With provenance, a results span the caller didn't inject is the model's
+    // own writing — its results are not tool output, so it stays text.
+    if (provenanceSupplied && !isHarnessEnvelope(span)) continue;
 
     const innerContent = span.innerContent;
     const rawXml = span.rawXml;

@@ -26,16 +26,26 @@
   the round's tool_results. The final parse produces them, and the XML
   formatter replays them as the bytes the model saw. The native formatter,
   whose output also feeds the Gemini, OpenRouter and openai-compatible
-  adapters, and the Responses formatter render the attempt as the assistant's
-  text and the notice as harness-side text after any tool results. The
+  adapters, membrane's native tool loop (which builds its own requests, first
+  and on every continuation), and the Responses formatter render the attempt
+  as the assistant's text and the notice as harness-side text after any tool
+  results. The
   completions formatter omits both, as it omits every tool carrier. Code that
   switches exhaustively over `ContentBlock['type']` or `StreamEvent['type']`
   needs cases for the new members. A consumer that persists XML rounds from
   yielded events should persist the attempt and the notices, or the resident
   loses them from history.
-- **Notices have provenance.** Only an envelope the loop itself injected,
-  recorded by its offsets and passed to the parse as
-  `ToolParseOptions.harnessEnvelopes`, carries notices and decides its
-  block's refusals. A lookalike envelope the model wrote, even directly after
-  its own block, and every parse without supplied provenance decode no
-  notices; there the rules decide every block.
+- **Envelopes have provenance.** The loops record the offsets of every
+  envelope they inject and pass them to the parse as
+  `ToolParseOptions.harnessEnvelopes`; `complete()` passes none, since it
+  injects nothing. With provenance supplied, only those envelopes speak for
+  the harness: only they answer a block (so `parseToolCalls` no longer skips
+  a call because the model wrote a lookalike envelope after it, which used to
+  hide the call from `complete()`), only their results are tool results (a
+  lookalike is the model's own text), and only their notices are read and
+  decide their block's refusals. Without provenance, as for an outside caller
+  of `parseToolCalls` or `parseAccumulatedIntoBlocks` on a raw transcript,
+  results spans are read as before, but no notices or recorded refusals are
+  taken from them. `parseToolCalls` never selects a block that ends in the
+  history `historyLength` covers, so a stray closer in the live text cannot
+  re-run an earlier turn's call.

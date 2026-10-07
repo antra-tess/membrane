@@ -664,9 +664,9 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
    * Reconstruct canonical <function_calls> XML for legacy tool_use blocks
    * stored without rawXml. The original layout (whitespace between tags,
    * parameter order as written, antml: prefix) is gone, but every value is
-   * written so the parser reads back exactly that value and its type, under
-   * any declaration and without the schema: strings as CDATA, everything else
-   * as markup-free JSON (see {@link encodeParameterValue}).
+   * written, without the schema, so the parser reads back exactly that value
+   * and its type under any declaration it satisfies: strings as CDATA,
+   * everything else as markup-free JSON (see {@link encodeParameterValue}).
    */
   private formatLegacyToolUseXml(blocks: ToolUseContent[]): string {
     const lines = ['<function_calls>'];

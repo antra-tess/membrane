@@ -34,19 +34,30 @@ import { assertCacheMarkersWithinLimit } from '../utils/cache-marker-budget.js';
 import { toolCallNoticesText } from '../utils/tool-parser.js';
 
 /**
- * A provider message with its tool_notice blocks as text: the form the wire
- * takes once the role split has placed them on the harness side.
+ * A provider message with its XML-history carriers as text: the form the wire
+ * takes once the role split has placed each on its speaker's side.
+ *
+ * A native request builder converts a `tool_attempt` content block to
+ * `{ type: 'tool_attempt', text: rawXml }` and a `tool_notice` to
+ * `{ type: 'tool_notice', text }` (see toolCallNoticesText), runs
+ * normalizeToolPairs — whose requiredRoleOf puts the attempt on the assistant
+ * side and the notice on the user side, whatever message held them — and then
+ * maps every message through this. Used by NativeFormatter and by Membrane's
+ * native tool-loop builder.
  */
-function noticesAsText<M extends { content: unknown }>(message: M): M {
+export function carriersAsText<M extends { content: unknown }>(message: M): M {
   if (!Array.isArray(message.content)) return message;
-  if (!message.content.some((block) => (block as { type?: unknown }).type === 'tool_notice')) return message;
+  if (!message.content.some(isCarrier)) return message;
   return {
     ...message,
     // Everything else on the block (a cache_control marker) stays.
-    content: message.content.map((block) =>
-      (block as { type?: unknown }).type === 'tool_notice' ? { ...(block as object), type: 'text' } : block
-    ),
+    content: message.content.map((block) => (isCarrier(block) ? { ...(block as object), type: 'text' } : block)),
   };
+}
+
+function isCarrier(block: unknown): boolean {
+  const type = (block as { type?: unknown }).type;
+  return type === 'tool_attempt' || type === 'tool_notice';
 }
 
 /** Index of the last content block that can carry cache_control. Anthropic
@@ -323,9 +334,9 @@ export class NativeFormatter implements PrefillFormatter {
       onEvent: options.onNormalize,
     });
 
-    // Merge consecutive same-role messages (API requires alternating). A
-    // tool_notice has its side now; on the wire it is text.
-    const mergedMessages = mergeConsecutiveRoles(normalized.messages.map(noticesAsText));
+    // Merge consecutive same-role messages (API requires alternating). The
+    // attempt and notice carriers have their sides now; on the wire they are text.
+    const mergedMessages = mergeConsecutiveRoles(normalized.messages.map(carriersAsText));
 
     // Build system content. Cache the system block only as a fallback — when no
     // message breakpoint was marked (see note above; otherwise a message
@@ -536,14 +547,16 @@ export class NativeFormatter implements PrefillFormatter {
         result.push({ ...(block as unknown as Record<string, unknown>) });
       } else if (block.type === 'tool_attempt') {
         // An XML tool-call block that dispatched nothing (every invoke
-        // refused): the model's own words, so they stay its text. Never a
-        // tool_use — nothing ran and nothing answers it.
-        result.push({ type: 'text', text: block.rawXml });
+        // refused): the model's own words, so they stay its text — on the
+        // assistant side even in a mis-roled message, which is why it travels
+        // as a tool_attempt until the role split (see carriersAsText). Never a
+        // tool_use: nothing ran and nothing answers it.
+        result.push({ type: 'tool_attempt', text: block.rawXml });
       } else if (block.type === 'tool_notice') {
         // The harness's notice about refused or warned invokes: attributed
         // text on the harness side, after any tool_result blocks. It travels
         // as a tool_notice block until the role split has put it on the user
-        // side (requiredRoleOf), then goes out as text (see buildMessages).
+        // side (requiredRoleOf), then goes out as text (see carriersAsText).
         // No name prefix: it is nobody's utterance.
         const text = toolCallNoticesText(block.notices);
         if (text) result.push({ type: 'tool_notice', text });
