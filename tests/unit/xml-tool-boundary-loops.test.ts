@@ -498,6 +498,30 @@ describe('a results opener the model left unclosed before its block', () => {
     expect(run.response.toolResults).toHaveLength(1);
     expect(run.response.toolCallNotices?.map((notice) => [notice.block, notice.invoke, notice.kind])).toEqual([[0, 1, 'refused']]);
   });
+
+  it('nor with the envelope an image result splits in two, recorded as one', async () => {
+    // A 1x1 PNG, so the result takes the split-turn path.
+    const pixel = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==';
+    const adapter = new ScriptedAdapter([
+      { chunks: [`Quoting a stray ${RESULTS_OPEN} as text.\n${openBlock(param('item', 'A'))}`], stopReason: 'stop_sequence', stopSequence: CALLS_CLOSE },
+      { chunks: ['ok'], stopReason: 'end_turn' },
+    ]);
+    const response = (await new Membrane(adapter, { logger: quietLogger() }).stream(request(), {
+      onToolCalls: async (toolCalls) =>
+        toolCalls.map((call): ToolResult => ({
+          toolUseId: call.id,
+          content: [
+            { type: 'text', text: 'shot' },
+            { type: 'image', source: { type: 'base64', data: pixel, mediaType: 'image/png' } },
+          ],
+          isError: false,
+        })),
+    })) as NormalizedResponse;
+
+    // The continuation's last assistant turn is the envelope's second part, after the image turn.
+    expect(adapter.prefill(1).startsWith('\n</stdout>')).toBe(true);
+    expect(types(response.content)).toEqual(['text', 'tool_use', 'tool_result', 'text']);
+  });
 });
 
 describe('no-loop callers', () => {
