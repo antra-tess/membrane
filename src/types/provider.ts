@@ -217,10 +217,20 @@ export interface ProviderAdapter {
    * ProviderRequest it receives into its API call (format conversion
    * aside), or calls `ProviderRequestOptions.onContentAltered` for any
    * request where it substitutes, drops or rewrites some, through every step
-   * up to the final body, passthrough parameters and cleanup included. Round reports
-   * (UsageEvent.round) rely on it: an adapter that doesn't declare it leaves
-   * a round's fidelity 'unknown'. Decorators must forward this capability
-   * and the callback.
+   * up to the final body, passthrough parameters and cleanup included.
+   *
+   * Declaring it also commits the adapter to leaving the supplied
+   * ProviderRequest unchanged: it derives its wire body as a separate object
+   * and never mutates the request, its messages or their blocks. Membrane
+   * reuses one request across refusal-retry attempts and attributes reports
+   * by the identity of the blocks it built, so an adapter that edited the
+   * request in place would change what later attempts carry without any
+   * report saying so. The built-in declaring adapters build their bodies
+   * this way.
+   *
+   * Round reports (UsageEvent.round) rely on it: an adapter that doesn't
+   * declare it leaves a round's fidelity 'unknown'. Decorators must forward
+   * this capability and the callback, and keep the same obligation.
    */
   readonly reportsContentAlterations?: boolean;
 
