@@ -270,6 +270,22 @@ export interface StreamParser {
    * per-stream tracking so processChunk works correctly.
    */
   resetForNewIteration(): void;
+
+  /**
+   * XML tool calls: the text pushed so far is history the turn did not
+   * write. A CDATA payload it left open ends here, so it cannot turn the
+   * turn's own text into data. Parsers without payloads need not implement it.
+   */
+  endHistory?(): void;
+
+  /**
+   * XML tool calls: the accumulated text ends inside a parameter's CDATA
+   * payload, where a stop sequence is data, not a stop.
+   */
+  isInsidePayload?(): boolean;
+
+  /** XML tool calls: whether an offset into the accumulated text lies inside a CDATA payload. */
+  isPayloadAt?(index: number): boolean;
 }
 
 // ============================================================================

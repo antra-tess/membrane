@@ -41,10 +41,19 @@ import { encodeCdata, readPayload } from './xml-payload.js';
  * the prefill, in membrane's XML loops. A CDATA payload opened in history ends
  * where history ends, so a section someone left unterminated in an earlier turn
  * cannot swallow this turn's calls. Left out, the whole text is the turn's own.
+ *
+ * `harnessEnvelopes` are the `<function_results>` envelopes the caller itself
+ * injected into this text, by offset: the evidence that an envelope is the
+ * harness speaking. Markup alone can't establish a speaker — a model can write
+ * a lookalike envelope, even right after its own block — so a parser notice is
+ * read only from an envelope listed here that answers a block, and only such
+ * an envelope's recorded refusals speak for that block. Left out, no envelope
+ * carries notices and the boundary rules decide every block.
  */
 export interface ToolParseOptions {
   tools?: ToolDefinition[];
   historyLength?: number;
+  harnessEnvelopes?: ReadonlyArray<{ start: number; end: number }>;
 }
 
 /** 16+ digits, no decimal: beyond Number.MAX_SAFE_INTEGER (Discord snowflakes). */
@@ -1576,6 +1585,14 @@ export function parseAccumulatedIntoBlocks(
   let unclosedInvokeHeads = 0;
   const notices: TurnToolCallNotice[] = [];
   let callsBlockCount = 0;
+  // The envelopes the caller injected, in processedText's offsets, and those
+  // found answering a block.
+  const prepended = processedText.length - text.length;
+  const harnessEnvelopeStarts = new Map(
+    (options?.harnessEnvelopes ?? []).map((envelope) => [envelope.start + prepended, envelope.end + prepended])
+  );
+  const isHarnessEnvelope = (span: CandidateSpan): boolean => harnessEnvelopeStarts.get(span.start) === span.end;
+  const harnessAnswers = new Set<CandidateSpan>();
 
   // Track positions of all special blocks to extract plain text between them
   type BlockPosition = {
@@ -1656,15 +1673,19 @@ export function parseAccumulatedIntoBlocks(
       const parsedInvokes = collectInvokes(resolvedBlock.inner, options?.tools);
       unclosedInvokeHeads += parsedInvokes.unclosedHeads;
 
-      // Results already answered this block: the notices recorded in that
-      // envelope are what happened — exactly the invokes it refused were not
-      // sent, whatever the present schemas would say. Otherwise nothing has
-      // answered the block yet, and the rules decide.
+      // The harness already answered this block: the notices recorded in the
+      // envelope it injected are what happened — exactly the invokes it
+      // refused were not sent, whatever the present schemas would say. Only an
+      // envelope the caller vouches for counts (see harnessEnvelopes);
+      // otherwise the rules decide, as they did when the block was live.
       const following = survivingSpans[spanIndex + 1];
       const answeredBy =
-        following?.kind === 'results' && isFollowedByResults(view.masked, resolvedBlock.end)
+        following?.kind === 'results' &&
+        isFollowedByResults(view.masked, resolvedBlock.end) &&
+        isHarnessEnvelope(following)
           ? following
           : undefined;
+      if (answeredBy) harnessAnswers.add(answeredBy);
       const blockNotices = answeredBy
         ? decodeToolCallNotices(answeredBy.innerContent)
         : noticesOf(parsedInvokes.invokes);
@@ -1786,8 +1807,10 @@ export function parseAccumulatedIntoBlocks(
 
     // The harness's notices close the envelope after every result. The span
     // is consumed whole even when they are all it holds, so nothing the
-    // harness wrote falls through as the assistant's text.
-    const envelopeNotices = decodeToolCallNotices(innerContent);
+    // harness wrote falls through as the assistant's text. Notices are read
+    // only from an envelope the harness injected in answer to a block; any
+    // other span's lookalike stays whatever it is.
+    const envelopeNotices = harnessAnswers.has(span) ? decodeToolCallNotices(innerContent) : [];
     if (envelopeNotices.length > 0) {
       blockResults.push({ type: 'tool_notice', notices: envelopeNotices });
     }
