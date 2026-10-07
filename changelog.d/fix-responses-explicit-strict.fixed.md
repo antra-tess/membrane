@@ -10,5 +10,5 @@
   `inputSchema`/`input_schema`/`parameters`. A `strict` that is not a boolean,
   `null` or absent is refused with an `invalid_request` error naming the tool,
   before any request is sent. Non-function tools and the Chat Completions and
-  openai-compatible adapters are unchanged. The serialized tool list changes
-  once, so the first request after upgrading misses the prompt cache.
+  openai-compatible adapters are unchanged; tools that already carried an
+  explicit boolean serialize as before.
