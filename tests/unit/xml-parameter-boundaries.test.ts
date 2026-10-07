@@ -337,7 +337,7 @@ describe('CDATA, the literal spelling', () => {
       },
     ]);
     expect(accumulated.toolCalls).toEqual([]);
-    expect(accumulated.notices).toEqual(dispatched!.notices.map((notice) => ({ ...notice, block: 0 })));
+    expect(accumulated.notices).toEqual(dispatched!.notices.map((notice) => ({ ...notice, block: 0, answered: false })));
     expect(accumulated.blocks[0]).toMatchObject({ type: 'tool_attempt' });
     // Nothing was read as an unclosed head or a spliced block: no re-anchoring happened.
     expect([accumulated.unclosedInvokeHeads, accumulated.splicedToolBlocks, accumulated.unclosedToolBlock]).toEqual([0, 0, false]);
