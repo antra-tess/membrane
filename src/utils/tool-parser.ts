@@ -627,6 +627,17 @@ const INVOKE_OPEN_REGEX = /<(antml:)?invoke\s+name=/g;
 
 const INVOKE_CLOSE_TAG = '</invoke>';
 
+/** One invoke as parsed: its call, or why it must not be sent. */
+interface ParsedInvoke {
+  /** 0-based ordinal of this invoke's opener among every invoke opener in its block. */
+  ordinal: number;
+  name: string;
+  input: Record<string, unknown>;
+  /** Present when the call must not be sent; see {@link parseInvokeParameters}. */
+  refusal?: string;
+  warnings: string[];
+}
+
 /**
  * The invokes one block's inner content dispatches, plus the heads it refused.
  *
@@ -638,16 +649,6 @@ const INVOKE_CLOSE_TAG = '</invoke>';
  * to the innermost opener inside it, which is where the live call begins. The
  * re-anchored text holds no further opener by construction, so this terminates.
  */
-interface ParsedInvoke {
-  /** 0-based ordinal of this invoke's opener among every invoke opener in its block. */
-  ordinal: number;
-  name: string;
-  input: Record<string, unknown>;
-  /** Present when the call must not be sent; see {@link parseInvokeParameters}. */
-  refusal?: string;
-  warnings: string[];
-}
-
 interface ParsedInvokes {
   invokes: ParsedInvoke[];
   unclosedHeads: number;
@@ -756,6 +757,17 @@ const WALK_VALUE =
 // An invoke head as INVOKE_REGEX accepts one, read where an opener was found.
 const WALK_INVOKE_HEAD = /<(?:antml:)?invoke\s+name=(["'])((?:(?!\1).)+)\1\s*(\/?)>/y;
 
+/** What the walker found: the payload ranges, and an unterminated one. */
+interface PayloadScan {
+  ranges: Array<{ start: number; end: number }>;
+  /**
+   * The payload the text ends inside, when one opened in the turn's own text
+   * never terminates: its parameter, and the invoke that holds it (name, and
+   * ordinal among its block's invoke openers).
+   */
+  unterminated?: { parameter: string; toolName: string; invoke: number };
+}
+
 /**
  * Where the CDATA payloads are: every parameter-leading CDATA payload of every
  * structural parameter, as `[start, end)` from its first `<![CDATA[` to just
@@ -774,16 +786,6 @@ const WALK_INVOKE_HEAD = /<(?:antml:)?invoke\s+name=(["'])((?:(?!\1).)+)\1\s*(\/
  * opened in history (before `historyLength`) ends where history ends instead,
  * and the turn's own text is read afresh from there.
  */
-interface PayloadScan {
-  ranges: Array<{ start: number; end: number }>;
-  /**
-   * The payload the text ends inside, when one opened in the turn's own text
-   * never terminates: its parameter, and the invoke that holds it (name, and
-   * ordinal among its block's invoke openers).
-   */
-  unterminated?: { parameter: string; toolName: string; invoke: number };
-}
-
 function findPayloadRanges(text: string, historyLength = 0): PayloadScan {
   const ranges: Array<{ start: number; end: number }> = [];
   let unterminated: PayloadScan['unterminated'];
