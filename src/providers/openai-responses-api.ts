@@ -26,6 +26,7 @@ import {
   abortError,
   authError,
   contextLengthError,
+  invalidRequestError,
   networkError,
   rateLimitError,
   serverError,
@@ -147,6 +148,27 @@ export interface OpenAIResponsesAPIAdapterConfig {
   defaultMaxTokens?: number;
   /** Additional HTTP headers. */
   extraHeaders?: Record<string, string>;
+}
+
+/**
+ * The `strict` a function tool is sent with: an explicit boolean as given,
+ * `false` when omitted or null (see {@link OpenAIResponsesAPIAdapter.convertTools}),
+ * and a refusal naming the tool for anything else.
+ */
+function functionToolStrictness(toolName: unknown, strict: unknown): boolean {
+  if (strict === undefined || strict === null) return false;
+  if (typeof strict === 'boolean') return strict;
+  const spelled = typeof strict === 'string'
+    ? JSON.stringify(strict)
+    : Array.isArray(strict)
+      ? 'an array'
+      : typeof strict === 'object'
+        ? 'an object'
+        : `${typeof strict} ${String(strict)}`;
+  throw invalidRequestError(
+    `OpenAI Responses API: function tool ${JSON.stringify(toolName ?? null)} has strict set to ` +
+      `${spelled}; strict must be true, false, null or omitted (omitted and null are sent as false).`
+  );
 }
 
 /** A cache key is any JSON string, a header value is not: anything beyond
@@ -491,15 +513,36 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
     return text || undefined;
   }
 
+  /**
+   * Every function tool reaches the wire with a boolean `strict`.
+   *
+   * Left out, strictness is whatever the provider defaults to, and strict
+   * validation treats every property as one the model must send. A tool schema
+   * written as plain JSON Schema means the opposite: a property outside
+   * `required` may be omitted. So an omitted or null `strict` is sent as
+   * `false`, stating what the schema means, as the Codex client (a plain
+   * `strict: bool` on every function tool) and pi's Responses conversion
+   * (default `false`) do. An explicit boolean is the caller's choice and is
+   * kept. Any other value is refused rather than coerced: true and false each
+   * change what the model may send, so neither is a safe guess.
+   *
+   * This holds on all three function paths: a flat Responses function, a
+   * nested Chat-style `{ type: 'function', function }`, and a definition built
+   * from `inputSchema`/`input_schema`/`parameters`. Non-function tools carry
+   * no such field and pass through unchanged.
+   */
   private convertTools(tools: unknown[]): unknown[] {
     return tools.map((rawTool: any) => {
       if (rawTool?.type && rawTool.type !== 'function') return rawTool;
 
       // Responses function definitions are flat. Accept them verbatim, while
       // also adapting Membrane and Chat Completions function schemas.
-      if (rawTool?.type === 'function' && rawTool.name) return rawTool;
+      if (rawTool?.type === 'function' && rawTool.name) {
+        return { ...rawTool, strict: functionToolStrictness(rawTool.name, rawTool.strict) };
+      }
       if (rawTool?.type === 'function' && rawTool.function) {
-        return { type: 'function', ...rawTool.function };
+        const fn = rawTool.function;
+        return { type: 'function', ...fn, strict: functionToolStrictness(fn.name, fn.strict) };
       }
       return {
         type: 'function',
@@ -510,7 +553,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
           rawTool?.inputSchema ??
           rawTool?.input_schema ??
           { type: 'object', properties: {} },
-        ...(rawTool?.strict !== undefined ? { strict: rawTool.strict } : {}),
+        strict: functionToolStrictness(rawTool?.name, rawTool?.strict),
       };
     });
   }
