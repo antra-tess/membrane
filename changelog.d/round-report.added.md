@@ -9,9 +9,12 @@
   uninstrumented formatter or adapter, opt-in image shedding, a
   `beforeRequest` hook that changed the request, or an adapter alteration
   that could not be attributed. Otherwise it is `established`.
-  `injectedBatch` gives the newest batch and how much of it the round
-  carried: all of it on the native path, none on the XML prefill path.
-  `ToolContext.supportsInjectedMessages` says which applies.
+  `injectedBatch` gives the newest batch and how many of its supplied
+  positions the round accounts for: all of them on the native path, none on
+  the XML prefill path. With established fidelity, each was carried
+  verbatim unless `altered` names it, as it names a message whose tool
+  blocks were stripped even when nothing else of it was sent.
+  `ToolContext.supportsInjectedMessages` says which path applies.
 - **Formatters and provider adapters:** `PrefillFormatter.reportsAlterations`
   and `ProviderAdapter.reportsContentAlterations` declare that a path reports
   what it does not carry verbatim. Formatters record alterations in

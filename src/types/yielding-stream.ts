@@ -102,8 +102,14 @@ export interface RoundReport {
    */
   usage: RoundUsage;
   /**
-   * The newest injected batch and how much of it, as an ordered prefix, this
-   * round's request carried: 0 on the XML prefill path, which carries none.
+   * The newest injected batch, and how many of its supplied positions, as an
+   * ordered prefix, this round's request accounts for. With established
+   * fidelity, each of those was carried verbatim unless `altered.injected`
+   * names it. A message whose tool blocks were stripped is named there even
+   * when nothing else of it was left to send, while one supplied empty
+   * carried nothing and is not.
+   * The native path accounts for the whole batch (`applied` is its supplied
+   * size); the XML prefill path carries none (`applied` is 0).
    */
   injectedBatch?: { batch: number; applied: number };
   /** Consumer messages this round's request did not carry verbatim (known alterations). */
@@ -236,8 +242,10 @@ export type StreamEvent =
  * the generic user participant. Non-assistant participants get the standard
  * "Name: " text prefix when rendered to the provider. Content must be
  * user-side blocks only (text/image); tool blocks are stripped with a
- * warning, and round reports name the message altered (in the position it
- * was supplied at, even if nothing else was left to send). NOTE: a
+ * warning. On the native path, which carries injected messages, round
+ * reports name such a message altered at the position it was supplied at,
+ * even if nothing else of it was left to send; the XML prefill path carries
+ * none (`RoundReport.injectedBatch.applied` is 0). NOTE: a
  * participant equal to the request's assistantParticipant would render as
  * an ASSISTANT turn (a prefill) — callers should not inject messages named
  * as the assistant.

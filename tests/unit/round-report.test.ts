@@ -13,8 +13,11 @@
  *     an uninstrumented path, opt-in image shedding, a beforeRequest hook
  *     that changed the request, an adapter alteration that could not be
  *     attributed.
- *   - `injectedBatch.applied` is the ordered prefix of the newest batch the
- *     round carried: its whole size natively, 0 on the XML prefill path.
+ *   - `injectedBatch.applied` is the ordered prefix of the newest batch's
+ *     supplied positions the round accounts for: its whole supplied size
+ *     natively, and 0 on the XML prefill path. With established fidelity, a
+ *     position not carried verbatim is in `altered` (even one whose stripped
+ *     tool blocks left nothing to send).
  *   - `usage` is the round's own; an unreported field is absent, a reported
  *     0 is 0.
  */
