@@ -371,5 +371,17 @@ export interface ProviderResponse {
 
 export interface StreamCallbacks {
   onChunk: (chunk: string) => void;
+  /**
+   * A provider content block, by its position in the response. Built-in
+   * adapters follow one of two conventions, and Membrane's native loops rely
+   * on them to tell a finished block from one still arriving:
+   * - paired (Anthropic, Bedrock): once when the block starts, with its start
+   *   payload, and again when it is finished, with the final payload. A start
+   *   payload is not the block's content: a tool call's `input` there is an
+   *   empty placeholder until its arguments have arrived.
+   * - single-final (OpenAI Responses): once per block, already finished,
+   *   after the terminal response has been parsed successfully.
+   * Images (OpenRouter) are reported once, when received.
+   */
   onContentBlock?: (index: number, block: unknown) => void;
 }

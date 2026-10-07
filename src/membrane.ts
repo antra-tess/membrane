@@ -6,6 +6,7 @@
 
 import { restoreToolName } from './utils/tool-names.js';
 import { StreamedThinking } from './utils/streamed-thinking.js';
+import { LocalStopSequences } from './utils/local-stop-sequences.js';
 
 import type {
   NormalizedRequest,
@@ -2249,8 +2250,23 @@ export class Membrane {
     let providerCalls = 0;
     while (true) {
       providerCalls++;
-      const streamCall = this.adapter.stream(finalRequest, callbacks, observedOptions);
-      const rawResult = receiptGuard ? await receiptGuard.settle(streamCall) : await streamCall;
+      // A native attempt ends at the request's first stop whether or not the
+      // provider applied it (see LocalStopSequences). The explicit-XML loops
+      // keep their own parser-aware stop handling. The stop is settled on each
+      // attempt before the refusal check below, so an attempt that stopped
+      // locally is never re-issued for a refusal that came after its stop.
+      const localStops = requiresAssistantPrefill ? undefined : new LocalStopSequences(finalRequest.stopSequences, callbacks);
+      let attemptResult: ProviderResponse;
+      try {
+        const streamCall = this.adapter.stream(finalRequest, localStops?.callbacks ?? callbacks, observedOptions);
+        attemptResult = receiptGuard ? await receiptGuard.settle(streamCall) : await streamCall;
+      } catch (error) {
+        // Held text was received: deliver it so partialContent keeps it. The
+        // attempt's own error is the one to report, whatever delivery does.
+        try { localStops?.release(); } catch { /* keep the original error */ }
+        throw error;
+      }
+      const rawResult = localStops ? localStops.finish(attemptResult) : attemptResult;
       // Restate usage in the one convention before any accumulator, ratio or
       // price sees it — this is the only door streamed usage enters through.
       const result: ProviderResponse = {
