@@ -355,3 +355,76 @@ describe('through the real Anthropic adapter: no retry beneath Membrane', () => 
     expect(sent).toEqual([0, 20_000]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// A wait stated in `retry-after-ms`. The SDK read that header before
+// `retry-after` when it retried; with its retries off, the adapter's own
+// reader is the only one, so it reads both, in the SDK's order.
+// ---------------------------------------------------------------------------
+
+describe('through the real Anthropic adapter: a wait stated in retry-after-ms', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('complete(): a fitting wait is exactly the time between attempts', async () => {
+    const sent = network([refused(429, { 'retry-after-ms': '20000' }), completed]);
+    const { value } = await settle(overClaude().complete(claudeRequest));
+    expect(value?.content[0]).toMatchObject({ type: 'text', text: 'zz-recovered' });
+    expect(sent).toEqual([0, 20_000]);
+  });
+
+  it('complete(): a wait beyond the budget goes out once, and the call ends with it intact', async () => {
+    const sent = network([refused(429, { 'retry-after-ms': '120000' }), completed]);
+    const { error } = await settle(overClaude().complete(claudeRequest));
+    expect(error).toMatchObject({ type: 'rate_limit', retryAfterMs: 120_000 });
+    expect(sent).toEqual([0]);
+  });
+
+  it('stream(): a fitting wait is exactly the time between attempts', async () => {
+    const sent = network([refused(429, { 'retry-after-ms': '20000' }), streamed]);
+    const { value } = await settle(overClaude().stream(claudeRequest, { onChunk: () => {} }));
+    expect(value?.content[0]).toMatchObject({ type: 'text', text: 'zz-recovered' });
+    expect(sent).toEqual([0, 20_000]);
+  });
+
+  it('stream(): a wait beyond the budget goes out once, and the call ends with it intact', async () => {
+    const sent = network([refused(429, { 'retry-after-ms': '120000' }), streamed]);
+    const { error } = await settle(overClaude().stream(claudeRequest, { onChunk: () => {} }));
+    expect(error).toMatchObject({ type: 'rate_limit', retryAfterMs: 120_000 });
+    expect(sent).toEqual([0]);
+  });
+
+  it('a fractional wait is carried in whole milliseconds, rounded as the other readers round it', async () => {
+    network([refused(429, { 'retry-after-ms': '120000.6' })]);
+    const { error } = await settle(overClaude().complete(claudeRequest));
+    expect(error).toMatchObject({ type: 'rate_limit', retryAfterMs: 120_001 });
+  });
+
+  it('retry-after-ms takes precedence over retry-after', async () => {
+    const sent = network([refused(429, { 'retry-after-ms': '20000', 'retry-after': '120' }), completed]);
+    const { value } = await settle(overClaude().complete(claudeRequest));
+    expect(value?.content[0]).toMatchObject({ type: 'text', text: 'zz-recovered' });
+    expect(sent).toEqual([0, 20_000]);
+  });
+
+  it('a retry-after-ms of zero is a stated wait of zero, not a reason to read retry-after', async () => {
+    const sent = network([refused(429, { 'retry-after-ms': '0', 'retry-after': '120' }), completed]);
+    const { value } = await settle(overClaude().complete(claudeRequest));
+    expect(value?.content[0]).toMatchObject({ type: 'text', text: 'zz-recovered' });
+    // The schedule's own first backoff, which a zero wait does not lengthen.
+    expect(sent).toEqual([0, 1_000]);
+  });
+
+  it('a retry-after-ms that is not a non-negative finite number leaves retry-after to state the wait (control)', async () => {
+    for (const unusable of ['zz-soon', '-5', 'Infinity', '']) {
+      const sent = network([refused(429, { 'retry-after-ms': unusable, 'retry-after': '20' }), completed]);
+      const { value } = await settle(overClaude().complete(claudeRequest));
+      expect(value?.content[0], unusable).toMatchObject({ type: 'text', text: 'zz-recovered' });
+      expect(sent, unusable).toEqual([0, 20_000]);
+    }
+  });
+});
