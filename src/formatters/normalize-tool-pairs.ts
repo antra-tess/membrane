@@ -44,8 +44,9 @@
  * tool_result sits with its own tool_use, synthesize `[pending]` results
  * for orphans (or signal not-ready for caller-declared pending ids), put
  * all results before non-results while preserving order within each group,
- * drop empty envelopes, prepend a synthetic `[continuing]` user envelope
- * when the first envelope ended up assistant-role, validate both
+ * drop empty envelopes, prepend a synthetic user envelope (`[continuing]`,
+ * or the caller's `leadingUserText`) when the first envelope ended up
+ * assistant-role, validate both
  * directions of the pairing rule and its one-to-one arity.
  */
 
@@ -118,6 +119,13 @@ export interface NormalizeOptions {
   pendingToolCallIds?: ReadonlySet<string>;
   /** See `BuildOptions.onNormalize`. */
   onEvent?: (event: NormalizeEvent) => void;
+  /**
+   * Text of the synthetic user envelope prepended when the first envelope is
+   * assistant (phase 7). `[continuing]` when absent. NativeFormatter passes
+   * `BuildOptions.prefillUserMessage`, so a caller's text is used wherever
+   * the conversation needs a leading user turn, whatever made it need one.
+   */
+  leadingUserText?: string;
 }
 
 export interface NormalizeResult {
@@ -235,8 +243,9 @@ export function normalizeToolPairs(
   //       `selectFromEnd` cut on an assistant turn). `originalFirstRole`
   //       is `'assistant'`.
   //
-  // Both cases get the same repair (prepend a `[continuing]` user
-  // envelope) because deletion would lose content in case (a) — the
+  // Both cases get the same repair (prepend a synthetic user envelope:
+  // the caller's `leadingUserText` when given, else `[continuing]`)
+  // because deletion would lose content in case (a) — the
   // re-roled blocks are real conversation content the producer
   // expected to ship. The synthetic costs a leading cache miss
   // (deterministic literal, so idempotent across identical inputs)
@@ -244,7 +253,7 @@ export function normalizeToolPairs(
   // a warn-level event so telemetry can distinguish the causes and
   // alert on (b) without coupling control flow to attribution.
   //
-  // Idempotency: the synthetic content is a fixed literal. Running
+  // Idempotency: the synthetic content is fixed for a given call. Running
   // normalize twice on the same input produces identical output the
   // second time (envelope[0] is user, gate doesn't fire).
   // ---------------------------------------------------------------------
@@ -254,7 +263,7 @@ export function normalizeToolPairs(
     // envelopes implies a non-empty input.
     const originalFirstRole = input[0]!.role;
     const leadingBlockTypes = envelopes[0]!.content.map((b) => b.type);
-    envelopes.unshift({ role: 'user', content: [{ type: 'text', text: '[continuing]' }] });
+    envelopes.unshift({ role: 'user', content: [{ type: 'text', text: options.leadingUserText || '[continuing]' }] });
     onEvent({ kind: 'leading_user_synthesized', originalFirstRole, leadingBlockTypes });
   }
 
@@ -859,12 +868,13 @@ function resolveOrphans(
  * Where the result for `useIds[useIdIndex]` belongs in the cycle's user
  * envelope: immediately after the result of the nearest earlier call that
  * already landed, or at the front when no earlier call has one. Every phase
- * that puts a result into a cycle envelope — synthesis (phase 4) and
- * relocation (phase 3.5) alike — routes through here, so the envelope's
- * tool_results end up in call order no matter which phase placed them or in
- * what sequence. Anchoring on landed neighbours rather than on a running
- * counter is what makes it order-independent: a stray arriving before its
- * earlier siblings still lands ahead of the later ones already present.
+ * that puts a result into a cycle envelope (synthesis in phase 4, relocation
+ * in phase 3.5) routes through here. Only the inserted result is placed:
+ * results already in the envelope keep their order. So an envelope whose
+ * results are in call order stays in call order whichever phase inserts and
+ * in whatever sequence, because each insertion anchors on landed neighbours
+ * rather than a running counter; one whose results arrived out of call order
+ * keeps them as they are.
  */
 function callOrderInsertionIndex(
   envelope: Envelope,
@@ -912,7 +922,7 @@ function validate(
   if (envelopes[0]!.role !== 'user') {
     throw new MembraneNormalizerError(
       `First message must have role 'user', got '${envelopes[0]!.role}'. ` +
-        `Repair (prepending '[continuing]') did not engage — internal bug.`,
+        `Repair (prepending a synthetic user envelope) did not engage — internal bug.`,
       input.map(cloneMsg),
       envelopes.map(toProviderMessage),
     );

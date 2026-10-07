@@ -547,6 +547,9 @@ export class AnthropicAdapter implements ProviderAdapter {
             const block = contentBlocks[currentBlockIndex];
             if (block && block.type === 'thinking' && sig) {
               block.signature = ((block.signature as string | undefined) ?? '') + sig;
+              // Reported as it accumulates, so a stream that ends before
+              // content_block_stop still keeps the signature it received.
+              callbacks.onThinkingSignature?.(currentBlockIndex, block.signature as string);
             }
           } else if ((event.delta as { type: string }).type === 'input_json_delta') {
             currentBlockInputJson += (event.delta as { partial_json: string }).partial_json;

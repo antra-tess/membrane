@@ -90,7 +90,9 @@ export interface BuildOptions {
 
   /** Custom content for the synthetic user message when first message is assistant role.
    *  In prefill formatters: defaults to '<cmd>cat untitled.txt</cmd>' with a CLI simulation
-   *  system prompt when no system prompt is configured, or '[Start]' when a system prompt is set. */
+   *  system prompt when no system prompt is configured, or '[Start]' when a system prompt is set.
+   *  In native construction: the leading user turn the tool-pair normalizer synthesizes,
+   *  '[continuing]' by default. */
   prefillUserMessage?: string;
 
   /**
