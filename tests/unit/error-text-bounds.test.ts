@@ -35,7 +35,7 @@ import { sseResponse } from '../helpers/sse-fixtures.js';
 // The documented bounds (src/types/errors.ts), restated so this file does not
 // depend on the new exports.
 const MAX_ERROR_MESSAGE_CHARS = 2_000;
-const MAX_RAW_ERROR_JSON_CHARS = 16 * 1024;
+const MAX_RAW_ERROR_JSON_BYTES = 16 * 1024;
 /** Length of the omission marker the bound inserts, at these sizes. */
 const MARKER_ALLOWANCE = 64;
 /** A bounded stack: the bounded message plus a modest frame list. */
@@ -90,7 +90,7 @@ function stubEcho(status: number, make: (echoed: string) => { text: string; type
 function expectBounded(error: MembraneError) {
   expect(error.message.length).toBeLessThanOrEqual(MAX_ERROR_MESSAGE_CHARS);
   expect((error.stack ?? '').length).toBeLessThanOrEqual(STACK_ALLOWANCE);
-  expect(JSON.stringify(error.rawError ?? null).length).toBeLessThanOrEqual(MAX_RAW_ERROR_JSON_CHARS);
+  expect(Buffer.byteLength(JSON.stringify(error.rawError ?? null), 'utf8')).toBeLessThanOrEqual(MAX_RAW_ERROR_JSON_BYTES);
 }
 
 describe('fetch boundary: an echoing 400 on openai-compatible', () => {
@@ -131,7 +131,7 @@ describe('fetch boundary: an echoing 400 on openai-compatible', () => {
       (e: MembraneError) => e,
     );
     const bodyText = echoShapes['JSON body, echo beside error.message'](echoed).text;
-    expect(error.rawError).toMatchObject({ truncated: true, chars: bodyText.length, sha256: sha256(bodyText) });
+    expect(error.rawError).toMatchObject({ truncated: true, bytes: Buffer.byteLength(bodyText, 'utf8'), sha256: sha256(bodyText) });
     expect(error.message).toContain('Image inputs are not supported for this model');
   });
 });

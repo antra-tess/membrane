@@ -22,11 +22,11 @@ import { createHash } from 'node:crypto';
 export const MAX_ERROR_MESSAGE_CHARS = 2_000;
 
 /**
- * Aggregate bound on a MembraneError's `rawError`, in characters of its JSON
+ * Aggregate bound on a MembraneError's `rawError`, in UTF-8 bytes of its JSON
  * serialization: nested bodies, headers and any other enumerable properties
  * all count toward it. A value within the bound is kept exactly as it is.
  */
-export const MAX_RAW_ERROR_JSON_CHARS = 16 * 1024;
+export const MAX_RAW_ERROR_JSON_BYTES = 16 * 1024;
 
 /** Longest provider error code kept verbatim; real codes are short tokens. */
 export const MAX_PROVIDER_ERROR_CODE_CHARS = 128;
@@ -34,10 +34,19 @@ export const MAX_PROVIDER_ERROR_CODE_CHARS = 128;
 /** Characters of serialized JSON kept as `head` when a rawError is summarized. */
 const RAW_ERROR_SUMMARY_HEAD_CHARS = 2_048;
 
-/** Move a cut point off the low half of a surrogate pair. */
-function cutBefore(text: string, index: number): number {
+const isLowSurrogate = (text: string, index: number): boolean => {
   const code = text.charCodeAt(index);
-  return index > 0 && code >= 0xdc00 && code <= 0xdfff ? index - 1 : index;
+  return code >= 0xdc00 && code <= 0xdfff;
+};
+
+/** End a head before a pair whose low half would start the cut: the head only shrinks. */
+function headCut(text: string, index: number): number {
+  return index > 0 && isLowSurrogate(text, index) ? index - 1 : index;
+}
+
+/** Start a tail after the low half of a pair the cut would split: the tail only shrinks. */
+function tailCut(text: string, index: number): number {
+  return index < text.length && isLowSurrogate(text, index) ? index + 1 : index;
 }
 
 /**
@@ -53,8 +62,10 @@ export function boundErrorText(text: string, max: number = MAX_ERROR_MESSAGE_CHA
   const markerLength = ` …[${text.length} of ${text.length} characters omitted]… `.length;
   const budget = Math.max(0, max - markerLength);
   const tailLength = Math.floor(budget / 4);
-  const headEnd = cutBefore(text, budget - tailLength);
-  const tailStart = cutBefore(text, text.length - tailLength);
+  // Each cut moves only toward omission, so the result stays within max and
+  // never holds half of a surrogate pair.
+  const headEnd = headCut(text, budget - tailLength);
+  const tailStart = tailCut(text, text.length - tailLength);
   const omitted = tailStart - headEnd;
   return `${text.slice(0, headEnd)} …[${omitted} of ${text.length} characters omitted]… ${text.slice(tailStart)}`;
 }
@@ -62,7 +73,7 @@ export function boundErrorText(text: string, max: number = MAX_ERROR_MESSAGE_CHA
 /** A provider error code, verbatim when it is token-sized; otherwise its head and length. */
 function boundProviderErrorCode(code: string | undefined): string | undefined {
   if (code === undefined || code.length <= MAX_PROVIDER_ERROR_CODE_CHARS) return code;
-  return `${code.slice(0, cutBefore(code, 64))}…[${code.length} characters]`;
+  return `${code.slice(0, headCut(code, 64))}…[${code.length} characters]`;
 }
 
 /**
@@ -83,15 +94,16 @@ function stringifyAcyclic(value: unknown): string | undefined {
 }
 
 /**
- * Enforce `MAX_RAW_ERROR_JSON_CHARS` on a rawError, measured on its JSON
- * serialization. Within the bound, the value is returned unchanged. Beyond
- * it, a summary replaces it: the length and sha256 of what was received (so
- * identical bodies are recognizable without being kept) and its first
+ * Enforce `MAX_RAW_ERROR_JSON_BYTES` on a rawError, measured in UTF-8 bytes of
+ * its JSON serialization. Within the bound, the value is returned unchanged.
+ * Beyond it, a summary replaces it: the size and sha256 of what was received
+ * (so identical bodies are recognizable without being kept) and its first
  * `RAW_ERROR_SUMMARY_HEAD_CHARS` characters. A string body (the usual raw
- * HTTP body) is summarized as text, `chars`; anything else as its JSON,
- * `jsonChars`. A cyclic value is replaced by its acyclic JSON form (bounded
- * the same way), and a value that cannot be serialized at all by a short
- * description, so a pathological error object can never break the error path.
+ * HTTP body) is summarized as received text, `bytes`; anything else as its
+ * JSON, `jsonBytes`. A cyclic value is replaced by its acyclic JSON form
+ * (bounded the same way), and a value that cannot be serialized at all by a
+ * short description, so a pathological error object can never break the
+ * error path.
  */
 export function boundRawError(value: unknown): unknown {
   if (value === undefined || value === null) return value;
@@ -110,21 +122,36 @@ export function boundRawError(value: unknown): unknown {
   }
   // Functions, symbols and undefined have no JSON form and take no space in one.
   if (json === undefined) return value;
-  if (json.length <= MAX_RAW_ERROR_JSON_CHARS) return rewritten ? JSON.parse(json) : value;
+  // UTF-16 length bounds UTF-8 bytes from below, so only a near miss pays for
+  // the exact count.
+  if (json.length <= MAX_RAW_ERROR_JSON_BYTES / 3 || Buffer.byteLength(json, 'utf8') <= MAX_RAW_ERROR_JSON_BYTES) {
+    return rewritten ? JSON.parse(json) : value;
+  }
   if (typeof value === 'string') {
     return {
       truncated: true,
-      chars: value.length,
+      bytes: Buffer.byteLength(value, 'utf8'),
       sha256: createHash('sha256').update(value).digest('hex'),
-      head: value.slice(0, cutBefore(value, RAW_ERROR_SUMMARY_HEAD_CHARS)),
+      head: value.slice(0, headCut(value, RAW_ERROR_SUMMARY_HEAD_CHARS)),
     };
   }
   return {
     truncated: true,
-    jsonChars: json.length,
+    jsonBytes: Buffer.byteLength(json, 'utf8'),
     sha256: createHash('sha256').update(json).digest('hex'),
-    head: json.slice(0, cutBefore(json, RAW_ERROR_SUMMARY_HEAD_CHARS)),
+    head: json.slice(0, headCut(json, RAW_ERROR_SUMMARY_HEAD_CHARS)),
   };
+}
+
+/** One line describing why a value could not be read, bounded. */
+function unreadable(error: unknown): string {
+  let reason: string;
+  try {
+    reason = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  } catch {
+    reason = 'unknown';
+  }
+  return `[unreadable: ${boundErrorText(reason, 200)}]`;
 }
 
 // ============================================================================
@@ -136,6 +163,9 @@ export function boundRawError(value: unknown): unknown {
  * Error objects don't JSON.stringify well (become {}), so we extract key properties.
  * The message and stack are bounded like a MembraneError's own message; the
  * aggregate size of the result is bounded where a MembraneError stores it.
+ * Every read is guarded: a field whose getter throws is recorded as
+ * unreadable rather than letting the error being described replace the one
+ * the caller is reporting.
  */
 export function serializeError(error: unknown): unknown {
   if (error === undefined || error === null) {
@@ -143,19 +173,30 @@ export function serializeError(error: unknown): unknown {
   }
 
   if (error instanceof Error) {
+    const read = (get: () => unknown): unknown => {
+      try {
+        return get();
+      } catch (readError) {
+        return unreadable(readError);
+      }
+    };
+    const name = read(() => error.name);
+    const message = read(() => error.message);
     const serialized: Record<string, unknown> = {
-      name: error.name,
-      message: boundErrorText(error.message),
+      name,
+      message: typeof message === 'string' ? boundErrorText(message) : message,
     };
 
     // Include stack trace in non-production
-    if (process.env.NODE_ENV !== 'production' && error.stack) {
-      serialized.stack = boundErrorText(error.stack);
+    if (process.env.NODE_ENV !== 'production') {
+      const stack = read(() => error.stack);
+      if (stack) serialized.stack = typeof stack === 'string' ? boundErrorText(stack) : stack;
     }
 
     // Copy any additional enumerable properties (like status, code, etc.)
-    for (const key of Object.keys(error)) {
-      serialized[key] = (error as unknown as Record<string, unknown>)[key];
+    const keys = read(() => Object.keys(error));
+    for (const key of Array.isArray(keys) ? keys as string[] : []) {
+      serialized[key] = read(() => (error as unknown as Record<string, unknown>)[key]);
     }
 
     return serialized;
@@ -236,8 +277,15 @@ export class MembraneError extends Error {
     this.retryAfterMs = info.retryAfterMs;
     this.httpStatus = info.httpStatus;
     this.providerErrorCode = boundProviderErrorCode(info.providerErrorCode);
-    // Serialize error objects so they don't become {} when JSON.stringify'd
-    this.rawError = boundRawError(serializeError(info.rawError));
+    // Serialize error objects so they don't become {} when JSON.stringify'd.
+    // Neither step may replace the failure being constructed.
+    let rawError: unknown;
+    try {
+      rawError = boundRawError(serializeError(info.rawError));
+    } catch (error) {
+      rawError = { truncated: true, unserializable: unreadable(error) };
+    }
+    this.rawError = rawError;
     this.rawRequest = info.rawRequest;
   }
 

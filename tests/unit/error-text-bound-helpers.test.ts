@@ -10,7 +10,7 @@ import {
   MembraneError,
   MAX_ERROR_MESSAGE_CHARS,
   MAX_PROVIDER_ERROR_CODE_CHARS,
-  MAX_RAW_ERROR_JSON_CHARS,
+  MAX_RAW_ERROR_JSON_BYTES,
   boundErrorText,
   boundRawError,
   serializeError,
@@ -23,6 +23,7 @@ const STACK_ALLOWANCE = MAX_ERROR_MESSAGE_CHARS + MARKER_ALLOWANCE + 8_000;
 
 const echo = (n: number, word = '') => `${'zz-echo '.repeat(Math.ceil(n / 16))}${word}${'zz-echo '.repeat(Math.ceil(n / 16))}`;
 const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
+const utf8 = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
 const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
 function bigError(rawError?: unknown, providerErrorCode?: string): MembraneError {
@@ -74,11 +75,22 @@ describe('the bound', () => {
     expect(boundErrorText(bounded, 2_000)).toBe(bounded);
   });
 
-  it('never splits a surrogate pair at either cut', () => {
+  it('never splits a surrogate pair at either cut, and stays within max', () => {
     for (const offset of [0, 1]) {
       const text = `${'x'.repeat(offset)}${'😀'.repeat(3_000)}`;
       const bounded = boundErrorText(text, 2_000);
       expect(loneSurrogate.test(bounded)).toBe(false);
+      expect(bounded.length).toBeLessThanOrEqual(2_000);
+    }
+    // One pair straddling each computed cut, at every nearby position (June's
+    // 99,000-unit case is one of these).
+    for (const n of [5_000, 99_000]) {
+      for (let at = 1; at < n - 1; at += at < 2_100 || at > n - 600 ? 1 : 997) {
+        const text = `${'x'.repeat(at - 1)}😀${'x'.repeat(n - at - 1)}`;
+        const bounded = boundErrorText(text, 2_000);
+        expect(bounded.length).toBeLessThanOrEqual(2_000);
+        expect(loneSurrogate.test(bounded)).toBe(false);
+      }
     }
   });
 
@@ -99,11 +111,11 @@ describe('the bound', () => {
     const json = JSON.stringify(body);
     expect(error.rawError).toEqual({
       truncated: true,
-      jsonChars: json.length,
+      jsonBytes: Buffer.byteLength(json, 'utf8'),
       sha256: sha256(json),
       head: json.slice(0, 2_048),
     });
-    expect(JSON.stringify(error.rawError).length).toBeLessThanOrEqual(MAX_RAW_ERROR_JSON_CHARS);
+    expect(utf8(error.rawError)).toBeLessThanOrEqual(MAX_RAW_ERROR_JSON_BYTES);
   });
 
   it('bounds the aggregate, not each string: many small fields still count', () => {
@@ -111,13 +123,13 @@ describe('the bound', () => {
     for (let i = 0; i < 2_000; i++) many[`field${i}`] = 'zz-value-0123456789';
     const error = bigError(many);
     expect((error.rawError as { truncated?: boolean }).truncated).toBe(true);
-    expect(JSON.stringify(error.rawError).length).toBeLessThanOrEqual(MAX_RAW_ERROR_JSON_CHARS);
+    expect(utf8(error.rawError)).toBeLessThanOrEqual(MAX_RAW_ERROR_JSON_BYTES);
   });
 
   it('counts nested Error properties and enumerable fields of a serialized Error', () => {
     const inner = Object.assign(new Error('zz-inner'), { body: { request: echo(200_000) } });
     const error = bigError(inner);
-    expect(JSON.stringify(error.rawError).length).toBeLessThanOrEqual(MAX_RAW_ERROR_JSON_CHARS);
+    expect(utf8(error.rawError)).toBeLessThanOrEqual(MAX_RAW_ERROR_JSON_BYTES);
     expect((error.rawError as { truncated?: boolean }).truncated).toBe(true);
   });
 
@@ -141,7 +153,7 @@ describe('the bound', () => {
     cyclic.self = cyclic;
     const error = bigError(cyclic);
     expect((error.rawError as { truncated?: boolean }).truncated).toBe(true);
-    expect(JSON.stringify(error.rawError).length).toBeLessThanOrEqual(MAX_RAW_ERROR_JSON_CHARS);
+    expect(utf8(error.rawError)).toBeLessThanOrEqual(MAX_RAW_ERROR_JSON_BYTES);
   });
 
   it('describes an unserializable rawError instead of breaking the error path', () => {
@@ -153,6 +165,50 @@ describe('the bound', () => {
       unserializable: 'Error: zz-cannot serialize',
       valueType: 'object',
     });
+  });
+
+  it('measures the aggregate in UTF-8 bytes, not UTF-16 code units', () => {
+    // 8,000 three-byte characters: 8,002 code units of JSON but 24,002 bytes.
+    const wide = '界'.repeat(8_000);
+    expect(boundRawError(wide)).toEqual({
+      truncated: true,
+      bytes: 24_000,
+      sha256: sha256(wide),
+      head: wide.slice(0, 2_048),
+    });
+    const fits = '界'.repeat(5_000); // 15,002 bytes of JSON
+    expect(boundRawError(fits)).toBe(fits);
+    const error = bigError({ text: wide });
+    expect(utf8(error.rawError)).toBeLessThanOrEqual(MAX_RAW_ERROR_JSON_BYTES);
+  });
+
+  it('keeps the failure when an Error property getter throws', () => {
+    const source = new Error('zz-original provider failure');
+    Object.defineProperty(source, 'response', {
+      enumerable: true,
+      get() { throw new Error('zz-response getter failed'); },
+    });
+    let error: MembraneError | undefined;
+    expect(() => {
+      error = new MembraneError({ type: 'invalid_request', retryable: false, message: 'zz-original provider failure', rawError: source });
+    }).not.toThrow();
+    expect(error!.message).toBe('zz-original provider failure');
+    expect(error!.type).toBe('invalid_request');
+    expect((error!.rawError as Record<string, unknown>).message).toBe('zz-original provider failure');
+    expect((error!.rawError as Record<string, unknown>).response).toBe('[unreadable: Error: zz-response getter failed]');
+    expect(() => serializeError(source)).not.toThrow();
+  });
+
+  it('keeps the failure when even the key listing of a rawError throws', () => {
+    const hostile = new Proxy(new Error('zz-proxied'), {
+      ownKeys() { throw new Error('zz-ownKeys failed'); },
+    });
+    let error: MembraneError | undefined;
+    expect(() => {
+      error = new MembraneError({ type: 'unknown', retryable: false, message: 'zz-still here', rawError: hostile });
+    }).not.toThrow();
+    expect(error!.message).toBe('zz-still here');
+    expect(utf8(error!.rawError ?? null)).toBeLessThanOrEqual(MAX_RAW_ERROR_JSON_BYTES);
   });
 
   it('writes a BigInt as its decimal string when it forces the acyclic form', () => {
