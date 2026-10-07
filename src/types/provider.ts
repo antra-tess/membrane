@@ -212,6 +212,17 @@ export interface ProviderAdapter {
    * maintenance messages). Wrappers must forward this capability. */
   readonly requiresNativeResponsesInput?: boolean;
 
+  /**
+   * True when this adapter carries the content of every message in the
+   * ProviderRequest it receives into its API call (format conversion
+   * aside), or calls `ProviderRequestOptions.onContentAltered` for any
+   * request where it substitutes, drops or rewrites some. Round reports
+   * (UsageEvent.round) rely on it: an adapter that doesn't declare it leaves
+   * a round's fidelity 'unknown'. Decorators must forward this capability
+   * and the callback.
+   */
+  readonly reportsContentAlterations?: boolean;
+
   /** Representation used for cache-layout receipts. The default provider-request
    * basis preserves post-hook semantic breakpoints even when this adapter's API
    * does not transmit cache_control. wire-request opts into the final body
@@ -306,6 +317,12 @@ export interface ProviderRequestOptions {
    * indistinguishably from visible text.
    */
   wrapThinkingTags?: boolean;
+  /**
+   * Called when the adapter did not carry some message content of this
+   * request verbatim: it substituted, dropped or rewrote a block. Adapters
+   * declaring `reportsContentAlterations` call it; decorators forward it.
+   */
+  onContentAltered?: () => void;
 }
 
 export interface ProviderResponse {

@@ -1,0 +1,439 @@
+/**
+ * Round reports (UsageEvent.round) and ToolContext.supportsInjectedMessages.
+ *
+ * A consumer that needs to know what a round's request actually carried —
+ * agent-framework's receipt clocks are the first — reads one report per
+ * provider round whose response stands. The contract (room-221 #43302):
+ *
+ *   - `altered` names consumer messages the request did not carry verbatim,
+ *     in the consumer's coordinates: `NormalizedRequest.messages` indices,
+ *     and `[batch, index]` for injected messages, for every batch still
+ *     retained in the request, resolved before role merging.
+ *   - `fidelity` is 'unknown' whenever an empty list would prove nothing:
+ *     an uninstrumented path, opt-in image shedding, a beforeRequest hook
+ *     that changed the request, an adapter that altered content.
+ *   - `injectedBatch.applied` is the ordered prefix of the newest batch the
+ *     round carried: its whole size natively, 0 on the XML prefill path.
+ *   - `usage` is the round's own; an unreported field is absent, a reported
+ *     0 is 0.
+ */
+
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import { Membrane } from '../../src/membrane.js';
+import { MockAdapter } from '../../src/providers/mock.js';
+import { OpenAIAdapter } from '../../src/providers/openai.js';
+import { OpenAIResponsesAPIAdapter } from '../../src/providers/openai-responses-api.js';
+import { GeminiAdapter } from '../../src/providers/gemini.js';
+import { AnthropicAdapter } from '../../src/providers/anthropic.js';
+import { normalizeResponsesInput } from '../../src/providers/responses-input.js';
+import { stubFetchWithSseLines } from '../helpers/sse-fixtures.js';
+import type {
+  ContentBlock,
+  NormalizedRequest,
+  ProviderAdapter,
+  ProviderRequest,
+  ProviderRequestOptions,
+  ProviderResponse,
+  RoundReport,
+  StreamCallbacks,
+  StreamEvent,
+  ToolContext,
+  ToolDefinition,
+  ToolResult,
+} from '../../src/types/index.js';
+import type { InjectedMessage } from '../../src/types/yielding-stream.js';
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+const noopTool: ToolDefinition = {
+  name: 'noop',
+  description: 'A no-op tool used to force tool rounds.',
+  inputSchema: { type: 'object', properties: {} },
+};
+
+/** An image no provider accepts: every builder substitutes a placeholder. */
+const svgImage: ContentBlock = {
+  type: 'image',
+  source: { type: 'base64', mediaType: 'image/svg+xml', data: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>').toString('base64') },
+} as ContentBlock;
+
+interface ScriptedTurn {
+  content: unknown[];
+  stopReason: string;
+  usage?: ProviderResponse['usage'];
+  /** Call options.onContentAltered while serving this turn. */
+  alterContent?: boolean;
+}
+
+/** Native-mode adapter that plays a script and records what it was sent. */
+class ScriptedAdapter implements ProviderAdapter {
+  readonly name = 'scripted';
+  readonly reportsContentAlterations: boolean;
+  requests: ProviderRequest[] = [];
+  private turns: ScriptedTurn[];
+
+  constructor(turns: ScriptedTurn[], options: { instrumented?: boolean } = {}) {
+    this.turns = [...turns];
+    this.reportsContentAlterations = options.instrumented ?? true;
+  }
+
+  supportsModel(): boolean {
+    return true;
+  }
+
+  async complete(): Promise<ProviderResponse> {
+    throw new Error('not used');
+  }
+
+  async stream(request: ProviderRequest, callbacks: StreamCallbacks, options?: ProviderRequestOptions): Promise<ProviderResponse> {
+    this.requests.push(JSON.parse(JSON.stringify(request)));
+    const turn = this.turns.shift();
+    if (!turn) throw new Error('no scripted turn left');
+    if (turn.alterContent) options?.onContentAltered?.();
+    for (const block of turn.content) {
+      if ((block as { type?: string }).type === 'text') callbacks.onChunk((block as { text: string }).text);
+    }
+    return {
+      content: turn.content,
+      stopReason: turn.stopReason,
+      usage: turn.usage ?? { inputTokens: 10, outputTokens: 10 },
+      raw: {},
+    };
+  }
+}
+
+function toolUseTurn(id: string, extra: Partial<ScriptedTurn> = {}): ScriptedTurn {
+  return {
+    content: [
+      { type: 'text', text: 'working' },
+      { type: 'tool_use', id, name: 'noop', input: {} },
+    ],
+    stopReason: 'tool_use',
+    ...extra,
+  };
+}
+
+function finalTurn(extra: Partial<ScriptedTurn> = {}): ScriptedTurn {
+  return { content: [{ type: 'text', text: 'done.' }], stopReason: 'end_turn', ...extra };
+}
+
+function nativeRequest(messages: NormalizedRequest['messages']): NormalizedRequest {
+  return { messages, config: { model: 'test-model', maxTokens: 1000 }, tools: [noopTool], toolMode: 'native' };
+}
+
+function okResults(event: { calls: Array<{ id: string }> }): ToolResult[] {
+  return event.calls.map((c) => ({ toolUseId: c.id, content: 'ok', isError: false }));
+}
+
+interface Driven {
+  rounds: RoundReport[];
+  contexts: ToolContext[];
+  events: StreamEvent[];
+}
+
+/** Drive a yielding stream; `inject[n]` is supplied with the n-th tool round's results. */
+async function drive(
+  membrane: Membrane,
+  request: NormalizedRequest,
+  options: { inject?: Array<InjectedMessage[] | undefined>; streamOptions?: Parameters<Membrane['streamYielding']>[1] } = {},
+): Promise<Driven> {
+  const stream = membrane.streamYielding(request, options.streamOptions ?? {});
+  const out: Driven = { rounds: [], contexts: [], events: [] };
+  let toolRound = 0;
+  for await (const event of stream) {
+    out.events.push(event);
+    if (event.type === 'usage' && event.round) out.rounds.push(event.round);
+    if (event.type === 'tool-calls') {
+      out.contexts.push(event.context);
+      const injectedMessages = options.inject?.[toolRound++];
+      stream.provideToolResults(okResults(event), injectedMessages ? { injectedMessages } : undefined);
+    }
+  }
+  return out;
+}
+
+describe('native yielding rounds', () => {
+  it('reports each round that stands: index, stop reason, its own usage, established fidelity', async () => {
+    const adapter = new ScriptedAdapter([
+      toolUseTurn('t1', { usage: { inputTokens: 100, outputTokens: 7, cacheReadTokens: 0 } }),
+      finalTurn({ usage: { inputTokens: 120, outputTokens: 3, cacheReadTokens: 90 } }),
+    ]);
+    const { rounds, contexts } = await drive(new Membrane(adapter), nativeRequest([
+      { participant: 'User', content: [{ type: 'text', text: 'hello' }] },
+    ]));
+    expect(rounds.map((r) => [r.index, r.stopReason, r.fidelity])).toEqual([
+      [0, 'tool_use', 'established'],
+      [1, 'end_turn', 'established'],
+    ]);
+    expect(rounds[0]!.usage).toMatchObject({ inputTokens: 100, outputTokens: 7, cacheReadTokens: 0 });
+    expect(rounds[1]!.usage).toMatchObject({ inputTokens: 120, outputTokens: 3, cacheReadTokens: 90 });
+    expect(rounds[0]!.usage.cacheCreationTokens).toBeUndefined();
+    expect(rounds.every((r) => r.altered.messages.length === 0 && r.altered.injected.length === 0)).toBe(true);
+    expect(rounds.every((r) => r.injectedBatch === undefined)).toBe(true);
+    expect(contexts[0]!.supportsInjectedMessages).toBe(true);
+  });
+
+  it('names only the merged neighbour that lost media, in the consumer\'s coordinates', async () => {
+    const adapter = new ScriptedAdapter([finalTurn()]);
+    const { rounds } = await drive(new Membrane(adapter), nativeRequest([
+      { participant: 'Alice', content: [{ type: 'text', text: 'first, intact' }] },
+      { participant: 'Bob', content: [{ type: 'text', text: 'second, with a picture' }, svgImage] },
+    ]));
+    // Both are user-role and travel in one merged provider message.
+    expect(adapter.requests[0]!.messages).toHaveLength(1);
+    expect(rounds[0]!.altered).toEqual({ messages: [1], injected: [] });
+    expect(rounds[0]!.fidelity).toBe('established');
+  });
+
+  it('reports an injected message that lost media, and keeps reporting it while the batch is retained', async () => {
+    const adapter = new ScriptedAdapter([toolUseTurn('t1'), toolUseTurn('t2'), finalTurn()]);
+    const { rounds } = await drive(new Membrane(adapter), nativeRequest([
+      { participant: 'User', content: [{ type: 'text', text: 'go' }] },
+    ]), {
+      inject: [
+        [{ participant: 'Carol', content: [{ type: 'text', text: 'look at this' }, svgImage] }],
+        [{ participant: 'Dan', content: [{ type: 'text', text: 'plain' }] }, { participant: 'Erin', content: [{ type: 'text', text: 'also plain' }] }],
+      ],
+    });
+    expect(rounds).toHaveLength(3);
+    expect(rounds[0]!.injectedBatch).toBeUndefined();
+    expect(rounds[1]!.injectedBatch).toEqual({ batch: 0, applied: 1 });
+    expect(rounds[1]!.altered).toEqual({ messages: [], injected: [[0, 0]] });
+    // The second batch is the newest now; the first is still in the request and still altered.
+    expect(rounds[2]!.injectedBatch).toEqual({ batch: 1, applied: 2 });
+    expect(rounds[2]!.altered).toEqual({ messages: [], injected: [[0, 0]] });
+  });
+
+  it('reports the attempt that stands after a refusal retry, as one round', async () => {
+    const adapter = new ScriptedAdapter([
+      { content: [{ type: 'text', text: 'no' }], stopReason: 'refusal', usage: { inputTokens: 50, outputTokens: 1 } },
+      finalTurn({ usage: { inputTokens: 51, outputTokens: 4 } }),
+    ]);
+    const { rounds } = await drive(new Membrane(adapter), nativeRequest([
+      { participant: 'User', content: [{ type: 'text', text: 'hello' }] },
+    ]), { streamOptions: { refusalRetries: 1 } });
+    expect(rounds).toHaveLength(1);
+    expect(rounds[0]).toMatchObject({ index: 0, stopReason: 'end_turn', usage: { inputTokens: 51, outputTokens: 4 } });
+  });
+
+  it('is unknown when the adapter reports altering content', async () => {
+    const adapter = new ScriptedAdapter([toolUseTurn('t1', { alterContent: true }), finalTurn()]);
+    const { rounds } = await drive(new Membrane(adapter), nativeRequest([
+      { participant: 'User', content: [{ type: 'text', text: 'hello' }] },
+    ]));
+    expect(rounds.map((r) => r.fidelity)).toEqual(['unknown', 'established']);
+  });
+
+  it('is unknown through an adapter that does not declare it reports alterations', async () => {
+    const adapter = new ScriptedAdapter([finalTurn()], { instrumented: false });
+    const { rounds } = await drive(new Membrane(adapter), nativeRequest([
+      { participant: 'User', content: [{ type: 'text', text: 'hello' }] },
+    ]));
+    expect(rounds[0]!.fidelity).toBe('unknown');
+    expect(rounds[0]!.altered).toEqual({ messages: [], injected: [] });
+  });
+
+  it('is unknown when opt-in image shedding removed something', async () => {
+    const big = Buffer.alloc(6 * 1024 * 1024, 7).toString('base64');
+    const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString('base64');
+    const adapter = new ScriptedAdapter([finalTurn()]);
+    const huge: ContentBlock = { type: 'image', source: { type: 'base64', mediaType: 'image/png', data: pngHeader + big } } as ContentBlock;
+    const request = nativeRequest(Array.from({ length: 8 }, (_, i) => ({
+      participant: 'User', content: [{ type: 'text', text: `picture ${i}` }, huge],
+    })));
+    request.shedOversizeImages = true;
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { rounds } = await drive(new Membrane(adapter), request);
+    expect(rounds[0]!.fidelity).toBe('unknown');
+  });
+
+  it('emits no round reports when usage events are off', async () => {
+    const adapter = new ScriptedAdapter([finalTurn()]);
+    const { rounds, events } = await drive(new Membrane(adapter), nativeRequest([
+      { participant: 'User', content: [{ type: 'text', text: 'hello' }] },
+    ]), { streamOptions: { emitUsage: false } });
+    expect(events.some((e) => e.type === 'usage')).toBe(false);
+    expect(rounds).toHaveLength(0);
+  });
+});
+
+describe('beforeRequest hooks', () => {
+  const messages: NormalizedRequest['messages'] = [{ participant: 'User', content: [{ type: 'text', text: 'hello' }] }];
+
+  it('a hook that mutates the request in place and returns nothing makes the round unknown', async () => {
+    const adapter = new ScriptedAdapter([finalTurn()]);
+    const membrane = new Membrane(adapter, {
+      hooks: {
+        beforeRequest: (_normalized, provider) => {
+          const request = provider as { messages: Array<{ content: Array<{ text?: string }> }> };
+          request.messages[0]!.content[0]!.text += ' (edited)';
+          return undefined;
+        },
+      },
+    });
+    const { rounds } = await drive(membrane, nativeRequest(messages));
+    expect(rounds[0]!.fidelity).toBe('unknown');
+  });
+
+  it('an observer hook keeps fidelity established', async () => {
+    const adapter = new ScriptedAdapter([finalTurn()]);
+    const seen: unknown[] = [];
+    const membrane = new Membrane(adapter, {
+      hooks: { beforeRequest: (_normalized, provider) => { seen.push(provider); return undefined; } },
+    });
+    const { rounds } = await drive(membrane, nativeRequest(messages));
+    expect(seen).toHaveLength(1);
+    expect(rounds[0]!.fidelity).toBe('established');
+  });
+
+  it('a hook returning an equal replacement keeps fidelity established', async () => {
+    const adapter = new ScriptedAdapter([finalTurn()]);
+    const membrane = new Membrane(adapter, {
+      hooks: { beforeRequest: (_normalized, provider) => JSON.parse(JSON.stringify(provider)) },
+    });
+    const { rounds } = await drive(membrane, nativeRequest(messages));
+    expect(rounds[0]!.fidelity).toBe('established');
+  });
+});
+
+describe('XML prefill rounds', () => {
+  function xmlRequest(messages: NormalizedRequest['messages']): NormalizedRequest {
+    return { messages, config: { model: 'test-model', maxTokens: 1000 }, tools: [noopTool] };
+  }
+  const toolRound = '<function_calls><invoke name="noop"></invoke></function_calls>';
+
+  it('carries no injected message: applied 0, and the context says so', async () => {
+    const adapter = new MockAdapter({ streamChunkDelayMs: 0, completeDelayMs: 0, responseQueue: [toolRound, 'done.'] });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { rounds, contexts } = await drive(new Membrane(adapter), xmlRequest([
+      { participant: 'User', content: [{ type: 'text', text: 'go' }] },
+    ]), { inject: [[{ participant: 'Carol', content: [{ type: 'text', text: 'arrived mid-turn' }] }]] });
+    expect(contexts[0]!.supportsInjectedMessages).toBe(false);
+    expect(rounds).toHaveLength(2);
+    expect(rounds[0]!.injectedBatch).toBeUndefined();
+    expect(rounds[1]!.injectedBatch).toEqual({ batch: 0, applied: 0 });
+    expect(rounds.map((r) => r.fidelity)).toEqual(['established', 'established']);
+  });
+
+  it('reports the initial build\'s alterations on every round, continuations included', async () => {
+    const adapter = new MockAdapter({ streamChunkDelayMs: 0, completeDelayMs: 0, responseQueue: [toolRound, 'done.'] });
+    const { rounds } = await drive(new Membrane(adapter), xmlRequest([
+      { participant: 'Alice', content: [{ type: 'text', text: 'intact' }] },
+      { participant: 'Bob', content: [{ type: 'text', text: 'with a picture' }, svgImage] },
+      { participant: 'Alice', content: [{ type: 'text', text: 'go' }] },
+    ]));
+    expect(rounds.map((r) => r.altered.messages)).toEqual([[1], [1]]);
+  });
+
+  it('reports a false-stop resumption as its own round', async () => {
+    let calls = 0;
+    const script = [
+      { text: '<function_calls>\n<invoke name="foo">', stopReason: 'stop_sequence' },
+      { text: 'a long enough stretch of resumed output to count as progress, then done', stopReason: 'end_turn' },
+    ];
+    const adapter: ProviderAdapter = {
+      name: 'scripted-xml',
+      reportsContentAlterations: true,
+      supportsModel: () => true,
+      complete: async () => { throw new Error('not used'); },
+      stream: async (request, callbacks) => {
+        const round = script[calls++]!;
+        callbacks.onChunk(round.text);
+        return {
+          content: [{ type: 'text', text: round.text }],
+          stopReason: round.stopReason,
+          usage: { inputTokens: 100 + calls, outputTokens: 5 },
+          model: request.model,
+          raw: {},
+        };
+      },
+    };
+    const membrane = new Membrane(adapter, { logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() } });
+    const { rounds } = await drive(membrane, { messages: [{ participant: 'User', content: [{ type: 'text', text: 'hi' }] }], config: { model: 'test', maxTokens: 100 } });
+    expect(rounds.map((r) => [r.index, r.usage.inputTokens, r.fidelity])).toEqual([
+      [0, 101, 'established'],
+      [1, 102, 'established'],
+    ]);
+  });
+});
+
+describe('usage at the adapter boundary: a reported 0 is 0, an unreported count is absent', () => {
+  it('OpenAI chat completions (streamed)', async () => {
+    const adapter = new OpenAIAdapter({ apiKey: 'zz-not-a-key', baseURL: 'http://localhost:9/v1' });
+    const request = { model: 'gpt-zz', maxTokens: 16, messages: [{ role: 'user', content: 'hi' }] } as any;
+    stubFetchWithSseLines([
+      '{"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}',
+      '{"choices":[],"usage":{"prompt_tokens":40,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":0}}}',
+      '[DONE]',
+    ]);
+    const zero = await adapter.stream(request, { onChunk: () => {} } as any);
+    expect(zero.usage.cacheReadTokens).toBe(0);
+    stubFetchWithSseLines([
+      '{"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}',
+      '{"choices":[],"usage":{"prompt_tokens":40,"completion_tokens":2}}',
+      '[DONE]',
+    ]);
+    const absent = await adapter.stream(request, { onChunk: () => {} } as any);
+    expect('cacheReadTokens' in absent.usage).toBe(false);
+  });
+
+  it('OpenAI Responses API', async () => {
+    const respond = (usage: unknown) => vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      id: 'resp_1', model: 'gpt-zz', status: 'completed',
+      output: [{ type: 'message', id: 'm1', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'ok', annotations: [] }] }],
+      usage,
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    const adapter = new OpenAIResponsesAPIAdapter({ apiKey: 'sk-test' });
+    const request = { model: 'gpt-zz', maxTokens: 16, messages: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }] } as any;
+    vi.stubGlobal('fetch', respond({ input_tokens: 40, output_tokens: 2, input_tokens_details: { cached_tokens: 0 } }));
+    expect((await adapter.complete(request)).usage.cacheReadTokens).toBe(0);
+    vi.stubGlobal('fetch', respond({ input_tokens: 40, output_tokens: 2 }));
+    expect('cacheReadTokens' in (await adapter.complete(request)).usage).toBe(false);
+  });
+
+  it('Gemini', async () => {
+    const respond = (usageMetadata: unknown) => vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }],
+      usageMetadata,
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    const adapter = new GeminiAdapter({ apiKey: 'zz-key-not-used' });
+    const request = { model: 'gemini-zz', maxTokens: 16, messages: [{ role: 'user', content: 'hi' }] } as any;
+    vi.stubGlobal('fetch', respond({ promptTokenCount: 40, candidatesTokenCount: 2, totalTokenCount: 42, cachedContentTokenCount: 0 }));
+    expect((await adapter.complete(request)).usage.cacheReadTokens).toBe(0);
+    vi.stubGlobal('fetch', respond({ promptTokenCount: 40, candidatesTokenCount: 2, totalTokenCount: 42 }));
+    expect('cacheReadTokens' in (await adapter.complete(request)).usage).toBe(false);
+  });
+});
+
+describe('adapters report the content they leave out', () => {
+  it('Anthropic: a nested tool-result block with no Anthropic form, but not empty-text cleanup', () => {
+    const adapter = new AnthropicAdapter({ apiKey: 'test', cacheKeepalive: { enabled: false } }) as any;
+    const request = (nested: unknown[]) => ({
+      model: 'claude-sonnet-4-5', maxTokens: 64,
+      messages: [
+        { role: 'assistant', content: [{ type: 'tool_use', id: 'call', name: 'noop', input: {} }] },
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call', content: nested }] },
+      ],
+    });
+    let altered = 0;
+    adapter.buildRequest(request([{ type: 'text', text: 'result' }, { type: 'text', text: ' ' }]), () => altered++);
+    expect(altered).toBe(0);
+    adapter.buildRequest(request([{ type: 'text', text: 'result' }, { type: 'document', source: { type: 'base64', mediaType: 'application/pdf', data: 'JVBERi0=' } }]), () => altered++);
+    expect(altered).toBe(1);
+  });
+
+  it('Responses input normalization: an assistant image and a non-object block', () => {
+    let dropped = 0;
+    normalizeResponsesInput([
+      { role: 'user', content: [{ type: 'text', text: 'hi' }, { type: 'image', source: { type: 'url', url: 'https://example.invalid/a.png' } }] },
+    ] as any, () => dropped++);
+    expect(dropped).toBe(0);
+    normalizeResponsesInput([
+      { role: 'assistant', content: [{ type: 'text', text: 'see' }, { type: 'image', source: { type: 'url', url: 'https://example.invalid/a.png' } }, 'stray'] },
+    ] as any, () => dropped++);
+    expect(dropped).toBe(2);
+  });
+});

@@ -163,6 +163,8 @@ function headerSafeSessionId(key: string): string {
 
 export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
   readonly name: string = 'openai-responses-api';
+  /** Carries native input items verbatim, and reports what subscription-mode normalization leaves out. */
+  readonly reportsContentAlterations = true;
 
   /**
    * Reads `usage.input_tokens_details.cached_tokens` from OpenAI's account-wide
@@ -227,7 +229,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
     options?: ProviderRequestOptions
   ): Promise<OpenAIResponsesAPIProviderResponse> {
     if (this.subscription) return this.stream(request, { onChunk: () => {} }, options);
-    const responsesRequest = this.buildRequest(request);
+    const responsesRequest = this.buildRequest(request, options?.onContentAltered);
     options?.onRequest?.(responsesRequest);
 
     const { signal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
@@ -250,7 +252,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
     callbacks: StreamCallbacks,
     options?: ProviderRequestOptions
   ): Promise<OpenAIResponsesAPIProviderResponse> {
-    const responsesRequest = this.buildRequest(request);
+    const responsesRequest = this.buildRequest(request, options?.onContentAltered);
     responsesRequest.stream = true;
     options?.onRequest?.(responsesRequest);
 
@@ -405,7 +407,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
     }, this.credentials ?? { token: this.apiKey });
   }
 
-  private buildRequest(request: ProviderRequest): OpenAIResponsesAPIRequest {
+  private buildRequest(request: ProviderRequest, onContentAltered?: () => void): OpenAIResponsesAPIRequest {
     if (!Array.isArray(request.messages)) {
       throw new Error('OpenAI Responses API input must be a provider-native input-item array');
     }
@@ -448,7 +450,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
     // These invariants define the adapter's stateless native-item contract and
     // cannot be overridden through provider params.
     responsesRequest.input = this.subscription
-      ? normalizeResponsesInput(request.messages)
+      ? normalizeResponsesInput(request.messages, onContentAltered)
       : request.messages as OpenAIResponsesInputItem[];
     responsesRequest.store = false;
     responsesRequest.include = this.mergeEncryptedReasoningInclude(responsesRequest.include);
@@ -526,7 +528,8 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
   ): OpenAIResponsesAPIProviderResponse {
     const outputItems = Array.isArray(response.output) ? response.output : [];
     const content = this.outputToContent(outputItems);
-    const cachedTokens = response.usage?.input_tokens_details?.cached_tokens ?? 0;
+    // A reported 0 is a fact (no cache read); only an unreported count is absent.
+    const cachedTokens = response.usage?.input_tokens_details?.cached_tokens;
 
     return {
       content,
@@ -536,7 +539,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
       usage: {
         inputTokens: response.usage?.input_tokens ?? 0,
         outputTokens: response.usage?.output_tokens ?? 0,
-        cacheReadTokens: cachedTokens > 0 ? cachedTokens : undefined,
+        ...(typeof cachedTokens === 'number' ? { cacheReadTokens: cachedTokens } : {}),
       },
       model: response.model ?? requestedModel,
       rawRequest,

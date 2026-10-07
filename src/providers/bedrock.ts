@@ -274,6 +274,8 @@ async function signRequest(
 
 export class BedrockAdapter implements ProviderAdapter {
   readonly name = 'bedrock';
+  /** Carries message content verbatim: only wire fields (sourceUrl, cache ttl, media_type spelling) change. */
+  readonly reportsContentAlterations = true;
   readonly cacheReceiptBasis = 'wire-request' as const;
 
   /**

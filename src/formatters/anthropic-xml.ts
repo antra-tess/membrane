@@ -301,10 +301,10 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         continue;
       }
 
-      // Skip empty messages except last. Whitespace-only text is content:
-      // skipping a message that held some is an alteration.
+      // Skip empty messages except last. Empty-text removal (whitespace
+      // only, as utils/empty-text defines it) is not an alteration; any block
+      // that was dropped on the way here was recorded by extractContent.
       if (isEmpty && !isLastMessage) {
-        if (message.content.some((b) => b.type === 'text' && b.text !== '')) onAltered?.();
         continue;
       }
 

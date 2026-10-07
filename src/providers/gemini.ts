@@ -123,9 +123,10 @@ function geminiUsageToProviderUsage(
     inputTokens: promptTokens,
     outputTokens: candidatesTokens + (thoughtsTokens ?? 0),
     ...(thoughtsTokens != null ? { thinkingTokens: thoughtsTokens } : {}),
-    cacheReadTokens: usageMetadata?.cachedContentTokenCount
-      ? usageMetadata.cachedContentTokenCount
-      : undefined,
+    // A reported 0 is a fact (no cache read); only an unreported count is absent.
+    ...(typeof usageMetadata?.cachedContentTokenCount === 'number'
+      ? { cacheReadTokens: usageMetadata.cachedContentTokenCount }
+      : {}),
   };
 }
 

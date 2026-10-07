@@ -74,7 +74,11 @@ export interface UsageEvent {
 export interface RoundReport {
   /** Zero-based index of this returned round (refusal re-issues within a round are not rounds). */
   index: number;
-  /** Mapped stop reason of the attempt that stands. 'refusal' is a provider refusal. */
+  /**
+   * Mapped stop reason of the attempt that stands. 'refusal' means the
+   * provider refused the round (its own stop reason), which is unrelated to
+   * tool invocations a parser declined.
+   */
   stopReason: StopReason;
   /** This round's own usage as the adapter reported it: an unreported field is absent, not 0. */
   usage: DetailedUsage;
@@ -352,8 +356,8 @@ export interface YieldingStreamOptions {
   emitBlocks?: boolean;
 
   /**
-   * Whether to emit 'usage' events.
-   * Default: true
+   * Whether to emit 'usage' events, and with them the per-round reports
+   * (`UsageEvent.round`). Default: true
    */
   emitUsage?: boolean;
 }

@@ -628,7 +628,8 @@ export class OpenAIAdapter implements ProviderAdapter {
     const message = choice?.message;
 
     // Extract prompt caching details (OpenAI automatic caching for prompts ≥1024 tokens)
-    const cachedTokens = response.usage?.prompt_tokens_details?.cached_tokens ?? 0;
+    // A reported 0 is a fact (no cache read); only an unreported count is absent.
+    const cachedTokens = response.usage?.prompt_tokens_details?.cached_tokens;
 
     return {
       content: this.messageToContent(message),
@@ -639,7 +640,7 @@ export class OpenAIAdapter implements ProviderAdapter {
         outputTokens: response.usage?.completion_tokens ?? 0,
         // OpenAI's automatic prompt caching - cached tokens are read from cache
         // Note: OpenAI doesn't have separate "creation" tokens - it's automatic
-        cacheReadTokens: cachedTokens > 0 ? cachedTokens : undefined,
+        ...(typeof cachedTokens === 'number' ? { cacheReadTokens: cachedTokens } : {}),
       },
       model: response.model ?? requestedModel,
       rawRequest,
@@ -655,7 +656,7 @@ export class OpenAIAdapter implements ProviderAdapter {
     rawRequest?: unknown
   ): ProviderResponse {
     // Extract cached tokens from stream usage if available
-    const cachedTokens = streamUsage?.prompt_tokens_details?.cached_tokens ?? 0;
+    const cachedTokens = streamUsage?.prompt_tokens_details?.cached_tokens;
 
     return {
       content: this.messageToContent(message),
@@ -664,7 +665,7 @@ export class OpenAIAdapter implements ProviderAdapter {
       usage: {
         inputTokens: streamUsage?.prompt_tokens ?? 0,
         outputTokens: streamUsage?.completion_tokens ?? 0,
-        cacheReadTokens: cachedTokens > 0 ? cachedTokens : undefined,
+        ...(typeof cachedTokens === 'number' ? { cacheReadTokens: cachedTokens } : {}),
       },
       model: requestedModel,
       rawRequest,

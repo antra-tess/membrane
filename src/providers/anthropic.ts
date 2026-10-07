@@ -3,7 +3,7 @@
  */
 
 import Anthropic, { type ClientOptions } from '@anthropic-ai/sdk';
-import { stripEmptyTextBlocks, stripEmptyTextRequest } from '../utils/empty-text.js';
+import { hasNonEmptyText, stripEmptyTextBlocks, stripEmptyTextRequest } from '../utils/empty-text.js';
 import { resolveImageMediaType, isAcceptedImageMediaType, assertWithinByteBudget, shedImagesToFitByteBudget } from '../utils/image-media.js';
 import type {
   ProviderAdapter,
@@ -197,6 +197,8 @@ export interface AnthropicAdapterConfig {
 
 export class AnthropicAdapter implements ProviderAdapter {
   readonly name = 'anthropic';
+  /** Carries message content verbatim, and reports the nested tool-result blocks it can't carry. */
+  readonly reportsContentAlterations = true;
   readonly cacheReceiptBasis = 'wire-request' as const;
 
   /**
@@ -318,7 +320,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     request: ProviderRequest,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const anthropicRequest = this.buildRequest(request);
+    const anthropicRequest = this.buildRequest(request, options?.onContentAltered);
     const fullRequest = { ...anthropicRequest, stream: false as const };
     options?.onRequest?.(fullRequest);
 
@@ -343,7 +345,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     callbacks: StreamCallbacks,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const anthropicRequest = this.buildRequest(request);
+    const anthropicRequest = this.buildRequest(request, options?.onContentAltered);
     // Note: stream is implicitly true when using .stream()
     const fullRequest = { ...anthropicRequest, stream: true };
     options?.onRequest?.(fullRequest);
@@ -676,7 +678,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     return { 'anthropic-beta': [...betas].join(',') };
   }
 
-  private buildRequest(request: ProviderRequest): Anthropic.MessageCreateParams {
+  private buildRequest(request: ProviderRequest, onContentAltered?: () => void): Anthropic.MessageCreateParams {
     // Strip provider-specific fields (e.g., sourceUrl for Gemini) from image blocks
     // before sending to Anthropic, which rejects extra inputs.
     // Also normalize nested tool_result content blocks: Membrane uses camelCase
@@ -704,10 +706,14 @@ export class AnthropicAdapter implements ProviderAdapter {
             };
           }
           if (block.type === 'tool_result' && Array.isArray(block.content)) {
-            return {
-              ...block,
-              content: toAnthropicToolResultContent(block.content as ContentBlock[]),
-            };
+            const content = toAnthropicToolResultContent(block.content as ContentBlock[]);
+            // Nested blocks other than text and base64/URL images have no
+            // Anthropic tool_result form and are left out. (Empty-text
+            // cleanup is not an alteration.)
+            const meaningful = (block.content as Array<{ type?: string; text?: unknown }>)
+              .filter((b) => !(b?.type === 'text' && !hasNonEmptyText(b.text))).length;
+            if (content.length !== meaningful) onContentAltered?.();
+            return { ...block, content };
           }
           return block;
         }),

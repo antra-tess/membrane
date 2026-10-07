@@ -11,7 +11,11 @@ type JsonObject = Record<string, unknown>;
  * final transport boundary so every call shape accepted by ProviderAdapter is
  * valid on the Codex Responses endpoint.
  */
-export function normalizeResponsesInput(messages: ProviderRequest['messages']): OpenAIResponsesInputItem[] {
+export function normalizeResponsesInput(
+  messages: ProviderRequest['messages'],
+  /** Hears each content block this normalization leaves out. */
+  onDropped?: () => void,
+): OpenAIResponsesInputItem[] {
   const output: unknown[] = [];
 
   for (const rawMessage of messages as unknown[]) {
@@ -51,12 +55,16 @@ export function normalizeResponsesInput(messages: ProviderRequest['messages']): 
     };
 
     for (const rawBlock of blocks) {
-      if (!isObject(rawBlock)) continue;
+      if (!isObject(rawBlock)) {
+        onDropped?.();
+        continue;
+      }
       if (rawBlock.type === 'text') {
         parts.push({ type: role === 'assistant' ? 'output_text' : 'input_text', text: asString(rawBlock.text) });
       } else if (rawBlock.type === 'image') {
         const imageUrl = responsesImageUrl(rawBlock);
         if (imageUrl && role !== 'assistant') parts.push({ type: 'input_image', image_url: imageUrl });
+        else onDropped?.();
       } else if (rawBlock.type === 'tool_use') {
         flush();
         output.push(normalizeStandaloneItem(rawBlock));

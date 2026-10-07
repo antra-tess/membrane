@@ -10,9 +10,10 @@
  * An alteration is any non-empty consumer block not carried verbatim: a
  * placeholder substituted for an image, an image or block stripped, an
  * unsupported block left out, a tool carrier skipped, a tool_result rewritten
- * as text. Removing an empty text block carries nothing and is not an
- * alteration; neither is the faithful rendering of harness or attempt
- * blocks, or a block moved between provider messages.
+ * as text. Empty-text removal (text that is empty or whitespace only, as
+ * utils/empty-text defines it) is not an alteration; neither is the
+ * faithful rendering of harness or attempt blocks, or a block moved between
+ * provider messages.
  *
  * Builders record alterations by the index of the message in the array they
  * were handed. When content changes in a way no index can be attached to
@@ -37,7 +38,25 @@ export class FidelityNotes {
   get established(): boolean {
     return !this.unattributed && !this.uninstrumented;
   }
+
+  /** An independent copy: a round that carries an earlier build's conversions starts from its notes. */
+  copy(): FidelityNotes {
+    const notes = new FidelityNotes();
+    for (const index of this.altered) notes.alter(index);
+    notes.unattributed = this.unattributed;
+    notes.uninstrumented = this.uninstrumented;
+    return notes;
+  }
 }
+
+/** Where a message in a yielding loop's working array came from. */
+export type MessageOrigin =
+  /** `NormalizedRequest.messages[index]`, as the consumer submitted it. */
+  | { kind: 'input'; index: number }
+  /** Message `index` of injected batch `batch`. */
+  | { kind: 'injected'; batch: number; index: number }
+  /** Built by membrane itself (an assistant round, a tool_result envelope). */
+  | { kind: 'own' };
 
 /**
  * A structural fingerprint of a provider request, for telling whether a

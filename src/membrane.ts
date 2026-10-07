@@ -69,6 +69,7 @@ import type {
   YieldingStreamOptions,
   StreamEvent,
   ToolCallsEvent,
+  RoundReport,
 } from './types/yielding-stream.js';
 import type { PrefillFormatter, StreamParser } from './formatters/types.js';
 import { AnthropicXmlFormatter } from './formatters/anthropic-xml.js';
@@ -92,7 +93,7 @@ import {
   shedImagesToFitByteBudget, assertWithinByteBudget,
 } from './utils/image-media.js';
 import { getDefaultPricing } from './registry/default-pricing.js';
-import { FidelityNotes, requestFingerprint } from './utils/fidelity.js';
+import { FidelityNotes, requestFingerprint, type MessageOrigin } from './utils/fidelity.js';
 
 // ============================================================================
 // Membrane Class
@@ -2306,6 +2307,39 @@ export class Membrane {
     return { providerRequest, prefillResult: buildResult };
   }
 
+  /**
+   * A round's report (UsageEvent.round), from the notes of the build that
+   * produced its request. `origins` maps the build's message indices back to
+   * the consumer's coordinates (native loop); without it, the indices
+   * already are `NormalizedRequest.messages` indices (XML loop).
+   */
+  private static roundReport(input: {
+    index: number;
+    stopReason: StopReason;
+    usage: DetailedUsage | undefined;
+    fidelity: FidelityNotes;
+    origins?: readonly MessageOrigin[];
+    injectedBatch?: { batch: number; applied: number };
+  }): RoundReport {
+    const messages: number[] = [];
+    const injected: Array<[number, number]> = [];
+    for (const at of input.fidelity.altered) {
+      const origin: MessageOrigin = input.origins ? (input.origins[at] ?? { kind: 'own' }) : { kind: 'input', index: at };
+      if (origin.kind === 'input') messages.push(origin.index);
+      else if (origin.kind === 'injected') injected.push([origin.batch, origin.index]);
+    }
+    messages.sort((a, b) => a - b);
+    injected.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    return {
+      index: input.index,
+      stopReason: input.stopReason,
+      usage: input.usage ?? { inputTokens: 0, outputTokens: 0 },
+      ...(input.injectedBatch ? { injectedBatch: input.injectedBatch } : {}),
+      altered: { messages, injected },
+      fidelity: input.fidelity.established ? 'established' : 'unknown',
+    };
+  }
+
   private async streamOnce(
     request: any,
     callbacks: { onChunk: (chunk: string) => void; onContentBlock?: (index: number, block: unknown) => void },
@@ -2348,6 +2382,14 @@ export class Membrane {
        * semantic count. Callers keep the latest value for telemetry.
        */
       onWireCacheMarkers?: (markerCount: number) => void;
+      /**
+       * The round's fidelity notes (utils/fidelity.ts). A beforeRequest hook
+       * whose output differs from its input, whether by replacement or by
+       * in-place mutation, makes them unattributed, as does an adapter that
+       * reports altering content; an adapter that doesn't declare
+       * `reportsContentAlterations` makes them uninstrumented.
+       */
+      fidelity?: FidelityNotes;
     }
   ): Promise<
     import('./types/provider.js').ProviderResponse & {
@@ -2361,8 +2403,13 @@ export class Membrane {
     // compatibility won't catch the excess field (checked only on object
     // literals, not on variables). Leaving it in would silently leak the
     // normalized form into every adapter's options.
-    const { normalizedRequest, refusalRetries, onRetrying, onWireCacheMarkers, ...adapterOptions } = options;
+    const { normalizedRequest, refusalRetries, onRetrying, onWireCacheMarkers, fidelity, ...adapterOptions } = options;
+    // Fingerprint around the hook only when both a hook and a reader exist:
+    // an observer or a no-op hook keeps fidelity established.
+    const beforeHook = fidelity && this.config.hooks?.beforeRequest ? requestFingerprint(request) : undefined;
     const finalRequest = (await this.applyBeforeRequestHook(normalizedRequest, request)) as typeof request;
+    if (beforeHook !== undefined && requestFingerprint(finalRequest) !== beforeHook) fidelity!.unattributed = true;
+    if (fidelity && !this.adapter.reportsContentAlterations) fidelity.uninstrumented = true;
 
     // Check every streaming path's post-hook representation. Only adapters
     // opting into wire-request receipts reconcile it with their final body;
@@ -2380,6 +2427,7 @@ export class Membrane {
     const observedOptions = {
       ...adapterOptions,
       ...(receiptGuard ? { signal: receiptGuard.signal } : {}),
+      ...(fidelity ? { onContentAltered: () => { fidelity.unattributed = true; } } : {}),
       onRequest: (wireRequest: unknown) => {
         if (useWireReceipt) {
           const wireCount = countWireCacheMarkers(wireRequest as Parameters<typeof countWireCacheMarkers>[0]);
@@ -3237,8 +3285,12 @@ export class Membrane {
     const executedToolCalls: ToolCall[] = [];
     const executedToolResults: ToolResult[] = [];
 
-    // Transform initial request using the formatter
-    let { providerRequest, prefillResult } = this.transformRequest(request, formatter);
+    // Transform initial request using the formatter. Its fidelity notes hold
+    // for every round: continuations carry the same converted messages.
+    const buildFidelity = new FidelityNotes();
+    let { providerRequest, prefillResult } = this.transformRequest(request, formatter, buildFidelity);
+    // Injected batches supplied to this stream; this path carries none of them.
+    let injectedBatches = 0;
 
     // Initialize parser with prefill content
     let initialPrefillLength = 0;
@@ -3307,6 +3359,8 @@ export class Membrane {
         let detectedStopSequence: string | null = null;
         let truncatedAccumulated: string | null = null;
         const checkFromIndex = parser.getAccumulated().length;
+        // This round's notes: the build's, plus what the hook and the adapter do.
+        const roundFidelity = buildFidelity.copy();
 
         // Stream from provider
         const streamResult = await this.streamOnce(
@@ -3372,6 +3426,7 @@ export class Membrane {
             wrapThinkingTags: true,
             onWireCacheMarkers: (count) => { prefillResult.cacheMarkersApplied = count; },
             onRequest: (req: unknown) => { rawRequest = req; },
+            fidelity: roundFidelity,
           }
         );
 
@@ -3400,7 +3455,18 @@ export class Membrane {
         // Accumulate usage (including cache metrics), priced at this round's model
         const usageSoFar = turnUsage.addRound(streamResult.model, streamResult.usage);
         if (emitUsage) {
-          stream.emit({ type: 'usage', usage: usageSoFar });
+          stream.emit({
+            type: 'usage',
+            usage: usageSoFar,
+            round: Membrane.roundReport({
+              index: rounds - 1,
+              stopReason: lastStopReason,
+              usage: turnUsage.lastRound?.usage,
+              fidelity: roundFidelity,
+              // The prefill transcript carries no injected message.
+              ...(injectedBatches > 0 ? { injectedBatch: { batch: injectedBatches - 1, applied: 0 } } : {}),
+            }),
+          });
         }
 
         // Flush the parser
@@ -3498,6 +3564,9 @@ export class Membrane {
               depth: toolDepth,
               previousResults: executedToolResults,
               accumulated: parser.getAccumulated().slice(initialPrefillLength),
+              // The continuation is an assistant prefill: no user envelope
+              // exists to carry injected messages.
+              supportsInjectedMessages: false,
             };
 
             // Yield control for tool execution
@@ -3523,6 +3592,7 @@ export class Membrane {
             // to append to. Warn (once per stream — long turns have many
             // rounds) rather than drop silently; the messages remain in the
             // caller's context window and reach the model on the next turn.
+            if (injectedMessages && injectedMessages.length > 0) injectedBatches++;
             if (injectedMessages && injectedMessages.length > 0 && !warnedInjectionUnsupported) {
               warnedInjectionUnsupported = true;
               console.warn(
@@ -3816,6 +3886,12 @@ export class Membrane {
     let discardedUsage: DiscardedAttemptsUsage | undefined;
 
     let messages = [...request.messages];
+    // Where each working message came from, so a round's alterations are
+    // reported in the consumer's coordinates (RoundReport).
+    const origins: MessageOrigin[] = request.messages.map((_, index) => ({ kind: 'input' as const, index }));
+    // Injected batches supplied to this stream; the newest one's size.
+    let injectedBatches = 0;
+    let newestBatchSize = 0;
     let allContentBlocks: ContentBlock[] = [];
     let markersInLastRequest = 0;
 
@@ -3834,8 +3910,11 @@ export class Membrane {
           return;
         }
 
-        // Build provider request with native tools
-        const providerRequest = this.buildNativeToolRequest(request, messages, toolDepth > 0, activeFormatter);
+        // Build provider request with native tools, recording what it alters.
+        const roundFidelity = new FidelityNotes();
+        const providerRequest = this.buildNativeToolRequest(request, messages, toolDepth > 0, activeFormatter, roundFidelity);
+        // Every supplied batch is in `messages` by now, the newest whole.
+        const carriedBatch = injectedBatches > 0 ? { batch: injectedBatches - 1, applied: newestBatchSize } : undefined;
 
         // Stream from provider
         let textAccumulated = '';
@@ -3886,6 +3965,7 @@ export class Membrane {
             onWireCacheMarkers: (markerCount: number) => {
               markersInLastRequest = markerCount;
             },
+            fidelity: roundFidelity,
             refusalRetries: options.refusalRetries,
             // Discard the refused attempt: roll the accumulators back to
             // where this attempt began and tell the consumer to drop what it
@@ -3923,7 +4003,18 @@ export class Membrane {
         // Accumulate usage (including cache metrics), priced at this round's model
         const usageSoFar = turnUsage.addRound(streamResult.model, streamResult.usage);
         if (emitUsage) {
-          stream.emit({ type: 'usage', usage: usageSoFar });
+          stream.emit({
+            type: 'usage',
+            usage: usageSoFar,
+            round: Membrane.roundReport({
+              index: rounds - 1,
+              stopReason: lastStopReason,
+              usage: turnUsage.lastRound?.usage,
+              fidelity: roundFidelity,
+              origins,
+              ...(carriedBatch ? { injectedBatch: carriedBatch } : {}),
+            }),
+          });
         }
 
         // Parse content blocks from response
@@ -3957,6 +4048,9 @@ export class Membrane {
             // lets consumers persist the assistant turn verbatim (signed
             // thinking must precede tool_use in the same turn).
             roundContent: responseBlocks,
+            // Injected messages supplied in reply are appended after the
+            // tool results if another round starts.
+            supportsInjectedMessages: true,
           };
 
           // Yield control for tool execution
@@ -3989,7 +4083,9 @@ export class Membrane {
             participant: assistantName,
             content: responseBlocks,
           });
+          origins.push({ kind: 'own' });
 
+          origins.push({ kind: 'own' });
           messages.push({
             participant: userName,
             content: results.map(r => ({
@@ -4007,14 +4103,17 @@ export class Membrane {
           // tool_result envelopes (e.g. ChatCompletions role:'tool') carry
           // them as ordinary user messages. Signed-thinking adjacency is
           // unaffected: the assistant turn above is round-tripped verbatim.
-          if (injectedMessages) {
-            for (const injected of injectedMessages) {
+          if (injectedMessages && injectedMessages.length > 0) {
+            const batch = injectedBatches++;
+            newestBatchSize = injectedMessages.length;
+            injectedMessages.forEach((injected, index) => {
               messages.push({
                 participant: injected.participant ?? userName,
                 content: injected.content,
                 ...(injected.metadata ? { metadata: injected.metadata } : {}),
               });
-            }
+              origins.push({ kind: 'injected', batch, index });
+            });
           }
 
           toolDepth++;
