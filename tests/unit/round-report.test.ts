@@ -556,7 +556,7 @@ describe('producer-boundary losses (Hugo, room-220 #45131 and #45179)', () => {
     expect(rounds[0]!.usage.outputTokens).toBe(10);
   });
 
-  it('a block shared by two messages: every occurrence removed alters both; one ambiguous report is unknown (Hugo #45748)', async () => {
+  it('a block object reused in two messages is emitted once per occurrence: removing both alters both; a report about the consumer\'s own object is unknown (Hugo #45748, #45945)', async () => {
     const shared = { type: 'text', text: '   ' } as ContentBlock;
     const messages = (): NormalizedRequest['messages'] => [
       { participant: 'Claude', content: [{ type: 'tool_use', id: 't1', name: 'noop', input: {} }] },
@@ -581,7 +581,8 @@ describe('producer-boundary losses (Hugo, room-220 #45131 and #45179)', () => {
     expect(both.rounds[0]!.altered.messages).toEqual([1, 3]);
     expect(both.rounds[0]!.fidelity).toBe('established');
 
-    // An adapter that reports the shared object once: which occurrence is unknowable.
+    // A report naming the consumer's own object, which membrane never emitted:
+    // which occurrence is unknowable.
     const once = new ScriptedAdapter([finalTurn()]);
     const original = once.stream.bind(once);
     once.stream = async (request, callbacks, options) => {
@@ -590,5 +591,34 @@ describe('producer-boundary losses (Hugo, room-220 #45131 and #45179)', () => {
     };
     const ambiguous = await drive(new Membrane(once), nativeRequest(messages()));
     expect(ambiguous.rounds[0]!.fidelity).toBe('unknown');
+  });
+
+  it('only the attempt that stands reports: a refused attempt\'s alteration is discarded, the standing attempt\'s kept (Hugo #45945)', async () => {
+    const messages = (): NormalizedRequest['messages'] => [
+      { participant: 'Claude', content: [{ type: 'tool_use', id: 't1', name: 'noop', input: {} }] },
+      { participant: 'User', content: [{ type: 'tool_result', toolUseId: 't1', content: [{ type: 'text', text: 'first' }] }] },
+    ];
+    /** Reports the nested block membrane emitted for message 1, on the attempts named. */
+    const reporting = (reportOn: number[]) => {
+      let attempt = 0;
+      return {
+        name: 'retrying', reportsContentAlterations: true,
+        supportsModel: () => true, complete: async () => { throw new Error('unused'); },
+        stream: async (request: ProviderRequest, callbacks: StreamCallbacks, options?: ProviderRequestOptions): Promise<ProviderResponse> => {
+          const now = attempt++;
+          const toolResult = (request.messages as any[]).flatMap((m) => m.content).find((b: any) => b.type === 'tool_result');
+          if (reportOn.includes(now)) options?.onContentAltered?.(toolResult.content[0]);
+          callbacks.onChunk('answer');
+          return { content: [{ type: 'text', text: 'answer' }], stopReason: now === 0 ? 'refusal' : 'end_turn', usage: { inputTokens: 10, outputTokens: 2 }, model: request.model, rawRequest: request, raw: {} };
+        },
+      } as ProviderAdapter;
+    };
+    const discarded = await drive(new Membrane(reporting([0])), nativeRequest(messages()), { streamOptions: { refusalRetries: 1 } });
+    expect(discarded.rounds).toHaveLength(1);
+    expect(discarded.rounds[0]!.altered.messages).toEqual([]);
+    expect(discarded.rounds[0]!.fidelity).toBe('established');
+    const kept = await drive(new Membrane(reporting([1])), nativeRequest(messages()), { streamOptions: { refusalRetries: 1 } });
+    expect(kept.rounds[0]!.altered.messages).toEqual([1]);
+    expect(kept.rounds[0]!.fidelity).toBe('established');
   });
 });

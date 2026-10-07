@@ -1630,7 +1630,12 @@ export class Membrane {
           content.push({
             type: 'tool_result',
             tool_use_id: block.toolUseId,
-            content: block.content,
+            // Each nested block is emitted as its own object (same bytes), so
+            // an adapter's report about one names exactly one occurrence even
+            // when the consumer reused a block object across messages.
+            content: Array.isArray(block.content)
+              ? block.content.map((nested) => (nested !== null && typeof nested === 'object' ? { ...nested } : nested))
+              : block.content,
             is_error: block.isError,
           });
         } else if (block.type === 'thinking') {
@@ -2326,7 +2331,6 @@ export class Membrane {
     origins?: readonly MessageOrigin[];
     injectedBatch?: { batch: number; applied: number };
   }): RoundReport {
-    input.fidelity.settle();
     const messages: number[] = [];
     const injected: Array<[number, number]> = [];
     for (const at of input.fidelity.altered) {
@@ -2440,6 +2444,8 @@ export class Membrane {
     onWireCacheMarkers?.(markerCount);
     const useWireReceipt = this.adapter.cacheReceiptBasis === 'wire-request';
     let receiptEmitted = false;
+    // The adapter's content-alteration reports for the attempt in flight.
+    let attemptAlterations: unknown[] = [];
     if (!useWireReceipt) normalizedRequest.onCacheWireReceipt?.(computeCacheWireReceipt(finalRequest));
     const receiptGuard = useWireReceipt && normalizedRequest.onCacheWireReceipt
       ? this.wireReceiptGuard(adapterOptions.signal)
@@ -2447,7 +2453,8 @@ export class Membrane {
     const observedOptions = {
       ...adapterOptions,
       ...(receiptGuard ? { signal: receiptGuard.signal } : {}),
-      ...(fidelity ? { onContentAltered: (block?: unknown) => fidelity.alterBlock(block) } : {}),
+      // Collected per attempt: only the attempt that stands describes the round.
+      ...(fidelity ? { onContentAltered: (block?: unknown) => { attemptAlterations.push(block); } } : {}),
       onRequest: (wireRequest: unknown) => {
         if (useWireReceipt) {
           const wireCount = countWireCacheMarkers(wireRequest as Parameters<typeof countWireCacheMarkers>[0]);
@@ -2474,6 +2481,7 @@ export class Membrane {
     let providerCalls = 0;
     while (true) {
       providerCalls++;
+      attemptAlterations = [];
       const streamCall = this.adapter.stream(finalRequest, callbacks, observedOptions);
       const rawResult = receiptGuard ? await receiptGuard.settle(streamCall) : await streamCall;
       // Restate usage in the one convention before any accumulator, ratio or
@@ -2483,6 +2491,7 @@ export class Membrane {
         usage: normalizeUsageToCacheExcluded(rawResult.usage, this.adapter.name, this.adapter.usageCacheConvention),
       };
       if (result.stopReason !== 'refusal' || retried >= maxAttempts) {
+        for (const block of attemptAlterations) fidelity?.alterBlock(block);
         return {
           ...result,
           providerCalls,

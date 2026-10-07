@@ -42,13 +42,11 @@ export class FidelityNotes {
    */
   mutatedInPlace = false;
 
-  /** Reports about blocks with more than one owning message, settled at the round's end. */
-  private readonly sharedReports = new Map<object, number>();
-
   /**
    * Request blocks the builder emitted (and nested tool-result blocks): the
-   * owning message of each occurrence. One object can occur in several
-   * messages (a consumer may reuse a block), so this is a list.
+   * owning message of each registration. Builders emit a distinct object per
+   * occurrence (nested tool-result blocks are copied, not passed through), so
+   * one owner is the norm; an object that ends up with several is ambiguous.
    */
   constructor(private readonly owners = new WeakMap<object, number[]>()) {}
 
@@ -65,37 +63,16 @@ export class FidelityNotes {
   }
 
   /**
-   * An adapter altered one occurrence of `block` (or an unknown part, when
-   * absent). A block owned by one message is attributed to it at once; one
-   * shared by several waits for `settle`, since a report names an object,
-   * not which occurrence.
+   * An adapter altered `block` (or an unknown part, when absent). A block
+   * this round's builder emitted for exactly one message is attributed to
+   * it. Anything else (an object the builder didn't emit, or one registered
+   * for several messages) can't say which message lost content, so the round
+   * is unattributed rather than letting an altered message look intact.
    */
   alterBlock(block?: unknown): void {
     const occurrences = block !== null && typeof block === 'object' ? this.owners.get(block) : undefined;
-    if (!occurrences) {
-      this.unattributed = true;
-      return;
-    }
-    if (new Set(occurrences).size === 1) {
-      this.alter(occurrences[0]!);
-      return;
-    }
-    this.sharedReports.set(block as object, (this.sharedReports.get(block as object) ?? 0) + 1);
-  }
-
-  /**
-   * Resolve reports about shared blocks once the round's request is final.
-   * A report for every occurrence alters every owner. Fewer leave it
-   * ambiguous which owner lost content, so the round is unattributed rather
-   * than letting an altered message look intact.
-   */
-  settle(): void {
-    for (const [block, reports] of this.sharedReports) {
-      const occurrences = this.owners.get(block) ?? [];
-      if (reports >= occurrences.length) for (const index of occurrences) this.alter(index);
-      else this.unattributed = true;
-    }
-    this.sharedReports.clear();
+    if (occurrences && new Set(occurrences).size === 1) this.alter(occurrences[0]!);
+    else this.unattributed = true;
   }
 
   get established(): boolean {

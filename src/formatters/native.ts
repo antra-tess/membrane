@@ -430,7 +430,7 @@ export class NativeFormatter implements PrefillFormatter {
         (item as { type?: string }).type === 'image'
       ) {
         const src = (item as { source?: { type?: string; data?: string; mediaType?: string; media_type?: string } }).source;
-        if (src?.type === 'url') return item;
+        if (src?.type === 'url') return { ...item };
         const mediaType = resolveImageMediaType(src?.data, src?.mediaType ?? src?.media_type);
         if (!isAcceptedImageMediaType(mediaType)) {
           onAltered?.();
@@ -439,7 +439,8 @@ export class NativeFormatter implements PrefillFormatter {
         const { mediaType: _declared, ...source } = src ?? {};
         return { ...item, source: { ...source, media_type: mediaType } };
       }
-      return item;
+      // Its own object per occurrence, so an adapter's report names one.
+      return item !== null && typeof item === 'object' ? { ...item } : item;
     });
   }
 
