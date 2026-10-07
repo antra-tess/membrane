@@ -167,11 +167,15 @@ export interface TurnToolCallNotice extends ToolCallNotice {
   block: number;
   /**
    * Whether the harness answered its block in-band: the notice is in the
-   * envelope membrane injected after the block — so also a `tool_notice` in
-   * the response content, and on that round's `tool-calls` or `tool-attempt`
-   * event. False when nothing answered the block: it never closed before the
-   * turn ended, or no loop ran (`complete()`, `stream()` without onToolCalls),
-   * so these are the notices only the response carries.
+   * envelope membrane injected and recorded after the block, so also a
+   * `tool_notice` in the response content. It says nothing about whether a
+   * later provider request presented it. A loop consumer also had it with the
+   * round: on the yielding loop's `tool-calls` or `tool-attempt` event, or on
+   * `ToolContext.notices` when the callback loop dispatched the round (an
+   * all-refused round calls no executor, so the callback loop's caller has it
+   * only here). False when nothing answered the block: it never closed before
+   * the turn ended, or no loop ran (`complete()`, `stream()` without
+   * onToolCalls).
    */
   answered: boolean;
 }

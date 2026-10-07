@@ -412,6 +412,37 @@ describe('a block the text ends inside', () => {
     expect(parsed.notices.map((n) => [n.block, n.kind, n.answered])).toEqual([[0, 'refused', false]]);
   });
 
+  it('holds the spans inside it, such as a thinking element quoted in the unfinished value', () => {
+    // Hazel's case (room-237 #45057): the thinking span inside the raw value
+    // must not hide the block's opener.
+    const quoted = `${CALLS_OPEN}<invoke name="board_update"><parameter name="item">raw <thinking>quoted</thinking> then cut`;
+    const parsed = parseAccumulatedIntoBlocks(quoted, TOOLS);
+    expect(parsed.blocks).toEqual([{ type: 'tool_attempt', rawXml: quoted }]);
+    expect(parsed.unclosedToolBlock).toBe(true);
+  });
+
+  it('starts at its own opener: a thinking element before it stays thinking', () => {
+    const resolved = block(invoke('board_update', param('item', 'A'), param('status', 's')));
+    const partial2 = `${CALLS_OPEN}<invoke name="board_update"><parameter name="item">cut`;
+    const parsed = parseAccumulatedIntoBlocks(`${resolved}\n<thinking>next</thinking>\n${partial2}`, TOOLS);
+    expect(parsed.blocks.map((b) => b.type)).toEqual(['tool_use', 'thinking', 'tool_attempt']);
+    expect(parsed.blocks.at(-1)).toEqual({ type: 'tool_attempt', rawXml: partial2 });
+    expect(parsed.toolCalls.map((c) => c.input.item)).toEqual(['A']);
+  });
+
+  it('is a call: a bare opener quoted in prose stays text, and the attempt starts at the opener its invoke follows', () => {
+    // Nell's case (room-237 #45084): a mention, not an attempt.
+    const mention = `The parser starts a block at ${CALLS_OPEN} and reads invokes after it. That's all for today.`;
+    expect(parseAccumulatedIntoBlocks(mention, TOOLS).blocks).toEqual([{ type: 'text', text: mention }]);
+
+    const partial3 = `${CALLS_OPEN}<invoke name="board_update"><parameter name="item">cut`;
+    const parsed = parseAccumulatedIntoBlocks(`Blocks open with ${CALLS_OPEN}. ${partial3}`, TOOLS);
+    expect(parsed.blocks).toEqual([
+      { type: 'text', text: `Blocks open with ${CALLS_OPEN}.` },
+      { type: 'tool_attempt', rawXml: partial3 },
+    ]);
+  });
+
   it('follows every resolved block: a stale opener a later block re-anchored past is not one', () => {
     // `<function_calls> unfinished <function_calls>…valid…</function_calls>`,
     // executed and answered: the inner block and its results stand.

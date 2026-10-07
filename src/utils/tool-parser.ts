@@ -1682,16 +1682,36 @@ function collectLiveToolBlocks(view: ScanText, envelopes?: readonly RecordedEnve
 }
 
 /**
- * Where a `function_calls` block that the text ends inside begins: the first
- * opener after every span, if there is one. Every opener a closer follows is
- * already a span (or inside one), so an opener past the last span never
- * closed.
+ * Where a `function_calls` block that the text ends inside begins: the
+ * innermost opener, after the last resolved block and outside every retained
+ * span, that an invoke head follows. Every opener a closer follows resolved to
+ * a block or lies inside a span, so this one never closed, and the invoke head
+ * makes it a call rather than a mention: a bare opener quoted in prose or
+ * thought stays text. An earlier unmatched opener, before a block that
+ * re-anchored past it, is that block's splice. Spans after the opener, such as
+ * a thinking element quoted in the unfinished value, are inside the attempt.
  */
 function unclosedTailStart(masked: string, spans: CandidateSpan[]): number | undefined {
-  const tailStart = spans.reduce((end, span) => Math.max(end, span.end), 0);
-  FUNCTION_CALLS_OPEN_REGEX.lastIndex = 0;
-  const opener = FUNCTION_CALLS_OPEN_REGEX.exec(masked.slice(tailStart));
-  return opener ? tailStart + opener.index : undefined;
+  const afterBlocks = spans.reduce((end, span) => (span.kind === 'calls' ? Math.max(end, span.end) : end), 0);
+  const outside = (at: number): boolean => !spans.some((span) => span.start <= at && at < span.end);
+  const matchesFrom = (source: string): number[] => {
+    const pattern = new RegExp(source, 'g');
+    pattern.lastIndex = afterBlocks;
+    const found: number[] = [];
+    for (let match = pattern.exec(masked); match; match = pattern.exec(masked)) {
+      if (outside(match.index)) found.push(match.index);
+    }
+    return found;
+  };
+  const openers = matchesFrom(FUNCTION_CALLS_OPEN_REGEX.source);
+  const heads = matchesFrom(INVOKE_OPEN_REGEX.source);
+  for (const [index, opener] of openers.entries()) {
+    const head = heads.find((at) => at > opener);
+    if (head === undefined) return undefined;
+    const next = openers[index + 1];
+    if (next === undefined || next > head) return opener;
+  }
+  return undefined;
 }
 
 /**
@@ -2062,11 +2082,14 @@ export function parseAccumulatedIntoBlocks(
   // A block the text ends inside never closed: nothing in it was dispatched,
   // and it is no more prose than a refused block — the model's own attempt,
   // from its opener to the end of the text (the turn's own text, when the
-  // opener was the prefill's). Only an opener after every retained span
-  // counts: an earlier one that a later block re-anchored past is that
-  // block's splice, and stays as it was.
+  // opener was the prefill's), spans inside it included. An earlier opener
+  // that a later block re-anchored past is that block's splice, and stays as
+  // it was.
   const openTail = unclosedTailStart(view.masked, survivingSpans);
   if (openTail !== undefined) {
+    for (let index = positions.length - 1; index >= 0; index--) {
+      if (positions[index]!.start >= openTail) positions.splice(index, 1);
+    }
     positions.push({
       start: openTail,
       end: processedText.length,
