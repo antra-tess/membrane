@@ -273,6 +273,9 @@ export class AnthropicAdapter implements ProviderAdapter {
             wire as unknown as Anthropic.MessageCreateParamsNonStreaming, headers,
           ),
           config.cacheKeepalive ?? {},
+          // Pokes report the SDK's own error in their receipts; the keepalive
+          // reads the stated wait and retryability as the adapter classifies them.
+          (error) => this.handleError(error),
         );
   }
 
@@ -352,7 +355,7 @@ export class AnthropicAdapter implements ProviderAdapter {
 
       return this.parseResponse(response, fullRequest);
     } catch (error) {
-      throw this.handleError(error, fullRequest);
+      throw this.holdKeepaliveFor(fullRequest.model, this.handleError(error, fullRequest));
     }
   }
 
@@ -662,7 +665,7 @@ export class AnthropicAdapter implements ProviderAdapter {
           rawRequest: fullRequest,
         });
       }
-      throw this.handleError(session.failure() ?? error, fullRequest);
+      throw this.holdKeepaliveFor(fullRequest.model, this.handleError(session.failure() ?? error, fullRequest));
     }
   }
 
@@ -861,6 +864,17 @@ export class AnthropicAdapter implements ProviderAdapter {
       rawRequest,
       raw: response,
     };
+  }
+
+  /**
+   * A stated wait from a foreground call holds this model's background
+   * keepalive pokes until it passes, whatever the failure's retryability
+   * (the wait says when, not whether; the caller decides about its own
+   * request). Returns the error unchanged.
+   */
+  private holdKeepaliveFor(model: string, error: MembraneError): MembraneError {
+    if (error.retryAfterMs !== undefined) this.cacheKeepalive?.holdModel(model, error.retryAfterMs, error.message);
+    return error;
   }
 
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {

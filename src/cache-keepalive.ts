@@ -89,7 +89,20 @@ export type KeepaliveEvent =
   | { type: 'skipped'; key: string; reason: string }
   | { type: 'error'; key: string; error: string; consecutive: number }
   | { type: 'disabled'; reason: string }
-  | { type: 'expired'; key: string; idleMs: number };
+  | { type: 'expired'; key: string; idleMs: number }
+  /** A provider stated a wait for `model`: no lineage of that model is poked
+   * before `until` (epoch ms; null holds until the keepalive stops). */
+  | { type: 'held'; model: string; until: number | null; reason: string };
+
+/** What the keepalive needs from a classified failure: the provider's stated
+ * wait, and whether the provider says the request may be retried. */
+export interface KeepaliveFailureClassification {
+  retryAfterMs?: number;
+  retryable?: boolean;
+}
+
+/** The last instant a JavaScript Date can represent (ECMA-262 time value range). */
+const MAX_DATE_MS = 8.64e15;
 
 export interface CacheKeepaliveConfig {
   /** Master switch. Default true. */
@@ -245,6 +258,14 @@ export function lineageKey(wire: Record<string, unknown>): string {
 
 export class CacheKeepalive {
   private lineages = new Map<string, Lineage>();
+  /**
+   * Per model, the instant before which no lineage of that model is poked:
+   * the maximum outstanding provider wait stated by any call to the model,
+   * foreground or keepalive (Infinity when a stated wait cannot be held as an
+   * instant: held until stop()). A wait passing is the only thing that ends
+   * one; another caller's release of its own admission does not.
+   */
+  private holds = new Map<string, number>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false;
   private consecutiveErrors = 0;
@@ -252,9 +273,47 @@ export class CacheKeepalive {
   private readonly cfg: Required<Omit<CacheKeepaliveConfig, 'onEvent' | 'onCall'>> &
     Pick<CacheKeepaliveConfig, 'onEvent' | 'onCall'>;
 
-  constructor(private readonly send: KeepaliveSend, config: CacheKeepaliveConfig = {}) {
+  /**
+   * `classify` reads a failed poke as the adapter classifies it (stated wait,
+   * retryability); without it, a failed poke holds nothing and always counts
+   * toward the breaker.
+   */
+  constructor(
+    private readonly send: KeepaliveSend,
+    config: CacheKeepaliveConfig = {},
+    private readonly classify?: (error: unknown) => KeepaliveFailureClassification | undefined,
+  ) {
     this.cfg = { ...DEFAULTS, ...config };
     if (!this.cfg.enabled) this.stopped = true;
+  }
+
+  /**
+   * A provider's stated wait for `model`, from any call to it: every lineage
+   * of that model is skipped until the wait passes. Holds reduce by maximum
+   * (a later, shorter wait never shortens one), and a wait that cannot be
+   * held as an instant (not finite, or past the last Date instant) holds
+   * until stop(). A value that is not a non-negative number states no wait.
+   */
+  holdModel(model: string, retryAfterMs: unknown, reason: string): void {
+    if (this.stopped) return;
+    if (typeof retryAfterMs !== 'number' || Number.isNaN(retryAfterMs) || retryAfterMs < 0) return;
+    const instant = Date.now() + retryAfterMs;
+    const until = Number.isFinite(instant) && instant <= MAX_DATE_MS ? instant : Number.POSITIVE_INFINITY;
+    const current = this.holds.get(model);
+    if (current !== undefined && current >= until) return;
+    this.holds.set(model, until);
+    this.emit({ type: 'held', model, until: Number.isFinite(until) ? until : null, reason });
+  }
+
+  /** The hold binding `model` at `now`, if any; a passed one is dropped. */
+  private heldUntil(model: string, now: number): number | undefined {
+    const until = this.holds.get(model);
+    if (until === undefined) return undefined;
+    if (now >= until) {
+      this.holds.delete(model);
+      return undefined;
+    }
+    return until;
   }
 
   /** Record a real outbound request. Cheap; called on every LLM call. */
@@ -321,6 +380,9 @@ export class CacheKeepalive {
         // inside the window, it refreshed the TTL for free and we do nothing.
         // This is what keeps a busy agent's keepalive cost at ~zero.
         if (now - lin.lastTouchAt < this.cfg.refreshAfterMs) continue;
+        // A stated wait on this lineage's model, including one a poke of
+        // another lineage of the same model received earlier in this tick.
+        if (this.heldUntil(String(lin.wire.model ?? ''), now) !== undefined) continue;
         await this.refresh(key, lin);
       }
     } finally {
@@ -386,7 +448,18 @@ export class CacheKeepalive {
           request: payload, outcome: 'error', error: err,
         });
       }
-      this.consecutiveErrors += 1;
+      // The provider's stated wait, if it gave one, holds every lineage of this
+      // model. A refusal the provider classifies as retryable that states a
+      // wait is then paced, not blind repetition: it does not count toward the
+      // breaker (the count stays where it was; it is not reset). A failure that
+      // is not retryable still counts, whatever wait it states.
+      let classified: KeepaliveFailureClassification | undefined;
+      try { classified = this.classify?.(err); } catch { classified = undefined; }
+      if (classified?.retryAfterMs !== undefined) {
+        this.holdModel(String(lin.wire.model ?? ''), classified.retryAfterMs, message);
+      }
+      const paced = classified?.retryable === true && classified.retryAfterMs !== undefined;
+      if (!paced) this.consecutiveErrors += 1;
       this.emit({ type: 'error', key, error: message, consecutive: this.consecutiveErrors });
 
       // Back this lineage off immediately rather than retrying on the next tick.
@@ -396,7 +469,7 @@ export class CacheKeepalive {
       // how fable-cm produced 1033 `400 invalid_request_error` rows in 3h on
       // 2026-08-21 — the exact error class that also trips the agent's
       // poison-history breaker. A keepalive must never be that loop.
-      if (this.consecutiveErrors >= this.cfg.maxConsecutiveErrors) {
+      if (!paced && this.consecutiveErrors >= this.cfg.maxConsecutiveErrors) {
         this.stop();
         this.emit({
           type: 'disabled',
