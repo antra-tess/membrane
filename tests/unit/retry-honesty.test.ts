@@ -82,15 +82,22 @@ describe('calculateRetryDelay honors retry-after (MAJOR-2)', () => {
     expect(elapsedMs).toBeGreaterThanOrEqual(150);
   });
 
-  it('still clamps to maxRetryDelayMs when the server asks for longer', async () => {
+  it('ends the call instead of retrying early when the server asks for longer than maxRetryDelayMs', async () => {
+    // A wait beyond the in-call budget is neither shortened (an early retry
+    // adds traffic the provider said would fail) nor slept through (that
+    // would park the call). The caller gets the wait intact and paces.
     const adapter = new FailingAdapter(1, () => rateLimit(60_000));
     adapter.queueResponse('zz-recovered');
     const membrane = new Membrane(adapter, { retry: { maxRetries: 2, retryDelayMs: 1, maxRetryDelayMs: 40 } });
 
     const startedAt = Date.now();
-    await membrane.complete(zzRequest);
+    const error = await membrane.complete(zzRequest).then(() => undefined, (e: MembraneError) => e);
     const elapsedMs = Date.now() - startedAt;
 
+    expect(error).toBeInstanceOf(MembraneError);
+    expect(error?.type).toBe('rate_limit');
+    expect(error?.retryAfterMs).toBe(60_000);
+    expect(adapter.completeCalls).toBe(1);
     expect(elapsedMs).toBeLessThan(2_000);
   });
 

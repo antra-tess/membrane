@@ -198,6 +198,9 @@ class NativeBlockTracker {
   }
 }
 
+/** Longest delay one setTimeout can represent (2^31-1 ms, about 24.8 days). */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
 export class Membrane {
   private adapter: ProviderAdapter;
   private registry?: ModelRegistry;
@@ -369,7 +372,11 @@ export class Membrane {
         // silently re-promoted to the long schedule by a positive base limit.
         const { isOverloaded, effectiveMax } = this.resolveRetryPolicy(errorInfo);
 
-        if (errorInfo.retryable && attempts < effectiveMax) {
+        if (
+          errorInfo.retryable &&
+          attempts < effectiveMax &&
+          this.providerWaitFitsRetryWindow(isOverloaded, errorInfo)
+        ) {
           // Check hook for retry decision
           if (this.config.hooks?.onError) {
             const decision = await this.config.hooks.onError(errorInfo, attempts);
@@ -510,7 +517,12 @@ export class Membrane {
         // same five-attempt floor complete() applies. Post-emission errors
         // still throw: retrying would replay content already consumed.
         const { isRateLimit, isOverloaded, effectiveMax } = this.resolveRetryPolicy(errorInfo);
-        if (!emitted && (isOverloaded || isRateLimit) && attempts < effectiveMax) {
+        if (
+          !emitted &&
+          (isOverloaded || isRateLimit) &&
+          attempts < effectiveMax &&
+          this.providerWaitFitsRetryWindow(isOverloaded, errorInfo)
+        ) {
           // Honor the same pre-retry hook contract as complete(): hosts use
           // onError for circuit-breaking, and its 'abort' decision must work
           // on the streaming path too.
@@ -2864,11 +2876,27 @@ export class Membrane {
   }
 
   /**
+   * Whether a provider's stated wait can be honored inside this call. A
+   * `retry-after` longer than the schedule's `maxRetryDelayMs` (or one that
+   * is not a usable number) is never retried early and never slept through:
+   * the call ends, and the classified error carries `retryAfterMs` intact so
+   * the caller (which owns pacing across calls) can wait the provider out.
+   * Retrying earlier would add traffic with no evidence it can succeed;
+   * sleeping longer than the configured budget would park the call.
+   */
+  private providerWaitFitsRetryWindow(overloaded: boolean, errorInfo: ErrorInfo): boolean {
+    const retryAfterMs = errorInfo.retryAfterMs;
+    if (retryAfterMs === undefined) return true;
+    const { maxRetryDelayMs } = overloaded ? this.retryConfig.overloaded : this.retryConfig;
+    return Number.isFinite(retryAfterMs) && retryAfterMs >= 0 && retryAfterMs <= maxRetryDelayMs;
+  }
+
+  /**
    * The server's own `retry-after` outranks our backoff when it is longer:
    * retrying inside a window the provider has already told us to wait out
-   * burns the whole attempt budget on guaranteed failures. maxRetryDelayMs
-   * still caps the wait, so a hostile or absurd retry-after cannot park a
-   * turn indefinitely.
+   * burns the whole attempt budget on guaranteed failures. Only waits that
+   * fit `maxRetryDelayMs` reach here (see providerWaitFitsRetryWindow), so a
+   * stated wait is never shortened.
    */
   private calculateRetryDelay(attempt: number, overloaded = false, errorInfo?: ErrorInfo): number {
     const { retryDelayMs, backoffMultiplier, maxRetryDelayMs } = overloaded
@@ -2919,17 +2947,35 @@ export class Membrane {
     return new MembraneError(errorInfo);
   }
 
+  /**
+   * Abort-aware wait. A single timer cannot represent more than 2^31-1 ms
+   * (Node and browsers fire such a timer almost immediately), so a longer
+   * configured wait is taken in steps rather than silently shortened.
+   */
   private sleep(ms: number, signal?: AbortSignal): Promise<void> {
     return new Promise((resolve, reject) => {
       if (signal?.aborted) {
         reject(signal.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
         return;
       }
-      const timer = setTimeout(resolve, ms);
-      signal?.addEventListener('abort', () => {
-        clearTimeout(timer);
-        reject(signal.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
-      }, { once: true });
+      let remaining = ms > 0 ? ms : 0;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const onAbort = () => {
+        if (timer !== undefined) clearTimeout(timer);
+        reject(signal!.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
+      };
+      const step = () => {
+        if (remaining <= 0) {
+          signal?.removeEventListener('abort', onAbort);
+          resolve();
+          return;
+        }
+        const wait = Math.min(remaining, MAX_TIMER_DELAY_MS);
+        remaining -= wait;
+        timer = setTimeout(step, wait);
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      step();
     });
   }
 
