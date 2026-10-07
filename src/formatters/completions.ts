@@ -31,6 +31,7 @@ import type {
   BlockEvent,
   StreamEmission,
 } from './types.js';
+import { holdsContent } from '../utils/fidelity.js';
 
 // ============================================================================
 // Configuration
@@ -256,9 +257,10 @@ export class CompletionsFormatter implements PrefillFormatter {
       if (leftOut) options.fidelity?.alter(index);
 
       // Skip empty messages (except if it's the final completion target).
-      // Whitespace-only text is content: skipping it is an alteration.
+      // Whitespace-only text is content: skipping it is an alteration. Only
+      // exactly empty '' blocks carry nothing (joined, two of them read '\n').
       if (!text.trim()) {
-        if (text !== '') options.fidelity?.alter(index);
+        if (holdsContent(message.content)) options.fidelity?.alter(index);
         continue;
       }
 

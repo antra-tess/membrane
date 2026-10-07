@@ -11,7 +11,8 @@
  *     retained in the request, resolved before role merging.
  *   - `fidelity` is 'unknown' whenever an empty list would prove nothing:
  *     an uninstrumented path, opt-in image shedding, a beforeRequest hook
- *     that changed the request, an adapter that altered content.
+ *     that changed the request, an adapter alteration that could not be
+ *     attributed.
  *   - `injectedBatch.applied` is the ordered prefix of the newest batch the
  *     round carried: its whole size natively, 0 on the XML prefill path.
  *   - `usage` is the round's own; an unreported field is absent, a reported
@@ -26,6 +27,9 @@ import { OpenAIResponsesAPIAdapter } from '../../src/providers/openai-responses-
 import { GeminiAdapter } from '../../src/providers/gemini.js';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import { normalizeResponsesInput } from '../../src/providers/responses-input.js';
+import { NativeFormatter } from '../../src/formatters/native.js';
+import { CompletionsFormatter } from '../../src/formatters/completions.js';
+import { FidelityNotes } from '../../src/utils/fidelity.js';
 import { stubFetchWithSseLines } from '../helpers/sse-fixtures.js';
 import type {
   ContentBlock,
@@ -220,7 +224,7 @@ describe('native yielding rounds', () => {
     expect(rounds[0]).toMatchObject({ index: 0, stopReason: 'end_turn', usage: { inputTokens: 51, outputTokens: 4 } });
   });
 
-  it('is unknown when the adapter reports altering content', async () => {
+  it('is unknown when the adapter reports altering content without naming a block', async () => {
     const adapter = new ScriptedAdapter([toolUseTurn('t1', { alterContent: true }), finalTurn()]);
     const { rounds } = await drive(new Membrane(adapter), nativeRequest([
       { participant: 'User', content: [{ type: 'text', text: 'hello' }] },
@@ -620,5 +624,210 @@ describe('producer-boundary losses (Hugo, room-220 #45131 and #45179)', () => {
     const kept = await drive(new Membrane(reporting([1])), nativeRequest(messages()), { streamOptions: { refusalRetries: 1 } });
     expect(kept.rounds[0]!.altered.messages).toEqual([1]);
     expect(kept.rounds[0]!.fidelity).toBe('established');
+  });
+});
+
+describe('Greptile\'s review of #104 (room-256)', () => {
+  const text = (value: string): ContentBlock => ({ type: 'text', text: value });
+  const toolUse = (id: string): ContentBlock => ({ type: 'tool_use', id, name: 'noop', input: {} }) as ContentBlock;
+  const toolResult = (toolUseId: string | undefined, content: unknown = 'stray'): ContentBlock =>
+    ({ type: 'tool_result', toolUseId, content }) as ContentBlock;
+  const sorted = (indices: Iterable<number>) => [...indices].sort((a, b) => a - b);
+
+  describe('injected messages keep the consumer\'s coordinates through provideToolResults\' cleaning', () => {
+    it('native: positions and applied as supplied; a stripped tool block is an alteration, an empty message is not', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const adapter = new ScriptedAdapter([toolUseTurn('t1'), finalTurn()]);
+      const { rounds } = await drive(new Membrane(adapter), nativeRequest([
+        { participant: 'User', content: [text('go')] },
+      ]), {
+        inject: [[
+          { participant: 'Ann', content: [] },
+          { participant: 'Bo', content: [text('a picture'), svgImage] },
+          { participant: 'Cy', content: [text('kept'), toolResult('x')] },
+        ]],
+      });
+      expect(rounds[1]!.injectedBatch).toEqual({ batch: 0, applied: 3 });
+      expect(rounds[1]!.altered).toEqual({ messages: [], injected: [[0, 1], [0, 2]] });
+      expect(rounds[1]!.fidelity).toBe('established');
+    });
+
+    it('native: a wholly stripped batch keeps its number and stays altered while retained', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const adapter = new ScriptedAdapter([toolUseTurn('t1'), toolUseTurn('t2'), finalTurn()]);
+      const { rounds } = await drive(new Membrane(adapter), nativeRequest([
+        { participant: 'User', content: [text('go')] },
+      ]), {
+        inject: [
+          [{ participant: 'Ann', content: [toolResult('x')] }],
+          [{ participant: 'Bo', content: [text('a picture'), svgImage, toolUse('y')] }],
+        ],
+      });
+      expect(rounds[1]!.injectedBatch).toEqual({ batch: 0, applied: 1 });
+      expect(rounds[1]!.altered.injected).toEqual([[0, 0]]);
+      expect(rounds[2]!.injectedBatch).toEqual({ batch: 1, applied: 1 });
+      // [1, 0] lost its image to the builder and its tool block to the cleaning: one entry.
+      expect(rounds[2]!.altered.injected).toEqual([[0, 0], [1, 0]]);
+    });
+
+    it('XML: a wholly stripped batch still takes its number', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const toolRound = '<function_calls><invoke name="noop"></invoke></function_calls>';
+      const adapter = new MockAdapter({ streamChunkDelayMs: 0, completeDelayMs: 0, responseQueue: [toolRound, toolRound, 'done.'] });
+      const { rounds } = await drive(new Membrane(adapter), {
+        messages: [{ participant: 'User', content: [text('go')] }],
+        config: { model: 'test-model', maxTokens: 1000 }, tools: [noopTool],
+      }, {
+        inject: [
+          [{ participant: 'Ann', content: [toolResult('x')] }],
+          [{ participant: 'Bo', content: [text('arrived mid-turn')] }],
+        ],
+      });
+      expect(rounds.map((r) => r.injectedBatch)).toEqual([undefined, { batch: 0, applied: 0 }, { batch: 1, applied: 0 }]);
+    });
+  });
+
+  describe('XML: a message the transcript leaves out is reported if it held anything', () => {
+    async function xmlRound(messages: NormalizedRequest['messages']) {
+      const adapter = new MockAdapter({ streamChunkDelayMs: 0, completeDelayMs: 0, responseQueue: ['done.'] });
+      const { rounds } = await drive(new Membrane(adapter), {
+        messages, config: { model: 'test-model', maxTokens: 1000 }, promptCaching: false,
+      });
+      return { round: rounds[0]!, sent: JSON.stringify(adapter.getLastRequest()?.messages) };
+    }
+
+    it('a trailing assistant message after another is left out of the transcript, and reported', async () => {
+      const { round, sent } = await xmlRound([
+        { participant: 'User', content: [text('hi')] },
+        { participant: 'Claude', content: [text('first')] },
+        { participant: 'Claude', content: [text('second')] },
+      ]);
+      expect(sent).toContain('first');
+      expect(sent).not.toContain('second');
+      expect(round.altered.messages).toEqual([2]);
+      expect(round.fidelity).toBe('established');
+    });
+
+    it('a whitespace-only last message is reported; an exactly empty one is not', async () => {
+      expect((await xmlRound([
+        { participant: 'User', content: [text('hi')] },
+        { participant: 'User', content: [text('  ')] },
+      ])).round.altered.messages).toEqual([1]);
+      expect((await xmlRound([
+        { participant: 'User', content: [text('hi')] },
+        { participant: 'Claude', content: [text('')] },
+      ])).round.altered.messages).toEqual([]);
+      expect((await xmlRound([
+        { participant: 'User', content: [text('hi')] },
+        { participant: 'Claude', content: [text('first')] },
+        { participant: 'Claude', content: [text('')] },
+      ])).round.altered.messages).toEqual([]);
+    });
+  });
+
+  describe.each([
+    {
+      name: 'the same orphan id in two messages',
+      messages: (): NormalizedRequest['messages'] => [
+        { participant: 'User', content: [text('start')] },
+        { participant: 'User', content: [toolResult('gone', 'one')] },
+        { participant: 'Claude', content: [text('noted')] },
+        { participant: 'User', content: [toolResult('gone', 'two')] },
+        { participant: 'User', content: [text('go')] },
+      ],
+      altered: [1, 3],
+    },
+    {
+      // A result with no id is textified as '<missing>'; a separate result whose
+      // id is literally '<missing>' is paired and carried (Hazel, room-256 #49551).
+      name: 'a missing id beside a literal \'<missing>\' id',
+      messages: (): NormalizedRequest['messages'] => [
+        { participant: 'User', content: [toolResult(undefined, 'no id')] },
+        { participant: 'Claude', content: [toolUse('<missing>')] },
+        { participant: 'User', content: [toolResult('<missing>', 'paired')] },
+        { participant: 'User', content: [text('go')] },
+      ],
+      altered: [0],
+    },
+  ])('a textified orphan tool_result alters exactly the message it came from: $name', ({ messages, altered }) => {
+    it('the yielding native loop', async () => {
+      const { rounds } = await drive(new Membrane(new ScriptedAdapter([finalTurn()])), nativeRequest(messages()));
+      expect(rounds[0]!.altered.messages).toEqual(altered);
+      expect(rounds[0]!.fidelity).toBe('established');
+    });
+
+    it('NativeFormatter.buildMessages', () => {
+      const notes = new FidelityNotes();
+      new NativeFormatter().buildMessages(messages(), { assistantParticipant: 'Claude', participantMode: 'multiuser', fidelity: notes } as any);
+      expect(sorted(notes.altered)).toEqual(altered);
+      expect(notes.established).toBe(true);
+    });
+  });
+
+  describe('a block the normalizer copies to drop cache_control keeps its owner', () => {
+    // The stranded tool_use gets a synthetic [pending] result in the next user
+    // envelope, and every cache_control from that envelope on is removed by
+    // copying the block. The breakpoint sits on a whitespace-only last block,
+    // which the Anthropic cleanup then removes: its report names the copy.
+    const messages = (): NormalizedRequest['messages'] => [
+      { participant: 'User', content: [text('start')] },
+      { participant: 'Claude', content: [toolUse('stranded')] },
+      { participant: 'User', content: [text('later'), text('  ')], cacheBreakpoint: true },
+    ];
+
+    it('through the yielding native loop and the real Anthropic cleanup', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const adapter = new ScriptedAnthropic([{ content: [{ type: 'text', text: 'done' }], stopReason: 'end_turn' }]);
+      const { rounds } = await drive(new Membrane(adapter), {
+        messages: messages(), config: { model: 'claude-sonnet-4-5', maxTokens: 1000 },
+        tools: [noopTool], toolMode: 'native', promptCaching: true,
+      });
+      const sent = JSON.stringify(adapter.sent[0].messages);
+      expect(sent).toContain('[pending]');
+      expect(sent).not.toContain('"  "');
+      expect(rounds[0]!.altered.messages).toEqual([2]);
+      expect(rounds[0]!.fidelity).toBe('established');
+    });
+
+    it('through NativeFormatter.buildMessages', () => {
+      const notes = new FidelityNotes();
+      const built = new NativeFormatter().buildMessages(messages(), {
+        assistantParticipant: 'Claude', participantMode: 'multiuser', promptCaching: true, fidelity: notes,
+      } as any);
+      const copy = (built.messages as Array<{ content: unknown }>)
+        .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
+        .find((b: any) => b.type === 'text' && b.text === '  ');
+      // The suppression's copy, not the block the builder registered.
+      expect(copy).toBeDefined();
+      expect((copy as Record<string, unknown>).cache_control).toBeUndefined();
+      notes.alterBlock(copy);
+      expect(sorted(notes.altered)).toEqual([2]);
+      expect(notes.established).toBe(true);
+    });
+  });
+
+  it('Responses subscription normalization reports a tool result whose nested content it can\'t carry, wrapped or standalone', () => {
+    let dropped = 0;
+    const lossy = [{ type: 'text', text: 'result' }, { type: 'document', source: { type: 'base64', mediaType: 'application/pdf', data: 'JVBERi0=' } }];
+    normalizeResponsesInput([{ role: 'user', content: [{ type: 'tool_result', toolUseId: 'c1', content: lossy }] }] as any, () => dropped++);
+    expect(dropped).toBe(1);
+    normalizeResponsesInput([{ type: 'tool_result', toolUseId: 'c2', content: lossy }] as any, () => dropped++);
+    expect(dropped).toBe(2);
+    // Text-only and string results lose nothing.
+    normalizeResponsesInput([{ role: 'user', content: [
+      { type: 'tool_result', toolUseId: 'c3', content: [{ type: 'text', text: 'ok' }] },
+      { type: 'tool_result', toolUseId: 'c4', content: 'ok' },
+    ] }] as any, () => dropped++);
+    expect(dropped).toBe(2);
+  });
+
+  it('completions: a skipped message is altered only if a block held something (two \'\' blocks join to \'\\n\')', () => {
+    const notes = new FidelityNotes();
+    new CompletionsFormatter().buildMessages([
+      { participant: 'User', content: [text(''), text('')] },
+      { participant: 'User', content: [text(' ')] },
+      { participant: 'User', content: [text('go')] },
+    ], { assistantParticipant: 'Claude', participantMode: 'multiuser', fidelity: notes } as any);
+    expect(sorted(notes.altered)).toEqual([1]);
   });
 });

@@ -22,7 +22,49 @@ import type { ToolResult } from './types/tools.js';
  */
 export interface ToolResultsPayload {
   results: ToolResult[];
-  injectedMessages?: InjectedMessage[];
+  /** Present when the consumer supplied a non-empty `injectedMessages` array (one batch). */
+  injected?: InjectedBatch;
+}
+
+/**
+ * One supplied `injectedMessages` array, cleaned to user-side content but
+ * kept in the consumer's coordinates, which round reports use
+ * (`RoundReport.altered.injected`, `injectedBatch.applied`): positions index
+ * the array as supplied, whatever the cleaning removed.
+ */
+export interface InjectedBatch {
+  /** How many messages the consumer supplied. */
+  size: number;
+  /** The messages left holding content, each with its supplied position. */
+  messages: Array<{ index: number; message: InjectedMessage }>;
+  /**
+   * Supplied positions that lost tool blocks to the cleaning, including a
+   * message left empty by it and dropped. A message supplied empty carried
+   * nothing: dropped, not altered.
+   */
+  altered: number[];
+}
+
+/**
+ * Clean a supplied batch to user-side content, keeping the consumer's
+ * positions and noting which ones lost tool blocks (see provideToolResults).
+ */
+function cleanInjectedBatch(supplied: InjectedMessage[]): InjectedBatch {
+  const batch: InjectedBatch = { size: supplied.length, messages: [], altered: [] };
+  supplied.forEach((m, index) => {
+    const clean = m.content.filter(
+      (block) => block.type !== 'tool_use' && block.type !== 'tool_result'
+    );
+    if (clean.length !== m.content.length) {
+      console.warn(
+        `[membrane] provideToolResults: stripped ${m.content.length - clean.length} ` +
+        `tool block(s) from an injected mid-turn message (user-side content only)`
+      );
+      batch.altered.push(index);
+    }
+    if (clean.length > 0) batch.messages.push({ index, message: { ...m, content: clean } });
+  });
+  return batch;
 }
 
 // ============================================================================
@@ -147,26 +189,11 @@ export class YieldingStreamImpl implements YieldingStream {
     // at this point would leave the stream parked in waiting_for_tools with
     // an unresolvable promise — wedging the caller's whole turn over a
     // notification is far worse than delivering it without its tool blocks.
-    const injectedMessages = options?.injectedMessages
-      ?.map((m) => {
-        const clean = m.content.filter(
-          (block) => block.type !== 'tool_use' && block.type !== 'tool_result'
-        );
-        if (clean.length !== m.content.length) {
-          console.warn(
-            `[membrane] provideToolResults: stripped ${m.content.length - clean.length} ` +
-            `tool block(s) from an injected mid-turn message (user-side content only)`
-          );
-        }
-        return { ...m, content: clean };
-      })
-      .filter((m) => m.content.length > 0);
+    const supplied = options?.injectedMessages;
+    const injected = supplied && supplied.length > 0 ? cleanInjectedBatch(supplied) : undefined;
 
     // Resolve the promise and transition state
-    this.pendingToolResults.resolve({
-      results,
-      ...(injectedMessages && injectedMessages.length > 0 ? { injectedMessages } : {}),
-    });
+    this.pendingToolResults.resolve({ results, ...(injected ? { injected } : {}) });
     this.pendingToolResults = null;
     this.state = { status: 'streaming' };
     this._toolDepth++;

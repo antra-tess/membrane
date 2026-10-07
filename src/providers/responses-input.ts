@@ -13,7 +13,10 @@ type JsonObject = Record<string, unknown>;
  */
 export function normalizeResponsesInput(
   messages: ProviderRequest['messages'],
-  /** Hears each content block this normalization leaves out. */
+  /**
+   * Hears each content block this normalization leaves out, and each tool
+   * result whose nested content it can't carry as it was.
+   */
   onDropped?: () => void,
 ): OpenAIResponsesInputItem[] {
   const output: unknown[] = [];
@@ -24,7 +27,7 @@ export function normalizeResponsesInput(
       continue;
     }
     if (rawMessage.type !== 'message' && rawMessage.role === undefined) {
-      output.push(normalizeStandaloneItem(rawMessage));
+      output.push(normalizeStandaloneItem(rawMessage, onDropped));
       continue;
     }
 
@@ -70,7 +73,7 @@ export function normalizeResponsesInput(
         output.push(normalizeStandaloneItem(rawBlock));
       } else if (rawBlock.type === 'tool_result') {
         flush();
-        output.push(normalizeStandaloneItem(rawBlock));
+        output.push(normalizeStandaloneItem(rawBlock, onDropped));
       } else if (rawBlock.type === 'redacted_thinking') {
         flush();
         output.push(reasoningInputItem(rawBlock));
@@ -85,7 +88,7 @@ export function normalizeResponsesInput(
   return output as OpenAIResponsesInputItem[];
 }
 
-function normalizeStandaloneItem(item: JsonObject): unknown {
+function normalizeStandaloneItem(item: JsonObject, onDropped?: () => void): unknown {
   if (item.type === 'tool_use') {
     return {
       type: 'function_call',
@@ -96,6 +99,8 @@ function normalizeStandaloneItem(item: JsonObject): unknown {
   }
   if (item.type === 'tool_result') {
     const content = item.content;
+    // A nested value the output can't carry is stringified or replaced by a note.
+    if (responsesToolOutputLoses(content)) onDropped?.();
     return {
       type: 'function_call_output',
       call_id: asString(item.toolUseId) || asString(item.tool_use_id),
@@ -124,16 +129,6 @@ function reasoningInputItem(block: JsonObject): unknown {
 }
 
 /**
- * `function_call_output.output` as a native content-part array, for tool
- * results that carry images. Responses accepts `output` as a string OR an
- * array of input_text / input_image parts; stringifying an image-bearing
- * result hands the model its base64 as TEXT — no vision, and ~1 token per
- * 2 base64 chars (a 760 KB snapshot ≈ 500k input tokens; probed live on the
- * Codex backend 2026-10-02: array form = 526 tokens and the model describes
- * the image). Returns null for image-free content so callers keep their
- * legacy string form and existing replay bytes don't change.
- */
-/**
  * Whether a tool result's content loses something on its way to a Responses
  * `function_call_output`: a nested block that is neither text nor an image
  * the output can carry (it is JSON-stringified or replaced by a note).
@@ -149,6 +144,16 @@ export function responsesToolOutputLoses(content: unknown): boolean {
   });
 }
 
+/**
+ * `function_call_output.output` as a native content-part array, for tool
+ * results that carry images. Responses accepts `output` as a string OR an
+ * array of input_text / input_image parts; stringifying an image-bearing
+ * result hands the model its base64 as TEXT — no vision, and ~1 token per
+ * 2 base64 chars (a 760 KB snapshot ≈ 500k input tokens; probed live on the
+ * Codex backend 2026-10-02: array form = 526 tokens and the model describes
+ * the image). Returns null for image-free content so callers keep their
+ * legacy string form and existing replay bytes don't change.
+ */
 export function responsesToolOutputParts(content: unknown): unknown[] | null {
   if (!Array.isArray(content)) return null;
   if (!content.some((block) => isObject(block) && (block.type === 'image' || block.type === 'input_image'))) {

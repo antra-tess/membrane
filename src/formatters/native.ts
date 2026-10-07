@@ -9,7 +9,7 @@
  * - 'multiuser': Multiple participants, names prefixed to content
  */
 
-import { ownBlocks } from '../utils/fidelity.js';
+import { followNormalizedBlocks, ownBlocks } from '../utils/fidelity.js';
 import type {
   NormalizedMessage,
   ContentBlock,
@@ -309,19 +309,10 @@ export class NativeFormatter implements PrefillFormatter {
     // merge sees role-correct envelopes.
     const normalized = normalizeToolPairs(providerMessages, {
       pendingToolCallIds: options.pendingToolCallIds,
-      onEvent: (event) => {
-        // An orphan tool_result rewritten as text is not carried verbatim:
-        // attribute it to the consumer message that held that result.
-        if (options.fidelity && event.kind === 'orphan_tool_result_textified') {
-          const toolUseId = (event as { toolUseId?: string }).toolUseId;
-          const owner = messages.findIndex((m) => m.content.some(
-            (b) => b.type === 'tool_result' && (b as { toolUseId?: string }).toolUseId === toolUseId,
-          ));
-          if (owner >= 0) options.fidelity.alter(owner);
-          else options.fidelity.unattributed = true;
-        }
-        options.onNormalize?.(event);
-      },
+      onEvent: options.onNormalize,
+      // A textified orphan tool_result alters the message that occurrence
+      // came from; a cache-suppression copy keeps its owner.
+      ...followNormalizedBlocks(options.fidelity),
     });
 
     // Merge consecutive same-role messages (API requires alternating)

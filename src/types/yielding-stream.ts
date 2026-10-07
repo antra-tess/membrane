@@ -236,9 +236,11 @@ export type StreamEvent =
  * the generic user participant. Non-assistant participants get the standard
  * "Name: " text prefix when rendered to the provider. Content must be
  * user-side blocks only (text/image); tool blocks are stripped with a
- * warning. NOTE: a participant equal to the request's assistantParticipant
- * would render as an ASSISTANT turn (a prefill) — callers should not inject
- * messages named as the assistant.
+ * warning, and round reports name the message altered (in the position it
+ * was supplied at, even if nothing else was left to send). NOTE: a
+ * participant equal to the request's assistantParticipant would render as
+ * an ASSISTANT turn (a prefill) — callers should not inject messages named
+ * as the assistant.
  */
 export type InjectedMessage =
   Omit<NormalizedMessage, 'participant' | 'cacheBreakpoint'> & {

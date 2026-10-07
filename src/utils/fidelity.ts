@@ -1,3 +1,6 @@
+import type { NormalizeOptions } from '../formatters/normalize-tool-pairs.js';
+import type { ContentBlock } from '../types/content.js';
+
 /**
  * Request fidelity: what a request build carried of the consumer's messages.
  *
@@ -75,6 +78,16 @@ export class FidelityNotes {
     else this.unattributed = true;
   }
 
+  /**
+   * `copy` stands on the request where `original` was (a normalizer made a
+   * new object out of it), so it has the same owners: an adapter's report
+   * about the copy is attributed as one about the original would be.
+   */
+  ownCopy(original: unknown, copy: unknown): void {
+    if (original === null || typeof original !== 'object') return;
+    for (const index of this.owners.get(original) ?? []) this.own(copy, index);
+  }
+
   get established(): boolean {
     return !this.unattributed && !this.uninstrumented;
   }
@@ -103,6 +116,36 @@ export function ownBlocks(fidelity: FidelityNotes | undefined, blocks: readonly 
       for (const nested of value.content) fidelity.own(nested, index);
     }
   }
+}
+
+/**
+ * The tool-pair normalizer's block-identity callbacks, for a build recording
+ * `fidelity` (spread into `normalizeToolPairs`' options). The normalizer
+ * makes new objects out of a consumer's blocks in two places. An orphan
+ * tool_result rewritten as text alters exactly the message that occurrence
+ * came from. A copy made to drop `cache_control` carries the same content,
+ * so it keeps its owner and a later adapter report about it is attributed.
+ */
+export function followNormalizedBlocks(
+  fidelity: FidelityNotes | undefined,
+): Pick<NormalizeOptions, 'onBlockRewritten' | 'onBlockCopied'> {
+  if (!fidelity) return {};
+  return {
+    onBlockRewritten: (original, replacement) => {
+      fidelity.alterBlock(original);
+      fidelity.ownCopy(original, replacement);
+    },
+    onBlockCopied: (original, copy) => fidelity.ownCopy(original, copy),
+  };
+}
+
+/**
+ * Whether leaving these blocks out loses anything: true unless every block
+ * is an exactly empty text block. Only '' carries nothing; whitespace-only
+ * text is content.
+ */
+export function holdsContent(blocks: readonly ContentBlock[]): boolean {
+  return blocks.some((block) => !(block.type === 'text' && block.text === ''));
 }
 
 /** Where a message in a yielding loop's working array came from. */

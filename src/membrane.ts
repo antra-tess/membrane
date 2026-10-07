@@ -94,7 +94,7 @@ import {
   shedImagesToFitByteBudget, assertWithinByteBudget,
 } from './utils/image-media.js';
 import { getDefaultPricing } from './registry/default-pricing.js';
-import { FidelityNotes, ownBlocks, requestFingerprint, type MessageOrigin } from './utils/fidelity.js';
+import { FidelityNotes, followNormalizedBlocks, ownBlocks, requestFingerprint, type MessageOrigin } from './utils/fidelity.js';
 
 // ============================================================================
 // Membrane Class
@@ -1744,17 +1744,10 @@ export class Membrane {
     const normalized = normalizeToolPairs(providerMessages, {
       onEvent: (e) => {
         if (PREFIX_REWRITING_NORMALIZE_EVENT_KINDS.has(e.kind)) prefixRewritten = true;
-        // An orphan tool_result rewritten as text is not carried verbatim:
-        // attribute it to the consumer message that held that result.
-        if (fidelity && e.kind === 'orphan_tool_result_textified') {
-          const toolUseId = (e as { toolUseId?: string }).toolUseId;
-          const owner = messages.findIndex((m) => m.content.some(
-            (b) => b.type === 'tool_result' && (b as { toolUseId?: string }).toolUseId === toolUseId,
-          ));
-          if (owner >= 0) fidelity.alter(owner);
-          else fidelity.unattributed = true;
-        }
       },
+      // A textified orphan tool_result alters the message that occurrence
+      // came from; a cache-suppression copy keeps its owner.
+      ...followNormalizedBlocks(fidelity),
     });
     const mergedMessages = mergeConsecutiveRoles(normalized.messages);
 
@@ -2329,17 +2322,22 @@ export class Membrane {
     unreported?: ReadonlyArray<'inputTokens' | 'outputTokens'>;
     fidelity: FidelityNotes;
     origins?: readonly MessageOrigin[];
+    /** Injected positions altered before any build (tool blocks stripped on supply). */
+    injectedAlterations?: ReadonlyArray<readonly [number, number]>;
     injectedBatch?: { batch: number; applied: number };
   }): RoundReport {
     const messages: number[] = [];
-    const injected: Array<[number, number]> = [];
+    const injected = new Map<string, [number, number]>();
+    const alterInjected = (batch: number, index: number) => injected.set(`${batch}:${index}`, [batch, index]);
+    for (const [batch, index] of input.injectedAlterations ?? []) alterInjected(batch, index);
     for (const at of input.fidelity.altered) {
       const origin: MessageOrigin = input.origins ? (input.origins[at] ?? { kind: 'own' }) : { kind: 'input', index: at };
       if (origin.kind === 'input') messages.push(origin.index);
-      else if (origin.kind === 'injected') injected.push([origin.batch, origin.index]);
+      else if (origin.kind === 'injected') alterInjected(origin.batch, origin.index);
     }
     messages.sort((a, b) => a - b);
-    injected.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    // One entry per position, however many steps altered it.
+    const injectedPairs = [...injected.values()].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
     // Counts only, and only those the provider reported.
     const usage: RoundUsage = {};
     const counts = ['inputTokens', 'outputTokens', 'cacheCreationTokens', 'cacheReadTokens', 'thinkingTokens'] as const;
@@ -2352,7 +2350,7 @@ export class Membrane {
       stopReason: input.stopReason,
       usage,
       ...(input.injectedBatch ? { injectedBatch: input.injectedBatch } : {}),
-      altered: { messages, injected },
+      altered: { messages, injected: injectedPairs },
       fidelity: input.fidelity.established ? 'established' : 'unknown',
     };
   }
@@ -2402,9 +2400,10 @@ export class Membrane {
       /**
        * The round's fidelity notes (utils/fidelity.ts). A beforeRequest hook
        * whose output differs from its input, whether by replacement or by
-       * in-place mutation, makes them unattributed, as does an adapter that
-       * reports altering content; an adapter that doesn't declare
-       * `reportsContentAlterations` makes them uninstrumented.
+       * in-place mutation, makes them unattributed. An adapter's report of
+       * altered content alters the message its block came from, or makes
+       * them unattributed when it can't be attributed. An adapter that
+       * doesn't declare `reportsContentAlterations` makes them uninstrumented.
        */
       fidelity?: FidelityNotes;
     }
@@ -3611,7 +3610,7 @@ export class Membrane {
               context,
             };
 
-            const { results, injectedMessages } = await stream.requestToolExecution(toolCallsEvent);
+            const { results, injected } = await stream.requestToolExecution(toolCallsEvent);
 
             // Backfill tool names for the legacy XML result rendering
             // (<result><tool_name>…</tool_name><stdout>…) when the executor
@@ -3627,8 +3626,10 @@ export class Membrane {
             // to append to. Warn (once per stream — long turns have many
             // rounds) rather than drop silently; the messages remain in the
             // caller's context window and reach the model on the next turn.
-            if (injectedMessages && injectedMessages.length > 0) injectedBatches++;
-            if (injectedMessages && injectedMessages.length > 0 && !warnedInjectionUnsupported) {
+            // A supplied batch still takes its number, so batches stay in the
+            // consumer's coordinates (RoundReport).
+            if (injected) injectedBatches++;
+            if (injected && !warnedInjectionUnsupported) {
               warnedInjectionUnsupported = true;
               console.warn(
                 `[membrane] provideToolResults injectedMessages ignored: XML tool mode ` +
@@ -3924,9 +3925,12 @@ export class Membrane {
     // Where each working message came from, so a round's alterations are
     // reported in the consumer's coordinates (RoundReport).
     const origins: MessageOrigin[] = request.messages.map((_, index) => ({ kind: 'input' as const, index }));
-    // Injected batches supplied to this stream; the newest one's size.
+    // Injected batches supplied to this stream; the newest one's size, as
+    // supplied; and the positions their cleaning altered (every batch is
+    // retained, so these are reported on every later round).
     let injectedBatches = 0;
     let newestBatchSize = 0;
+    const injectedAlterations: Array<[number, number]> = [];
     // Set once a beforeRequest hook changed its request in place: nested
     // blocks are shared with the consumer's messages, so later rounds stay
     // unknown.
@@ -3952,7 +3956,9 @@ export class Membrane {
         // Build provider request with native tools, recording what it alters.
         const roundFidelity = new FidelityNotes();
         const providerRequest = this.buildNativeToolRequest(request, messages, toolDepth > 0, activeFormatter, roundFidelity);
-        // Every supplied batch is in `messages` by now, the newest whole.
+        // Every supplied batch is in `messages` by now, the newest whole: each
+        // supplied position is carried, or reported altered if cleaning took
+        // its tool blocks (a position supplied empty carried nothing).
         const carriedBatch = injectedBatches > 0 ? { batch: injectedBatches - 1, applied: newestBatchSize } : undefined;
 
         // Stream from provider
@@ -4054,6 +4060,7 @@ export class Membrane {
               unreported: streamResult.unreportedUsage,
               fidelity: roundFidelity,
               origins,
+              injectedAlterations,
               ...(carriedBatch ? { injectedBatch: carriedBatch } : {}),
             }),
           });
@@ -4102,7 +4109,7 @@ export class Membrane {
             context,
           };
 
-          const { results, injectedMessages } = await stream.requestToolExecution(toolCallsEvent);
+          const { results, injected } = await stream.requestToolExecution(toolCallsEvent);
 
           // Track tool results
           executedToolResults.push(...results);
@@ -4145,17 +4152,22 @@ export class Membrane {
           // tool_result envelopes (e.g. ChatCompletions role:'tool') carry
           // them as ordinary user messages. Signed-thinking adjacency is
           // unaffected: the assistant turn above is round-tripped verbatim.
-          if (injectedMessages && injectedMessages.length > 0) {
+          //
+          // Positions are the consumer's: a message the cleaning dropped
+          // leaves its position empty, and every position that lost tool
+          // blocks stays altered for as long as the batch is retained.
+          if (injected) {
             const batch = injectedBatches++;
-            newestBatchSize = injectedMessages.length;
-            injectedMessages.forEach((injected, index) => {
+            newestBatchSize = injected.size;
+            for (const { index, message } of injected.messages) {
               messages.push({
-                participant: injected.participant ?? userName,
-                content: injected.content,
-                ...(injected.metadata ? { metadata: injected.metadata } : {}),
+                participant: message.participant ?? userName,
+                content: message.content,
+                ...(message.metadata ? { metadata: message.metadata } : {}),
               });
               origins.push({ kind: 'injected', batch, index });
-            });
+            }
+            for (const index of injected.altered) injectedAlterations.push([batch, index]);
           }
 
           toolDepth++;

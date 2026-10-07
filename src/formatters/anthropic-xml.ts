@@ -37,6 +37,7 @@ import { IncrementalXmlParser } from '../utils/stream-parser.js';
 import { assertCacheMarkersWithinLimit, clampCacheMarkers } from '../utils/cache-marker-budget.js';
 import { lastCacheableBlockIndex } from './native.js';
 import { resolveImageMediaType, isAcceptedImageMediaType, strippedImagePlaceholder } from '../utils/image-media.js';
+import { holdsContent } from '../utils/fidelity.js';
 
 // ============================================================================
 // Configuration
@@ -301,11 +302,16 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         continue;
       }
 
-      // Skip empty messages except last. Whitespace-only text is content
-      // (only an exactly empty '' block carries nothing), so skipping a
-      // message that held some is an alteration.
+      // Every branch below that leaves a message's content out of the
+      // transcript alters it, unless it held nothing: whitespace-only text is
+      // content, and only an exactly empty '' block carries nothing.
+      const omitted = () => {
+        if (holdsContent(message.content)) onAltered?.();
+      };
+
+      // Skip empty messages except last.
       if (isEmpty && !isLastMessage) {
-        if (message.content.some((b) => b.type === 'text' && typeof b.text === 'string' && b.text !== '')) onAltered?.();
+        omitted();
         continue;
       }
 
@@ -345,10 +351,13 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         hasToolResult && message.content.every((c) => c.type === 'tool_result');
 
       if (isContinuation && isLastMessage) {
-        // Bot continuation - don't add prefix
+        // Bot continuation - don't add prefix. Its content is not carried:
+        // the transcript ends on the turn prefix alone.
+        omitted();
         continue;
       } else if (isLastMessage && isEmpty) {
-        // Completion target - prefix added below
+        // Completion target - prefix added below; whitespace it held is not carried
+        omitted();
       } else if (text) {
         if (isPureToolResults) {
           // Tool results are not speech: replay them exactly as they were

@@ -3,13 +3,15 @@
   reason and own usage, and `altered`: the consumer messages that round's
   request did not carry verbatim. Messages are addressed by
   `NormalizedRequest.messages` index, and injected messages as
-  `[batch, index]` for every batch still retained. `fidelity` is `unknown`
-  whenever an empty list would prove nothing: an uninstrumented formatter or
-  adapter, opt-in image shedding, a `beforeRequest` hook that changed the
-  request, or an adapter that altered content. Otherwise it is
-  `established`. `injectedBatch` gives the newest batch and how much of it
-  the round carried: all of it on the native path, none on the XML prefill
-  path. `ToolContext.supportsInjectedMessages` says which applies.
+  `[batch, index]` into the array as supplied, for every batch still
+  retained; tool blocks stripped from an injected message make it altered.
+  `fidelity` is `unknown` whenever an empty list would prove nothing: an
+  uninstrumented formatter or adapter, opt-in image shedding, a
+  `beforeRequest` hook that changed the request, or an adapter alteration
+  that could not be attributed. Otherwise it is `established`.
+  `injectedBatch` gives the newest batch and how much of it the round
+  carried: all of it on the native path, none on the XML prefill path.
+  `ToolContext.supportsInjectedMessages` says which applies.
 - **Formatters and provider adapters:** `PrefillFormatter.reportsAlterations`
   and `ProviderAdapter.reportsContentAlterations` declare that a path reports
   what it does not carry verbatim. Formatters record alterations in
@@ -26,6 +28,11 @@
   their empty-text cleanup (an exactly empty `''` block is still no loss), a
   passthrough `messages` that replaces the built messages, and nested
   tool-result blocks with no wire form.
+- `normalizeToolPairs` tells a caller that follows blocks by identity which
+  ones it replaced with new objects: `NormalizeOptions.onBlockRewritten` for
+  an orphan `tool_result` rewritten as text, and `onBlockCopied` for a block
+  copied to drop `cache_control`. Membrane's builders use them to attribute
+  those occurrences.
 - `ProviderResponse.unreportedUsage` names the required counts
   (`inputTokens`, `outputTokens`) a provider did not report. Their 0 in
   `usage` stays for accounting, and round reports leave them out. Every
