@@ -104,6 +104,17 @@ export interface KeepaliveFailureClassification {
 /** The last instant a JavaScript Date can represent (ECMA-262 time value range). */
 const MAX_DATE_MS = 8.64e15;
 
+/**
+ * The instant a stated wait holds until, from `now`: Infinity when it cannot
+ * be held as an instant (not finite, or past the last Date instant), and
+ * undefined when the value states no wait at all (not a non-negative number).
+ */
+function holdDeadline(retryAfterMs: unknown, now: number): number | undefined {
+  if (typeof retryAfterMs !== 'number' || Number.isNaN(retryAfterMs) || retryAfterMs < 0) return undefined;
+  const instant = now + retryAfterMs;
+  return Number.isFinite(instant) && instant <= MAX_DATE_MS ? instant : Number.POSITIVE_INFINITY;
+}
+
 export interface CacheKeepaliveConfig {
   /** Master switch. Default true. */
   enabled?: boolean;
@@ -296,9 +307,8 @@ export class CacheKeepalive {
    */
   holdModel(model: string, retryAfterMs: unknown, reason: string): void {
     if (this.stopped) return;
-    if (typeof retryAfterMs !== 'number' || Number.isNaN(retryAfterMs) || retryAfterMs < 0) return;
-    const instant = Date.now() + retryAfterMs;
-    const until = Number.isFinite(instant) && instant <= MAX_DATE_MS ? instant : Number.POSITIVE_INFINITY;
+    const until = holdDeadline(retryAfterMs, Date.now());
+    if (until === undefined) return;
     const current = this.holds.get(model);
     if (current !== undefined && current >= until) return;
     this.holds.set(model, until);
@@ -455,10 +465,11 @@ export class CacheKeepalive {
       // is not retryable still counts, whatever wait it states.
       let classified: KeepaliveFailureClassification | undefined;
       try { classified = this.classify?.(err); } catch { classified = undefined; }
-      if (classified?.retryAfterMs !== undefined) {
-        this.holdModel(String(lin.wire.model ?? ''), classified.retryAfterMs, message);
-      }
-      const paced = classified?.retryable === true && classified.retryAfterMs !== undefined;
+      // Exempt only when the stated wait is one a hold accepts (holdModel's own
+      // test): a negative or NaN hint states no wait, so it paces nothing.
+      const accepted = holdDeadline(classified?.retryAfterMs, Date.now()) !== undefined;
+      if (accepted) this.holdModel(String(lin.wire.model ?? ''), classified!.retryAfterMs, message);
+      const paced = classified?.retryable === true && accepted;
       if (!paced) this.consecutiveErrors += 1;
       this.emit({ type: 'error', key, error: message, consecutive: this.consecutiveErrors });
 

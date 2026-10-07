@@ -112,6 +112,19 @@ describe('keepalive model holds', () => {
     expect(send).toHaveBeenCalledTimes(4);
   });
 
+  it('a retryable refusal whose hint states no wait (negative, NaN) holds nothing and counts toward the breaker (#48365)', async () => {
+    for (const hint of [-1, Number.NaN]) {
+      const send = vi.fn(() => Promise.reject(new Classified('zz 429 with an unusable hint', true, hint)));
+      const { ka, events } = setup(send, { maxConsecutiveErrors: 1 });
+      ka.record(wire(), undefined, 'stream');
+      await vi.advanceTimersByTimeAsync(6 * 60 * MIN);
+      expect(send, String(hint)).toHaveBeenCalledTimes(1);
+      expect(events.some((e) => e.type === 'held'), String(hint)).toBe(false);
+      expect(events.some((e) => e.type === 'disabled'), String(hint)).toBe(true);
+      ka.stop();
+    }
+  });
+
   it('a poke refused as NOT retryable still counts toward the breaker, whatever wait it states; the wait still holds the model', async () => {
     const send = vi.fn(() => Promise.reject(new Classified('zz 400 with a hint', false, 50 * MIN)));
     const { ka, events } = setup(send, { maxConsecutiveErrors: 3 });
