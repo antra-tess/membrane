@@ -15,6 +15,7 @@ import type {
   ContentBlock,
   ProviderAdapter,
   ProviderResponse,
+  StreamCallbacks,
   ModelRegistry,
   MembraneConfig,
   StreamOptions,
@@ -102,12 +103,13 @@ import { getDefaultPricing } from './registry/default-pricing.js';
 // Membrane Class
 // ============================================================================
 
-/** One block as an attempt received it: its start payload, final payload, and streamed chunks. */
+/** One block as an attempt received it: its start payload, final payload, streamed chunks, and any signature received before it finished. */
 interface ReceivedBlock {
   index?: number;
   start?: Record<string, unknown>;
   final?: unknown;
   streamed: string;
+  signature?: string;
 }
 
 /**
@@ -129,9 +131,11 @@ interface ReceivedBlock {
  * The same convention decides what an aborted attempt received. A block is
  * finished at its second sighting (an image, reported once, when it arrives),
  * and kept as that final payload. Unfinished text and thinking are kept as
- * their start payload plus the chunks streamed into them. An unfinished tool
- * call is not content yet: its start payload's empty `input` is a placeholder,
- * not the call's arguments, so it is left out. *
+ * their start payload plus the chunks streamed into them, and an unfinished
+ * thinking block keeps the signature received so far (onThinkingSignature).
+ * An unfinished tool call is not content yet: its start payload's empty
+ * `input` is a placeholder, not the call's arguments, so it is left out.
+ *
  * A single-final adapter reports its finished blocks only after its terminal
  * response, one callback each, and their completion is not observable under
  * this callback contract before the provider call returns. If a caller's
@@ -175,6 +179,12 @@ class NativeBlockTracker {
     this.complete(index, block);
   }
 
+  /** A thinking block's signature so far; its finished payload supersedes it. */
+  onThinkingSignature(index: number, signature: string): void {
+    const entry = this.receivedByIndex.get(index);
+    if (entry && entry.final === undefined) entry.signature = signature;
+  }
+
   /** A streamed chunk, recorded against the block it belongs to. */
   onChunk(chunk: string): void {
     const open = this.started.has(this.blockIndex) && !this.completed.has(this.blockIndex)
@@ -203,7 +213,11 @@ class NativeBlockTracker {
       } else if (entry.start?.type === 'text') {
         if (entry.streamed) blocks.push({ ...entry.start, text: entry.streamed });
       } else if (entry.start?.type === 'thinking') {
-        blocks.push({ ...entry.start, thinking: entry.streamed });
+        blocks.push({
+          ...entry.start,
+          ...(entry.signature !== undefined ? { signature: entry.signature } : {}),
+          thinking: entry.streamed,
+        });
       } else if (entry.start?.type === 'redacted_thinking') {
         blocks.push({ ...entry.start });
       }
@@ -937,6 +951,8 @@ export class Membrane {
               }
             },
             onContentBlock: onProviderBlock,
+            // Only a thinking span already recorded takes it (see onProviderBlock).
+            onThinkingSignature: (index, signature) => streamedThinking.onSignature(index, signature),
           },
           {
             signal,
@@ -1446,6 +1462,7 @@ export class Membrane {
               // Deprecated pass-through, kept for callers still on it.
               onContentBlockUpdate?.(index, block as ContentBlock);
             },
+            onThinkingSignature: (index, signature) => tracker.onThinkingSignature(index, signature),
           },
           {
             signal,
@@ -2218,7 +2235,7 @@ export class Membrane {
 
   private async streamOnce(
     request: any,
-    callbacks: { onChunk: (chunk: string) => void; onContentBlock?: (index: number, block: unknown) => void },
+    callbacks: StreamCallbacks,
     options: {
       signal?: AbortSignal;
       timeoutMs?: number;
@@ -3332,6 +3349,8 @@ export class Membrane {
               }
             },
             onContentBlock: onProviderBlock,
+            // Only a thinking span already recorded takes it (see onProviderBlock).
+            onThinkingSignature: (index, signature) => streamedThinking.onSignature(index, signature),
           },
           {
             signal: stream.signal,
@@ -3856,6 +3875,10 @@ export class Membrane {
             onContentBlock: (index, block) => {
               if (stream.isCancelled) return;
               tracker.onProviderBlock(index, block);
+            },
+            onThinkingSignature: (index, signature) => {
+              if (stream.isCancelled) return;
+              tracker.onThinkingSignature(index, signature);
             },
           },
           {

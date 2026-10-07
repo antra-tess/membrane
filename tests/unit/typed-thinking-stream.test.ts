@@ -38,6 +38,8 @@ function setup(provider: string, mode: string, finish: string, signatureOnly = f
     const source = wire ?? events(signatureOnly, mode === 'xml');
     const abortAt = finish === 'thinking-abort'
       ? source.findIndex(event => event.delta?.type === 'thinking_delta')
+      // After the signature, the thinking block's last delta, and before its stop.
+      : finish === 'signed-abort' ? source.findIndex(event => event.delta?.type === 'signature_delta')
       : finish === 'text-abort' ? source.findIndex(event => event.delta?.type === 'text_delta' && event.delta.text === abortChunk) : -1;
     const frames = (abortAt >= 0 ? source.slice(0, abortAt + 1) : source).map(event => provider === 'anthropic'
       ? new TextEncoder().encode('event: ' + event.type + '\ndata: ' + JSON.stringify(event) + '\n\n')
@@ -90,22 +92,23 @@ async function run(path: string, membrane: Membrane, mode: string, chunks: any[]
 for (const provider of ['anthropic', 'bedrock']) {
   for (const mode of ['plain', 'native']) {
     describe(provider + ' typed thinking in ' + mode, () => {
-      for (const finish of ['success', 'thinking-abort', 'text-abort']) {
+      for (const finish of ['success', 'thinking-abort', 'signed-abort', 'text-abort']) {
         it.each(['stream', 'yielding'])(finish + ' via %s keeps thinking typed', async path => {
           const chunks: any[] = [];
           const blocks: any[] = [];
           const response: any = await run(path, setup(provider, mode, finish), mode, chunks, blocks);
           const content = finish === 'success' ? response.content : response.partialContent;
+          const inThinking = finish === 'thinking-abort' || finish === 'signed-abort';
           expect(content).toBeDefined();
           expect(content.filter((block: any) => block.type === 'thinking')).toEqual([{
             type: 'thinking', thinking: thought, ...(finish !== 'thinking-abort' ? { signature: 'signature' } : {}),
           }]);
-          expect(content.filter((block: any) => block.type === 'text')).toEqual(finish === 'thinking-abort' ? [] : [text(visible)]);
+          expect(content.filter((block: any) => block.type === 'text')).toEqual(inThinking ? [] : [text(visible)]);
           expect(response.toolCalls ?? []).toEqual([]);
           expect(chunks.map(item => item.chunk).join('')).not.toContain('<thinking>');
           expect(blocks.map(event => [event.event, event.index, event.block.type])).toEqual([
             ['block_start', 0, 'thinking'],
-            ...(finish !== 'thinking-abort' ? [['block_complete', 0, 'thinking'], ['block_start', 1, 'text']] : []),
+            ...(!inThinking ? [['block_complete', 0, 'thinking'], ['block_start', 1, 'text']] : []),
             ...(finish === 'success' ? [['block_complete', 1, 'text']] : []),
           ]);
           const thinkingChunk = chunks.find(item => item.chunk === thought);
@@ -113,6 +116,19 @@ for (const provider of ['anthropic', 'bedrock']) {
           expect(chunks.filter(item => item.meta?.visible).map(item => item.chunk).join('')).not.toContain(thought);
         });
       }
+    });
+  }
+  it.each(['stream', 'yielding'])(provider + ' native %s keeps a received signature through an abort with stops configured', async path => {
+    const response: any = await run(path, setup(provider, 'native', 'signed-abort'), 'native', [], [], { stopSequences: ['END'] });
+    expect(response.partialContent).toEqual([{ type: 'thinking', thinking: thought, signature: 'signature' }]);
+  });
+  for (const mode of ['plain', 'native']) {
+    it.each(['stream', 'yielding'])(provider + ' ' + mode + ' %s keeps a signature cut off part-way as received', async path => {
+      const wire = events().flatMap(event => event.delta?.type === 'signature_delta'
+        ? [{ ...event, delta: { type: 'signature_delta', signature: 'sig' } }, { ...event, delta: { type: 'signature_delta', signature: 'nature' } }]
+        : [event]);
+      const response: any = await run(path, setup(provider, mode, 'signed-abort', false, wire), mode, []);
+      expect(response.partialContent).toEqual([{ type: 'thinking', thinking: thought, signature: 'sig' }]);
     });
   }
   it.each(['stream', 'yielding'])(provider + ' signature-only thinking survives partial %s', async path => {

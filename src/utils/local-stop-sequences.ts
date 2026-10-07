@@ -13,12 +13,10 @@ export function membraneBlockType(apiType: unknown): MembraneBlockType {
   return 'text';
 }
 
-interface WaitingBlock {
-  index: number;
-  block: unknown;
-  /** Held text before this event. */
-  at: number;
-}
+/** A block event or thinking signature no chunk has followed yet, at the held text before it. */
+type Waiting =
+  | { kind: 'block'; index: number; block: unknown; at: number }
+  | { kind: 'signature'; index: number; signature: string; at: number };
 
 interface ReleasedTextBlock {
   start: Record<string, unknown>;
@@ -55,7 +53,8 @@ interface ReleasedTextBlock {
  * text: a stop does not span one. The provider's stream still runs to its end,
  * so the attempt's usage and raw response are the provider's own.
  *
- * Block events wait until a chunk follows them. Block events can't be told
+ * Block events (and thinking signatures, which stay in order with them) wait
+ * until a chunk follows them. Block events can't be told
  * apart on arrival: a paired adapter's first report is a start payload,
  * and a single-final adapter's is a finished block whose text may never have
  * streamed (see StreamCallbacks). Timing tells them apart: single-final reports
@@ -84,7 +83,7 @@ export class LocalStopSequences {
   // Visible text that could still begin a stop, and the block events no chunk
   // has followed yet.
   private held = '';
-  private waiting: WaitingBlock[] = [];
+  private waiting: Waiting[] = [];
 
   // What the caller has received: visible length, and its text blocks.
   private released = 0;
@@ -101,6 +100,9 @@ export class LocalStopSequences {
     this.callbacks = this.stops.length === 0 ? inner : {
       onChunk: chunk => this.onChunk(chunk),
       onContentBlock: (index, block) => this.onContentBlock(index, block),
+      onThinkingSignature: (index, signature) => {
+        this.waiting.push({ kind: 'signature', index, signature, at: this.held.length });
+      },
     };
   }
 
@@ -133,8 +135,9 @@ export class LocalStopSequences {
     this.held = '';
     this.waiting = [];
     if (Array.isArray(cut.content)) {
+      // Signatures are superseded here: each delivered block is final.
       for (const event of waiting) {
-        if (event.index === this.completedAtStop || event.index >= cut.content.length) continue;
+        if (event.kind !== 'block' || event.index === this.completedAtStop || event.index >= cut.content.length) continue;
         if (event.index <= cut.index) this.inner.onContentBlock?.(event.index, cut.content[event.index]);
       }
     }
@@ -150,7 +153,7 @@ export class LocalStopSequences {
     }
     // A non-text block waiting between held text and this chunk ends the
     // stretch: text before it cannot begin a stop that continues after it.
-    const delimiter = lastIndexWhere(this.waiting, event => blockType(event.block) !== 'text');
+    const delimiter = lastIndexWhere(this.waiting, event => event.kind === 'block' && blockType(event.block) !== 'text');
     if (delimiter >= 0) this.releaseTo(this.held.length, (_, i) => i <= delimiter);
     this.held += chunk;
     const found = this.earliestStop();
@@ -180,7 +183,7 @@ export class LocalStopSequences {
         this.openType = undefined;
       }
     }
-    this.waiting.push({ index, block, at: this.held.length });
+    this.waiting.push({ kind: 'block', index, block, at: this.held.length });
   }
 
   /** The stop whose occurrence in the held text ends first, as a provider's token-by-token check would find it. */
@@ -203,10 +206,10 @@ export class LocalStopSequences {
    * callback runs, so a callback that throws is never handed the same text or
    * event again.
    */
-  private releaseTo(at: number, due: (event: WaitingBlock, position: number) => boolean): void {
+  private releaseTo(at: number, due: (event: Waiting, position: number) => boolean): void {
     const text = this.held;
-    const now: WaitingBlock[] = [];
-    const later: WaitingBlock[] = [];
+    const now: Waiting[] = [];
+    const later: Waiting[] = [];
     this.waiting.forEach((event, position) => (due(event, position) ? now : later).push(event));
     this.held = text.slice(at);
     this.waiting = later.map(event => ({ ...event, at: Math.max(0, event.at - at) }));
@@ -217,7 +220,8 @@ export class LocalStopSequences {
         this.deliverText(text.slice(cursor, upTo));
         cursor = upTo;
       }
-      this.deliverBlock(event.index, event.block);
+      if (event.kind === 'block') this.deliverBlock(event.index, event.block);
+      else this.inner.onThinkingSignature?.(event.index, event.signature);
     }
     if (at > cursor) this.deliverText(text.slice(cursor, at));
   }

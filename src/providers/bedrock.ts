@@ -783,6 +783,9 @@ export class BedrockAdapter implements ProviderAdapter {
                   } else if (eventData.delta?.type === 'signature_delta' && (eventData.delta as any).signature) {
                     if (contentBlocks[currentBlockIndex]) {
                       contentBlocks[currentBlockIndex]!.signature = (contentBlocks[currentBlockIndex]!.signature ?? '') + (eventData.delta as any).signature;
+                      // Reported as it accumulates, so a stream that ends before
+                      // content_block_stop still keeps the signature it received.
+                      callbacks.onThinkingSignature?.(currentBlockIndex, contentBlocks[currentBlockIndex]!.signature!);
                     }
                   } else if (eventData.delta?.type === 'input_json_delta' && (eventData.delta as any).partial_json !== undefined) {
                     // Tool-call arguments stream as input_json_delta fragments.

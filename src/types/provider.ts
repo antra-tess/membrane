@@ -384,4 +384,13 @@ export interface StreamCallbacks {
    * Images (OpenRouter) are reported once, when received.
    */
   onContentBlock?: (index: number, block: unknown) => void;
+  /**
+   * A thinking block's signature as received so far: the whole accumulated
+   * string, after each signature delta (Anthropic, Bedrock). It neither starts
+   * nor completes a block, and the block's finished payload, when it arrives,
+   * is authoritative. It lets a stream that ends before the block finishes
+   * keep the signature it received. That preserves what arrived; a signature
+   * cut off part-way is not thereby valid for replay.
+   */
+  onThinkingSignature?: (index: number, signature: string) => void;
 }

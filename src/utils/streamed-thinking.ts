@@ -53,6 +53,12 @@ export class StreamedThinking {
     }
   }
 
+  /** A signature received before the block's finished snapshot, which supersedes it. */
+  onSignature(index: number, signature: string): void {
+    const span = this.current.get(index);
+    if (span?.block.type === 'thinking') span.block = { ...span.block, signature };
+  }
+
   onThinkingChunk(index: number, chunk: string): void {
     const span = this.current.get(index);
     if (span?.block.type === 'thinking') {
