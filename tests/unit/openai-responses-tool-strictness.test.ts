@@ -164,6 +164,32 @@ describe.each(Object.entries(MODES))('Responses function-tool strictness, %s', (
     });
   });
 
+  it('applies the same rule to tools supplied as a provider-params override', async () => {
+    const fetchMock = stubFetch(mode.response);
+    const overridden: ProviderRequest = {
+      ...request([SPELLINGS['a tool definition']!.tool({})]),
+      extra: { tools: [SPELLINGS['a flat Responses function']!.tool({}), { type: 'web_search' }] },
+    };
+    await mode.adapter().complete(overridden);
+
+    // The override replaces request.tools, as before; strictness is stated on what reaches the wire.
+    expect(sentTools(fetchMock)).toEqual([
+      SPELLINGS['a flat Responses function']!.wire(false),
+      { type: 'web_search' },
+    ]);
+  });
+
+  it('refuses a non-boolean strict in a provider-params override before sending', async () => {
+    const fetchMock = stubFetch(mode.response);
+    const sending = mode.adapter().complete({
+      ...request([]),
+      extra: { tools: [SPELLINGS['a nested Chat-style function']!.tool({ strict: 'yes' })] },
+    });
+
+    await expect(sending).rejects.toMatchObject({ type: 'invalid_request', retryable: false });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('passes non-function tools through unchanged, without a strict field', async () => {
     const fetchMock = stubFetch(mode.response);
     const webSearch = { type: 'web_search' };
@@ -222,6 +248,26 @@ describe('save_recent_image through Membrane', () => {
       strict: false,
     });
     expect(tool!.parameters.required).toEqual(['path']);
+  });
+
+  it('states strictness on function tools a caller passes as providerParams.tools', async () => {
+    const fetchMock = stubFetch(completedJson);
+    const membrane = new Membrane(
+      new OpenAIResponsesAPIAdapter({ apiKey: 'sk-test' }),
+      { formatter: new OpenAIResponsesFormatter(), assistantParticipant: 'Astra' },
+    );
+
+    await membrane.complete({
+      messages: [{ participant: 'nissa', content: [{ type: 'text', text: 'Keep that screenshot.' }] }],
+      config: { model: 'gpt-5.6', maxTokens: 100 },
+      providerParams: {
+        tools: [{ type: 'function', name: 'save_recent_image', parameters: SAVE_RECENT_IMAGE.inputSchema }],
+      },
+    });
+
+    expect(sentTools(fetchMock)).toEqual([
+      { type: 'function', name: 'save_recent_image', parameters: SAVE_RECENT_IMAGE.inputSchema, strict: false },
+    ]);
   });
 
   it('reaches the subscription wire with strict:false from an Anthropic-shaped input_schema (native formatter)', async () => {

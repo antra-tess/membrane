@@ -444,7 +444,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
     if (instructions) responsesRequest.instructions = instructions;
     if (request.temperature !== undefined) responsesRequest.temperature = request.temperature;
     if (request.topP !== undefined) responsesRequest.top_p = request.topP;
-    if (request.tools?.length) responsesRequest.tools = this.convertTools(request.tools);
+    if (request.tools?.length) responsesRequest.tools = request.tools;
 
     if (request.extra) {
       const {
@@ -465,6 +465,12 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
       void stream;
       Object.assign(responsesRequest, extra);
       responsesRequest.include = this.mergeEncryptedReasoningInclude(include);
+    }
+
+    // Strictness is a property of the tools that reach the wire, whether they
+    // came as request.tools or as a provider-params override of them.
+    if (Array.isArray(responsesRequest.tools)) {
+      responsesRequest.tools = this.convertTools(responsesRequest.tools);
     }
 
     // These invariants define the adapter's stateless native-item contract and
