@@ -953,18 +953,19 @@ export class Membrane {
           if (parsed && parsed.calls.length === 0 && parsed.notices.length > 0) {
             // Every invoke was refused: there is nothing to execute. The
             // harness answers the block with the notices alone, so the model
-            // reads why nothing was sent, and the turn continues. This is an
-            // automatic continuation, bounded by the resumption cap as well
-            // as maxToolDepth.
-            if (!registerResumptionRound()) {
-              lastStopReason = 'round_limit';
-              break;
-            }
+            // reads why nothing was sent, and the turn continues. Every such
+            // round is answered, so the record is the same whether or not it
+            // continues; the continuation is automatic, so it is bounded by
+            // the resumption cap as well as maxToolDepth.
             const preToolNew = parsed.beforeText.slice(initialPrefillLength);
             if (onPreToolContent && preToolNew.trim()) {
               await onPreToolContent(preToolNew);
             }
             injectEnvelope(parser, harnessEnvelopes, formatToolResults([], parsed.notices));
+            if (!registerResumptionRound()) {
+              lastStopReason = 'round_limit';
+              break;
+            }
             if (request.config.thinking?.enabled) {
               parser.push('\n<thinking>');
             }
@@ -3508,13 +3509,10 @@ export class Membrane {
 
           if (parsed && parsed.calls.length === 0 && parsed.notices.length > 0) {
             // Every invoke was refused: nothing to execute, so the executor is
-            // not asked. The consumer hears of the attempt; the harness answers
-            // the block with the notices alone and the turn continues — an
-            // automatic continuation, bounded by the resumption cap.
-            if (!registerResumptionRound()) {
-              lastStopReason = 'round_limit';
-              break;
-            }
+            // not asked. The consumer hears of the attempt and the harness
+            // answers the block with the notices alone — every such round, so
+            // the record is the same whether or not it continues. The
+            // continuation is automatic, bounded by the resumption cap.
             const attemptEvent: ToolAttemptEvent = {
               type: 'tool-attempt',
               rawXml: parsed.fullMatch,
@@ -3531,6 +3529,10 @@ export class Membrane {
             };
             stream.emit(attemptEvent);
             injectEnvelope(parser, harnessEnvelopes, formatToolResults([], parsed.notices));
+            if (!registerResumptionRound()) {
+              lastStopReason = 'round_limit';
+              break;
+            }
             if (request.config.thinking?.enabled) {
               parser.push('\n<thinking>');
             }

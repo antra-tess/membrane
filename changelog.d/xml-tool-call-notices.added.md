@@ -9,11 +9,12 @@
   as a second argument.
 - A round in which every invoke was refused does not call the executor.
   Membrane answers the block with a notices-only envelope and continues once.
-  The continuation counts against `maxToolDepth` and the resumption cap. The
-  yielding stream emits a new non-executor event for it, `{ type:
-  'tool-attempt', rawXml, notices, context }` (`isToolAttemptEvent`), not a
-  zero-call `tool-calls` event. The callback loop still delivers the round's
-  text through `onPreToolContent`.
+  The continuation counts against `maxToolDepth` and the resumption cap; at
+  the cap the turn ends with `round_limit`, the round still answered and
+  recorded. The yielding stream emits a new non-executor event for every such
+  round, `{ type: 'tool-attempt', rawXml, notices, context }`
+  (`isToolAttemptEvent`), not a zero-call `tool-calls` event. The callback
+  loop still delivers the round's text through `onPreToolContent`.
 - `NormalizedResponse.toolCallNotices` lists the turn's notices with `block`,
   the function_calls block's 0-based index in the turn's text, beside
   `invoke`. It is absent when there are none and in native mode. `complete()`

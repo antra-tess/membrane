@@ -224,6 +224,38 @@ describe("an all-refused round (Linn's)", () => {
   });
 });
 
+describe('an all-refused round at the resumption cap', () => {
+  const CAPPED: Round[] = [{ chunks: ['Updating.\n', LINNS_ATTEMPT], stopReason: 'stop_sequence', stopSequence: CALLS_CLOSE }];
+
+  it.each(['callback', 'yielding'] as const)('%s: is answered and recorded like any other, and the turn ends without continuing', async (mode) => {
+    const adapter = new ScriptedAdapter(CAPPED);
+    const membrane = new Membrane(adapter, { logger: quietLogger() });
+    const events: string[] = [];
+    let response: NormalizedResponse;
+    if (mode === 'callback') {
+      response = (await membrane.stream(request(), {
+        maxResumptionRounds: 0,
+        onToolCalls: async () => {
+          throw new Error('nothing should be dispatched');
+        },
+      })) as NormalizedResponse;
+    } else {
+      const stream = membrane.streamYielding(request(), { maxResumptionRounds: 0 });
+      for await (const event of stream) {
+        events.push(event.type);
+        if (event.type === 'complete') response = event.response;
+      }
+      expect(events).toContain('tool-attempt');
+      expect(events).not.toContain('tool-calls');
+    }
+
+    expect(adapter.requests).toHaveLength(1);
+    expect(response!.stopReason).toBe('round_limit');
+    expect(types(response!.content)).toEqual(['text', 'tool_attempt', 'tool_notice']);
+    expect(response!.toolCallNotices).toHaveLength(1);
+  });
+});
+
 describe('a mixed round', () => {
   const MIXED: Round[] = [
     {
