@@ -14,7 +14,7 @@
   as a JSON string literal keeps its quotes. Tools that compensated by
   re-trimming, or that relied on the coercion, should drop that workaround. A
   value that itself begins or ends with a newline is written with one more
-  there; legacy `tool_use` blocks without `rawXml` are reconstructed that way.
+  there.
 - A declaration that also admits `null` (`["string","null"]`, an
   `anyOf`/`oneOf` with a `null` branch) receives JSON `null` for the text
   `null`, and the XML tool instructions mark the parameter `nullable="true"`.
