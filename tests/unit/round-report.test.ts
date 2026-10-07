@@ -171,6 +171,7 @@ describe('native yielding rounds', () => {
     expect(rounds[0]!.usage).toMatchObject({ inputTokens: 100, outputTokens: 7, cacheReadTokens: 0 });
     expect(rounds[1]!.usage).toMatchObject({ inputTokens: 120, outputTokens: 3, cacheReadTokens: 90 });
     expect(rounds[0]!.usage.cacheCreationTokens).toBeUndefined();
+    expect('estimatedCost' in rounds[0]!.usage).toBe(false);
     expect(rounds.every((r) => r.altered.messages.length === 0 && r.altered.injected.length === 0)).toBe(true);
     expect(rounds.every((r) => r.injectedBatch === undefined)).toBe(true);
     expect(contexts[0]!.supportsInjectedMessages).toBe(true);
@@ -553,5 +554,41 @@ describe('producer-boundary losses (Hugo, room-220 #45131 and #45179)', () => {
     const { rounds } = await drive(new Membrane(silent), nativeRequest([{ participant: 'User', content: [{ type: 'text', text: 'hi' }] }]));
     expect('inputTokens' in rounds[0]!.usage).toBe(false);
     expect(rounds[0]!.usage.outputTokens).toBe(10);
+  });
+
+  it('a block shared by two messages: every occurrence removed alters both; one ambiguous report is unknown (Hugo #45748)', async () => {
+    const shared = { type: 'text', text: '   ' } as ContentBlock;
+    const messages = (): NormalizedRequest['messages'] => [
+      { participant: 'Claude', content: [{ type: 'tool_use', id: 't1', name: 'noop', input: {} }] },
+      { participant: 'User', content: [{ type: 'tool_result', toolUseId: 't1', content: [{ type: 'text', text: 'first' }, shared] }] },
+      { participant: 'Claude', content: [{ type: 'tool_use', id: 't2', name: 'noop', input: {} }] },
+      { participant: 'User', content: [{ type: 'tool_result', toolUseId: 't2', content: [{ type: 'text', text: 'second' }, shared] }] },
+    ];
+    // The real Bedrock request builder and cleanup; only transport is scripted.
+    const { BedrockAdapter } = await import('../../src/providers/bedrock.js');
+    class ScriptedBedrock extends BedrockAdapter {
+      sent: any;
+      constructor() { super({ accessKeyId: 'test', secretAccessKey: 'test', region: 'us-east-1' }); }
+      override async stream(request: ProviderRequest, callbacks: StreamCallbacks, options?: ProviderRequestOptions): Promise<ProviderResponse> {
+        this.sent = (this as any).buildRequest(request, request.model, options?.onContentAltered);
+        callbacks.onChunk('done');
+        return { content: [{ type: 'text', text: 'done' }], stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 2 }, model: request.model, rawRequest: this.sent, raw: {} };
+      }
+    }
+    const bedrock = new ScriptedBedrock();
+    const both = await drive(new Membrane(bedrock), nativeAnthropicRequest({ messages: messages() }));
+    expect(JSON.stringify(bedrock.sent.messages)).not.toContain('"   "');
+    expect(both.rounds[0]!.altered.messages).toEqual([1, 3]);
+    expect(both.rounds[0]!.fidelity).toBe('established');
+
+    // An adapter that reports the shared object once: which occurrence is unknowable.
+    const once = new ScriptedAdapter([finalTurn()]);
+    const original = once.stream.bind(once);
+    once.stream = async (request, callbacks, options) => {
+      options?.onContentAltered?.(shared);
+      return original(request, callbacks, options);
+    };
+    const ambiguous = await drive(new Membrane(once), nativeRequest(messages()));
+    expect(ambiguous.rounds[0]!.fidelity).toBe('unknown');
   });
 });

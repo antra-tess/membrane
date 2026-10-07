@@ -29,4 +29,5 @@
 - `ProviderResponse.unreportedUsage` names the required counts
   (`inputTokens`, `outputTokens`) a provider did not report. Their 0 in
   `usage` stays for accounting, and round reports leave them out. Every
-  built-in adapter sets it.
+  built-in adapter sets it. A round report's `usage` (`RoundUsage`) carries
+  token counts only, never accounting's `estimatedCost`.

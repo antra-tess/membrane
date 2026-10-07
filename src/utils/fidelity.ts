@@ -42,23 +42,60 @@ export class FidelityNotes {
    */
   mutatedInPlace = false;
 
-  /** Request blocks the builder emitted (and nested tool-result blocks), by owning message. */
-  constructor(private readonly owners = new WeakMap<object, number>()) {}
+  /** Reports about blocks with more than one owning message, settled at the round's end. */
+  private readonly sharedReports = new Map<object, number>();
+
+  /**
+   * Request blocks the builder emitted (and nested tool-result blocks): the
+   * owning message of each occurrence. One object can occur in several
+   * messages (a consumer may reuse a block), so this is a list.
+   */
+  constructor(private readonly owners = new WeakMap<object, number[]>()) {}
 
   alter(index: number): void {
     this.altered.add(index);
   }
 
-  /** Remember that `block`, as sent on the request, came from message `index`. */
+  /** Remember that an occurrence of `block`, as sent on the request, came from message `index`. */
   own(block: unknown, index: number): void {
-    if (block !== null && typeof block === 'object') this.owners.set(block, index);
+    if (block === null || typeof block !== 'object') return;
+    const occurrences = this.owners.get(block);
+    if (occurrences) occurrences.push(index);
+    else this.owners.set(block, [index]);
   }
 
-  /** An adapter altered `block` (or an unknown part, when absent): attribute it, or mark the round unattributed. */
+  /**
+   * An adapter altered one occurrence of `block` (or an unknown part, when
+   * absent). A block owned by one message is attributed to it at once; one
+   * shared by several waits for `settle`, since a report names an object,
+   * not which occurrence.
+   */
   alterBlock(block?: unknown): void {
-    const index = block !== null && typeof block === 'object' ? this.owners.get(block) : undefined;
-    if (index === undefined) this.unattributed = true;
-    else this.alter(index);
+    const occurrences = block !== null && typeof block === 'object' ? this.owners.get(block) : undefined;
+    if (!occurrences) {
+      this.unattributed = true;
+      return;
+    }
+    if (new Set(occurrences).size === 1) {
+      this.alter(occurrences[0]!);
+      return;
+    }
+    this.sharedReports.set(block as object, (this.sharedReports.get(block as object) ?? 0) + 1);
+  }
+
+  /**
+   * Resolve reports about shared blocks once the round's request is final.
+   * A report for every occurrence alters every owner. Fewer leave it
+   * ambiguous which owner lost content, so the round is unattributed rather
+   * than letting an altered message look intact.
+   */
+  settle(): void {
+    for (const [block, reports] of this.sharedReports) {
+      const occurrences = this.owners.get(block) ?? [];
+      if (reports >= occurrences.length) for (const index of occurrences) this.alter(index);
+      else this.unattributed = true;
+    }
+    this.sharedReports.clear();
   }
 
   get established(): boolean {

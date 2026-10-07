@@ -61,8 +61,20 @@ export interface UsageEvent {
   round?: RoundReport;
 }
 
-/** A round's usage, every count present only when the provider reported it. */
-export type RoundUsage = Partial<DetailedUsage>;
+/**
+ * A round's token counts, each present only when the provider reported it (a
+ * reported 0 is 0). Counts only: accounting's estimates (estimatedCost) are
+ * not part of the evidence, since a default-derived count would price to a
+ * claimed zero.
+ */
+export interface RoundUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheCreationTokens?: number;
+  cacheReadTokens?: number;
+  /** Thinking tokens, already inside outputTokens (see DetailedUsage.thinkingTokens). */
+  thinkingTokens?: number;
+}
 
 /**
  * One provider round whose response stands, as its producer saw it.

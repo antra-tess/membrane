@@ -2326,6 +2326,7 @@ export class Membrane {
     origins?: readonly MessageOrigin[];
     injectedBatch?: { batch: number; applied: number };
   }): RoundReport {
+    input.fidelity.settle();
     const messages: number[] = [];
     const injected: Array<[number, number]> = [];
     for (const at of input.fidelity.altered) {
@@ -2335,8 +2336,13 @@ export class Membrane {
     }
     messages.sort((a, b) => a - b);
     injected.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-    const usage: RoundUsage = { ...input.usage };
-    for (const field of input.unreported ?? []) delete usage[field];
+    // Counts only, and only those the provider reported.
+    const usage: RoundUsage = {};
+    const counts = ['inputTokens', 'outputTokens', 'cacheCreationTokens', 'cacheReadTokens', 'thinkingTokens'] as const;
+    for (const field of counts) {
+      const value = input.usage?.[field];
+      if (typeof value === 'number' && !(input.unreported as readonly string[] | undefined)?.includes(field)) usage[field] = value;
+    }
     return {
       index: input.index,
       stopReason: input.stopReason,
