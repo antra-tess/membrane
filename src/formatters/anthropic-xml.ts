@@ -17,6 +17,7 @@ import type {
   ToolUseContent,
   ToolResultContent,
   ToolResultContentBlock,
+  ToolCallNotice,
 } from '../types/index.js';
 import type {
   PrefillFormatter,
@@ -32,6 +33,8 @@ import {
   parseAccumulatedIntoBlocks,
   formatToolDefinitions,
   toolDefinitionForPrompt,
+  encodeParameterValue,
+  CDATA_INSTRUCTION,
 } from '../utils/tool-parser.js';
 import { IncrementalXmlParser } from '../utils/stream-parser.js';
 import { assertCacheMarkersWithinLimit, clampCacheMarkers } from '../utils/cache-marker-budget.js';
@@ -274,8 +277,10 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         }
       }
 
-      // Check for tool results
-      const hasToolResult = message.content.some(c => c.type === 'tool_result');
+      // Check for tool results. A parser notice is harness content like a
+      // result: it answers the round, it is nobody's utterance.
+      const isHarnessContent = (c: ContentBlock) => c.type === 'tool_result' || c.type === 'tool_notice';
+      const hasToolResult = message.content.some(isHarnessContent);
 
       // If message has images, flush and add as user turn
       if (hasImages && !isEmpty) {
@@ -336,7 +341,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
       const isContinuation = isBotMessage && lastNonEmptyParticipant === assistantParticipant && !hasToolResult;
 
       const isPureToolResults =
-        hasToolResult && message.content.every((c) => c.type === 'tool_result');
+        hasToolResult && message.content.every(isHarnessContent);
 
       if (isContinuation && isLastMessage) {
         // Bot continuation - don't add prefix
@@ -547,14 +552,26 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         }
         i--;
         parts.push(...this.renderToolUseRun(run));
-      } else if (block.type === 'tool_result') {
+      } else if (block.type === 'tool_result' || block.type === 'tool_notice') {
+        // One envelope: the run of results, then the parser notice that closed
+        // it live, if one follows (an all-refused round has the notice alone).
         const run: ToolResultContent[] = [];
         while (i < content.length && content[i]!.type === 'tool_result') {
           run.push(content[i] as ToolResultContent);
           i++;
         }
+        let notices: ToolCallNotice[] = [];
+        const next = content[i];
+        if (next?.type === 'tool_notice') {
+          notices = next.notices;
+          i++;
+        }
         i--;
-        parts.push(...this.renderToolResultRun(run));
+        parts.push(...this.renderToolResultRun(run, notices));
+      } else if (block.type === 'tool_attempt') {
+        // A block whose every invoke was refused: the model's own text,
+        // replayed exactly as it was written.
+        parts.push(block.rawXml);
       } else if (block.type === 'document' || block.type === 'audio') {
         hasUnsupportedMedia = true;
       }
@@ -603,22 +620,31 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     return out;
   }
 
-  /** See {@link renderToolUseRun} — same contract for tool results. */
-  private renderToolResultRun(run: ToolResultContent[]): string[] {
+  /**
+   * See {@link renderToolUseRun} — same contract for tool results.
+   *
+   * `notices` are the parser notices that closed this envelope live. A run
+   * replayed from its verbatim `rawXml` already holds them, so they are written
+   * only into an envelope reconstructed here, through the same function the
+   * live loop wrote it with — the replay is the bytes the model read, with no
+   * notice twice. With no results at all (every invoke refused), the envelope
+   * holds the notices alone.
+   */
+  private renderToolResultRun(run: ToolResultContent[], notices: ToolCallNotice[] = []): string[] {
     const out: string[] = [];
     let legacy: ToolResultContent[] = [];
     let lastRaw: string | undefined;
 
-    const flushLegacy = () => {
-      if (legacy.length > 0) {
-        out.push(formatToolResultsXml(legacy.map(toToolResult)));
+    const flushLegacy = (withNotices: ToolCallNotice[]) => {
+      if (legacy.length > 0 || withNotices.length > 0) {
+        out.push(formatToolResultsXml(legacy.map(toToolResult), withNotices));
         legacy = [];
       }
     };
 
     for (const block of run) {
       if (block.rawXml) {
-        flushLegacy();
+        flushLegacy([]);
         if (block.rawXml !== lastRaw) {
           out.push(block.rawXml);
         }
@@ -628,29 +654,27 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         legacy.push(block);
       }
     }
-    flushLegacy();
+    // The notices close the last envelope. When that envelope was replayed
+    // verbatim it already holds them.
+    flushLegacy(lastRaw === undefined ? notices : []);
     return out;
   }
 
   /**
    * Reconstruct canonical <function_calls> XML for legacy tool_use blocks
-   * stored without rawXml. Lossy (whitespace, parameter order, antml:
-   * prefix are gone) but consistent with the parser and the instructions.
-   *
-   * A string value that begins or ends with a newline gets one more there:
-   * the parser reads one newline on each side of a string parameter as
-   * layout, so this is how that value is written to read back as itself.
+   * stored without rawXml. The original layout (whitespace between tags,
+   * parameter order as written, antml: prefix) is gone, but every value is
+   * written so the parser reads back exactly that value and its type, under
+   * any declaration and without the schema: strings as CDATA, everything else
+   * as markup-free JSON (see {@link encodeParameterValue}).
    */
   private formatLegacyToolUseXml(blocks: ToolUseContent[]): string {
     const lines = ['<function_calls>'];
     for (const block of blocks) {
       lines.push(`<invoke name="${block.name}">`);
       for (const [name, value] of Object.entries(block.input)) {
-        const text =
-          typeof value === 'string'
-            ? `${value.startsWith('\n') ? '\n' : ''}${value}${value.endsWith('\n') ? '\n' : ''}`
-            : JSON.stringify(value);
-        lines.push(`<parameter name="${name}">${text}</parameter>`);
+        const text = encodeParameterValue(value);
+        if (text !== undefined) lines.push(`<parameter name="${name}">${text}</parameter>`);
       }
       lines.push('</invoke>');
     }
@@ -686,7 +710,8 @@ ${FUNC_CALLS_OPEN}
 ${INVOKE_OPEN}tool_name">
 ${PARAM_OPEN}param_name">value${PARAM_CLOSE}
 ${INVOKE_CLOSE}
-${FUNC_CALLS_CLOSE}`;
+${FUNC_CALLS_CLOSE}
+${CDATA_INSTRUCTION}`;
   }
 
   private injectToolsIntoSystem(system: string, toolsXml: string): string {
@@ -701,6 +726,7 @@ When you want to use a tool, output:
 <parameter name="param_name">value</parameter>
 </invoke>
 </function_calls>
+${CDATA_INSTRUCTION}
 `;
     return system + '\n\n' + toolsSection;
   }

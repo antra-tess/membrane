@@ -31,6 +31,7 @@ import type {
 import { normalizeToolPairs, mergeConsecutiveRoles } from './normalize-tool-pairs.js';
 import { resolveImageMediaType, isAcceptedImageMediaType, strippedImagePlaceholder } from '../utils/image-media.js';
 import { assertCacheMarkersWithinLimit } from '../utils/cache-marker-budget.js';
+import { toolCallNoticesText } from '../utils/tool-parser.js';
 
 /** Index of the last content block that can carry cache_control. Anthropic
  *  rejects cache_control on thinking / redacted_thinking blocks, so a cache
@@ -516,6 +517,17 @@ export class NativeFormatter implements PrefillFormatter {
       } else if (block.type === 'redacted_thinking') {
         // Pass through verbatim (carries encrypted data field)
         result.push({ ...(block as unknown as Record<string, unknown>) });
+      } else if (block.type === 'tool_attempt') {
+        // An XML tool-call block that dispatched nothing (every invoke
+        // refused): the model's own words, so they stay its text. Never a
+        // tool_use — nothing ran and nothing answers it.
+        result.push({ type: 'text', text: block.rawXml });
+      } else if (block.type === 'tool_notice') {
+        // The harness's notice about refused or warned invokes, as attributed
+        // text after any tool_result blocks (which must come first). No name
+        // prefix: it is nobody's utterance.
+        const text = toolCallNoticesText(block.notices);
+        if (text) result.push({ type: 'text', text });
       } else if (block.type === 'document') {
         hasUnsupportedMedia = true;
       }

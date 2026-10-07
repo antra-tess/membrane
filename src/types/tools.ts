@@ -127,16 +127,50 @@ export interface ToolContext {
 // Tool Parsing
 // ============================================================================
 
+/**
+ * What the XML tool-call parser found wrong with one invoke of a
+ * `<function_calls>` block.
+ *
+ * A `refused` invoke was not dispatched: its parameter boundaries are
+ * malformed in a way that would change the caller's arguments (a miskeyed or
+ * missing closing tag swallowed a required parameter, a value was cut at a
+ * literal closing tag, text follows a CDATA value). It never becomes a
+ * ToolCall or a tool_use. A `warning` invoke was dispatched as parsed, with the
+ * parse's oddity stated (a value contains markup for an optional parameter the
+ * call doesn't otherwise include). `message` is written for the model that
+ * made the call; it says what was observed and, for a refusal, how to send the
+ * text as data.
+ */
+export interface ToolCallNotice {
+  /** 0-based ordinal of the invoke's opening tag among the block's invoke openers. */
+  invoke: number;
+  /** The invoke's tool name, as written. */
+  toolName: string;
+  kind: 'refused' | 'warning';
+  message: string;
+}
+
+/** A {@link ToolCallNotice} located within a turn: `block` is the 0-based index of its `<function_calls>` block in the turn's text. */
+export interface TurnToolCallNotice extends ToolCallNotice {
+  block: number;
+}
+
 export interface ParsedToolCalls {
-  /** Parsed tool calls */
+  /** Parsed tool calls: the block's dispatchable invokes, in document order. */
   calls: ToolCall[];
-  
+
+  /**
+   * The block's refused and warned invokes. A block whose every invoke was
+   * refused has no calls and at least one notice.
+   */
+  notices: ToolCallNotice[];
+
   /** Text before the tool calls block */
   beforeText: string;
-  
+
   /** Text after the tool calls block */
   afterText: string;
-  
+
   /** The full matched tool calls XML block */
   fullMatch: string;
 }

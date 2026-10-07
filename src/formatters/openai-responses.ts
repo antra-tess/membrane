@@ -25,6 +25,7 @@ import type {
 import { responsesToolOutputParts } from '../providers/responses-input.js';
 
 import { resolveImageMediaType } from '../utils/image-media.js';
+import { toolCallNoticesText } from '../utils/tool-parser.js';
 
 export const OPENAI_RESPONSES_ITEMS_METADATA_KEY = 'openaiResponsesItems';
 
@@ -99,7 +100,7 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
       };
 
       for (const block of message.content) {
-        const rawItem = block.rawItem as NativeItem | undefined;
+        const rawItem = ('rawItem' in block ? block.rawItem : undefined) as NativeItem | undefined;
         if (!rawItem || typeof rawItem !== 'object') {
           pendingParts.push(block);
           continue;
@@ -203,6 +204,16 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
       } else if (block.type === 'redacted_thinking') {
         flushMessage();
         out.push({ type: 'reasoning', encrypted_content: block.data, summary: [] });
+      } else if (block.type === 'tool_attempt') {
+        // An XML tool-call block that dispatched nothing: the model's own
+        // words, kept as its text. Never a function_call: nothing ran.
+        messageParts.push({ type: isAssistant ? 'output_text' : 'input_text', text: block.rawXml });
+      } else if (block.type === 'tool_notice') {
+        // The harness's notice about refused or warned invokes: attributed
+        // text on the harness side, after any function_call_output items.
+        flushMessage();
+        const text = toolCallNoticesText(block.notices);
+        if (text) out.push({ type: 'message', role: 'user', content: [{ type: 'input_text', text }] });
       }
     }
     flushMessage();

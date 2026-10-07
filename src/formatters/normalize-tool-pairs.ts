@@ -305,8 +305,12 @@ function requiredRoleOf(block: ProviderBlock): RequiredRole {
     case 'tool_use':
     case 'thinking':
     case 'redacted_thinking':
+    // Formatters render these two as text before the wire; listed so one that
+    // ever reaches here keeps its speaker's side.
+    case 'tool_attempt':
       return 'assistant';
     case 'tool_result':
+    case 'tool_notice':
       return 'user';
     default:
       if (block.type.startsWith('tool_') || block.type.startsWith('thinking')) {
