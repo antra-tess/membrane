@@ -1,13 +1,15 @@
 /**
- * The stop boundary of a native-mode stream that this PR's native
- * construction left open (greptile on #102: discussion_r4207037937).
+ * Boundaries of a native-mode stream that this PR's native construction left
+ * open (greptile on #102: discussion_r4207037937, r4207037948).
  *
- * A provider that does not apply a request's stop sequences (the Responses
- * API has no stop parameter; Chat Completions drops it for some models and
- * sends at most four) still ends the accepted output at the stop, including
- * in text it reports only in its returned output: no chunk, block event,
- * returned block or replayed item carries the stop or anything after it, and
- * thinking is never scanned.
+ * - Stops. A provider that does not apply a request's stop sequences (the
+ *   Responses API has no stop parameter; Chat Completions drops it for some
+ *   models and sends at most four) still ends the accepted output at the
+ *   stop, including in text it reports only in its returned output: no
+ *   chunk, block event, returned block or replayed item carries the stop or
+ *   anything after it, and thinking is never scanned.
+ * - prefillUserMessage. The caller's synthetic user text is the leading user
+ *   turn wherever a native conversation needs one.
  *
  * The Anthropic fixtures stream past the stop on purpose: they stand for any
  * provider that does not apply it.
@@ -16,7 +18,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import { OpenAIResponsesAPIAdapter, type OpenAIResponsesOutputItem } from '../../src/providers/openai-responses-api.js';
+import { NativeFormatter } from '../../src/formatters/native.js';
 import { OpenAIResponsesFormatter } from '../../src/formatters/openai-responses.js';
+import { normalizeToolPairs } from '../../src/formatters/normalize-tool-pairs.js';
 import { LocalStopSequences, cutVisible } from '../../src/utils/local-stop-sequences.js';
 
 const text = (value: string) => ({ type: 'text' as const, text: value });
@@ -398,5 +402,47 @@ describe('LocalStopSequences', () => {
     const wire = JSON.stringify(next.messages);
     expect(wire).toContain('pre ');
     expect(wire).not.toContain('END');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// prefillUserMessage
+// ---------------------------------------------------------------------------
+
+describe('prefillUserMessage in a native conversation', () => {
+  const completed = () => new Response(JSON.stringify({
+    id: 'm', type: 'message', role: 'assistant', model: MODEL, content: [text('ok')],
+    stop_reason: 'end_turn', stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1 },
+  }), { headers: { 'content-type': 'application/json' } });
+
+  it('is the leading user turn before a context prefix, through the default formatter', async () => {
+    const bodies = script(completed);
+    await claude().complete(ask({ contextPrefix: 'seed', prefillUserMessage: 'CUSTOM' }) as any);
+    expect(bodies[0].messages[0]).toEqual({ role: 'user', content: [text('CUSTOM')] });
+    expect(bodies[0].messages[1]).toMatchObject({ role: 'assistant', content: [{ type: 'text', text: 'seed' }] });
+  });
+
+  it('is the leading user turn before assistant-first history, through NativeFormatter', async () => {
+    const bodies = script(completed);
+    await claude({ formatter: new NativeFormatter() }).complete({
+      config: { model: MODEL, maxTokens: 64 },
+      messages: [
+        { participant: 'Claude', content: [text('I spoke first.')] },
+        { participant: 'User', content: [text('Then I did.')] },
+      ],
+      prefillUserMessage: 'CUSTOM',
+    } as any);
+    expect(bodies[0].messages[0]).toEqual({ role: 'user', content: [text('CUSTOM')] });
+  });
+
+  it('is the text the normalizer synthesizes when role repair leaves an assistant first', () => {
+    const result = normalizeToolPairs([{ role: 'assistant', content: [text('a')] }], { leadingUserText: 'CUSTOM' } as any);
+    expect(result.messages[0]).toEqual({ role: 'user', content: [text('CUSTOM')] });
+  });
+
+  it('leaves the synthetic turn as [continuing] when not supplied (control)', async () => {
+    const bodies = script(completed);
+    await claude().complete(ask({ contextPrefix: 'seed' }) as any);
+    expect(bodies[0].messages[0]).toEqual({ role: 'user', content: [text('[continuing]')] });
   });
 });

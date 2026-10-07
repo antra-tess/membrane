@@ -195,7 +195,8 @@ export interface NormalizedRequest {
   /**
    * Custom content for the synthetic user message injected when the first
    * provider message is an assistant turn (required by Claude Messages API).
-   * Defaults to '[Start]' if not specified.
+   * Defaults to '[Start]' in prefill construction (or a CLI-simulation command
+   * when no system prompt is set) and to '[continuing]' in native construction.
    */
   prefillUserMessage?: string;
 
