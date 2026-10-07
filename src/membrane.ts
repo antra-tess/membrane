@@ -6,7 +6,7 @@
 
 import { restoreToolName } from './utils/tool-names.js';
 import { StreamedThinking } from './utils/streamed-thinking.js';
-import { LocalStopSequences } from './utils/local-stop-sequences.js';
+import { LocalStopSequences, membraneBlockType } from './utils/local-stop-sequences.js';
 
 import type {
   NormalizedRequest,
@@ -102,9 +102,18 @@ import { getDefaultPricing } from './registry/default-pricing.js';
 // Membrane Class
 // ============================================================================
 
+/** One block as an attempt received it: its start payload, final payload, and streamed chunks. */
+interface ReceivedBlock {
+  index?: number;
+  start?: Record<string, unknown>;
+  final?: unknown;
+  streamed: string;
+}
+
 /**
  * Block-lifecycle tracking shared by the two native-tools streaming paths
- * (`streamWithNativeTools` and `runNativeToolsYielding`).
+ * (`streamWithNativeTools` and `runNativeToolsYielding`), and the record of
+ * what the current attempt has received, for partialContent if it aborts.
  *
  * Providers signal blocks through `onContentBlock(index, block)`, but not all
  * of them the same way: the Anthropic and Bedrock adapters fire it twice per
@@ -116,6 +125,20 @@ import { getDefaultPricing } from './registry/default-pricing.js';
  * the paired semantics and adds `flush()`, which the caller runs once the
  * provider stream has returned: every started block that never saw a second
  * callback is completed from the last block payload seen for it.
+ *
+ * The same convention decides what an aborted attempt received. A block is
+ * finished at its second sighting (an image, reported once, when it arrives),
+ * and kept as that final payload. Unfinished text and thinking are kept as
+ * their start payload plus the chunks streamed into them. An unfinished tool
+ * call is not content yet: its start payload's empty `input` is a placeholder,
+ * not the call's arguments, so it is left out. *
+ * A single-final adapter reports its finished blocks only after its terminal
+ * response, one callback each, and their completion is not observable under
+ * this callback contract before the provider call returns. If a caller's
+ * callback throws while they are being reported, the call never returns:
+ * those blocks stay first sightings here, so a tool call among them is left
+ * out. Once the provider's call has returned, the round's returned content
+ * is what it received.
  */
 class NativeBlockTracker {
   currentType: MembraneBlockType = 'text';
@@ -123,31 +146,69 @@ class NativeBlockTracker {
   private readonly started = new Map<number, MembraneBlockType>();
   private readonly completed = new Set<number>();
   private readonly lastSeen = new Map<number, unknown>();
+  /** This attempt's blocks in arrival order; an entry without an index is text no block event announced. */
+  private received: ReceivedBlock[] = [];
+  private readonly receivedByIndex = new Map<number, ReceivedBlock>();
 
   constructor(private readonly emit: ((event: BlockEvent) => void) | undefined) {}
-
-  static mapApiBlockType(apiType: string | undefined): MembraneBlockType {
-    if (apiType === 'thinking' || apiType === 'redacted_thinking' || apiType === 'reasoning') return 'thinking';
-    if (apiType === 'tool_use' || apiType === 'function_call' || apiType === 'tool_call') return 'tool_call';
-    return 'text';
-  }
 
   /** Provider block callback: first sighting of an index starts it, a second completes it. */
   onProviderBlock(index: number, block: unknown): void {
     const type = (block as { type?: string } | undefined)?.type;
     // Images use the content-block callback and final response, not the
     // text/thinking/tool logical-block event vocabulary.
-    if (type === 'image' || type === 'generated_image') return;
+    if (type === 'image' || type === 'generated_image') {
+      this.record(index, block, true);
+      return;
+    }
     this.lastSeen.set(index, block);
     if (!this.started.has(index)) {
-      const mbType = NativeBlockTracker.mapApiBlockType((block as { type?: string } | undefined)?.type);
+      const mbType = membraneBlockType(type);
       this.started.set(index, mbType);
       this.currentType = mbType;
       this.blockIndex = index;
+      this.record(index, block, false);
       this.emit?.({ event: 'block_start', index, block: { type: mbType } });
       return;
     }
+    this.record(index, block, true);
     this.complete(index, block);
+  }
+
+  /** A streamed chunk, recorded against the block it belongs to. */
+  onChunk(chunk: string): void {
+    const open = this.started.has(this.blockIndex) && !this.completed.has(this.blockIndex)
+      ? this.receivedByIndex.get(this.blockIndex)
+      : undefined;
+    if (open) {
+      open.streamed += chunk;
+      return;
+    }
+    const last = this.received[this.received.length - 1];
+    if (last && last.index === undefined) last.streamed += chunk;
+    else this.received.push({ streamed: chunk });
+  }
+
+  /**
+   * What this attempt received, in arrival order, as provider blocks for
+   * `parseProviderContent`: see the class comment for what counts.
+   */
+  partialContent(): unknown[] {
+    const blocks: unknown[] = [];
+    for (const entry of this.received) {
+      if (entry.final !== undefined) {
+        blocks.push(entry.final);
+      } else if (entry.index === undefined) {
+        if (entry.streamed) blocks.push({ type: 'text', text: entry.streamed });
+      } else if (entry.start?.type === 'text') {
+        if (entry.streamed) blocks.push({ ...entry.start, text: entry.streamed });
+      } else if (entry.start?.type === 'thinking') {
+        blocks.push({ ...entry.start, thinking: entry.streamed });
+      } else if (entry.start?.type === 'redacted_thinking') {
+        blocks.push({ ...entry.start });
+      }
+    }
+    return blocks;
   }
 
   /**
@@ -168,13 +229,27 @@ class NativeBlockTracker {
     this.started.clear();
     this.completed.clear();
     this.lastSeen.clear();
+    this.received = [];
+    this.receivedByIndex.clear();
+  }
+
+  /** Copy each payload: an adapter may keep mutating the object it reported (Bedrock's start blocks do). */
+  private record(index: number, block: unknown, finished: boolean): void {
+    const payload = block && typeof block === 'object' ? { ...(block as Record<string, unknown>) } : undefined;
+    let entry = this.receivedByIndex.get(index);
+    if (!entry) {
+      entry = { index, streamed: '' };
+      this.receivedByIndex.set(index, entry);
+      this.received.push(entry);
+    }
+    if (finished) entry.final = payload ?? block;
+    else entry.start = payload;
   }
 
   private complete(index: number, block: unknown): void {
     if (this.completed.has(index)) return;
     this.completed.add(index);
-    const mbType = this.started.get(index)
-      ?? NativeBlockTracker.mapApiBlockType((block as { type?: string } | undefined)?.type);
+    const mbType = this.started.get(index) ?? membraneBlockType((block as { type?: string } | undefined)?.type);
     const apiBlock = block as {
       text?: string;
       thinking?: string;
@@ -1330,9 +1405,11 @@ export class Membrane {
     // Build messages array that we'll update with tool results
     let messages = [...request.messages];
     let allContentBlocks: ContentBlock[] = [];
-    const partialThinking = new StreamedThinking();
-    let partialText = '';
-    let partialActive = false;
+    // What the current round has received, for partialContent if it aborts:
+    // the tracker's record while the provider streams, then the content the
+    // provider returned until it joins allContentBlocks. An abort can still
+    // come after the provider returns, from a caller's callback.
+    let roundReceived: (() => ContentBlock[]) | undefined;
     let markersInLastRequest = 0;
 
     try {
@@ -1343,23 +1420,20 @@ export class Membrane {
 
         // Stream from provider
         let textAccumulated = '';
-        partialThinking.reset();
-        partialText = '';
-        partialActive = true;
         // Tag every token chunk with the membrane block it belongs to and
         // surface the block lifecycle through onBlock — the same shape
         // runNativeToolsYielding uses (#19). Before this, meta.type was
         // hardcoded to 'text' on every chunk and onBlock was never invoked
         // from this path (#20).
         const tracker = new NativeBlockTracker(onBlock ? (event) => onBlock(event) : undefined);
+        roundReceived = () => this.parseProviderContent(tracker.partialContent(), request.tools);
         const streamResult = await this.streamOnce(
           providerRequest,
           {
             onChunk: (chunk) => {
               textAccumulated += chunk;
               allTextAccumulated += chunk;
-              if (tracker.currentType === 'thinking') partialThinking.onThinkingChunk(tracker.blockIndex, chunk);
-              else partialText += chunk;
+              tracker.onChunk(chunk);
               const meta: ChunkMeta = {
                 type: tracker.currentType,
                 visible: tracker.currentType === 'text',
@@ -1368,7 +1442,6 @@ export class Membrane {
               onChunk?.(chunk, meta);
             },
             onContentBlock: (index: number, block: unknown) => {
-              partialThinking.onBlock(index, block, partialText.length);
               tracker.onProviderBlock(index, block);
               // Deprecated pass-through, kept for callers still on it.
               onContentBlockUpdate?.(index, block as ContentBlock);
@@ -1397,6 +1470,11 @@ export class Membrane {
           }
         );
 
+        // The provider has finished the round: from here, what it received is
+        // the content it returned.
+        const responseBlocks = this.parseProviderContent(streamResult.content, request.tools);
+        roundReceived = () => responseBlocks;
+
         // Single-callback adapters (OpenAI Responses) report each finalised
         // block once, after the stream: complete whatever never saw a stop.
         tracker.flush();
@@ -1417,10 +1495,8 @@ export class Membrane {
         const usageSoFar = turnUsage.addRound(streamResult.model, streamResult.usage);
         onUsage?.(usageSoFar);
 
-        // Parse content blocks from response
-        const responseBlocks = this.parseProviderContent(streamResult.content, request.tools);
         allContentBlocks.push(...responseBlocks);
-        partialActive = false;
+        roundReceived = undefined;
 
         // Check for tool_use blocks
         const toolUseBlocks = responseBlocks.filter(
@@ -1552,7 +1628,7 @@ export class Membrane {
           executedToolCalls,
           executedToolResults,
           this.abortReason(error, signal),
-          [...allContentBlocks, ...(partialActive ? partialThinking.content(partialText, value => this.parseProviderContent(value)) : [])]
+          [...allContentBlocks, ...(roundReceived?.() ?? [])]
         );
       }
       // Re-throw with rawRequest attached for logging
@@ -3719,9 +3795,11 @@ export class Membrane {
 
     let messages = [...request.messages];
     let allContentBlocks: ContentBlock[] = [];
-    const partialThinking = new StreamedThinking();
-    let partialText = '';
-    let partialActive = false;
+    // What the current round has received, for partialContent if it aborts:
+    // the tracker's record while the provider streams, then the content the
+    // provider returned until it joins allContentBlocks. An abort can still
+    // come after the provider returns, from a caller's callback.
+    let roundReceived: (() => ContentBlock[]) | undefined;
     let markersInLastRequest = 0;
 
     try {
@@ -3732,7 +3810,7 @@ export class Membrane {
           stream.emit({
             type: 'aborted',
             reason: 'user',
-            partialContent: [...allContentBlocks, ...(partialActive ? partialThinking.content(partialText, value => this.parseProviderContent(value)) : [])],
+            partialContent: [...allContentBlocks, ...(roundReceived?.() ?? [])],
             rawAssistantText: allTextAccumulated,
             toolCalls: executedToolCalls,
             toolResults: executedToolResults,
@@ -3745,9 +3823,6 @@ export class Membrane {
 
         // Stream from provider
         let textAccumulated = '';
-        partialThinking.reset();
-        partialText = '';
-        partialActive = true;
         // Where this attempt starts inside the tool-loop-spanning buffer, so
         // a refusal retry can roll back exactly this attempt's contribution.
         const allTextBefore = allTextAccumulated.length;
@@ -3758,6 +3833,7 @@ export class Membrane {
         const tracker = new NativeBlockTracker(
           emitBlocks ? (event) => stream.emit({ type: 'block', event }) : undefined,
         );
+        roundReceived = () => this.parseProviderContent(tracker.partialContent(), request.tools);
         const streamResult = await this.streamOnce(
           providerRequest,
           {
@@ -3766,8 +3842,7 @@ export class Membrane {
 
               textAccumulated += chunk;
               allTextAccumulated += chunk;
-              if (tracker.currentType === 'thinking') partialThinking.onThinkingChunk(tracker.blockIndex, chunk);
-              else partialText += chunk;
+              tracker.onChunk(chunk);
 
               if (emitTokens) {
                 const meta: ChunkMeta = {
@@ -3780,7 +3855,6 @@ export class Membrane {
             },
             onContentBlock: (index, block) => {
               if (stream.isCancelled) return;
-              partialThinking.onBlock(index, block, partialText.length);
               tracker.onProviderBlock(index, block);
             },
           },
@@ -3810,8 +3884,6 @@ export class Membrane {
               allTextAccumulated = allTextAccumulated.slice(0, allTextBefore);
               textAccumulated = '';
               tracker.reset();
-              partialThinking.reset();
-              partialText = '';
               stream.emit({
                 type: 'retrying',
                 attempt: info.attempt,
@@ -3822,6 +3894,11 @@ export class Membrane {
             },
           }
         );
+
+        // The provider has finished the round: from here, what it received is
+        // the content it returned.
+        const responseBlocks = this.parseProviderContent(streamResult.content, request.tools);
+        roundReceived = () => responseBlocks;
 
         // Single-callback adapters (OpenAI Responses) report each finalised
         // block once, after the stream: complete whatever never saw a stop.
@@ -3843,10 +3920,8 @@ export class Membrane {
           stream.emit({ type: 'usage', usage: usageSoFar });
         }
 
-        // Parse content blocks from response
-        const responseBlocks = this.parseProviderContent(streamResult.content, request.tools);
         allContentBlocks.push(...responseBlocks);
-        partialActive = false;
+        roundReceived = undefined;
 
         // Check for tool_use blocks
         const toolUseBlocks = responseBlocks.filter(
@@ -3997,7 +4072,7 @@ export class Membrane {
         stream.emit({
           type: 'aborted',
           reason: this.abortReason(error, stream.signal),
-          partialContent: [...allContentBlocks, ...(partialActive ? partialThinking.content(partialText, value => this.parseProviderContent(value)) : [])],
+          partialContent: [...allContentBlocks, ...(roundReceived?.() ?? [])],
           rawAssistantText: allTextAccumulated,
           toolCalls: executedToolCalls,
           toolResults: executedToolResults,

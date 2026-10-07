@@ -1,6 +1,7 @@
 /**
- * Boundaries of a native-mode stream that this PR's native construction left
- * open (greptile on #102: discussion_r4207037937, r4207037948).
+ * Three boundaries of a native-mode stream that this PR's native construction
+ * left open (greptile on #102: discussion_r4207037937, r4207037948,
+ * r4207037963).
  *
  * - Stops. A provider that does not apply a request's stop sequences (the
  *   Responses API has no stop parameter; Chat Completions drops it for some
@@ -10,6 +11,9 @@
  *   anything after it, and thinking is never scanned.
  * - prefillUserMessage. The caller's synthetic user text is the leading user
  *   turn wherever a native conversation needs one.
+ * - Aborts. A block the provider finished delivering before an abort is kept
+ *   in partialContent, and once the provider has returned, every block it
+ *   returned is; a tool call whose arguments never finished is not.
  *
  * The Anthropic fixtures stream past the stop on purpose: they stand for any
  * provider that does not apply it.
@@ -444,5 +448,95 @@ describe('prefillUserMessage in a native conversation', () => {
     const bodies = script(completed);
     await claude().complete(ask({ contextPrefix: 'seed' }) as any);
     expect(bodies[0].messages[0]).toEqual({ role: 'user', content: [text('[continuing]')] });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Aborts
+// ---------------------------------------------------------------------------
+
+describe('partialContent after a native stream aborts', () => {
+  it.each(['stream', 'yielding'])('keeps a finished tool call when the transport aborts before another chunk, with stops configured (%s)', async path => {
+    script(() => anthropicResponse([messageStart, ...textBlock(0, 'pre '), ...toolBlock(1, 'toolu_1', 'srv__echo', '{"x":1}')], true));
+    const s = sink();
+    const response = await run(path, claude(), ask({ tools: [echo], stopSequences: ['END'] }), s);
+    expect(response.partialContent).toEqual([text('pre '), { type: 'tool_use', id: 'toolu_1', name: 'srv:echo', input: { x: 1 } }]);
+    expect(s.toolCalls).toEqual([]);
+  });
+
+  it.each(['stream', 'yielding'])('keeps a finished thinking block and its signature when the transport aborts, with stops configured (%s)', async path => {
+    script(() => anthropicResponse([messageStart, ...thinkingBlock(0, 'mull')], true));
+    const response = await run(path, claude(), ask({ stopSequences: ['END'] }), sink());
+    expect(response.partialContent).toEqual([{ type: 'thinking', thinking: 'mull', signature: 'signature' }]);
+  });
+
+  it.each(['stream', 'yielding'])('keeps only what precedes a stop when the transport aborts after it (%s)', async path => {
+    script(() => anthropicResponse([messageStart, ...textBlock(0, 'before END after'), ...toolBlock(1, 'toolu_1', 'srv__echo', '{"x":1}')], true));
+    const s = sink();
+    const response = await run(path, claude(), ask({ tools: [echo], stopSequences: ['END'] }), s);
+    expect(response.partialContent).toEqual([text('before ')]);
+    expect(s.toolCalls).toEqual([]);
+  });
+
+  it('never hands the round\'s text twice to a callback that aborted it', async () => {
+    script(() => anthropicResponse([messageStart, ...textBlock(0, 'hello'), ...messageEnd()]));
+    const seen: string[] = [];
+    const response: any = await claude().stream(ask({ stopSequences: ['END'] }) as any, {
+      onChunk: chunk => {
+        seen.push(chunk);
+        throw new DOMException('consumer abort', 'AbortError');
+      },
+    });
+    expect(seen).toEqual(['hello']);
+    expect(response.partialContent).toEqual([text('hello')]);
+  });
+
+  it('keeps every block a single-final provider returned when a callback aborts after the stream', async () => {
+    script(() => responsesResponse(['pre '], {
+      after: [{ type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'srv__echo', arguments: '{"x":1}', status: 'completed' } as any],
+    }));
+    const membrane = new Membrane(new OpenAIResponsesAPIAdapter({ apiKey: 'sk-test' }), { formatter: new OpenAIResponsesFormatter() });
+    const toolCalls: unknown[] = [];
+    const response: any = await membrane.stream({
+      config: { model: 'gpt-5.6', maxTokens: 256 },
+      messages: [{ participant: 'User', content: [text('Question')] }],
+      tools: [echo],
+    } as any, {
+      onResponse: () => { throw new DOMException('consumer abort', 'AbortError'); },
+      onToolCalls: async calls => {
+        toolCalls.push(...calls);
+        return [];
+      },
+    });
+    expect(response.partialContent.map((block: any) => block.type)).toEqual(['redacted_thinking', 'text', 'tool_use']);
+    expect(response.partialContent[1]).toMatchObject(text('pre '));
+    expect(response.partialContent[2]).toMatchObject({ type: 'tool_use', id: 'call_1', name: 'srv:echo', input: { x: 1 } });
+    expect(toolCalls).toEqual([]);
+  });
+
+  const echo = { name: 'srv:echo', description: 'echo', inputSchema: { type: 'object' as const, properties: {} } };
+
+  it.each(['stream', 'yielding'])('keeps a tool call the provider finished, under its declared name, unexecuted (%s)', async path => {
+    script(() => anthropicResponse([messageStart, ...textBlock(0, 'pre '), ...toolBlock(1, 'toolu_1', 'srv__echo', '{"x":1}')], true));
+    const s = sink();
+    const response = await run(path, claude(), ask({ tools: [echo] }), s);
+    expect(response.partialContent).toEqual([text('pre '), { type: 'tool_use', id: 'toolu_1', name: 'srv:echo', input: { x: 1 } }]);
+    expect(response.toolCalls ?? []).toEqual([]);
+    expect(s.toolCalls).toEqual([]);
+  });
+
+  it.each(['stream', 'yielding'])('leaves out a tool call whose arguments never finished (%s)', async path => {
+    script(() => anthropicResponse([messageStart, ...textBlock(0, 'pre '), ...toolBlock(1, 'toolu_1', 'srv__echo', '{"x":', false)], true));
+    const s = sink();
+    const response = await run(path, claude(), ask({ tools: [echo] }), s);
+    expect(response.partialContent).toEqual([text('pre ')]);
+  });
+
+  it.each(['stream', 'yielding'])('keeps received text that was held as a possible stop (%s)', async path => {
+    const open = textBlock(0, 'before E').slice(0, -1); // no content_block_stop
+    script(() => anthropicResponse([messageStart, ...open], true));
+    const s = sink();
+    const response = await run(path, claude(), ask({ stopSequences: ['END'] }), s);
+    expect(response.partialContent).toEqual([text('before E')]);
   });
 });
