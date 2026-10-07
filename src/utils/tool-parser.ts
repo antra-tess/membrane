@@ -1682,6 +1682,19 @@ function collectLiveToolBlocks(view: ScanText, envelopes?: readonly RecordedEnve
 }
 
 /**
+ * Where a `function_calls` block that the text ends inside begins: the first
+ * opener after every span, if there is one. Every opener a closer follows is
+ * already a span (or inside one), so an opener past the last span never
+ * closed.
+ */
+function unclosedTailStart(masked: string, spans: CandidateSpan[]): number | undefined {
+  const tailStart = spans.reduce((end, span) => Math.max(end, span.end), 0);
+  FUNCTION_CALLS_OPEN_REGEX.lastIndex = 0;
+  const opener = FUNCTION_CALLS_OPEN_REGEX.exec(masked.slice(tailStart));
+  return opener ? tailStart + opener.index : undefined;
+}
+
+/**
  * The text left once every retained span is cut out — the document's own
  * structural level.
  *
@@ -1895,7 +1908,7 @@ export function parseAccumulatedIntoBlocks(
       const refusedOrdinals = new Set(
         blockNotices.filter((notice) => notice.kind === 'refused').map((notice) => notice.invoke)
       );
-      for (const notice of blockNotices) notices.push({ ...notice, block: blockIndex });
+      for (const notice of blockNotices) notices.push({ ...notice, block: blockIndex, answered: answeredBy !== undefined });
 
       for (const invoke of parsedInvokes.invokes) {
         if (refusedOrdinals.has(invoke.ordinal)) continue;
@@ -2042,6 +2055,22 @@ export function parseAccumulatedIntoBlocks(
       toolName: view.unterminated.toolName,
       kind: 'refused',
       message: refusalMessage(`the CDATA section in the value of ${view.unterminated.parameter} never ends`),
+      answered: false,
+    });
+  }
+
+  // A block the text ends inside never closed: nothing in it was dispatched,
+  // and it is no more prose than a refused block — the model's own attempt,
+  // from its opener to the end of the text (the turn's own text, when the
+  // opener was the prefill's). Only an opener after every retained span
+  // counts: an earlier one that a later block re-anchored past is that
+  // block's splice, and stays as it was.
+  const openTail = unclosedTailStart(view.masked, survivingSpans);
+  if (openTail !== undefined) {
+    positions.push({
+      start: openTail,
+      end: processedText.length,
+      block: { type: 'tool_attempt', rawXml: processedText.slice(Math.max(openTail, prepended)) },
     });
   }
 

@@ -17,12 +17,17 @@
   loop still delivers the round's text through `onPreToolContent`.
 - `NormalizedResponse.toolCallNotices` lists the turn's notices with `block`,
   the function_calls block's 0-based index in the turn's text, beside
-  `invoke`. It is absent when there are none and in native mode. `complete()`
-  and `stream()` without `onToolCalls` run no loop, so their callers answer
-  these notices with their results.
+  `invoke`. Each also carries `answered`, which is true when membrane answered
+  that block in-band (the notice is then also a `tool_notice` in the content
+  and was on that round's event). It is false when nothing answered the
+  block: it never closed, or no loop ran. The field is absent when there are
+  no notices, and in native mode. `complete()` and `stream()` without
+  `onToolCalls` run no loop, so their callers answer these notices with their
+  results.
 - Two content block types carry this history. `tool_attempt` `{ rawXml }` is
-  a function_calls block that dispatched nothing, on the assistant side; it is
-  never a tool_use. `tool_notice` `{ notices }` is the harness's notice, after
+  a function_calls block that dispatched nothing, on the assistant side,
+  because every invoke was refused or because the turn ended before it
+  closed. It is never a tool_use. `tool_notice` `{ notices }` is the harness's notice, after
   the round's tool_results. The final parse produces them, and the XML
   formatter replays them as the bytes the model saw. The native formatter,
   whose output also feeds the Gemini, OpenRouter and openai-compatible

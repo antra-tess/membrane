@@ -287,9 +287,11 @@ export interface NormalizedResponse {
    * loop, it also wrote each block's notices into the envelope it injected
    * after that block, recorded for continuation and replay: the model reads
    * them when the turn continues, which `maxToolDepth` and the resumption cap
-   * can prevent after the last round. A caller running its own loop
-   * (`complete()`, or `stream()` without onToolCalls) answers them with its
-   * results. Absent when there are none, and in native mode.
+   * can prevent after the last round. `answered` says which: a notice whose
+   * block nothing answered — it never closed, or no loop ran — is carried only
+   * here. A caller running its own loop (`complete()`, or `stream()` without
+   * onToolCalls) answers them with its results. Absent when there are none,
+   * and in native mode.
    */
   toolCallNotices?: TurnToolCallNotice[];
 

@@ -161,9 +161,19 @@ export interface ToolCallNotice {
   message: string;
 }
 
-/** A {@link ToolCallNotice} located within a turn: `block` is the 0-based index of its `<function_calls>` block in the turn's text. */
+/** A {@link ToolCallNotice} located within a turn. */
 export interface TurnToolCallNotice extends ToolCallNotice {
+  /** The 0-based index of its `<function_calls>` block in the turn's text. */
   block: number;
+  /**
+   * Whether the harness answered its block in-band: the notice is in the
+   * envelope membrane injected after the block — so also a `tool_notice` in
+   * the response content, and on that round's `tool-calls` or `tool-attempt`
+   * event. False when nothing answered the block: it never closed before the
+   * turn ended, or no loop ran (`complete()`, `stream()` without onToolCalls),
+   * so these are the notices only the response carries.
+   */
+  answered: boolean;
 }
 
 export interface ParsedToolCalls {

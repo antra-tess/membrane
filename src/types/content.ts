@@ -164,7 +164,9 @@ export interface ToolResultContent {
 
 /**
  * A `<function_calls>` block, in prefill/XML mode, that dispatched nothing:
- * the parser refused every invoke in it (see {@link ToolNoticeContent}).
+ * the parser refused every invoke in it (see {@link ToolNoticeContent}), or
+ * the turn ended before the block closed (rawXml then runs from its opener to
+ * the end of the turn's text).
  *
  * It is the model's own text, kept so replay shows the attempt exactly as
  * written. It is not a call — nothing ran, and no tool_result answers it — so

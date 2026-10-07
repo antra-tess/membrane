@@ -215,7 +215,7 @@ describe("an all-refused round (Linn's)", () => {
     expect(response.content[1]).toEqual({ type: 'tool_attempt', rawXml: `${LINNS_ATTEMPT}${CALLS_CLOSE}` });
     expect(response.toolCalls.map((call) => call.input.on_behalf_of_name)).toEqual(['antra']);
     expect(response.toolCallNotices).toEqual([
-      { block: 0, invoke: 0, toolName: 'board_update', kind: 'refused', message: REFUSAL },
+      { block: 0, invoke: 0, toolName: 'board_update', kind: 'refused', message: REFUSAL, answered: true },
     ]);
   });
 
@@ -475,8 +475,29 @@ describe('an unterminated payload at the end of the turn', () => {
         toolName: 'board_update',
         kind: 'refused',
         message: expect.stringContaining('the CDATA section in the value of quote never ends'),
+        answered: false,
       },
     ]);
+  });
+});
+
+describe('a turn that answers one block and ends inside the next', () => {
+  const PARTIAL = `${CALLS_OPEN}\n<invoke name="board_update">\n<parameter name="quote"><![CDATA[runs out`;
+
+  it.each(['callback', 'yielding'] as const)('%s: keeps the partial block an attempt, and only its notice unanswered', async (mode) => {
+    const script: Round[] = [
+      { chunks: ['Updating.\n', LINNS_ATTEMPT], stopReason: 'stop_sequence', stopSequence: CALLS_CLOSE },
+      { chunks: ['Again.\n', PARTIAL], stopReason: 'max_tokens' },
+    ];
+    const run = mode === 'callback' ? await runCallback(script) : await runYielding(script);
+
+    expect(types(run.response.content)).toEqual(['text', 'tool_attempt', 'tool_notice', 'text', 'tool_attempt']);
+    expect(run.response.content.at(-1)).toEqual({ type: 'tool_attempt', rawXml: PARTIAL });
+    expect(run.response.toolCallNotices?.map((n) => [n.block, n.kind, n.answered])).toEqual([
+      [0, 'refused', true],
+      [1, 'refused', false],
+    ]);
+    expect(run.response.details.stop.unclosedToolBlock).toBe(true);
   });
 });
 
@@ -610,7 +631,9 @@ describe('no-loop callers', () => {
     const response = await membrane.complete(request());
 
     expect(response.toolCalls).toEqual([]);
-    expect(response.toolCallNotices).toEqual([{ block: 0, invoke: 0, toolName: 'board_update', kind: 'refused', message: REFUSAL }]);
+    expect(response.toolCallNotices).toEqual([
+      { block: 0, invoke: 0, toolName: 'board_update', kind: 'refused', message: REFUSAL, answered: false },
+    ]);
     // A refused block is not an empty one.
     expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('parsed to zero tool calls'));
   });

@@ -388,6 +388,51 @@ describe('CDATA, the literal spelling', () => {
   });
 });
 
+describe('a block the text ends inside', () => {
+  const partial = `${CALLS_OPEN}\n<invoke name="board_update">\n<parameter name="item">X</parameter>\n<parameter name="status">ope`;
+
+  it('is a tool attempt from its opener, not prose, with no notice when nothing was refused', () => {
+    const parsed = parseAccumulatedIntoBlocks(`Before. ${partial}`, TOOLS);
+    expect(parsed.blocks).toEqual([
+      { type: 'text', text: 'Before.' },
+      { type: 'tool_attempt', rawXml: partial },
+    ]);
+    expect(parsed.unclosedToolBlock).toBe(true);
+    expect(parsed.toolCalls).toEqual([]);
+    expect(parsed.notices).toEqual([]);
+  });
+
+  it('carries an unterminated payload as the attempt, with its notice unanswered', () => {
+    const unterminated = `${CALLS_OPEN}\n<invoke name="board_update">\n<parameter name="item"><![CDATA[a ${CALLS_CLOSE} b`;
+    const parsed = parseAccumulatedIntoBlocks(`Before. ${unterminated}`, TOOLS);
+    expect(parsed.blocks).toEqual([
+      { type: 'text', text: 'Before.' },
+      { type: 'tool_attempt', rawXml: unterminated },
+    ]);
+    expect(parsed.notices.map((n) => [n.block, n.kind, n.answered])).toEqual([[0, 'refused', false]]);
+  });
+
+  it('follows every closed block: a stale opener a later block re-anchored past is not one', () => {
+    const later = block(invoke('board_update', param('item', 'A'), param('status', 's')));
+    const parsed = parseAccumulatedIntoBlocks(`${CALLS_OPEN}\n<invoke name="board_update">\n${later}\nafter`, TOOLS);
+    expect(parsed.blocks.map((b) => b.type)).not.toContain('tool_attempt');
+    expect(parsed.toolCalls.map((c) => c.input.item)).toEqual(['A']);
+  });
+});
+
+describe('answered notices', () => {
+  const linn = block(
+    invoke('board_update', param('item', 'X'), param('status', 's'), `<parameter name="on_behalf_of_name">antra</antra:parameter>`, param('quote', 'q')),
+  );
+
+  it('are those from an envelope the harness injected after the block; the rules\' own are not', () => {
+    const { notices } = parseToolCalls(linn, TOOLS)!;
+    const turn = injected(linn, formatToolResults([], notices));
+    expect(parseAccumulatedIntoBlocks(turn.text, { ...TOOLS, harnessEnvelopes: turn.harnessEnvelopes }).notices.map((n) => n.answered)).toEqual([true]);
+    expect(parseAccumulatedIntoBlocks(linn, TOOLS).notices.map((n) => n.answered)).toEqual([false]);
+  });
+});
+
 describe('history blocks', () => {
   it('are never this turn’s to dispatch, answered or not, so a stray closer cannot re-run one', () => {
     const answered = `${block(invoke('board_update', param('item', 'OLD'), param('status', 's')))}\n${RESULTS_OPEN}\n<result>\n<stdout>ok</stdout>\n</result>\n${RESULTS_CLOSE}`;
@@ -418,6 +463,7 @@ describe('an unterminated payload', () => {
         toolName: 'board_update',
         kind: 'refused',
         message: expect.stringContaining('the CDATA section in the value of item never ends; nothing was sent.'),
+        answered: false,
       },
     ]);
   });
@@ -473,7 +519,7 @@ describe('the two entry points agree', () => {
     const accumulated = parseAccumulatedIntoBlocks(text, TOOLS);
 
     expect(dispatched.calls.map((c) => c.input)).toEqual(accumulated.toolCalls.map((c) => c.input));
-    expect(dispatched.notices).toEqual(accumulated.notices.map(({ block: _block, ...notice }) => notice));
+    expect(dispatched.notices).toEqual(accumulated.notices.map(({ block: _block, answered: _answered, ...notice }) => notice));
     expect(dispatched.notices.map((n) => [n.invoke, n.kind])).toEqual([
       [1, 'refused'],
       [2, 'warning'],
@@ -524,7 +570,7 @@ describe('the notice envelope', () => {
     for (const tools of [undefined, [loosened]]) {
       const parsed = parseAccumulatedIntoBlocks(turn.text, { tools, harnessEnvelopes: turn.harnessEnvelopes });
       expect(parsed.toolCalls).toEqual([]);
-      expect(parsed.notices).toEqual(notices.map((notice) => ({ ...notice, block: 0 })));
+      expect(parsed.notices).toEqual(notices.map((notice) => ({ ...notice, block: 0, answered: true })));
     }
   });
 

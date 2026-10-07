@@ -45,6 +45,11 @@
   as the model's markup (the optional `StreamParser.pushEnvelope`; a custom
   parser without it is pushed the envelope as before), so a tool's output
   that opens a thinking block cannot hide a later call's payload.
+- A tool-call block the turn's text ends inside is a `tool_attempt` in the
+  final content, not text, from its opener to the end of the text. That
+  covers an unterminated payload and also a `max_tokens` cut mid-call. Before,
+  the partial XML reached consumers as assistant prose.
+  `details.stop.unclosedToolBlock` still flags it.
 - Legacy `tool_use` blocks without `rawXml` are reconstructed without the
   schema, so that a value reads back exactly, type included, under any
   declaration it satisfies and when undeclared. Strings are written as CDATA,
