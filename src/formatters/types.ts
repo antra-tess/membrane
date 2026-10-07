@@ -286,6 +286,14 @@ export interface StreamParser {
 
   /** XML tool calls: whether an offset into the accumulated text lies inside a CDATA payload. */
   isPayloadAt?(index: number): boolean;
+
+  /**
+   * XML tool calls: add an envelope the harness injected (results and notices
+   * answering a block) without reading it as markup, so a tool's output
+   * cannot move the state the model's next round is read against. Parsers
+   * without payloads need not implement it; `push` is used instead.
+   */
+  pushEnvelope?(content: string): void;
 }
 
 // ============================================================================

@@ -164,13 +164,27 @@ export class IncrementalXmlParser {
   }
 
   /**
-   * Add text without emitting: a prefill, or text the harness writes (results,
-   * a restored stop sequence). Depths and payload state follow it exactly as
-   * they follow streamed text.
+   * Add text without emitting: a prefill, or text the harness writes into the
+   * model's markup (a restored stop sequence, a thinking opener). Depths and
+   * payload state follow it exactly as they follow streamed text. An injected
+   * envelope goes through pushEnvelope instead.
    */
   push(chunk: string): BlockEvent[] {
     this.consume(chunk, null);
     return [];
+  }
+
+  /**
+   * Add an envelope the harness injected — results and notices answering a
+   * block — without reading it. Nothing in it is the model's markup: a tool's
+   * output that opens a thinking block, say, must not move the depths or the
+   * turn's containers that the model's next round is read against, just as
+   * the complete-text parse never reads a recorded envelope. The harness
+   * injects one only where the model's markup is at rest, after a block's
+   * closer, so there is no partial tag or value to carry across it.
+   */
+  pushEnvelope(text: string): void {
+    this.state.accumulated += text;
   }
 
   /**

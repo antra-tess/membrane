@@ -15,6 +15,7 @@ import { hasUnclosedToolBlock } from '../../src/utils/tool-parser.js';
 const CALLS_OPEN = '<' + 'function_calls>';
 const CALLS_CLOSE = '</' + 'function_calls>';
 const RESULTS_OPEN = '<' + 'function_results>';
+const RESULTS_CLOSE = '</' + 'function_results>';
 
 const payload = `${CALLS_CLOSE} and <thinking> and </parameter></invoke> and ]] then >`;
 const call =
@@ -172,6 +173,19 @@ describe('a CDATA payload in the incremental parser', () => {
     parser.processChunk(`</thinking>\n<thinking>quoting ${CALLS_OPEN}<invoke name="t"><parameter name="x"><![CDATA[`);
     expect(parser.isInsidePayload()).toBe(false);
     parser.processChunk(`]]></parameter></invoke>${CALLS_CLOSE}</thinking>\n${CALLS_OPEN}<invoke name="t"><parameter name="x"><![CDATA[`);
+    expect(parser.isInsidePayload()).toBe(true);
+  });
+
+  it('reads nothing inside an envelope the harness pushed: a tool’s unbalanced output moves no depth and hides no payload', () => {
+    const parser = new IncrementalXmlParser();
+    parser.processChunk(`${CALLS_OPEN}<invoke name="t"><parameter name="x">a</parameter></invoke>`);
+    parser.push(CALLS_CLOSE);
+    const envelope = `${RESULTS_OPEN}\n<result>\n<stdout>\nthe file says <thinking> and stops\n</stdout>\n</result>\n${RESULTS_CLOSE}`;
+    parser.pushEnvelope(envelope);
+
+    expect(parser.getAccumulated().endsWith(envelope)).toBe(true);
+    expect(parser.getDepths()).toEqual({ functionCalls: 0, functionResults: 0, thinking: 0 });
+    parser.processChunk(`\n${CALLS_OPEN}<invoke name="t"><parameter name="x"><![CDATA[ ${CALLS_CLOSE}`);
     expect(parser.isInsidePayload()).toBe(true);
   });
 

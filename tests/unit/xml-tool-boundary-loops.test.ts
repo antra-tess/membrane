@@ -143,9 +143,14 @@ const LINNS_TURN: Round[] = [
 
 const REFUSAL = expect.stringContaining('the value of on_behalf_of_name contains the closing tag `</antra:parameter>`');
 
+/** What a tool returns: by default `saved NAME`; `round` counts executor calls from 0. */
+type Output = (call: ToolCall, round: number) => string;
+const saved: Output = (call) => `saved ${call.name}`;
+
 async function runCallback(
   script: Round[],
   req: NormalizedRequest = request(),
+  output: Output = saved,
 ): Promise<{ response: NormalizedResponse; adapter: ScriptedAdapter; calls: Array<{ calls: ToolCall[]; context: ToolContext }>; preTool: string[] }> {
   const adapter = new ScriptedAdapter(script);
   const membrane = new Membrane(adapter, { logger: quietLogger() });
@@ -153,8 +158,9 @@ async function runCallback(
   const preTool: string[] = [];
   const response = (await membrane.stream(req, {
     onToolCalls: async (toolCalls, context) => {
+      const round = calls.length;
       calls.push({ calls: toolCalls, context });
-      return toolCalls.map((call): ToolResult => ({ toolUseId: call.id, content: `saved ${call.name}`, isError: false }));
+      return toolCalls.map((call): ToolResult => ({ toolUseId: call.id, content: output(call, round), isError: false }));
     },
     onPreToolContent: async (text) => {
       preTool.push(text);
@@ -166,18 +172,21 @@ async function runCallback(
 async function runYielding(
   script: Round[],
   req: NormalizedRequest = request(),
+  output: Output = saved,
 ): Promise<{ response: NormalizedResponse; adapter: ScriptedAdapter; events: StreamEvent[] }> {
   const adapter = new ScriptedAdapter(script);
   const membrane = new Membrane(adapter, { logger: quietLogger() });
   const stream = membrane.streamYielding(req, {});
   const events: StreamEvent[] = [];
   let response: NormalizedResponse | undefined;
+  let round = 0;
   for await (const event of stream) {
     if (event.type === 'tokens' || event.type === 'block' || event.type === 'usage') continue;
     events.push(event);
     if (event.type === 'tool-calls') {
+      const executed = round++;
       stream.provideToolResults(
-        event.calls.map((call): ToolResult => ({ toolUseId: call.id, content: `saved ${call.name}`, isError: false })),
+        event.calls.map((call): ToolResult => ({ toolUseId: call.id, content: output(call, executed), isError: false })),
       );
     }
     if (event.type === 'complete') response = event.response;
@@ -377,6 +386,48 @@ describe('the history boundary', () => {
       expect(run.response.toolCalls.map((call) => call.input.item)).toEqual([`see ${CALLS_CLOSE} and more`]);
       expect(run.response.toolCallNotices).toBeUndefined();
       expect(run.adapter.requests).toHaveLength(3);
+    },
+  );
+});
+
+describe('a tool’s output that opens a thinking block it never closes', () => {
+  // Call A's output leaves a thinking block open; the next call's CDATA value
+  // then meets a provider stop on a literal closer.
+  const output: Output = (call, round) => (round === 0 ? 'the file says <thinking> and stops' : `saved ${call.name}`);
+  const secondCall = (prose: string): Round[] => [
+    { chunks: [`${prose}${CALLS_OPEN}\n<invoke name="board_update">\n<parameter name="item"><![CDATA[see `], stopReason: 'stop_sequence', stopSequence: CALLS_CLOSE },
+    { chunks: [' and more]]></parameter>\n</invoke>\n'], stopReason: 'stop_sequence', stopSequence: CALLS_CLOSE },
+  ];
+  const cases: Array<[string, NormalizedRequest, Round[]]> = [
+    [
+      // XML thinking mode opens the turn's thinking in the prefill and after every result.
+      'with thinking enabled',
+      { ...request(), config: { model: 'test-model', maxTokens: 1000, thinking: { enabled: true } } },
+      [
+        { chunks: [`Checking.</thinking>\n${openBlock(param('item', 'A'))}`], stopReason: 'stop_sequence', stopSequence: CALLS_CLOSE },
+        ...secondCall('Next.</thinking>\n'),
+        { chunks: ['Done.</thinking>\nok'], stopReason: 'end_turn' },
+      ],
+    ],
+    [
+      'after a stray thinking closer in the model’s prose',
+      request(),
+      [
+        { chunks: [`I won't write </thinking> here.\n${openBlock(param('item', 'A'))}`], stopReason: 'stop_sequence', stopSequence: CALLS_CLOSE },
+        ...secondCall(''),
+        { chunks: ['ok'], stopReason: 'end_turn' },
+      ],
+    ],
+  ];
+
+  it.each(cases.flatMap(([name, req, script]) => (['callback', 'yielding'] as const).map((mode) => [mode, name, req, script] as const)))(
+    '%s, %s: is the harness’s text, not the model’s, so the next call’s payload still resumes',
+    async (mode, _name, req, script) => {
+      const run = mode === 'callback' ? await runCallback(script, req, output) : await runYielding(script, req, output);
+
+      expect(run.response.toolCalls.map((call) => call.input.item)).toEqual(['A', `see ${CALLS_CLOSE} and more`]);
+      expect(run.response.toolCallNotices).toBeUndefined();
+      expect(run.adapter.requests).toHaveLength(4);
     },
   );
 });

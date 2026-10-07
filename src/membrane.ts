@@ -859,7 +859,7 @@ export class Membrane {
 
         // If we detected stop sequence manually, fix up the parser and result
         if (detectedStopSequence && truncatedAccumulated !== null) {
-          rebuildParser(parser, truncatedAccumulated, initialPrefillLength);
+          rebuildParser(parser, truncatedAccumulated, initialPrefillLength, harnessEnvelopes);
           streamResult.stopReason = 'stop_sequence';
           streamResult.stopSequence = detectedStopSequence;
         }
@@ -1074,8 +1074,8 @@ export class Membrane {
                 block: { type: 'tool_result' },
               });
 
-              // Push XML to parser for prefill (internal)
-              parser.push(splitContent.beforeImageXml);
+              // Push XML to parser for prefill (internal): the envelope's first part
+              pushEnvelope(parser, splitContent.beforeImageXml);
 
               // Emit chunk and block complete for each tool result (without XML wrapper)
               for (const result of results) {
@@ -1103,10 +1103,8 @@ export class Membrane {
               }
 
               // If thinking is enabled, add <thinking> tag after tool results
-              let afterImageXml = splitContent.afterImageXml;
-              if (request.config.thinking?.enabled) {
-                afterImageXml += '\n<thinking>';
-              }
+              const thinkingOpener = request.config.thinking?.enabled ? '\n<thinking>' : '';
+              const afterImageXml = splitContent.afterImageXml + thinkingOpener;
 
               // Build continuation with image injection
               providerRequest = this.buildContinuationRequestWithImages(
@@ -1118,8 +1116,10 @@ export class Membrane {
               );
 
               // Also add afterImageXml to accumulated for complete rawAssistantText
-              // Note: afterImageXml is internal prefill (closing tags), not emitted via onChunk
-              parser.push(afterImageXml);
+              // Note: afterImageXml is internal prefill (closing tags), not emitted via onChunk.
+              // The envelope's second part is the harness's; the thinking opener is read.
+              pushEnvelope(parser, splitContent.afterImageXml);
+              parser.push(thinkingOpener);
               // The envelope is both parts, without a following <thinking>.
               harnessEnvelopes.push({
                 start: envelopeStart,
@@ -3453,7 +3453,7 @@ export class Membrane {
 
         // If we detected stop sequence manually, fix up the parser and result
         if (detectedStopSequence && truncatedAccumulated !== null) {
-          rebuildParser(parser, truncatedAccumulated, initialPrefillLength);
+          rebuildParser(parser, truncatedAccumulated, initialPrefillLength, harnessEnvelopes);
           streamResult.stopReason = 'stop_sequence';
           streamResult.stopSequence = detectedStopSequence;
         }
@@ -3677,7 +3677,8 @@ export class Membrane {
                 });
               }
 
-              parser.push(splitContent.beforeImageXml);
+              // The envelope's first part, the harness's own.
+              pushEnvelope(parser, splitContent.beforeImageXml);
 
               // Emit tool result content
               for (const result of results) {
@@ -3713,10 +3714,8 @@ export class Membrane {
                 parser.incrementBlockIndex();
               }
 
-              let afterImageXml = splitContent.afterImageXml;
-              if (request.config.thinking?.enabled) {
-                afterImageXml += '\n<thinking>';
-              }
+              const thinkingOpener = request.config.thinking?.enabled ? '\n<thinking>' : '';
+              const afterImageXml = splitContent.afterImageXml + thinkingOpener;
 
               providerRequest = this.buildContinuationRequestWithImages(
                 request,
@@ -3726,7 +3725,9 @@ export class Membrane {
                 afterImageXml
               );
 
-              parser.push(afterImageXml);
+              // The envelope's second part is the harness's; the thinking opener is read.
+              pushEnvelope(parser, splitContent.afterImageXml);
+              parser.push(thinkingOpener);
               // The envelope is both parts, without a following <thinking>.
               harnessEnvelopes.push({
                 start: envelopeStart,
@@ -4250,14 +4251,36 @@ function firstStopOutsidePayload(
 
 /**
  * Rebuild the parser over `text` after a local stop truncated it, keeping the
- * history boundary: a payload the prefill left open ends where the prefill
- * ends, exactly as when the parser was first seeded.
+ * history boundary — a payload the prefill left open ends where the prefill
+ * ends, exactly as when the parser was first seeded — and reading the
+ * envelopes the loop injected as it pushed them, as the harness's own.
  */
-function rebuildParser(parser: StreamParser, text: string, historyLength: number): void {
+function rebuildParser(
+  parser: StreamParser,
+  text: string,
+  historyLength: number,
+  harnessEnvelopes: ReadonlyArray<{ start: number; end: number }>
+): void {
   parser.reset();
   parser.push(text.slice(0, historyLength));
   if (historyLength > 0) parser.endHistory?.();
-  parser.push(text.slice(historyLength));
+  let cursor = historyLength;
+  for (const { start, end } of harnessEnvelopes) {
+    parser.push(text.slice(cursor, start));
+    pushEnvelope(parser, text.slice(start, end));
+    cursor = end;
+  }
+  parser.push(text.slice(cursor));
+}
+
+/**
+ * Add text the harness injected as an envelope (or part of one) without the
+ * parser reading it as the model's markup, where the parser can tell the two
+ * apart (StreamParser.pushEnvelope).
+ */
+function pushEnvelope(parser: StreamParser, text: string): void {
+  if (parser.pushEnvelope) parser.pushEnvelope(text);
+  else parser.push(text);
 }
 
 /** Push an envelope the loop wrote, recording where it sits as the harness's own. */
@@ -4267,7 +4290,7 @@ function injectEnvelope(
   envelope: string
 ): void {
   const start = parser.getAccumulated().length;
-  parser.push(envelope);
+  pushEnvelope(parser, envelope);
   harnessEnvelopes.push({ start, end: start + envelope.length });
 }
 

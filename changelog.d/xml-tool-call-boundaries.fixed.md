@@ -41,7 +41,10 @@
   reported with the parameter named. A thinking or results block that history
   left unclosed does not stop the turn's own calls from being read as calls,
   so their payloads are recognized while they stream, as the complete-text
-  parse reads them.
+  parse reads them. Nor is anything inside an envelope the loop injects read
+  as the model's markup (the optional `StreamParser.pushEnvelope`; a custom
+  parser without it is pushed the envelope as before), so a tool's output
+  that opens a thinking block cannot hide a later call's payload.
 - Legacy `tool_use` blocks without `rawXml` are reconstructed without the
   schema, so that a value reads back exactly, type included, under any
   declaration it satisfies and when undeclared. Strings are written as CDATA,
