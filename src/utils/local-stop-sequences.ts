@@ -13,10 +13,15 @@ export function membraneBlockType(apiType: unknown): MembraneBlockType {
   return 'text';
 }
 
-/** A block event or thinking signature no chunk has followed yet, at the held text before it. */
+/**
+ * A block event or thinking signature no chunk has followed yet, or a
+ * non-visible chunk withheld after a stop found while streaming, at the held
+ * text before it.
+ */
 type Waiting =
   | { kind: 'block'; index: number; block: unknown; at: number }
-  | { kind: 'signature'; index: number; signature: string; at: number };
+  | { kind: 'signature'; index: number; signature: string; at: number }
+  | { kind: 'chunk'; chunk: string; at: number };
 
 interface ReleasedTextBlock {
   start: Record<string, unknown>;
@@ -36,7 +41,8 @@ interface ReleasedTextBlock {
  * provider did. Where the provider already stopped, the stop never streams
  * and nothing changes.
  *
- * What the caller receives is what a provider-side stop produces:
+ * When the attempt stops, what the caller receives is what a provider-side
+ * stop produces:
  * - No chunk carries any part of the stop or anything after it, however the
  *   provider chunks or subdivides its text. Visible text that could still
  *   begin a stop is held until it either completes a stop or cannot.
@@ -45,13 +51,40 @@ interface ReleasedTextBlock {
  *   exactly at the stop counts as after it: a stop that begins a new text
  *   block leaves the previous block whole and the new one unreported.
  * - The attempt ends with stopReason 'stop_sequence' and the stop as its
- *   stopSequence, its content cut at the same point. A message item shared by
+ *   stopSequence, its content cut at the stop. A message item shared by
  *   the cut text loses its replayable rawItem on every block that kept it, so
  *   the next request replays the accepted text rather than the whole item.
  *
  * Thinking is never scanned, and a non-text block ends a stretch of visible
  * text: a stop does not span one. The provider's stream still runs to its end,
  * so the attempt's usage and raw response are the provider's own.
+ *
+ * The returned content decides where the attempt stops, since it is the
+ * attempt's result and what the next request replays, and an adapter's chunks
+ * need not match it. The returned text need not be the chunks joined
+ * (OpenAICompatibleAdapter drops reasoning a backend leaked into the text, and
+ * the Responses adapter returns refusals it never streams), and the chunks
+ * need not show where the returned blocks begin and end (the Responses adapter
+ * reports its blocks only at the end). So the content is cut at the first stop
+ * in its own visible text, found stretch by stretch, and a stop found while
+ * streaming is settled when the adapter returns: until then, whatever streams
+ * after it is withheld. Then:
+ * - If the returned content holds no stop, nothing stopped. The content and
+ *   its stop reason are the provider's, and what was withheld is delivered in
+ *   the order it arrived.
+ * - If it holds one, and the streamed visible text is how the returned visible
+ *   text begins, positions in the two correspond: held or withheld text is
+ *   delivered up to the content's stop. Otherwise they don't correspond, and
+ *   nothing more is delivered: the chunks end where they stand (at the stop,
+ *   if streaming found one), and the content at its own stop. A stop in text
+ *   the adapter returns ahead of what it streamed, without streaming it (a
+ *   Responses refusal part before output text), can even fall before chunks
+ *   already delivered; those chunks stand.
+ *
+ * A text block completed at a stop found while streaming stays completed if
+ * the content holds no stop. Its own later report is delivered with the rest,
+ * and the native loops' NativeBlockTracker records that as the block's final
+ * payload without completing it again.
  *
  * Block events (and thinking signatures, which stay in order with them) wait
  * until a chunk follows them. Block events can't be told
@@ -60,12 +93,12 @@ interface ReleasedTextBlock {
  * streamed (see StreamCallbacks). Timing tells them apart: single-final reports
  * come after the last chunk. So an event followed by a chunk is released, in
  * order, before that chunk. Events still waiting when the adapter returns are
- * settled against its returned content. If no streamed text reached a stop,
- * the returned visible text is scanned too, so text the provider reported only
- * at the end is held to the same stops, and the waiting events are delivered
- * as that content's blocks, cut at the stop. The cost, only when stops are
- * configured: a paired block event that no chunk follows, such as a trailing
- * tool call, is reported when the stream ends rather than as it arrives.
+ * settled against its returned content: delivered as they arrived if it holds
+ * no stop, and otherwise as the cut content's blocks, so text the provider
+ * reported only at the end is held to the same stops. The cost, only when
+ * stops are configured: a paired block event that no chunk follows, such as a
+ * trailing tool call, is reported when the stream ends rather than as it
+ * arrives.
  */
 export class LocalStopSequences {
   readonly callbacks: StreamCallbacks;
@@ -80,17 +113,19 @@ export class LocalStopSequences {
   private openIndex: number | undefined;
   private openType: unknown;
 
-  // Visible text that could still begin a stop, and the block events no chunk
-  // has followed yet.
+  // Visible text not delivered yet, and the events no chunk has followed yet:
+  // text that could still begin a stop or, once streaming has found a stop,
+  // everything from the stop on, withheld until finish().
   private held = '';
   private waiting: Waiting[] = [];
 
-  // What the caller has received: visible length, and its text blocks.
-  private released = 0;
+  // What the caller has received: its visible text, and its text blocks.
+  private delivered = '';
   private readonly releasedText = new Map<number, ReleasedTextBlock>();
   private releasedOpen: number | undefined;
 
-  private stopped: { stop: string; offset: number } | undefined;
+  /** Streaming found a stop: what streams after it is withheld until finish(). */
+  private stopped = false;
   /** The text block completed at the stop: its own later completion is not reported again. */
   private completedAtStop: number | undefined;
 
@@ -108,29 +143,31 @@ export class LocalStopSequences {
 
   /**
    * The adapter threw. Before a stop, everything held was received and is
-   * delivered, so partialContent keeps it. After a stop, only what the
-   * accepted text already delivered stands.
+   * delivered, so partialContent keeps it. After a stop found while
+   * streaming, there is no returned content to settle it against, so only
+   * what was delivered before the stop stands.
    */
   release(): void {
     if (!this.stopped) this.releaseTo(this.held.length, () => true);
   }
 
-  /** The adapter returned: settle what is held against its returned content. */
+  /**
+   * The adapter returned: cut its content at the first stop in the content's
+   * own visible text, and settle what is held or withheld against it (see the
+   * class comment).
+   */
   finish(result: ProviderResponse): ProviderResponse {
-    if (!this.stopped) {
-      const found = firstStopInStretches(result.content, this.stops);
-      if (!found) {
-        this.releaseTo(this.held.length, () => true);
-        return result;
-      }
-      // A stop the streamed text never reached: text the provider reported
-      // only in its returned content.
-      this.stopped = found;
-      const upTo = Math.min(Math.max(found.offset - this.released, 0), this.held.length);
-      this.releaseTo(upTo, event => event.at < upTo);
+    const found = firstStopInStretches(result.content, this.stops);
+    if (!found) {
+      this.releaseTo(this.held.length, () => true);
+      return result;
     }
-    const stopped = this.stopped;
-    const cut = cutVisible(result.content, stopped.offset);
+    const streamed = this.delivered + this.held;
+    const upTo = visibleText(result.content).startsWith(streamed)
+      ? Math.min(Math.max(found.offset - this.delivered.length, 0), this.held.length)
+      : 0;
+    this.releaseTo(upTo, event => event.at < upTo);
+    const cut = cutVisible(result.content, found.offset);
     const waiting = this.waiting;
     this.held = '';
     this.waiting = [];
@@ -141,12 +178,17 @@ export class LocalStopSequences {
         if (event.index <= cut.index) this.inner.onContentBlock?.(event.index, cut.content[event.index]);
       }
     }
-    return { ...result, content: cut.content, stopReason: 'stop_sequence', stopSequence: stopped.stop };
+    return { ...result, content: cut.content, stopReason: 'stop_sequence', stopSequence: found.stop };
   }
 
   private onChunk(chunk: string): void {
-    if (this.stopped) return;
-    if (this.openIndex !== undefined && membraneBlockType(this.openType) !== 'text') {
+    const visible = this.openIndex === undefined || membraneBlockType(this.openType) === 'text';
+    if (this.stopped) {
+      if (visible) this.held += chunk;
+      else this.waiting.push({ kind: 'chunk', chunk, at: this.held.length });
+      return;
+    }
+    if (!visible) {
       this.releaseTo(this.held.length, () => true);
       this.inner.onChunk(chunk);
       return;
@@ -159,11 +201,10 @@ export class LocalStopSequences {
     const found = this.earliestStop();
     if (found) {
       // Settle the stop before anything reaches the caller, so a callback that
-      // throws leaves release() nothing to deliver, least of all the stop.
-      this.stopped = { stop: found.stop, offset: this.released + found.at };
+      // throws leaves release() nothing to deliver, least of all the stop. The
+      // stop and what follows it stay held: finish() settles them.
+      this.stopped = true;
       this.releaseTo(found.at, event => event.at < found.at);
-      this.held = '';
-      this.waiting = [];
       this.completeAtStop();
       return;
     }
@@ -221,14 +262,15 @@ export class LocalStopSequences {
         cursor = upTo;
       }
       if (event.kind === 'block') this.deliverBlock(event.index, event.block);
-      else this.inner.onThinkingSignature?.(event.index, event.signature);
+      else if (event.kind === 'signature') this.inner.onThinkingSignature?.(event.index, event.signature);
+      else this.inner.onChunk(event.chunk);
     }
     if (at > cursor) this.deliverText(text.slice(cursor, at));
   }
 
   private deliverText(text: string): void {
     if (this.releasedOpen !== undefined) this.releasedText.get(this.releasedOpen)!.text += text;
-    this.released += text.length;
+    this.delivered += text;
     this.inner.onChunk(text);
   }
 
@@ -264,6 +306,13 @@ function blockType(block: unknown): unknown {
 function visibleLength(block: unknown): number {
   const item = block as { type?: unknown; text?: unknown } | undefined;
   return item?.type === 'text' && typeof item.text === 'string' ? item.text.length : 0;
+}
+
+/** Provider content's visible text in the coordinates of its visible offsets: its text blocks' text, in order. */
+function visibleText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content.map(block => (visibleLength(block) > 0 ? (block as { text: string }).text : '')).join('');
 }
 
 function lastIndexWhere<T>(items: readonly T[], predicate: (item: T) => boolean): number {

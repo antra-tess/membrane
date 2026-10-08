@@ -8,7 +8,12 @@
  *   models and sends at most four) still ends the accepted output at the
  *   stop, including in text it reports only in its returned output: no
  *   chunk, block event, returned block or replayed item carries the stop or
- *   anything after it, and thinking is never scanned.
+ *   anything after it (chunks already sent ahead of unstreamed text that
+ *   holds a stop aside; see LocalStopSequences), and thinking is never
+ *   scanned. The returned content decides where the attempt stops when an
+ *   adapter's chunks don't match it (slimepriestess's review of #58): text a
+ *   stop withheld while streaming is delivered at the end when that content
+ *   holds no stop.
  * - prefillUserMessage. The caller's synthetic user text is the leading user
  *   turn wherever a native conversation needs one.
  * - Aborts. A block the provider finished delivering before an abort is kept
@@ -21,6 +26,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
+import { OpenAICompatibleAdapter } from '../../src/providers/openai-compatible.js';
 import { OpenAIResponsesAPIAdapter, type OpenAIResponsesOutputItem } from '../../src/providers/openai-responses-api.js';
 import { NativeFormatter } from '../../src/formatters/native.js';
 import { OpenAIResponsesFormatter } from '../../src/formatters/openai-responses.js';
@@ -234,6 +240,71 @@ describe('a request stop on a native stream the provider did not stop', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Stops where the returned text is not the streamed text: OpenAICompatibleAdapter
+// drops reasoning a backend leaked into the content channel (`…</think>`)
+// from what it returns, while its chunks carried it. The returned content
+// decides where the attempt stops (slimepriestess's review of #58).
+// ---------------------------------------------------------------------------
+
+/** An OpenAI-compatible chat stream of `deltas`, ending with finish_reason stop. */
+function compatibleResponse(deltas: string[]): Response {
+  const frames = [
+    ...deltas.map(content => ({ choices: [{ index: 0, delta: { content } }] })),
+    { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+  ].map(frame => `data: ${JSON.stringify(frame)}\n\n`).join('') + 'data: [DONE]\n\n';
+  return new Response(new TextEncoder().encode(frames), { headers: { 'Content-Type': 'text/event-stream' } });
+}
+
+const compatible = () =>
+  new Membrane(new OpenAICompatibleAdapter({ baseURL: 'http://localhost:9/v1', apiKey: 'k' }), { formatter: new NativeFormatter() });
+
+describe('a request stop where the returned text is not the streamed text', () => {
+  const rows: Array<{ name: string; deltas: string[]; stops?: string[]; chunks: string; content: string; reason: string; stop?: string }> = [
+    {
+      name: 'a stop in the answer, no leak (control)',
+      deltas: ['Answer ', 'END after'], chunks: 'Answer ', content: 'Answer ', reason: 'stop_sequence', stop: 'END',
+    },
+    {
+      name: 'a stop in the answer after a leaked prefix: cut in the returned text',
+      deltas: ['leaked thought</think>', '\n\nAnswer ', 'END after'],
+      chunks: 'leaked thought</think>\n\nAnswer ', content: 'Answer ', reason: 'stop_sequence', stop: 'END',
+    },
+    {
+      name: 'a stop only in the leaked prefix: nothing stopped, and what was withheld is delivered',
+      deltas: ['leak END x</think>', 'Answer'],
+      chunks: 'leak END x</think>Answer', content: 'Answer', reason: 'end_turn',
+    },
+    {
+      name: 'a stop in the leaked prefix and another in the answer: the answer\'s',
+      deltas: ['leak END x</think>', 'Answer END more'],
+      chunks: 'leak ', content: 'Answer ', reason: 'stop_sequence', stop: 'END',
+    },
+    {
+      name: 'a different stop in the leaked prefix: the answer\'s stop is the one reported',
+      deltas: ['a XYZ b</think>', 'Answer END more'], stops: ['END', 'XYZ'],
+      chunks: 'a ', content: 'Answer ', reason: 'stop_sequence', stop: 'END',
+    },
+  ];
+
+  for (const row of rows) {
+    it.each(['stream', 'yielding'])(`${row.name} (%s)`, async path => {
+      script(() => compatibleResponse(row.deltas));
+      const s = sink();
+      const response = await run(path, compatible(), {
+        config: { model: 'm', maxTokens: 64 },
+        messages: [{ participant: 'User', content: [text('Question')] }],
+        stopSequences: row.stops ?? ['END'],
+      }, s);
+      expect(visibleText(s)).toBe(row.chunks);
+      expect(response.rawAssistantText).toBe(row.chunks);
+      expect(response.content).toEqual([text(row.content)]);
+      expect(response.stopReason).toBe(row.reason);
+      if (row.stop) expect(response.details.stop).toMatchObject({ reason: 'stop_sequence', triggeredSequence: row.stop });
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Stops through the Responses API, which has no stop parameter and reports
 // its blocks only after the stream, carrying raw items the formatter replays.
 // ---------------------------------------------------------------------------
@@ -328,7 +399,115 @@ describe('a request stop through the Responses API', () => {
     expect(wire).not.toContain('END');
     expect(wire).not.toContain('after');
   });
+
+  // The adapter reports no item boundaries while streaming, so the streamed
+  // `before E` + `ND after` looks like one stretch; the returned content's
+  // function call ends the stretch, so it holds no stop.
+  const message = (id: string, value: string): OpenAIResponsesOutputItem => ({
+    type: 'message', id, role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: value, annotations: [] }],
+  });
+  const call = { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'lookup', arguments: '{}', status: 'completed' } as any;
+  const spanned = (streamed: boolean, abort = false) => responsesItems([
+    { item: message('msg_1', 'before E'), deltas: streamed ? ['before E'] : [] },
+    { item: call },
+    { item: message('msg_2', 'ND after'), deltas: streamed ? ['ND after'] : [] },
+  ], abort);
+  const callRequest = {
+    config: { model: 'gpt-5.6', maxTokens: 256 },
+    messages: [{ participant: 'User', content: [text('Question')] }],
+    tools: [lookup],
+    stopSequences: ['END'],
+  };
+  const responses = () => new Membrane(new OpenAIResponsesAPIAdapter({ apiKey: 'sk-test' }), { formatter: new OpenAIResponsesFormatter() });
+  const firstRoundBlocks = (s: Sink) => s.blocks
+    .filter(event => event.event === 'block_complete' && event.index <= 2)
+    .slice(0, 3)
+    .map(event => [event.block.type, event.block.content ?? event.block.toolName]);
+
+  it.each(['stream', 'yielding'])('runs a function call between two messages whose text only looks like a stop when streamed (%s)', async path => {
+    const bodies = script(() => spanned(true), () => responsesResponse(['done']));
+    const s = sink();
+    const response = await run(path, responses(), callRequest, s);
+    expect(bodies).toHaveLength(2);
+    expect(s.toolCalls).toMatchObject([{ id: 'call_1', name: 'lookup' }]);
+    // What the stream withheld after the stop it found arrives when the
+    // round's content shows there was none.
+    expect(s.chunks.map(item => item.chunk).join('')).toBe('before END afterdone');
+    expect(firstRoundBlocks(s)).toEqual([['text', 'before E'], ['tool_call', 'lookup'], ['text', 'ND after']]);
+    expect(response.stopReason).toBe('end_turn');
+  });
+
+  it.each(['stream', 'yielding'])('runs the same function call when that text never streamed (control) (%s)', async path => {
+    const bodies = script(() => spanned(false), () => responsesResponse(['done']));
+    const s = sink();
+    const response = await run(path, responses(), callRequest, s);
+    expect(bodies).toHaveLength(2);
+    expect(s.toolCalls).toMatchObject([{ id: 'call_1', name: 'lookup' }]);
+    expect(firstRoundBlocks(s)).toEqual([['text', 'before E'], ['tool_call', 'lookup'], ['text', 'ND after']]);
+    expect(response.stopReason).toBe('end_turn');
+  });
+
+  it.each(['stream', 'yielding'])('keeps only what preceded such a stop when the transport aborts before the content can settle it (%s)', async path => {
+    // With no returned content, a stop found while streaming stands, so a
+    // stop that the content would not have held still truncates partialContent.
+    script(() => spanned(true, true));
+    const s = sink();
+    const response = await run(path, responses(), callRequest, s);
+    expect(response.partialContent).toEqual([text('before ')]);
+    expect(visibleText(s)).toBe('before ');
+    expect(s.toolCalls).toEqual([]);
+  });
+
+  it.each(['stream', 'yielding'])('cuts at the stop in the returned text when a refusal it never streamed comes first (%s)', async path => {
+    // The adapter returns a refusal part as text but streams only output_text,
+    // so the returned text is not the streamed text: the second live case of
+    // the streamed-offset cut (Barnaby-1871's probe gave `no` + `ab`).
+    const item = {
+      type: 'message', id: 'msg_1', role: 'assistant', status: 'completed',
+      content: [{ type: 'refusal', refusal: 'no' }, { type: 'output_text', text: 'abc END after', annotations: [] }],
+    } as any;
+    script(() => responsesItems([{ item, deltas: ['abc END after'], contentIndex: 1 }]));
+    const s = sink();
+    const response = await run(path, responses(), {
+      config: { model: 'gpt-5.6', maxTokens: 256 },
+      messages: [{ participant: 'User', content: [text('Question')] }],
+      stopSequences: ['END'],
+    }, s);
+    expect(visibleText(s)).toBe('abc ');
+    expect(response.content.map((block: any) => block.text)).toEqual(['no', 'abc ']);
+    expect(response.stopReason).toBe('stop_sequence');
+    expect(response.details.stop).toMatchObject({ reason: 'stop_sequence', triggeredSequence: 'END' });
+  });
 });
+
+/**
+ * A Responses stream of `items` in order, each message streaming its
+ * `deltas` into part `contentIndex` (none: its text is only in the returned
+ * output). `abort` errors the transport where response.completed would have
+ * been.
+ */
+function responsesItems(items: Array<{ item: OpenAIResponsesOutputItem; deltas?: string[]; contentIndex?: number }>, abort = false): Response {
+  const output = items.map(entry => entry.item);
+  const events: Event[] = items.flatMap(({ item, deltas = [], contentIndex = 0 }, index) => [
+    { type: 'response.output_item.added', output_index: index, item: item.type === 'message' ? { ...item, status: 'in_progress', content: [] } : item },
+    ...deltas.map(delta => ({ type: 'response.output_text.delta', output_index: index, content_index: contentIndex, item_id: (item as any).id, delta })),
+    { type: 'response.output_item.done', output_index: index, item },
+  ]);
+  if (!abort) {
+    events.push({ type: 'response.completed', response: { id: 'resp_1', model: 'gpt-5.6', status: 'completed', output, usage: { input_tokens: 3, output_tokens: 4 } } });
+  }
+  const frames = events.map(event => new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+  if (!abort) frames.push(new TextEncoder().encode('data: [DONE]\n\n'));
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      const frame = frames.shift();
+      if (frame) controller.enqueue(frame);
+      else if (abort) controller.error(new DOMException('aborted by fixture', 'AbortError'));
+      else controller.close();
+    },
+  }, { highWaterMark: 0 });
+  return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+}
 
 // ---------------------------------------------------------------------------
 // The stop wrapper's own boundaries: callbacks that throw, the returned
@@ -388,6 +567,77 @@ describe('LocalStopSequences', () => {
     const result = stops.finish(response(content) as any);
     expect(result.stopReason).toBe('end_turn');
     expect(result.content).toBe(content);
+  });
+
+  /** A wrapper over a recording sink: chunks as strings, events as [index, type], signatures as ['sig', index]. */
+  const recording = (stops: string[]) => {
+    const events: unknown[] = [];
+    const wrapper = new LocalStopSequences(stops, {
+      onChunk: chunk => events.push(chunk),
+      onContentBlock: (index, block) => events.push([index, (block as any).type]),
+      onThinkingSignature: index => events.push(['sig', index]),
+    });
+    return { events, callbacks: wrapper.callbacks, wrapper };
+  };
+  const tool = { type: 'tool_use', id: 't', name: 'x', input: {} };
+
+  it('delivers nothing it withheld after a stop when the adapter throws, whatever the content would have shown', () => {
+    const { events, callbacks, wrapper } = recording(['END']);
+    callbacks.onChunk('before E');
+    callbacks.onChunk('ND after');
+    wrapper.release();
+    expect(events).toEqual(['before ']);
+  });
+
+  it('delivers what it withheld after a stop the returned content does not hold, in the order it arrived', () => {
+    const { events, callbacks, wrapper } = recording(['END']);
+    callbacks.onChunk('before E');
+    callbacks.onChunk('ND');
+    // After the stop: a thinking block streams, then a text block opens.
+    callbacks.onContentBlock!(3, { type: 'thinking', thinking: '' });
+    callbacks.onChunk('mull');
+    callbacks.onThinkingSignature!(3, 'sig');
+    callbacks.onContentBlock!(3, { type: 'thinking', thinking: 'mull' });
+    callbacks.onContentBlock!(4, { type: 'text', text: '' });
+    callbacks.onChunk(' tail');
+    const content = [text('before E'), tool, text('ND'), { type: 'thinking', thinking: 'mull' }, text(' tail')];
+    const result = wrapper.finish(response(content) as any);
+    expect(result).toMatchObject({ content, stopReason: 'end_turn' });
+    expect(events).toEqual(['before ', 'END', [3, 'thinking'], 'mull', ['sig', 3], [3, 'thinking'], [4, 'text'], ' tail']);
+  });
+
+  it('delivers withheld text up to a later stop the returned content holds, where positions correspond', () => {
+    const { events, callbacks, wrapper } = recording(['END']);
+    callbacks.onChunk('before E');
+    callbacks.onChunk('ND after END tail');
+    const result = wrapper.finish(response([text('before E'), tool, text('ND after END tail')]) as any);
+    expect(result).toMatchObject({ content: [text('before E'), tool, text('ND after ')], stopReason: 'stop_sequence', stopSequence: 'END' });
+    expect(events).toEqual(['before ', 'END after ']);
+  });
+
+  it('delivers nothing more where streamed and returned positions do not correspond', () => {
+    // Streamed `leak END x</think>Answer END more`, returned `Answer END more`:
+    // offset arithmetic across the two would hand out `EN` of the withheld stop.
+    const stopped = recording(['END']);
+    stopped.callbacks.onChunk('leak END x</think>');
+    stopped.callbacks.onChunk('Answer END more');
+    const cut = stopped.wrapper.finish(response([text('Answer END more')]) as any);
+    expect(cut).toMatchObject({ content: [text('Answer ')], stopReason: 'stop_sequence', stopSequence: 'END' });
+    expect(stopped.events).toEqual(['leak ']);
+    // The same when streaming found no stop and only held a possible one.
+    const held = recording(['END']);
+    held.callbacks.onChunk('leak E');
+    const kept = held.wrapper.finish(response([text('Answer END more')]) as any);
+    expect(kept).toMatchObject({ content: [text('Answer ')], stopReason: 'stop_sequence' });
+    expect(held.events).toEqual(['leak ']);
+  });
+
+  it('keeps a held stop prefix whose stop completes only in text the provider returned without streaming', () => {
+    const { events, callbacks, wrapper } = recording(['END']);
+    callbacks.onChunk('before E');
+    const result = wrapper.finish(response([text('before END after')]) as any);
+    expect(result).toMatchObject({ content: [text('before ')], stopReason: 'stop_sequence' });
+    expect(events).toEqual(['before ']);
   });
 
   it('replays nothing of a cut message whose parts carry equal raw items without ids', () => {
