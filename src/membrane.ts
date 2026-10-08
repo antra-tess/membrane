@@ -2399,11 +2399,14 @@ export class Membrane {
       onWireCacheMarkers?: (markerCount: number) => void;
       /**
        * The round's fidelity notes (utils/fidelity.ts). A beforeRequest hook
-       * whose output differs from its input, whether by replacement or by
-       * in-place mutation, makes them unattributed. An adapter's report of
-       * altered content alters the message its block came from, or makes
-       * them unattributed when it can't be attributed. An adapter that
-       * doesn't declare `reportsContentAlterations` makes them uninstrumented.
+       * that changed either of its arguments makes them unattributed: the
+       * provider request by replacement or in place, or the normalized
+       * request in place. An in-place change also marks them
+       * `mutatedInPlace`, so the loops keep later rounds unknown. An
+       * adapter's report of altered content alters the message its block
+       * came from, or makes them unattributed when it can't be attributed.
+       * An adapter that doesn't declare `reportsContentAlterations` makes
+       * them uninstrumented.
        */
       fidelity?: FidelityNotes;
     }
@@ -2421,16 +2424,21 @@ export class Membrane {
     // normalized form into every adapter's options.
     const { normalizedRequest, refusalRetries, onRetrying, onWireCacheMarkers, fidelity, ...adapterOptions } = options;
     // Fingerprint around the hook only when both a hook and a reader exist:
-    // an observer or a no-op hook keeps fidelity established. A change made
-    // in place to the object the hook was handed is also remembered, since
-    // that object shares structure with state later rounds reuse.
-    const beforeHook = fidelity && this.config.hooks?.beforeRequest ? requestFingerprint(request) : undefined;
+    // an observer or a no-op hook keeps fidelity established. The hook is
+    // handed two objects, and a change made in place to either is also
+    // remembered: the provider request shares structure with state later
+    // rounds reuse, and the normalized request is what later rounds are
+    // built from (the native loop's working messages are its own objects).
+    const hooked = fidelity !== undefined && this.config.hooks?.beforeRequest !== undefined;
+    const beforeHook = hooked ? requestFingerprint(request) : undefined;
+    const normalizedBefore = hooked ? requestFingerprint(normalizedRequest) : undefined;
     const finalRequest = (await this.applyBeforeRequestHook(normalizedRequest, request)) as typeof request;
     if (beforeHook !== undefined) {
       const handed = requestFingerprint(request);
-      if (handed !== beforeHook) fidelity!.mutatedInPlace = true;
+      const normalizedChanged = requestFingerprint(normalizedRequest) !== normalizedBefore;
+      if (handed !== beforeHook || normalizedChanged) fidelity!.mutatedInPlace = true;
       const sent = finalRequest === request ? handed : requestFingerprint(finalRequest);
-      if (sent !== beforeHook) fidelity!.unattributed = true;
+      if (sent !== beforeHook || normalizedChanged) fidelity!.unattributed = true;
     }
     if (fidelity && !this.adapter.reportsContentAlterations) fidelity.uninstrumented = true;
 

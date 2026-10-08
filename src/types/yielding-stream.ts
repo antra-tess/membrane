@@ -118,7 +118,8 @@ export interface RoundReport {
    * 'established' when every step of the build and transport reports its
    * alterations and none was unattributable; 'unknown' otherwise (an
    * uninstrumented path, opt-in image shedding, a beforeRequest hook that
-   * changed the request). With 'unknown', an empty `altered` proves nothing.
+   * changed either of its arguments, or an earlier round's hook that changed
+   * one in place). With 'unknown', an empty `altered` proves nothing.
    */
   fidelity: 'established' | 'unknown';
 }

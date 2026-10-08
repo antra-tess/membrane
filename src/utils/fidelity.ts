@@ -23,12 +23,11 @@ import type { ContentBlock } from '../types/content.js';
  * were handed, and register the blocks they emit (`own`), so an adapter that
  * reports altering a block (`ProviderRequestOptions.onContentAltered`) is
  * attributed to the message that block came from. When content changes in a
- * way no index can be attached to
- * (opt-in image shedding after role merging, a beforeRequest hook that
- * changed the request), the notes are marked unattributed; when any part of
- * the build or transport does not report alterations at all, they are marked
- * uninstrumented. Either makes the round's fidelity 'unknown', so an empty
- * alteration list is never mistaken for proof.
+ * way no index can be attached to (opt-in image shedding after role merging, a
+ * beforeRequest hook that changed either of its arguments), the notes are
+ * marked unattributed; when any part of the build or transport does not report
+ * alterations at all, they are marked uninstrumented. Either makes the round's
+ * fidelity 'unknown', so an empty alteration list is never mistaken for proof.
  */
 export class FidelityNotes {
   /** Indices, in the builder's input messages, whose content was not carried verbatim. */
@@ -38,10 +37,12 @@ export class FidelityNotes {
   /** Some part of the build or transport does not report alterations. */
   uninstrumented = false;
   /**
-   * A beforeRequest hook changed, in place, the request object it was handed.
-   * That object shares structure with membrane's retained build state (an XML
-   * stream's prefill messages) or with the consumer's own blocks, so the
-   * change can outlive this round: loops keep later rounds unknown.
+   * A beforeRequest hook changed, in place, one of the objects it was handed.
+   * The provider request shares structure with membrane's retained build
+   * state (an XML stream's prefill messages) or with the consumer's own
+   * blocks, and later rounds are built from the normalized request (the
+   * native loop's working messages are its objects), so the change can
+   * outlive this round: loops keep later rounds unknown.
    */
   mutatedInPlace = false;
 

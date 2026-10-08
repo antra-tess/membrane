@@ -7,8 +7,10 @@
   retained; tool blocks stripped from an injected message make it altered.
   `fidelity` is `unknown` whenever an empty list would prove nothing: an
   uninstrumented formatter or adapter, opt-in image shedding, a
-  `beforeRequest` hook that changed the request, or an adapter alteration
-  that could not be attributed. Otherwise it is `established`.
+  `beforeRequest` hook that changed either of its arguments (the provider
+  request by replacement or in place, or the normalized request in place;
+  an in-place change keeps every later round `unknown` too), or an adapter
+  alteration that could not be attributed. Otherwise it is `established`.
   `injectedBatch` gives the newest batch and how many of its supplied
   positions the round accounts for: all of them on the native path, none on
   the XML prefill path. With established fidelity, each was carried

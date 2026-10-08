@@ -11,7 +11,8 @@
  *     retained in the request, resolved before role merging.
  *   - `fidelity` is 'unknown' whenever an empty list would prove nothing:
  *     an uninstrumented path, opt-in image shedding, a beforeRequest hook
- *     that changed the request, an adapter alteration that could not be
+ *     that changed either of its arguments (and every round after one that
+ *     changed one in place), an adapter alteration that could not be
  *     attributed.
  *   - `injectedBatch.applied` is the ordered prefix of the newest batch's
  *     supplied positions the round accounts for: its whole supplied size
@@ -832,5 +833,71 @@ describe('Greptile\'s review of #104 (room-256)', () => {
       { participant: 'User', content: [text('go')] },
     ], { assistantParticipant: 'Claude', participantMode: 'multiuser', fidelity: notes } as any);
     expect(sorted(notes.altered)).toEqual([1]);
+  });
+});
+
+describe('slimepriestess\'s review of #104 (room-338)', () => {
+  describe('a beforeRequest hook that changes the normalized request in place', () => {
+    const anthropicTurns = () => [
+      { content: [{ type: 'tool_use', id: 't1', name: 'noop', input: {} }], stopReason: 'tool_use' },
+      { content: [{ type: 'text', text: 'done' }], stopReason: 'end_turn' },
+    ];
+    const nativeAnthropic = (): NormalizedRequest => ({
+      messages: [{ participant: 'User', content: [{ type: 'text', text: 'ORIGINAL' }] }],
+      config: { model: 'claude-sonnet-4-5', maxTokens: 1000 },
+      tools: [noopTool], toolMode: 'native', promptCaching: false,
+    });
+    /** A hook that edits the consumer's first message in the given rounds. */
+    const editing = (rounds: number[]) => {
+      let call = 0;
+      return {
+        beforeRequest: (normalized: NormalizedRequest) => {
+          if (rounds.includes(call++)) (normalized.messages[0]!.content[0] as { text: string }).text = 'HOOK-EDIT';
+          return undefined;
+        },
+      };
+    };
+
+    it('native: the next round is built from the edit, so that round and every later one are unknown', async () => {
+      const adapter = new ScriptedAnthropic(anthropicTurns());
+      const { rounds } = await drive(new Membrane(adapter, { hooks: editing([0]) }), nativeAnthropic());
+      expect(JSON.stringify(adapter.sent[0].messages)).toContain('ORIGINAL');
+      expect(JSON.stringify(adapter.sent[1].messages)).toContain('HOOK-EDIT');
+      expect(rounds.map((r) => r.fidelity)).toEqual(['unknown', 'unknown']);
+    });
+
+    it('native: rounds before the edit stay established', async () => {
+      const adapter = new ScriptedAnthropic(anthropicTurns());
+      const { rounds } = await drive(new Membrane(adapter, { hooks: editing([1]) }), nativeAnthropic());
+      expect(rounds.map((r) => r.fidelity)).toEqual(['established', 'unknown']);
+    });
+
+    it('native: a hook that only reads both arguments keeps every round established', async () => {
+      const adapter = new ScriptedAnthropic(anthropicTurns());
+      const seen: string[] = [];
+      const membrane = new Membrane(adapter, {
+        hooks: { beforeRequest: (normalized, provider) => { seen.push(JSON.stringify([normalized, provider])); return undefined; } },
+      });
+      const { rounds } = await drive(membrane, nativeAnthropic());
+      expect(seen).toHaveLength(2);
+      expect(rounds.map((r) => r.fidelity)).toEqual(['established', 'established']);
+    });
+
+    it('XML: an edit to the config, which continuations reuse, makes the rounds unknown', async () => {
+      const adapter = new MockAdapter({ streamChunkDelayMs: 0, completeDelayMs: 0, responseQueue: ['<function_calls><invoke name="noop"></invoke></function_calls>', 'done.'] });
+      const maxTokens: number[] = [];
+      const stream = adapter.stream.bind(adapter);
+      adapter.stream = (request, callbacks, options) => { maxTokens.push(request.maxTokens); return stream(request, callbacks, options); };
+      let call = 0;
+      const membrane = new Membrane(adapter, {
+        hooks: { beforeRequest: (normalized) => { if (call++ === 0) normalized.config.maxTokens = 7; return undefined; } },
+      });
+      const { rounds } = await drive(membrane, {
+        messages: [{ participant: 'User', content: [{ type: 'text', text: 'go' }] }],
+        config: { model: 'test-model', maxTokens: 1000 }, tools: [noopTool], promptCaching: false,
+      });
+      expect(maxTokens).toEqual([1000, 7]);
+      expect(rounds.map((r) => r.fidelity)).toEqual(['unknown', 'unknown']);
+    });
   });
 });
