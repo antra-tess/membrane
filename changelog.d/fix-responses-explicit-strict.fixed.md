@@ -9,8 +9,9 @@
   `{ type: 'function', function }` tools and tools built from
   `inputSchema`/`input_schema`/`parameters`, and to the tools that reach the
   wire whether they came as `request.tools` or as a `providerParams.tools`
-  override of them. A `strict` that is not a boolean,
-  `null` or absent is refused with an `invalid_request` error naming the tool,
-  before any request is sent. Non-function tools and the Chat Completions and
-  openai-compatible adapters are unchanged; tools that already carried an
-  explicit boolean serialize as before.
+  override of them. A `strict` that is not a boolean, `null` or absent (such
+  as the string `'true'`, `1` or an object) used to be forwarded to the
+  provider as given; it is now refused with an `invalid_request` error naming
+  the tool, before any request is sent. Non-function tools and the Chat
+  Completions and openai-compatible adapters are unchanged; tools that already
+  carried an explicit boolean serialize as before.
