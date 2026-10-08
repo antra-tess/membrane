@@ -198,8 +198,10 @@ export interface StreamOptions {
   timeoutMs?: number;
 
   /**
-   * Abort a call whose stream goes silent for this many ms. Parity with
-   * YieldingStreamOptions.idleTimeoutMs; the adapter owns the default.
+   * Anthropic idle deadline after the first SDK event (default: 600000 ms).
+   * Nonempty Web response-body bytes, including SSE keepalives, refresh it;
+   * other SDK-supported bodies refresh it on SDK events. This does not bound
+   * total duration or generation progress. Parity with YieldingStreamOptions.
    */
   idleTimeoutMs?: number;
 

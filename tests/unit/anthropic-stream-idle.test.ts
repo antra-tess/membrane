@@ -103,6 +103,8 @@ const timing = { idleTimeoutMs: IDLE_MS, firstEventTimeoutMs: IDLE_MS };
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  vi.useRealTimers();
   probes.length = 0;
 });
 
@@ -254,5 +256,64 @@ describe('Anthropic stream idle watchdog with live transport', () => {
     expect(flags).toEqual([false, true]);
     expect(calls).toHaveLength(2);
     expect(new Headers(calls[1]?.headers).get('authorization')).toBe('Bearer fresh');
+  });
+});
+
+
+describe('Anthropic stream setup and alternate SDK response bodies', () => {
+  it('cleans the watchdog and caller listener when SDK session creation throws', async () => {
+    vi.useFakeTimers();
+    const caller = new AbortController();
+    const added = vi.spyOn(caller.signal, 'addEventListener');
+    const removed = vi.spyOn(caller.signal, 'removeEventListener');
+    const adapter = newAdapter();
+    const error = new Error('SDK client setup failed');
+    const client = (adapter as unknown as { client: { withOptions: () => unknown } }).client;
+    vi.spyOn(client, 'withOptions').mockImplementation(() => { throw error; });
+    const failure = await adapter.stream(request, { onChunk: () => {} }, { signal: caller.signal }).catch(error => error);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(added).toHaveBeenCalledWith('abort', expect.any(Function), { once: true });
+    expect(removed).toHaveBeenCalledWith('abort', added.mock.calls[0]?.[1]);
+    expect(failure).toMatchObject({
+      type: 'unknown', rawError: { message: error.message }, rawRequest: expect.objectContaining({ stream: true }),
+    });
+  });
+
+  it('passes an async-iterable SSE body through the real SDK without retry or byte loss', async () => {
+    const encoder = new TextEncoder();
+    // message_delta is the adapter's terminal event; it intentionally closes
+    // the transport before any later message_stop frame.
+    const bytes = encoder.encode(messageStart() + ping() + answer().slice(0, -1).join(''));
+    let consumed = 0;
+    const calls = stubFetch(() => {
+      const response = new Response(null, { headers: {
+        'content-type': 'text/event-stream', 'request-id': 'req_async_fixture',
+      } });
+      // SDK 0.52 shims accepts async iterables. Split every byte to also cover
+      // framing boundaries and preserve the exact encoded stream.
+      Object.defineProperty(response, 'body', { value: {
+        async *[Symbol.asyncIterator]() {
+          for (const byte of bytes) { consumed++; yield Uint8Array.of(byte); }
+        },
+      } });
+      return response;
+    });
+    const chunks: string[] = [];
+    const result = await newAdapter().stream(request, { onChunk: chunk => chunks.push(chunk) }, timing);
+    expect(calls).toHaveLength(1);
+    expect(consumed).toBe(bytes.length);
+    expect(result).toMatchObject({ stopReason: 'end_turn', content: [{ type: 'text', text: 'hello back' }] });
+    expect(chunks).toEqual(['hello back']);
+  });
+
+  it('preserves HTTP error response metadata instead of wrapping its body', async () => {
+    const calls = stubFetch(() => Response.json({
+      type: 'error', error: { type: 'invalid_request_error', message: 'fixture invalid request' },
+    }, { status: 400, headers: { 'request-id': 'req_error_fixture' } }));
+    const failure = await newAdapter().stream(request, { onChunk: () => {} }, timing).catch(error => error);
+    expect(calls).toHaveLength(1);
+    expect(failure).toMatchObject({ type: 'invalid_request', retryable: false });
+    expect(failure.rawError).toMatchObject({ status: 400, requestID: 'req_error_fixture' });
+    expect(failure.rawError.headers.get('request-id')).toBe('req_error_fixture');
   });
 });

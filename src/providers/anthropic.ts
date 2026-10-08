@@ -206,13 +206,14 @@ type SdkFetch = NonNullable<ClientOptions['fetch']>;
  * unchanged; error responses are returned untouched so SDK error
  * classification keeps their full metadata. The rebuilt Response has an empty
  * `url`, which SDK 0.52 reads only for debug logging. Without `observe` the
- * base fetch is returned as is.
+ * base fetch is returned as is. SDK-supported bodies without pipeThrough also
+ * pass through unchanged; their SDK events still refresh the idle watchdog.
  */
 function observeBodyActivity(base: SdkFetch, observe?: () => void): SdkFetch {
   if (!observe) return base;
   return async (input, init) => {
     const response = await base(input, init);
-    if (!response.ok || !response.body) return response;
+    if (!response.ok || !response.body || typeof response.body.pipeThrough !== 'function') return response;
     const body = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
       transform(chunk, controller) {
         if (chunk.byteLength > 0) observe();
@@ -396,7 +397,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       'stream',
     );
 
-    // Idle timeout: abort if no SSE event arrives within the deadline.
+    // Idle timeout: abort on transport silence after the first SDK event.
     // The SDK's timeout only covers the initial HTTP response headers;
     // once streaming starts, a silently dropped connection waits forever.
     // Default raised 120s → 600s (2026-07-20): on Opus 4.7+/Fable-class models
@@ -405,8 +406,8 @@ export class AnthropicAdapter implements ProviderAdapter {
     // request can legitimately be silent for minutes mid-stream. At 120s the
     // watchdog repeatedly killed real, billing, actively-thinking turns
     // (Cairn, 2026-07-20: every >120s think died for an hour straight). 600s
-    // matches the SDK's own request timeout; the watchdog now only catches
-    // truly dead connections, at the cost of slower detection.
+    // matches the SDK's own request timeout. Body keepalives now count as
+    // activity after the first SDK event; this is no total or progress bound.
     const idleMs = options?.idleTimeoutMs ?? 600_000;
     // TTFT can legitimately exceed the inter-event idle: on a large context
     // with a cache miss, the API sends only SSE `ping` keepalives until
@@ -448,9 +449,10 @@ export class AnthropicAdapter implements ProviderAdapter {
     };
 
     resetIdleTimer();
-    const session = this.credentialSession(idleAbort.signal, onTransportActivity);
+    let session: ReturnType<AnthropicAdapter['credentialSession']> | undefined;
 
     try {
+      session = this.credentialSession(idleAbort.signal, onTransportActivity);
       const stream = await session.client.messages.stream(anthropicRequest, {
         signal: session.signal,
         headers: this.liveHeaders(this.betaHeaders(request), 'stream'),
@@ -685,14 +687,14 @@ export class AnthropicAdapter implements ProviderAdapter {
         throw new MembraneError({
           type: 'timeout',
           message: sawEvent
-            ? `SSE stream idle timeout — no events received within ${idleMs}ms`
+            ? `SSE stream idle timeout — no observed activity within ${idleMs}ms`
             : `SSE stream first-event timeout — no message_start within ${firstEventMs}ms (TTFT deadline)`,
           retryable: true,
           rawError: error,
           rawRequest: fullRequest,
         });
       }
-      throw this.handleError(session.failure() ?? error, fullRequest);
+      throw this.handleError(session?.failure() ?? error, fullRequest);
     }
   }
 
