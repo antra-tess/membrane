@@ -90,6 +90,15 @@ interface GeminiResponse {
 }
 
 /**
+ * Gemini's usageMetadata follows proto3 JSON, which omits zero-valued counts:
+ * when the object is present, a missing count is a reported 0. Only a
+ * response with no usageMetadata at all leaves the counts unreported.
+ */
+function geminiUnreportedUsage(usageMetadata: GeminiResponse['usageMetadata']): { unreportedUsage?: Array<'inputTokens' | 'outputTokens'> } {
+  return usageMetadata ? {} : { unreportedUsage: ['inputTokens', 'outputTokens'] };
+}
+
+/**
  * Map Gemini's `usageMetadata` onto membrane's usage shape.
  *
  * `thoughtsTokenCount` is disjoint from `candidatesTokenCount` and billed at
@@ -99,15 +108,6 @@ interface GeminiResponse {
  * Google's own total is the independent witness, and a mismatch means a
  * usageMetadata field membrane does not read is carrying tokens.
  */
-/**
- * Gemini's usageMetadata follows proto3 JSON, which omits zero-valued counts:
- * when the object is present, a missing count is a reported 0. Only a
- * response with no usageMetadata at all leaves the counts unreported.
- */
-function geminiUnreportedUsage(usageMetadata: GeminiResponse['usageMetadata']): { unreportedUsage?: Array<'inputTokens' | 'outputTokens'> } {
-  return usageMetadata ? {} : { unreportedUsage: ['inputTokens', 'outputTokens'] };
-}
-
 function geminiUsageToProviderUsage(
   usageMetadata: GeminiResponse['usageMetadata']
 ): ProviderResponse['usage'] {
@@ -132,9 +132,12 @@ function geminiUsageToProviderUsage(
     inputTokens: promptTokens,
     outputTokens: candidatesTokens + (thoughtsTokens ?? 0),
     ...(thoughtsTokens != null ? { thinkingTokens: thoughtsTokens } : {}),
-    // A reported 0 is a fact (no cache read); only an unreported count is absent.
-    ...(typeof usageMetadata?.cachedContentTokenCount === 'number'
-      ? { cacheReadTokens: usageMetadata.cachedContentTokenCount }
+    // A reported 0 is a fact (no cache read); only an unreported count is
+    // absent. By the proto3 rule above, a present usageMetadata reports the
+    // cache-read count even when it omits it: real calls without a cache hit
+    // never send the field (see usageCacheConvention's note), and that is a 0.
+    ...(usageMetadata
+      ? { cacheReadTokens: typeof usageMetadata.cachedContentTokenCount === 'number' ? usageMetadata.cachedContentTokenCount : 0 }
       : {}),
   };
 }

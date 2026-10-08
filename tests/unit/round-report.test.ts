@@ -410,17 +410,30 @@ describe('usage at the adapter boundary: a reported 0 is 0, an unreported count 
     expect('cacheReadTokens' in (await adapter.complete(request)).usage).toBe(false);
   });
 
-  it('Gemini', async () => {
+  it('Gemini: proto3 omits a zero count, so a count missing from a present usageMetadata is a reported 0 (slimepriestess, room-338)', async () => {
     const respond = (usageMetadata: unknown) => vi.fn().mockResolvedValue(new Response(JSON.stringify({
       candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }],
-      usageMetadata,
+      ...(usageMetadata ? { usageMetadata } : {}),
     }), { status: 200, headers: { 'content-type': 'application/json' } }));
     const adapter = new GeminiAdapter({ apiKey: 'zz-key-not-used' });
     const request = { model: 'gemini-zz', maxTokens: 16, messages: [{ role: 'user', content: 'hi' }] } as any;
     vi.stubGlobal('fetch', respond({ promptTokenCount: 40, candidatesTokenCount: 2, totalTokenCount: 42, cachedContentTokenCount: 0 }));
     expect((await adapter.complete(request)).usage.cacheReadTokens).toBe(0);
+    // The shape real no-cache-hit calls return: the field is omitted.
     vi.stubGlobal('fetch', respond({ promptTokenCount: 40, candidatesTokenCount: 2, totalTokenCount: 42 }));
-    expect('cacheReadTokens' in (await adapter.complete(request)).usage).toBe(false);
+    const omitted = await adapter.complete(request);
+    expect(omitted.usage.cacheReadTokens).toBe(0);
+    expect(omitted.unreportedUsage).toBeUndefined();
+    vi.stubGlobal('fetch', respond(undefined));
+    const unreported = await adapter.complete(request);
+    expect('cacheReadTokens' in unreported.usage).toBe(false);
+    expect(unreported.unreportedUsage).toEqual(['inputTokens', 'outputTokens']);
+    // Streamed: the usageMetadata on the last chunk is read the same way.
+    stubFetchWithSseLines([
+      '{"candidates":[{"content":{"parts":[{"text":"o"}]}}]}',
+      '{"candidates":[{"content":{"parts":[{"text":"k"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":40,"candidatesTokenCount":2,"totalTokenCount":42}}',
+    ]);
+    expect((await adapter.stream(request, { onChunk: () => {} } as any)).usage.cacheReadTokens).toBe(0);
   });
 });
 
