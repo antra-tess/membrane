@@ -3,22 +3,32 @@
   contains a closing parameter tag in an unrecognized namespace (such as
   `</antra:parameter>`) followed by markup for a declared parameter the call
   lacks, a value that contains markup for a parameter the schema makes
-  unconditionally required and the call lacks, text inside an invoke outside
-  every parameter (a value cut short at a literal closing tag, or a parameter
-  never closed), and text after a CDATA value's last section all refuse the
-  invoke. Text after a CDATA value runs to the value's closer and is part of
-  that value: an `<invoke>` or `<function_calls>` opener written there starts
-  no call of its own and is refused with the invoke that holds it, rather than
-  re-anchoring the parse onto a call inside the value. A refused invoke is
-  never a `ToolCall` or a `tool_use`. A value
-  that contains markup for an optional declared parameter the call doesn't
-  otherwise include keeps the call as parsed, with a warning: membrane's loops
-  dispatch it, and a no-loop result returns it as a call. Before, a
-  miskeyed closer read through to the next well-formed one, and the call
-  dispatched with the next parameter swallowed into the previous value. Both
-  `parseToolCalls` and `parseAccumulatedIntoBlocks` apply the same rules. Each
-  refusal and warning is a notice, recorded in the results the loop injects
-  and on the response (see Added).
+  unconditionally required and the call lacks, text inside an invoke after a
+  parameter (a value cut short at a literal closing tag, or a parameter never
+  closed), markup before an invoke's first parameter (a parameter the parser
+  doesn't read, such as `<path>…</path>`, another namespace or a single-quoted
+  name), text in an invoke with no parameter the parser reads, and text after
+  a CDATA value's last section all refuse the invoke. Text after a CDATA value
+  runs to the value's closer and is part of that value: an `<invoke>` or
+  `<function_calls>` opener written there starts no call of its own and is
+  refused with the invoke that holds it, rather than re-anchoring the parse
+  onto a call inside the value. A refused invoke is never a `ToolCall` or a
+  `tool_use`. A value that contains markup for an optional declared parameter
+  the call doesn't otherwise include keeps the call as parsed, with a warning:
+  membrane's loops dispatch it, and a no-loop result returns it as a call. So
+  does text before an invoke's first parameter that contains no markup, such
+  as a model's commentary: no value precedes it to have been cut, and the tool
+  never receives it. Before, a miskeyed closer read through to the next
+  well-formed one, and the call dispatched with the next parameter swallowed
+  into the previous value; text inside an invoke outside every parameter was
+  ignored, so the tail of a value cut at a literal closing tag, or a value
+  written as a parameter the parser doesn't read, was dropped without a word.
+  **This also refuses calls that used to work:** prose between or after an
+  invoke's parameters, or in an invoke with no parameter, is now refused,
+  while prose before the first parameter still dispatches, now with a
+  warning. Both `parseToolCalls` and `parseAccumulatedIntoBlocks` apply the
+  same rules. Each refusal and warning is a notice, recorded in the results
+  the loop injects and on the response (see Added).
 - **CDATA is the literal spelling for a parameter value.** One or more
   consecutive CDATA sections directly after a parameter's opening tag (one
   framing newline allowed), followed only by whitespace before the closer,

@@ -455,12 +455,16 @@ const UNRECOGNIZED_PARAMETER_CLOSER_AT_END = /<\/([^\s<>/:]+):parameter>\s*$/;
  *     miskeyed close);
  *   - a raw value holding an opener for an unconditionally required parameter
  *     the call lacks (an unclosed or wrongly closed value swallowed it);
- *   - non-whitespace text outside every parameter (a value cut at a literal
- *     closing tag, or a parameter never closed);
+ *   - non-whitespace text after a parameter (a value cut at a literal closing
+ *     tag, or a parameter never closed), markup before the first parameter
+ *     (perhaps a parameter the parser doesn't read), or any text in a call
+ *     with no parameter the parser reads;
  *   - text after a CDATA value's last section, before its closer.
  * A raw value holding an opener for an optional declared parameter the call
  * lacks keeps the call as parsed, with a warning that makes no claim about
- * intent.
+ * intent. So does markup-free text before the first parameter, such as a
+ * model's commentary: no value precedes it to have been cut, and it is not
+ * passed to the tool.
  * CDATA payloads are never inspected: they are what the caller meant.
  *
  * `toolName` is the name the invoke actually dispatches under — for a
@@ -482,7 +486,7 @@ function parseInvokeParameters(
   PARAMETER_REGEX.lastIndex = 0;
   let paramMatch: RegExpExecArray | null;
   while ((paramMatch = PARAMETER_REGEX.exec(body.masked)) !== null) {
-    noteTextOutsideParameters(body, gapStart, paramMatch.index, previous, findings);
+    noteTextOutsideParameters(body, gapStart, paramMatch.index, previous, true, findings);
 
     const paramName = paramMatch[2] ?? '';
     const closerLength = `</${paramMatch[4] ?? ''}parameter>`.length;
@@ -518,7 +522,7 @@ function parseInvokeParameters(
     previous = paramName;
     gapStart = paramMatch.index + paramMatch[0].length;
   }
-  noteTextOutsideParameters(body, gapStart, body.masked.length, previous, findings);
+  noteTextOutsideParameters(body, gapStart, body.masked.length, previous, false, findings);
 
   if (schema !== undefined) {
     for (const value of rawValues) noteAbsorbedParameters(value, schema, input, findings);
@@ -532,16 +536,37 @@ function parseInvokeParameters(
   return { input, refusal, warnings };
 }
 
+// A `<` that can start a tag: a name's first character, or the `/`, `!` or `?`
+// of a closer, a declaration or a processing instruction. Before a space, a
+// digit or another symbol (`a < b`, `<-`) it is prose.
+const TAG_START = /<[/!?:_\p{L}]/u;
+
 /**
- * Non-whitespace text between parameters (or before the first, or after the
- * last) is a value cut short at a literal closing tag, or a parameter that
- * never closed. Either way the call would not carry what was written.
+ * Non-whitespace text inside an invoke but outside every parameter.
+ *
+ * After a parameter, it is the tail of a value cut short at a literal closing
+ * tag, or of one never closed (a parameter opener at its start), so the call
+ * would not carry what was written: refused. With the real closer forgotten,
+ * even a cut's tail can hold no markup.
+ *
+ * Before the first parameter, no value precedes it to have been cut. Text
+ * there that holds no markup is taken as commentary and kept out of the call:
+ * the call is sent as parsed, with a warning that makes no claim about intent.
+ * Markup there may be a parameter the parser doesn't read (an element per
+ * parameter, another namespace, a single-quoted name), whose value the call
+ * would lose: refused.
+ *
+ * In a call with no parameter the parser reads, any text is refused: a value
+ * written without its parameter tag reads just like commentary, and a tool
+ * that declares no parameters may still accept some (an open object schema, a
+ * root union the reading can't merge).
  */
 function noteTextOutsideParameters(
   body: ScanText,
   from: number,
   to: number,
   previous: string | undefined,
+  parameterFollows: boolean,
   findings: BoundaryFinding[]
 ): void {
   const offset = body.masked.slice(from, to).search(/\S/);
@@ -558,14 +583,38 @@ function noteTextOutsideParameters(
     });
     return;
   }
-  const where = previous === undefined ? 'before its first parameter' : `after parameter ${previous}`;
-  findings.push({
-    at,
-    refusal: refusalMessage(
-      `the call has text ${where} that is outside every parameter, starting \`${quoteStart(stray.trimEnd())}\`: ` +
-        'a value was probably cut short at a literal closing tag'
-    ),
-  });
+  const quoted = quoteStart(stray.trimEnd());
+  if (previous !== undefined) {
+    findings.push({
+      at,
+      refusal: refusalMessage(
+        `the call has text after parameter ${previous} that is outside every parameter, starting \`${quoted}\`: ` +
+          'a value was probably cut short at a literal closing tag'
+      ),
+    });
+  } else if (!parameterFollows) {
+    findings.push({
+      at,
+      refusal: refusalMessage(
+        `the call has text outside every parameter, starting \`${quoted}\`, and no parameter the parser reads`
+      ),
+    });
+  } else if (TAG_START.test(stray)) {
+    findings.push({
+      at,
+      refusal: refusalMessage(
+        `the call has text before its first parameter that is outside every parameter, starting \`${quoted}\`: ` +
+          'it contains markup, but no parameter the parser reads'
+      ),
+    });
+  } else {
+    findings.push({
+      at,
+      warning:
+        `the call has text before its first parameter, starting \`${quoted}\`, ` +
+        'which is outside every parameter and was not passed to the tool',
+    });
+  }
 }
 
 /** Openers inside a raw value that name a declared parameter the call lacks. */

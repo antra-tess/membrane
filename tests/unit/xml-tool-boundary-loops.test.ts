@@ -305,6 +305,46 @@ describe('a mixed round', () => {
   });
 });
 
+describe('commentary before the first parameter', () => {
+  const COMMENTED: Round[] = [
+    {
+      chunks: [openBlock('Updating the board now:', param('item', 'A'), param('status', 'open'))],
+      stopReason: 'stop_sequence',
+      stopSequence: CALLS_CLOSE,
+    },
+    { chunks: ['ok'], stopReason: 'end_turn' },
+  ];
+  const WARNING = {
+    invoke: 0,
+    toolName: 'board_update',
+    kind: 'warning',
+    message:
+      'the call has text before its first parameter, starting `Updating the board now:`, which is outside every parameter and was not passed to the tool',
+  };
+
+  it.each(['callback', 'yielding'] as const)('%s: dispatches the call as parsed, and the envelope carries the warning after its result', async (mode) => {
+    const run = mode === 'callback' ? await runCallback(COMMENTED) : await runYielding(COMMENTED);
+    const rounds =
+      mode === 'callback'
+        ? (run as Awaited<ReturnType<typeof runCallback>>).calls
+        : (run as Awaited<ReturnType<typeof runYielding>>).events
+            .filter((event) => event.type === 'tool-calls')
+            .map((event) => event as Extract<StreamEvent, { type: 'tool-calls' }>);
+
+    expect(rounds).toHaveLength(1);
+    expect(rounds[0]!.calls.map((call) => call.input)).toEqual([{ item: 'A', status: 'open' }]);
+    expect(rounds[0]!.context.notices).toEqual([WARNING]);
+
+    const envelope = run.adapter.prefill(1).slice(run.adapter.prefill(1).lastIndexOf(RESULTS_OPEN));
+    const resultEnd = envelope.indexOf('</result>');
+    expect(resultEnd).toBeGreaterThan(-1);
+    expect(resultEnd).toBeLessThan(envelope.indexOf('<tool_call_notice invoke="0" tool="board_update" kind="warning">'));
+
+    expect(types(run.response.content)).toEqual(['tool_use', 'tool_result', 'tool_notice', 'text']);
+    expect(run.response.toolCallNotices).toEqual([{ block: 0, ...WARNING, answered: true }]);
+  });
+});
+
 describe('a CDATA payload with a stop spelling inside it', () => {
   const VALUE = `see ${CALLS_CLOSE} and\nUser: inside`;
 

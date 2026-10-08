@@ -144,13 +144,15 @@ export interface ToolContext {
  * A `refused` invoke was not dispatched: its parameter boundaries are
  * malformed in a way that would change the caller's arguments (a miskeyed or
  * missing closing tag swallowed a required parameter, a value was cut at a
- * literal closing tag, text follows a CDATA value). It never becomes a
+ * literal closing tag, markup before the first parameter may hold a parameter
+ * the parser doesn't read, text follows a CDATA value). It never becomes a
  * ToolCall or a tool_use. A `warning` invoke is a call as parsed — dispatched
  * in membrane's loops, eligible for dispatch in a parse result a caller acts
  * on — with the parse's oddity stated (a value contains markup for an optional
- * parameter the call doesn't otherwise include). `message` is written for the model that
- * made the call; it says what was observed and, for a refusal, how to send the
- * text as data.
+ * parameter the call doesn't otherwise include, or markup-free text before the
+ * first parameter was not passed to the tool). `message` is written for the
+ * model that made the call; it says what was observed and, for a refusal, how
+ * to send the text as data.
  */
 export interface ToolCallNotice {
   /** 0-based ordinal of the invoke's opening tag among the block's invoke openers. */

@@ -238,6 +238,161 @@ describe('text outside every parameter', () => {
     const spaced = `${CALLS_OPEN}\n<invoke name="board_update">\n\n  ${param('item', 'X')}\n\t${param('status', 'open')}\n\n</invoke>\n${CALLS_CLOSE}`;
     expect(parseToolCalls(spaced, TOOLS)?.notices).toEqual([]);
   });
+
+  it('refuses markup-free text after a parameter, which a cut value can leave behind', () => {
+    // A literal closer inside the value, and the real closer forgotten: the
+    // stray tail holds no markup, and the value is cut short all the same.
+    const forgottenCloser = block(invoke('board_update', param('status', 'open'), '<parameter name="item">Close tags with </parameter> to end them'));
+    const commentary = block(invoke('board_update', param('item', 'X'), param('status', 'open'), 'Done.'));
+    expect(parseToolCalls(forgottenCloser, TOOLS)?.notices).toEqual([
+      {
+        invoke: 0,
+        toolName: 'board_update',
+        kind: 'refused',
+        message:
+          'the call has text after parameter item that is outside every parameter, starting `to end them`: ' +
+          'a value was probably cut short at a literal closing tag; nothing was sent. ' +
+          'To send this text as data, write the value as CDATA.',
+      },
+    ]);
+    expect(parseToolCalls(commentary, TOOLS)?.calls).toEqual([]);
+    expect(parseToolCalls(commentary, TOOLS)?.notices[0]?.kind).toBe('refused');
+  });
+
+  describe('before the first parameter, where no value precedes it to have been cut', () => {
+    const leading = (text: string) => block(invoke('board_update', text, param('item', 'X'), param('status', 'open')));
+
+    it.each([
+      ['commentary', 'Updating the board now:', 'Updating the board now:'],
+      ['commentary whose `<` starts no tag', 'Moving it along <- since a < b:', 'Moving it along <- since a < b:'],
+      [
+        'long commentary, quoted by its start',
+        'Updating the board now, then I will tell the channel:',
+        'Updating the board now, then I will tell…',
+      ],
+    ])('keeps %s out of the call and sends it as parsed, with a warning, schema or not', (_shape, text, quoted) => {
+      for (const options of [TOOLS, undefined]) {
+        const parsed = parseToolCalls(leading(text), options);
+        expect(parsed?.calls.map((call) => call.input)).toEqual([{ item: 'X', status: 'open' }]);
+        expect(parsed?.notices).toEqual([
+          {
+            invoke: 0,
+            toolName: 'board_update',
+            kind: 'warning',
+            message: `the call has text before its first parameter, starting \`${quoted}\`, which is outside every parameter and was not passed to the tool`,
+          },
+        ]);
+      }
+    });
+
+    it('counts as markup a `<` that can start a tag, and no other', () => {
+      const kindOf = (text: string) => parseToolCalls(leading(text), TOOLS)?.notices[0]?.kind;
+      for (const tagLike of ['<b', '</', '<!', '<?', '<_', '<:', '<é']) expect(kindOf(`a ${tagLike} b`), tagLike).toBe('refused');
+      for (const plain of ['< b', '<-', '<=', '<3', '<<', 'a<']) expect(kindOf(`a ${plain} b`), plain).toBe('warning');
+    });
+
+    it('is read the same way by parseAccumulatedIntoBlocks', () => {
+      const parsed = parseAccumulatedIntoBlocks(leading('Updating the board now:'), TOOLS);
+      expect(parsed.blocks.map((b) => b.type)).toEqual(['tool_use']);
+      expect(parsed.toolCalls.map((call) => call.input)).toEqual([{ item: 'X', status: 'open' }]);
+      expect(parsed.notices).toEqual([
+        {
+          block: 0,
+          invoke: 0,
+          toolName: 'board_update',
+          kind: 'warning',
+          message:
+            'the call has text before its first parameter, starting `Updating the board now:`, which is outside every parameter and was not passed to the tool',
+          answered: false,
+        },
+      ]);
+    });
+
+    // Markup there is where a parameter the parser doesn't read lands; main
+    // dropped such a value silently and sent the call without it.
+    it.each([
+      ['an element per parameter', '<quote>q</quote>', '<quote>q</quote>'],
+      [
+        'a parameter in an unrecognized namespace',
+        '<antra:parameter name="quote">q</antra:parameter>',
+        '<antra:parameter name="quote">q</antra:p…',
+      ],
+      ['a single-quoted parameter name', "<parameter name='quote'>q</parameter>", "<parameter name='quote'>q</parameter>"],
+      ['a value whose opener is missing', 'q</parameter>', 'q</parameter>'],
+      ['commentary holding a tag', 'Marking it <b>done</b>:', 'Marking it <b>done</b>:'],
+    ])('refuses text that holds markup (%s): it holds no parameter the parser reads', (_shape, text, quoted) => {
+      for (const options of [TOOLS, undefined]) {
+        const parsed = parseToolCalls(leading(text), options);
+        expect(parsed?.calls).toEqual([]);
+        expect(parsed?.notices).toEqual([
+          {
+            invoke: 0,
+            toolName: 'board_update',
+            kind: 'refused',
+            message:
+              `the call has text before its first parameter that is outside every parameter, starting \`${quoted}\`: ` +
+              'it contains markup, but no parameter the parser reads; nothing was sent. To send this text as data, write the value as CDATA.',
+          },
+        ]);
+      }
+    });
+
+    it('leaves a later refusal standing: commentary does not excuse a cut after it', () => {
+      const parsed = parseToolCalls(
+        block(invoke('board_update', 'Updating now:', param('item', 'see </parameter> here'), param('status', 'open'))),
+        TOOLS,
+      );
+      expect(parsed?.calls).toEqual([]);
+      expect(parsed?.notices).toEqual([
+        {
+          invoke: 0,
+          toolName: 'board_update',
+          kind: 'refused',
+          message:
+            'the call has text after parameter item that is outside every parameter, starting `here</parameter>`: ' +
+            'a value was probably cut short at a literal closing tag; nothing was sent. ' +
+            'To send this text as data, write the value as CDATA.',
+        },
+      ]);
+    });
+  });
+
+  describe('in a call with no parameter the parser reads', () => {
+    // Zero declared parameters is not zero accepted ones (an open object
+    // schema, a root union the reading can't merge), and text written for a
+    // value without its parameter tag looks just like commentary.
+    const LIST_FILES: ToolDefinition = {
+      name: 'list_files',
+      description: 'List the files.',
+      inputSchema: { type: 'object', properties: {} },
+    };
+
+    it.each([
+      ['commentary', 'Listing the files now.'],
+      ['an element per parameter', '<path>/tmp/a.txt</path>'],
+    ])('refuses %s, schema or not', (_shape, text) => {
+      for (const options of [{ tools: [LIST_FILES] }, undefined]) {
+        const parsed = parseToolCalls(block(invoke('list_files', text)), options);
+        expect(parsed?.calls).toEqual([]);
+        expect(parsed?.notices).toEqual([
+          {
+            invoke: 0,
+            toolName: 'list_files',
+            kind: 'refused',
+            message:
+              `the call has text outside every parameter, starting \`${text}\`, and no parameter the parser reads; ` +
+              'nothing was sent. To send this text as data, write the value as CDATA.',
+          },
+        ]);
+      }
+    });
+
+    it('still names a parameter left unclosed as the reason', () => {
+      expect(parseToolCalls(block(invoke('board_update', '<parameter name="item">X')), TOOLS)?.notices[0]?.message).toBe(
+        'parameter item is not closed before the call ends; nothing was sent. To send this text as data, write the value as CDATA.'
+      );
+    });
+  });
 });
 
 describe('CDATA, the literal spelling', () => {
