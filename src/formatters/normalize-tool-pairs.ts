@@ -121,9 +121,10 @@ export interface NormalizeOptions {
   onEvent?: (event: NormalizeEvent) => void;
   /**
    * Text of the synthetic user envelope prepended when the first envelope is
-   * assistant (phase 7). `[continuing]` when absent. NativeFormatter passes
-   * `BuildOptions.prefillUserMessage`, so a caller's text is used wherever
-   * the conversation needs a leading user turn, whatever made it need one.
+   * assistant (phase 7). `[continuing]` when absent, empty or only
+   * whitespace. NativeFormatter passes `BuildOptions.prefillUserMessage`, so
+   * a caller's text is used wherever the conversation needs a leading user
+   * turn, whatever made it need one.
    */
   leadingUserText?: string;
 }
@@ -263,7 +264,10 @@ export function normalizeToolPairs(
     // envelopes implies a non-empty input.
     const originalFirstRole = input[0]!.role;
     const leadingBlockTypes = envelopes[0]!.content.map((b) => b.type);
-    envelopes.unshift({ role: 'user', content: [{ type: 'text', text: options.leadingUserText || '[continuing]' }] });
+    // Blank text would be a whitespace-only block, which Anthropic rejects
+    // and stripEmptyTextRequest drops, leaving an assistant first again.
+    const leadingText = options.leadingUserText?.trim() ? options.leadingUserText : '[continuing]';
+    envelopes.unshift({ role: 'user', content: [{ type: 'text', text: leadingText }] });
     onEvent({ kind: 'leading_user_synthesized', originalFirstRole, leadingBlockTypes });
   }
 
