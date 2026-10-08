@@ -92,7 +92,7 @@ export interface BuildOptions {
    *  In prefill formatters: defaults to '<cmd>cat untitled.txt</cmd>' with a CLI simulation
    *  system prompt when no system prompt is configured, or '[Start]' when a system prompt is set.
    *  In native construction: the leading user turn the tool-pair normalizer synthesizes,
-   *  '[continuing]' by default. */
+   *  '[continuing]' by default and in place of text that is only whitespace. */
   prefillUserMessage?: string;
 
   /**

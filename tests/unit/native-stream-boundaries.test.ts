@@ -699,6 +699,21 @@ describe('prefillUserMessage in a native conversation', () => {
     await claude().complete(ask({ contextPrefix: 'seed' }) as any);
     expect(bodies[0].messages[0]).toEqual({ role: 'user', content: [text('[continuing]')] });
   });
+
+  it.each([' ', '\n', ''])('leaves the synthetic turn as [continuing] for text that is empty or only whitespace (%j)', async blank => {
+    const bodies = script(completed);
+    await claude({ formatter: new NativeFormatter() }).complete({
+      config: { model: MODEL, maxTokens: 64 },
+      messages: [
+        { participant: 'Claude', content: [text('I spoke first.')] },
+        { participant: 'User', content: [text('Then I did.')] },
+      ],
+      prefillUserMessage: blank,
+    } as any);
+    expect(bodies[0].messages[0]).toEqual({ role: 'user', content: [text('[continuing]')] });
+    const direct = normalizeToolPairs([{ role: 'assistant', content: [text('a')] }], { leadingUserText: blank } as any);
+    expect(direct.messages[0]).toEqual({ role: 'user', content: [text('[continuing]')] });
+  });
 });
 
 // ---------------------------------------------------------------------------
