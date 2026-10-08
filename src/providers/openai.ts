@@ -12,6 +12,8 @@
  * - Direct API integration with proper error handling
  */
 
+import { assertMessagePrefillSupported } from './request-capabilities.js';
+
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -245,6 +247,7 @@ export class OpenAIAdapter implements ProviderAdapter {
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
     const openAIRequest = this.buildRequest(request);
+    assertMessagePrefillSupported(openAIRequest.model, openAIRequest.messages, options, this.name, openAIRequest);
     options?.onRequest?.(openAIRequest);
 
     try {
@@ -264,6 +267,7 @@ export class OpenAIAdapter implements ProviderAdapter {
     openAIRequest.stream = true;
     // Request usage data in stream for cache metrics
     openAIRequest.stream_options = { include_usage: true };
+    assertMessagePrefillSupported(openAIRequest.model, openAIRequest.messages, options, this.name, openAIRequest);
     options?.onRequest?.(openAIRequest);
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);

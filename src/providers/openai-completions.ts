@@ -10,6 +10,8 @@
  * Serializes conversations to Human:/Assistant: format.
  */
 
+import { assertPromptToolSupport } from './request-capabilities.js';
+
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -158,7 +160,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
     request: ProviderRequest,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const completionsRequest = this.buildRequest(request);
+    const completionsRequest = this.buildRequest(request, options);
     options?.onRequest?.(completionsRequest);
 
     try {
@@ -174,7 +176,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
     callbacks: StreamCallbacks,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const completionsRequest = this.buildRequest(request);
+    const completionsRequest = this.buildRequest(request, options);
     completionsRequest.stream = true;
     // Ask for usage in the stream — without this the endpoint sends no usage
     // frame at all and every streamed call reports 0/0 tokens.
@@ -434,21 +436,29 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
     return headers;
   }
 
-  private buildRequest(request: ProviderRequest): CompletionsRequest {
+  private buildRequest(request: ProviderRequest, options?: ProviderRequestOptions): CompletionsRequest {
     let prompt: string;
     let stopSequences: string[];
 
-    if (typeof request.extra?.prompt === 'string') {
+    // Capture the exact excluded extra fields once, retaining ordinary getter
+    // access and the rest-spread semantics of the native overrides below.
+    const extra = request.extra ?? {};
+    const { messages: _messages, tools: extraTools, normalizedMessages, prompt: explicitPrompt, ...rest } = extra;
+    const hasNormalizedMessages = normalizedMessages !== undefined || 'normalizedMessages' in Object(extra);
+    const promptMessages = hasNormalizedMessages ? normalizedMessages : options?.promptMessages;
+    assertPromptToolSupport(request, options, this.name, { kind: 'xml-prompt', prompt: explicitPrompt, extraTools });
+
+    if (typeof explicitPrompt === 'string') {
       // Continuation path: prompt is already serialized, skip re-serialization.
       // No participant-based stops or eotToken — the prompt already contains them.
-      prompt = request.extra.prompt;
+      prompt = explicitPrompt;
       stopSequences = [
         ...this.extraStopSequences,
         ...(request.stopSequences || []),
       ];
     } else {
       // Normal path: serialize messages into prompt format
-      const messages = (request.extra?.normalizedMessages as any[]) || (request.messages as any[]);
+      const messages = (promptMessages as any[]) || (request.messages as any[]);
       const result = this.serializeToPrompt(messages);
       prompt = result.prompt;
       stopSequences = [
@@ -490,10 +500,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
     }
 
     // Apply extra params (but not messages/tools/normalizedMessages/prompt which don't apply)
-    if (request.extra) {
-      const { messages, tools, normalizedMessages, prompt, ...rest } = request.extra as any;
-      Object.assign(params, rest);
-    }
+    Object.assign(params, rest);
 
     return params;
   }

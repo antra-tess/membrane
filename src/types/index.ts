@@ -102,6 +102,7 @@ export type {
   ProviderAdapter,
   ProviderRequest,
   ProviderRequestOptions,
+  ProviderRequestContext,
   ProviderResponse,
   StreamCallbacks,
   UsageCacheConvention,
@@ -157,6 +158,7 @@ export type {
 
 export {
   MembraneError,
+  MembraneNotReadyError,
   serializeError,
   rateLimitError,
   contextLengthError,

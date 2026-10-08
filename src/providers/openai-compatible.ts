@@ -12,6 +12,8 @@
  * Uses the standard OpenAI chat completions format with tool_calls support.
  */
 
+import { assertMessagePrefillSupported } from './request-capabilities.js';
+
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -182,6 +184,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
     const openAIRequest = this.buildRequest(request);
+    assertMessagePrefillSupported(openAIRequest.model, openAIRequest.messages, options, this.name, openAIRequest);
     options?.onRequest?.(openAIRequest);
 
     try {
@@ -202,6 +205,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     // Ask for usage in the stream — without this the endpoint sends no usage
     // frame at all and every streamed call reports 0/0 tokens.
     openAIRequest.stream_options = { include_usage: true };
+    assertMessagePrefillSupported(openAIRequest.model, openAIRequest.messages, options, this.name, openAIRequest);
     options?.onRequest?.(openAIRequest);
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);

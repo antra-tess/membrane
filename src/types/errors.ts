@@ -125,6 +125,35 @@ export class MembraneError extends Error {
   }
 }
 
+/**
+ * A build reported `ready: false` — the caller declared one of the request's
+ * `tool_use` ids still in flight (`BuildOptions.pendingToolCallIds`), so the
+ * tool-pair normalizer left it unmatched rather than papering over it with a
+ * synthetic `[pending]` result. Shipping that request would produce exactly
+ * the 400 the normalizer exists to prevent.
+ *
+ * Not retryable as-is: the request is deterministic, and the fix is to wait
+ * for the in-flight result to land, append it, and rebuild.
+ */
+export class MembraneNotReadyError extends MembraneError {
+  readonly formatterName: string;
+
+  constructor(formatterName: string) {
+    super({
+      type: 'invalid_request',
+      message:
+        `Request is not ready to send: formatter '${formatterName}' returned ready=false, ` +
+        `meaning a tool_use in this request has no result yet and its id was declared ` +
+        `in-flight via pendingToolCallIds. Wait for the in-flight tool result, append it to ` +
+        `the conversation, and rebuild — sending now would ship an unmatched tool_use.`,
+      retryable: false,
+      rawError: undefined,
+    });
+    this.name = 'MembraneNotReadyError';
+    this.formatterName = formatterName;
+  }
+}
+
 // ============================================================================
 // Error Factory Functions
 // ============================================================================

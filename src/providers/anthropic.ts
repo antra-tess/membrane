@@ -2,6 +2,8 @@
  * Anthropic provider adapter
  */
 
+import { assertMessagePrefillSupported } from './request-capabilities.js';
+
 import Anthropic, { type ClientOptions } from '@anthropic-ai/sdk';
 import { stripEmptyTextBlocks, stripEmptyTextRequest } from '../utils/empty-text.js';
 import { resolveImageMediaType, isAcceptedImageMediaType, assertWithinByteBudget, shedImagesToFitByteBudget } from '../utils/image-media.js';
@@ -320,6 +322,7 @@ export class AnthropicAdapter implements ProviderAdapter {
   ): Promise<ProviderResponse> {
     const anthropicRequest = this.buildRequest(request);
     const fullRequest = { ...anthropicRequest, stream: false as const };
+    assertMessagePrefillSupported(fullRequest.model, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
 
     const headers = this.betaHeaders(request);
@@ -346,6 +349,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     const anthropicRequest = this.buildRequest(request);
     // Note: stream is implicitly true when using .stream()
     const fullRequest = { ...anthropicRequest, stream: true };
+    assertMessagePrefillSupported(fullRequest.model, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
 
     // Snapshot the primary lane's prefix so it can be held warm across idle
@@ -524,6 +528,9 @@ export class AnthropicAdapter implements ProviderAdapter {
             const block = contentBlocks[currentBlockIndex];
             if (block && block.type === 'thinking' && sig) {
               block.signature = ((block.signature as string | undefined) ?? '') + sig;
+              // Reported as it accumulates, so a stream that ends before
+              // content_block_stop still keeps the signature it received.
+              callbacks.onThinkingSignature?.(currentBlockIndex, block.signature as string);
             }
           } else if ((event.delta as { type: string }).type === 'input_json_delta') {
             currentBlockInputJson += (event.delta as { partial_json: string }).partial_json;
