@@ -313,7 +313,7 @@ export class NativeFormatter implements PrefillFormatter {
       // The caller's synthetic user text, used where the normalizer decides a
       // leading user turn is needed: after a contextPrefix, before
       // assistant-first history, or after role repair moved a block forward.
-      leadingUserText: options.prefillUserMessage || undefined,
+      leadingUserText: options.prefillUserMessage,
     });
 
     // Merge consecutive same-role messages (API requires alternating)
