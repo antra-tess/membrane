@@ -544,10 +544,13 @@ const TAG_START = /<[/!?:_\p{L}]/u;
 /**
  * Non-whitespace text inside an invoke but outside every parameter.
  *
- * After a parameter, it is the tail of a value cut short at a literal closing
- * tag, or of one never closed (a parameter opener at its start), so the call
- * would not carry what was written: refused. With the real closer forgotten,
- * even a cut's tail can hold no markup.
+ * A parameter opener in it, wherever it stands in the text, is a parameter
+ * never closed: an opener with a closer after it would have been read as a
+ * parameter, so only the gap after the last parameter can hold one.
+ *
+ * After a parameter, the text can be the tail of a value cut short at a literal
+ * closing tag, and commentary there can't be told apart from one: with the
+ * real closer forgotten, even a cut's tail holds no markup. Refused.
  *
  * Before the first parameter, no value precedes it to have been cut. Text
  * there that holds no markup is taken as commentary and kept out of the call:
@@ -574,8 +577,8 @@ function noteTextOutsideParameters(
   const at = from + offset;
   const stray = body.original.slice(at, to);
 
-  PARAMETER_OPEN_AT_START.lastIndex = 0;
-  const unclosed = PARAMETER_OPEN_AT_START.exec(stray);
+  PARAMETER_OPEN_REGEX.lastIndex = 0;
+  const unclosed = PARAMETER_OPEN_REGEX.exec(stray);
   if (unclosed) {
     findings.push({
       at,

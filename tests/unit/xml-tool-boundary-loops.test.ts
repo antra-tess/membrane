@@ -343,6 +343,50 @@ describe('commentary before the first parameter', () => {
     expect(types(run.response.content)).toEqual(['tool_use', 'tool_result', 'tool_notice', 'text']);
     expect(run.response.toolCallNotices).toEqual([{ block: 0, ...WARNING, answered: true }]);
   });
+
+  // Ralph-1911's case: commentary and an absorbed optional parameter give one
+  // invoke two warnings, and both must survive the round trip.
+  const TWO: Round[] = [
+    {
+      chunks: [openBlock('Updating the board now:', param('item', 'A <parameter name="quote">q'), param('status', 'open'))],
+      stopReason: 'stop_sequence',
+      stopSequence: CALLS_CLOSE,
+    },
+    { chunks: ['ok'], stopReason: 'end_turn' },
+  ];
+  const ABSORBED = {
+    invoke: 0,
+    toolName: 'board_update',
+    kind: 'warning',
+    message: "the value of item contains markup for parameter quote, which the call doesn't otherwise include",
+  };
+
+  it.each(['callback', 'yielding'] as const)('%s: beside an absorbed optional parameter, both warnings reach the round, the envelope and the response', async (mode) => {
+    const run = mode === 'callback' ? await runCallback(TWO) : await runYielding(TWO);
+    const rounds =
+      mode === 'callback'
+        ? (run as Awaited<ReturnType<typeof runCallback>>).calls
+        : (run as Awaited<ReturnType<typeof runYielding>>).events
+            .filter((event) => event.type === 'tool-calls')
+            .map((event) => event as Extract<StreamEvent, { type: 'tool-calls' }>);
+
+    expect(rounds).toHaveLength(1);
+    expect(rounds[0]!.calls.map((call) => call.input)).toEqual([{ item: 'A <parameter name="quote">q', status: 'open' }]);
+    expect(rounds[0]!.context.notices).toEqual([WARNING, ABSORBED]);
+
+    const envelope = run.adapter.prefill(1).slice(run.adapter.prefill(1).lastIndexOf(RESULTS_OPEN));
+    const opener = '<tool_call_notice invoke="0" tool="board_update" kind="warning">';
+    const resultEnd = envelope.indexOf('</result>');
+    expect(envelope.split(opener)).toHaveLength(3);
+    expect(resultEnd).toBeGreaterThan(-1);
+    expect(resultEnd).toBeLessThan(envelope.indexOf(opener));
+
+    expect(types(run.response.content)).toEqual(['tool_use', 'tool_result', 'tool_notice', 'text']);
+    expect(run.response.toolCallNotices).toEqual([
+      { block: 0, ...WARNING, answered: true },
+      { block: 0, ...ABSORBED, answered: true },
+    ]);
+  });
 });
 
 describe('a CDATA payload with a stop spelling inside it', () => {

@@ -227,6 +227,19 @@ describe('text outside every parameter', () => {
     );
   });
 
+  it('names a parameter left unclosed even when text comes before its opener', () => {
+    const message =
+      'parameter status is not closed before the call ends; nothing was sent. To send this text as data, write the value as CDATA.';
+    const afterCommentary = block(invoke('board_update', 'Updating now:', '<parameter name="status">open'));
+    const afterText = block(invoke('board_update', param('item', 'X'), 'and the status:', '<parameter name="status">open'));
+    expect(parseToolCalls(afterCommentary, TOOLS)?.notices).toEqual([
+      { invoke: 0, toolName: 'board_update', kind: 'refused', message },
+    ]);
+    expect(parseToolCalls(afterText, TOOLS)?.notices).toEqual([
+      { invoke: 0, toolName: 'board_update', kind: 'refused', message },
+    ]);
+  });
+
   it('detects stray text without a schema', () => {
     const stray = block(invoke('unknown_tool', param('a', 'x</parameter> tail')));
     const parsed = parseToolCalls(stray);
