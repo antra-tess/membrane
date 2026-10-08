@@ -52,6 +52,9 @@ const DEFAULT_CONFIG: Required<Omit<MockAdapterConfig, 'responseGenerator'>> = {
 export class MockAdapter implements ProviderAdapter {
   readonly name = 'mock';
 
+  /** Test double: it carries the request it receives as is. */
+  readonly reportsContentAlterations = true;
+
   /** Test double; it reports no cache tokens, so the convention never bites. */
   readonly usageCacheConvention = 'cache-excluded' as const;
 

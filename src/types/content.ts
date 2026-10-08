@@ -44,6 +44,13 @@ export interface TextContent {
    * other providers must ignore it. A zero-width carrier (`text: ''` plus
    * `rawItem`) has no normalized equivalent and must be filtered out of
    * requests for providers that reject empty text blocks (Anthropic).
+   *
+   * Where it is replayed, it goes out in place of this block's other fields,
+   * which are not read: a consumer that changes the block's content
+   * (compression, redaction) must drop or replace `rawItem` too, or the
+   * change won't reach the provider, and round reports count the block as
+   * carried when its item is (utils/fidelity.ts). A path that leaves out a
+   * zero-width carrier reports its message altered.
    */
   rawItem?: unknown;
 }
@@ -119,6 +126,12 @@ export interface ToolUseContent {
    * both corrupts the record and teaches the model a syntax the parser
    * does not accept (membrane#36). Analogous to `signature` on a thinking
    * block. Absent on native-tools blocks and on legacy stored blocks.
+   *
+   * Replayed in place of the block's other fields (`name`, `input`), which
+   * the prefill path then doesn't read: a consumer that changes the call
+   * (truncating its input, say) must drop or replace `rawXml` too, or the
+   * change won't reach the provider, and round reports count the block as
+   * carried when its raw text is (utils/fidelity.ts).
    */
   rawXml?: string;
   /**
@@ -153,7 +166,12 @@ export interface ToolResultContent {
    * Verbatim document text this result was parsed from in prefill/XML mode:
    * the full `<function_results>…</function_results>` block as the harness
    * originally placed it in the document, shared by every result parsed
-   * from that block. Replayed exactly on the prefill path (membrane#36).
+   * from that block. Replayed exactly on the prefill path (membrane#36), in
+   * place of the block's other fields (`content`, `toolName`, `isError`): a
+   * consumer that changes the result (truncating it, say) must drop or
+   * replace `rawXml` too, or the change won't reach the provider, and round
+   * reports count the block as carried when its raw text is
+   * (utils/fidelity.ts).
    */
   rawXml?: string;
   /** See {@link TextContent.rawItem}. */

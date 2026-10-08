@@ -212,6 +212,28 @@ export interface ProviderAdapter {
    * maintenance messages). Wrappers must forward this capability. */
   readonly requiresNativeResponsesInput?: boolean;
 
+  /**
+   * True when this adapter carries the content of every message in the
+   * ProviderRequest it receives into its API call (format conversion
+   * aside), or calls `ProviderRequestOptions.onContentAltered` for any
+   * request where it substitutes, drops or rewrites some, through every step
+   * up to the final body, passthrough parameters and cleanup included.
+   *
+   * Declaring it also commits the adapter to leaving the supplied
+   * ProviderRequest unchanged: it derives its wire body as a separate object
+   * and never mutates the request, its messages or their blocks. Membrane
+   * reuses one request across refusal-retry attempts and attributes reports
+   * by the identity of the blocks it built, so an adapter that edited the
+   * request in place would change what later attempts carry without any
+   * report saying so. The built-in declaring adapters build their bodies
+   * this way.
+   *
+   * Round reports (UsageEvent.round) rely on it: an adapter that doesn't
+   * declare it leaves a round's fidelity 'unknown'. Decorators must forward
+   * this capability and the callback, and keep the same obligation.
+   */
+  readonly reportsContentAlterations?: boolean;
+
   /** Representation used for cache-layout receipts. The default provider-request
    * basis preserves post-hook semantic breakpoints even when this adapter's API
    * does not transmit cache_control. wire-request opts into the final body
@@ -306,6 +328,16 @@ export interface ProviderRequestOptions {
    * indistinguishably from visible text.
    */
   wrapThinkingTags?: boolean;
+  /**
+   * Called when the adapter did not carry some message content of this
+   * request verbatim: it substituted, dropped or rewrote a block, including
+   * whitespace-only text its cleanup removed and message content a
+   * passthrough parameter replaced. Pass the request's own block object when
+   * the alteration is to one block (membrane attributes it to the message
+   * that block came from); call it with no argument otherwise. Adapters
+   * declaring `reportsContentAlterations` call it; decorators forward it.
+   */
+  onContentAltered?: (block?: unknown) => void;
 }
 
 export interface ProviderResponse {
@@ -342,6 +374,13 @@ export interface ProviderResponse {
      */
     cacheConvention?: UsageCacheConvention;
   };
+
+  /**
+   * Required usage counts the provider did not report. Their value in
+   * `usage` is a 0 default kept for accounting, not an observation; round
+   * reports (UsageEvent.round) leave them out. Absent when both were reported.
+   */
+  unreportedUsage?: Array<'inputTokens' | 'outputTokens'>;
   
   /** Model that actually ran */
   model: string;

@@ -47,10 +47,92 @@ export interface ToolCallsEvent {
 
 /**
  * Usage update event - token counts updated.
+ *
+ * On the yielding paths it is emitted once per provider round whose response
+ * stands (after any refusal retries), and then carries `round`: that round's
+ * own report. Streams created with `emitUsage: false` emit no usage events,
+ * so no round reports either.
  */
 export interface UsageEvent {
   type: 'usage';
+  /** Turn total so far (cumulative across rounds). */
   usage: DetailedUsage;
+  /** The round that just stood (yielding paths). */
+  round?: RoundReport;
+}
+
+/**
+ * A round's token counts, each present only when the provider reported it (a
+ * reported 0 is 0). Counts only: accounting's estimates (estimatedCost) are
+ * not part of the evidence, since a default-derived count would price to a
+ * claimed zero.
+ */
+export interface RoundUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheCreationTokens?: number;
+  cacheReadTokens?: number;
+  /** Thinking tokens, already inside outputTokens (see DetailedUsage.thinkingTokens). */
+  thinkingTokens?: number;
+}
+
+/**
+ * One provider round whose response stands, as its producer saw it.
+ *
+ * Coordinates: `altered.messages` indexes the `NormalizedRequest.messages`
+ * the consumer submitted. Injected messages are addressed as `[batch, index]`:
+ * a batch is one non-empty `injectedMessages` array supplied to
+ * `provideToolResults`, numbered from 0 in supply order within the stream;
+ * `index` is the position within that array. Every batch still retained in
+ * the round's request is reported, not only the newest.
+ */
+export interface RoundReport {
+  /** Zero-based index of this returned round (refusal re-issues within a round are not rounds). */
+  index: number;
+  /**
+   * Mapped stop reason of the attempt that stands. 'refusal' means the
+   * provider refused the round (its own stop reason), which is unrelated to
+   * tool invocations a parser declined.
+   */
+  stopReason: StopReason;
+  /**
+   * This round's own usage as the provider reported it: a count it did not
+   * report is absent, not 0 (even where accounting keeps a 0 default), and a
+   * reported 0 is 0.
+   */
+  usage: RoundUsage;
+  /**
+   * The newest injected batch, and how many of its supplied positions, as an
+   * ordered prefix, this round's request accounts for. With established
+   * fidelity, each of those was carried verbatim unless `altered.injected`
+   * names it. A message whose tool blocks were stripped is named there even
+   * when nothing else of it was left to send, while one supplied empty
+   * carried nothing and is not.
+   * The native path accounts for the whole batch (`applied` is its supplied
+   * size); the XML prefill path carries none (`applied` is 0).
+   */
+  injectedBatch?: { batch: number; applied: number };
+  /**
+   * Consumer messages this round's request did not carry verbatim (known
+   * alterations). Where a path sends a provider-native raw form in place of
+   * the fields it stands in for (on the OpenAI Responses formatter, a
+   * block's `rawItem` and a message's `openaiResponsesItems`; in the
+   * Responses API adapter, a `redacted_thinking` block's reasoning
+   * `rawItem`; on the XML prefill path, `rawXml`), "verbatim" means that raw
+   * form: content a consumer edited without dropping its raw form isn't
+   * named, because the edit never reaches the wire (utils/fidelity.ts). A
+   * zero-width carrier (`''` text holding an object `rawItem`) that a path
+   * leaves out is named.
+   */
+  altered: { messages: number[]; injected: Array<[number, number]> };
+  /**
+   * 'established' when every step of the build and transport reports its
+   * alterations and none was unattributable; 'unknown' otherwise (an
+   * uninstrumented path, opt-in image shedding, a beforeRequest hook that
+   * changed either of its arguments, or an earlier round's hook that changed
+   * one in place). With 'unknown', an empty `altered` proves nothing.
+   */
+  fidelity: 'established' | 'unknown';
 }
 
 /**
@@ -172,9 +254,13 @@ export type StreamEvent =
  * the generic user participant. Non-assistant participants get the standard
  * "Name: " text prefix when rendered to the provider. Content must be
  * user-side blocks only (text/image); tool blocks are stripped with a
- * warning. NOTE: a participant equal to the request's assistantParticipant
- * would render as an ASSISTANT turn (a prefill) — callers should not inject
- * messages named as the assistant.
+ * warning. On the native path, which carries injected messages, round
+ * reports name such a message altered at the position it was supplied at,
+ * even if nothing else of it was left to send; the XML prefill path carries
+ * none (`RoundReport.injectedBatch.applied` is 0). NOTE: a
+ * participant equal to the request's assistantParticipant would render as
+ * an ASSISTANT turn (a prefill) — callers should not inject messages named
+ * as the assistant.
  */
 export type InjectedMessage =
   Omit<NormalizedMessage, 'participant' | 'cacheBreakpoint'> & {
@@ -311,8 +397,8 @@ export interface YieldingStreamOptions {
   emitBlocks?: boolean;
 
   /**
-   * Whether to emit 'usage' events.
-   * Default: true
+   * Whether to emit 'usage' events, and with them the per-round reports
+   * (`UsageEvent.round`). Default: true
    */
   emitUsage?: boolean;
 }

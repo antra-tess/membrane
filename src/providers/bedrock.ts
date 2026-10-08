@@ -4,6 +4,7 @@
  * Uses the Anthropic Messages API format through AWS Bedrock.
  */
 
+import { unreportedUsage } from '../utils/usage.js';
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -274,6 +275,8 @@ async function signRequest(
 
 export class BedrockAdapter implements ProviderAdapter {
   readonly name = 'bedrock';
+  /** Carries message content verbatim: only wire fields (sourceUrl, cache ttl, media_type spelling) change. */
+  readonly reportsContentAlterations = true;
   readonly cacheReceiptBasis = 'wire-request' as const;
 
   /**
@@ -372,7 +375,7 @@ export class BedrockAdapter implements ProviderAdapter {
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
     const bedrockModelId = this.toBedrockModelId(request.model);
-    const bedrockRequest = this.buildRequest(request, bedrockModelId);
+    const bedrockRequest = this.buildRequest(request, bedrockModelId, options?.onContentAltered);
     const fullRequest = { modelId: bedrockModelId, ...bedrockRequest };
     options?.onRequest?.(fullRequest);
 
@@ -393,7 +396,7 @@ export class BedrockAdapter implements ProviderAdapter {
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
     const bedrockModelId = this.toBedrockModelId(request.model);
-    const bedrockRequest = this.buildRequest(request, bedrockModelId);
+    const bedrockRequest = this.buildRequest(request, bedrockModelId, options?.onContentAltered);
     const fullRequest = { modelId: bedrockModelId, ...bedrockRequest, stream: true };
     options?.onRequest?.(fullRequest);
 
@@ -407,7 +410,14 @@ export class BedrockAdapter implements ProviderAdapter {
     }
   }
 
-  private buildRequest(request: ProviderRequest, bedrockModelId?: string): BedrockMessageRequest {
+  private buildRequest(request: ProviderRequest, bedrockModelId?: string, onContentAltered?: (block?: unknown) => void): BedrockMessageRequest {
+    // Wire copies of the request's own blocks, so a block the cleanup drops
+    // is reported as the block membrane built (and can attribute).
+    const originals = new WeakMap<object, unknown>();
+    const remember = <T>(copy: T, original: unknown): T => {
+      if (copy !== original && copy !== null && typeof copy === 'object') originals.set(copy as object, original);
+      return copy;
+    };
     // Strip provider-specific fields (e.g., sourceUrl for Gemini) from image blocks
     // before sending to Bedrock/Anthropic, which rejects extra inputs.
     //
@@ -440,7 +450,7 @@ export class BedrockAdapter implements ProviderAdapter {
       if (!Array.isArray(msg.content)) return msg;
       return {
         ...msg,
-        content: msg.content.map((block: any) => {
+        content: msg.content.map((block: any) => remember((() => {
           if (block.type === 'image' && block.sourceUrl !== undefined) {
             const { sourceUrl, ...rest } = block;
             return stripCacheTtl(toWireImage(rest));
@@ -457,7 +467,7 @@ export class BedrockAdapter implements ProviderAdapter {
             });
           }
           return stripCacheTtl(block);
-        }),
+        })(), block)),
       };
     });
 
@@ -514,6 +524,8 @@ export class BedrockAdapter implements ProviderAdapter {
     // Apply extra params, excluding internal membrane fields
     if (request.extra) {
       const { normalizedMessages, prompt, ...rest } = request.extra as Record<string, unknown>;
+      // A passthrough `messages` replaces the built messages wholesale.
+      if (rest.messages !== undefined) onContentAltered?.();
       Object.assign(params, rest);
     }
 
@@ -538,7 +550,9 @@ export class BedrockAdapter implements ProviderAdapter {
       params.anthropic_beta = [...new Set([...existing, INTERLEAVED_THINKING_BETA])];
     }
 
-    stripEmptyTextRequest(params);
+    stripEmptyTextRequest(params, onContentAltered
+      ? (dropped) => onContentAltered(dropped !== null && typeof dropped === 'object' ? originals.get(dropped) ?? dropped : dropped)
+      : undefined);
     return params;
   }
 
@@ -630,6 +644,9 @@ export class BedrockAdapter implements ProviderAdapter {
     let finalMessage: BedrockMessageResponse | undefined;
     let inputTokens = 0;
     let outputTokens = 0;
+    // Whether the stream reported each count (an unreported one stays a 0 default).
+    let inputReported = false;
+    let outputReported = false;
     let cacheCreationTokens: number | undefined;
     let cacheReadTokens: number | undefined;
     let stopReason: string = 'end_turn';
@@ -754,6 +771,7 @@ export class BedrockAdapter implements ProviderAdapter {
                   // consumer downstream saw zeros. (Connectome issue #35.)
                   const startUsage = eventData.message.usage;
                   inputTokens = startUsage?.input_tokens ?? 0;
+                  inputReported = typeof startUsage?.input_tokens === 'number';
                   if (startUsage?.cache_creation_input_tokens != null) {
                     cacheCreationTokens = startUsage.cache_creation_input_tokens;
                   }
@@ -809,6 +827,7 @@ export class BedrockAdapter implements ProviderAdapter {
                   sawTerminalEvent = true;
                   if (eventData.usage) {
                     outputTokens = eventData.usage.output_tokens;
+                    if (typeof eventData.usage.output_tokens === 'number') outputReported = true;
                     // message_delta carries cumulative cache metrics — use as
                     // authoritative when present (same contract as the
                     // Anthropic adapter).
@@ -900,7 +919,9 @@ export class BedrockAdapter implements ProviderAdapter {
       },
     };
 
-    return this.parseResponse(finalMessage, { modelId, ...request, stream: true });
+    const parsed = this.parseResponse(finalMessage, { modelId, ...request, stream: true });
+    const { unreportedUsage: _fromSynthetic, ...rest } = parsed;
+    return { ...rest, ...unreportedUsage(inputReported ? inputTokens : undefined, outputReported ? outputTokens : undefined) };
   }
 
   private parseResponse(response: BedrockMessageResponse, rawRequest: unknown): ProviderResponse {
@@ -940,6 +961,7 @@ export class BedrockAdapter implements ProviderAdapter {
         cacheCreationTokens: response.usage.cache_creation_input_tokens,
         cacheReadTokens: response.usage.cache_read_input_tokens,
       },
+      ...unreportedUsage(response.usage?.input_tokens, response.usage?.output_tokens),
       model: response.model,
       rawRequest,
       raw: response,

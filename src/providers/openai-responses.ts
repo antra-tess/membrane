@@ -23,6 +23,7 @@
  * routing and vendor configs (`openairesponses-*` prefix).
  */
 
+import { unreportedUsage } from '../utils/usage.js';
 import { resolveImageMediaType } from '../utils/image-media.js';
 import type {
   ProviderAdapter,
@@ -544,6 +545,7 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
         inputTokens: response.usage?.input_tokens ?? 0,
         outputTokens: response.usage?.output_tokens ?? 0,
       },
+      ...unreportedUsage(response.usage?.input_tokens, response.usage?.output_tokens),
       model: requestedModel,
       rawRequest,
       raw: response,
