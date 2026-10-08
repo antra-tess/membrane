@@ -37,7 +37,7 @@ import { IncrementalXmlParser } from '../utils/stream-parser.js';
 import { assertCacheMarkersWithinLimit, clampCacheMarkers } from '../utils/cache-marker-budget.js';
 import { lastCacheableBlockIndex } from './native.js';
 import { resolveImageMediaType, isAcceptedImageMediaType, strippedImagePlaceholder } from '../utils/image-media.js';
-import { holdsContent } from '../utils/fidelity.js';
+import { holdsContent, isRawItemCarrier } from '../utils/fidelity.js';
 
 // ============================================================================
 // Configuration
@@ -304,7 +304,8 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
 
       // Every branch below that leaves a message's content out of the
       // transcript alters it, unless it held nothing: whitespace-only text is
-      // content, and only an exactly empty '' block carries nothing.
+      // content, and only an exactly empty '' block with no raw form (not a
+      // zero-width carrier) carries nothing.
       const omitted = () => {
         if (holdsContent(message.content)) onAltered?.();
       };
@@ -537,6 +538,8 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
       const block = content[i]!;
       if (block.type === 'text') {
         parts.push(block.text);
+        // A zero-width carrier's item is its content; the transcript can't carry it.
+        if (isRawItemCarrier(block)) onAltered?.();
       } else if (block.type === 'image') {
         if (block.source.type === 'base64') {
           const mediaType = resolveImageMediaType(block.source.data, block.source.mediaType);

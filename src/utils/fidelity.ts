@@ -14,10 +14,34 @@ import type { ContentBlock } from '../types/content.js';
  * placeholder substituted for an image, an image or block stripped, an
  * unsupported block left out, a tool carrier skipped, a tool_result rewritten
  * as text, nested tool-result media rendered as a note, whitespace-only text
- * removed by a cleanup policy. Removing an exactly empty text block ('')
- * carries nothing and is not an alteration; neither is the faithful
- * rendering of harness or attempt blocks, or a block moved between provider
- * messages.
+ * removed by a cleanup policy. Removing an exactly empty text block ('') that
+ * holds no raw form carries nothing and is not an alteration; neither is the
+ * faithful rendering of harness or attempt blocks, or a block moved between
+ * provider messages.
+ *
+ * Raw forms. Some blocks and messages carry the provider-native form they
+ * were derived from, and the paths that understand it send that form in
+ * place of the other fields:
+ *   - the OpenAI Responses formatter sends a block's object `rawItem` (blocks
+ *     of one message whose items share a type and id, or are identical
+ *     without one, go out as that item once), and sends a message's
+ *     `metadata.openaiResponsesItems` array in place of its content (nothing,
+ *     for an empty array);
+ *   - the Responses API adapter's input normalization sends a
+ *     `redacted_thinking` block's reasoning `rawItem`, and rebuilds every
+ *     other block from its fields;
+ *   - the Anthropic XML formatter sends `rawXml` in place of a tool_use's or
+ *     tool_result's fields (consecutive blocks sharing it, once).
+ * Where a raw form is sent, it is the content of the block or message it is
+ * attached to: that is carried verbatim when its raw form is, and the fields
+ * it stands in for (text, input, result content, a message's blocks) are not
+ * compared with it. A consumer that edits content under a raw form
+ * (compression, redaction) has to drop or replace the raw form too, or the
+ * edit doesn't reach the provider and nothing here reports it. Elsewhere the
+ * raw form isn't sent and the block's fields are what is carried, so a
+ * zero-width carrier (exactly empty text holding an object `rawItem`, whose
+ * item is all of its content) alters its message wherever a path leaves it
+ * out.
  *
  * Builders record alterations by the index of the message in the array they
  * were handed, and register the blocks they emit (`own`), so an adapter that
@@ -141,12 +165,25 @@ export function followNormalizedBlocks(
 }
 
 /**
+ * A zero-width carrier: exactly empty text holding a provider-native item
+ * (an object `rawItem`, the test the Responses formatter replays it by). The
+ * item is all of its content, so a path that doesn't send the item and
+ * leaves the block out alters its message.
+ */
+export function isRawItemCarrier(block: ContentBlock): boolean {
+  if (block.type !== 'text' || block.text !== '') return false;
+  const raw = (block as { rawItem?: unknown }).rawItem;
+  return raw !== null && typeof raw === 'object';
+}
+
+/**
  * Whether leaving these blocks out loses anything: true unless every block
- * is an exactly empty text block. Only '' carries nothing; whitespace-only
- * text is content.
+ * is an exactly empty text block that holds no raw form. Only such a ''
+ * carries nothing; whitespace-only text is content, and so is a zero-width
+ * carrier's item.
  */
 export function holdsContent(blocks: readonly ContentBlock[]): boolean {
-  return blocks.some((block) => !(block.type === 'text' && block.text === ''));
+  return blocks.some((block) => !(block.type === 'text' && block.text === '') || isRawItemCarrier(block));
 }
 
 /** Where a message in a yielding loop's working array came from. */

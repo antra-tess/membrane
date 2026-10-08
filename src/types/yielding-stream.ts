@@ -112,7 +112,18 @@ export interface RoundReport {
    * size); the XML prefill path carries none (`applied` is 0).
    */
   injectedBatch?: { batch: number; applied: number };
-  /** Consumer messages this round's request did not carry verbatim (known alterations). */
+  /**
+   * Consumer messages this round's request did not carry verbatim (known
+   * alterations). Where a path sends a provider-native raw form in place of
+   * the fields it stands in for (on the OpenAI Responses formatter, a
+   * block's `rawItem` and a message's `openaiResponsesItems`; in the
+   * Responses API adapter, a `redacted_thinking` block's reasoning
+   * `rawItem`; on the XML prefill path, `rawXml`), "verbatim" means that raw
+   * form: content a consumer edited without dropping its raw form isn't
+   * named, because the edit never reaches the wire (utils/fidelity.ts). A
+   * zero-width carrier (`''` text holding an object `rawItem`) that a path
+   * leaves out is named.
+   */
   altered: { messages: number[]; injected: Array<[number, number]> };
   /**
    * 'established' when every step of the build and transport reports its

@@ -5,6 +5,12 @@
  * `openaiResponsesItems` or on content blocks as `rawItem`. Those items are
  * emitted verbatim and in order. Normalized messages created after import are
  * converted to Responses input items without rewriting the native prefix.
+ *
+ * Native items stand in for what they're attached to: a message's metadata
+ * items for its whole content (an empty array sends nothing), a block's
+ * `rawItem` for that block. The fields they replace aren't read, and round
+ * reports count the message or block as carried when its items are
+ * (utils/fidelity.ts).
  */
 
 import type {

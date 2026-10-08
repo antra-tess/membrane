@@ -31,7 +31,7 @@ import type {
   BlockEvent,
   StreamEmission,
 } from './types.js';
-import { holdsContent } from '../utils/fidelity.js';
+import { holdsContent, isRawItemCarrier } from '../utils/fidelity.js';
 
 // ============================================================================
 // Configuration
@@ -258,7 +258,8 @@ export class CompletionsFormatter implements PrefillFormatter {
 
       // Skip empty messages (except if it's the final completion target).
       // Whitespace-only text is content: skipping it is an alteration. Only
-      // exactly empty '' blocks carry nothing (joined, two of them read '\n').
+      // exactly empty '' blocks with no raw form carry nothing (joined, two
+      // of them read '\n').
       if (!text.trim()) {
         if (holdsContent(message.content)) options.fidelity?.alter(index);
         continue;
@@ -354,6 +355,8 @@ export class CompletionsFormatter implements PrefillFormatter {
     for (const block of content) {
       if (block.type === 'text') {
         textParts.push(block.text);
+        // A zero-width carrier's item is its content; the prompt can't carry it.
+        if (isRawItemCarrier(block)) leftOut = true;
       } else {
         if (block.type === 'image') hadImages = true;
         // Skip tool_use, tool_result, thinking and media blocks for base models

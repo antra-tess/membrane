@@ -21,6 +21,11 @@
  *     tool blocks left nothing to send).
  *   - `usage` is the round's own; an unreported field is absent, a reported
  *     0 is 0.
+ *   - where a path sends a provider-native raw form (`rawItem`,
+ *     `openaiResponsesItems`, `rawXml`) in place of the fields it stands in
+ *     for, verbatim is measured against the raw form; a zero-width carrier
+ *     (`''` text holding an object `rawItem`) that a path leaves out alters
+ *     its message.
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
@@ -33,6 +38,8 @@ import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import { normalizeResponsesInput } from '../../src/providers/responses-input.js';
 import { NativeFormatter } from '../../src/formatters/native.js';
 import { CompletionsFormatter } from '../../src/formatters/completions.js';
+import { AnthropicXmlFormatter } from '../../src/formatters/anthropic-xml.js';
+import { OpenAIResponsesFormatter } from '../../src/formatters/openai-responses.js';
 import { FidelityNotes } from '../../src/utils/fidelity.js';
 import { stubFetchWithSseLines } from '../helpers/sse-fixtures.js';
 import type {
@@ -837,6 +844,9 @@ describe('Greptile\'s review of #104 (room-256)', () => {
 });
 
 describe('slimepriestess\'s review of #104 (room-338)', () => {
+  const text = (value: string): ContentBlock => ({ type: 'text', text: value });
+  const sorted = (indices: Iterable<number>) => [...indices].sort((a, b) => a - b);
+
   describe('a beforeRequest hook that changes the normalized request in place', () => {
     const anthropicTurns = () => [
       { content: [{ type: 'tool_use', id: 't1', name: 'noop', input: {} }], stopReason: 'tool_use' },
@@ -898,6 +908,129 @@ describe('slimepriestess\'s review of #104 (room-338)', () => {
       });
       expect(maxTokens).toEqual([1000, 7]);
       expect(rounds.map((r) => r.fidelity)).toEqual(['unknown', 'unknown']);
+    });
+  });
+
+  /** The real Responses API request builder (API-key mode); only the network is scripted. */
+  class ScriptedResponses extends OpenAIResponsesAPIAdapter {
+    sent: any[] = [];
+    constructor() { super({ apiKey: 'sk-test' }); }
+    override async stream(request: ProviderRequest, callbacks: StreamCallbacks, options?: ProviderRequestOptions): Promise<any> {
+      const wire = (this as any).buildRequest(request, options?.onContentAltered);
+      this.sent.push(JSON.parse(JSON.stringify(wire)));
+      callbacks.onChunk('done');
+      return { content: [{ type: 'text', text: 'done' }], stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 2 }, model: request.model, rawRequest: wire, raw: {} };
+    }
+  }
+  const responsesRound = async (messages: NormalizedRequest['messages']) => {
+    const adapter = new ScriptedResponses();
+    const { rounds } = await drive(new Membrane(adapter, { formatter: new OpenAIResponsesFormatter() }), {
+      messages, config: { model: 'gpt-test', maxTokens: 100 },
+    });
+    return { round: rounds[0]!, wire: JSON.stringify(adapter.sent[0].input) };
+  };
+
+  describe('a raw form its path sends is the block\'s content: what ships, and what counts as carried', () => {
+    it('Responses formatter: a block\'s rawItem goes out in place of its text, once for the blocks that share it', async () => {
+      const item = { type: 'message', id: 'msg_1', role: 'assistant', content: [{ type: 'output_text', text: 'ITEM-TEXT' }] };
+      const { round, wire } = await responsesRound([
+        { participant: 'User', content: [{ type: 'text', text: 'hi' }] },
+        { participant: 'Claude', content: [{ type: 'text', text: 'EDITED', rawItem: item }, { type: 'text', text: 'ALSO-EDITED', rawItem: item }] as ContentBlock[] },
+        { participant: 'User', content: [{ type: 'text', text: 'go on' }] },
+      ]);
+      expect(wire.match(/ITEM-TEXT/g)).toHaveLength(1);
+      expect(wire).not.toContain('EDITED');
+      expect(round.altered.messages).toEqual([]);
+      expect(round.fidelity).toBe('established');
+    });
+
+    it('Responses formatter: a message\'s openaiResponsesItems go out in place of its content; an empty array sends nothing', async () => {
+      const { round, wire } = await responsesRound([
+        { participant: 'User', content: [{ type: 'text', text: '(imported)' }], metadata: { openaiResponsesItems: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'IMPORTED-TURN' }] }] } },
+        { participant: 'User', content: [{ type: 'text', text: '(nothing native)' }], metadata: { openaiResponsesItems: [] } },
+        { participant: 'User', content: [{ type: 'text', text: 'new turn' }] },
+      ]);
+      expect(wire).toContain('IMPORTED-TURN');
+      expect(wire).not.toContain('(imported)');
+      expect(wire).not.toContain('(nothing native)');
+      expect(round.altered.messages).toEqual([]);
+      expect(round.fidelity).toBe('established');
+    });
+
+    it('XML prefill: a tool_result\'s rawXml goes out in place of its content', async () => {
+      const adapter = new MockAdapter({ streamChunkDelayMs: 0, completeDelayMs: 0, responseQueue: ['done.'] });
+      const { rounds } = await drive(new Membrane(adapter), {
+        config: { model: 'test-model', maxTokens: 1000 }, promptCaching: false,
+        messages: [
+          { participant: 'User', content: [{ type: 'text', text: 'run it' }] },
+          { participant: 'Claude', content: [{ type: 'tool_use', id: 't1', name: 'noop', input: {} } as ContentBlock] },
+          { participant: 'User', content: [{ type: 'tool_result', toolUseId: 't1', content: 'TRUNCATED', rawXml: '<function_results><result>RAW-RESULT</result></function_results>' } as ContentBlock] },
+          { participant: 'User', content: [{ type: 'text', text: 'continue' }] },
+        ],
+      });
+      const sent = JSON.stringify(adapter.getLastRequest()?.messages);
+      expect(sent).toContain('RAW-RESULT');
+      expect(sent).not.toContain('TRUNCATED');
+      expect(rounds[0]!.altered.messages).toEqual([]);
+      expect(rounds[0]!.fidelity).toBe('established');
+    });
+  });
+
+  describe('a zero-width carrier is all raw form: a path that leaves it out alters its message', () => {
+    // How Anthropic's unconvertible response blocks (server-tool results) are kept.
+    const carrier = (): ContentBlock => ({ type: 'text', text: '', rawItem: { type: 'web_search_tool_result', tool_use_id: 'srv_1', content: [] } }) as ContentBlock;
+    const conversations = {
+      'beside text': (): NormalizedRequest['messages'] => [
+        { participant: 'User', content: [text('search for it')] },
+        { participant: 'Claude', content: [text('found it'), carrier()] },
+        { participant: 'User', content: [text('go on')] },
+      ],
+      alone: (): NormalizedRequest['messages'] => [
+        { participant: 'User', content: [text('search for it')] },
+        { participant: 'Claude', content: [carrier()] },
+        { participant: 'User', content: [text('go on')] },
+      ],
+    };
+
+    it('the yielding native loop with the real Anthropic builder; plain \'\' text is still no loss', async () => {
+      for (const messages of Object.values(conversations)) {
+        const adapter = new ScriptedAnthropic([{ content: [{ type: 'text', text: 'done' }], stopReason: 'end_turn' }]);
+        const { rounds } = await drive(new Membrane(adapter), {
+          messages: messages(), config: { model: 'claude-sonnet-4-5', maxTokens: 1000 }, tools: [noopTool], toolMode: 'native', promptCaching: false,
+        });
+        expect(JSON.stringify(adapter.sent[0].messages)).not.toContain('web_search_tool_result');
+        expect(rounds[0]!.altered.messages).toEqual([1]);
+        expect(rounds[0]!.fidelity).toBe('established');
+      }
+      const plain = new ScriptedAnthropic([{ content: [{ type: 'text', text: 'done' }], stopReason: 'end_turn' }]);
+      const { rounds } = await drive(new Membrane(plain), {
+        messages: [{ participant: 'User', content: [text('hi')] }, { participant: 'Claude', content: [text('ok'), text('')] }, { participant: 'User', content: [text('go on')] }],
+        config: { model: 'claude-sonnet-4-5', maxTokens: 1000 }, tools: [noopTool], toolMode: 'native', promptCaching: false,
+      });
+      expect(rounds[0]!.altered.messages).toEqual([]);
+    });
+
+    it.each([
+      ['NativeFormatter', () => new NativeFormatter()],
+      ['AnthropicXmlFormatter', () => new AnthropicXmlFormatter()],
+      ['CompletionsFormatter', () => new CompletionsFormatter()],
+    ] as const)('%s', (_name, formatter) => {
+      for (const messages of Object.values(conversations)) {
+        const notes = new FidelityNotes();
+        formatter().buildMessages(messages(), { assistantParticipant: 'Claude', participantMode: 'multiuser', fidelity: notes } as any);
+        expect(sorted(notes.altered)).toEqual([1]);
+      }
+    });
+
+    it('the Responses formatter sends the carrier\'s item, and names nothing', async () => {
+      const developer = { type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'DEVELOPER-ITEM' }] };
+      const { round, wire } = await responsesRound([
+        { participant: 'User', content: [{ type: 'text', text: '', rawItem: developer } as ContentBlock] },
+        { participant: 'User', content: [text('new turn')] },
+      ]);
+      expect(wire).toContain('DEVELOPER-ITEM');
+      expect(round.altered.messages).toEqual([]);
+      expect(round.fidelity).toBe('established');
     });
   });
 });

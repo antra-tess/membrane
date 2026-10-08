@@ -94,7 +94,7 @@ import {
   shedImagesToFitByteBudget, assertWithinByteBudget,
 } from './utils/image-media.js';
 import { getDefaultPricing } from './registry/default-pricing.js';
-import { FidelityNotes, followNormalizedBlocks, ownBlocks, requestFingerprint, type MessageOrigin } from './utils/fidelity.js';
+import { FidelityNotes, followNormalizedBlocks, isRawItemCarrier, ownBlocks, requestFingerprint, type MessageOrigin } from './utils/fidelity.js';
 
 // ============================================================================
 // Membrane Class
@@ -1601,8 +1601,12 @@ export class Membrane {
           // Empty text blocks are rejected by the Anthropic API. In
           // particular, zero-width rawItem carriers (opaque Responses items,
           // see parseProviderContent) must not leak here. Filter BEFORE the
-          // name prefix below would make them non-empty.
-          if (block.text === '') continue;
+          // name prefix below would make them non-empty. A carrier's item is
+          // its content, and it is not sent here.
+          if (block.text === '') {
+            if (isRawItemCarrier(block)) fidelity?.alter(messageIndex);
+            continue;
+          }
           let text = block.text;
           if (includeNamePrefix && msg.participant && !hasText) {
             text = (activeFormatter.nameFormat ?? '{name}: ').replace('{name}', () => msg.participant) + text;

@@ -9,7 +9,7 @@
  * - 'multiuser': Multiple participants, names prefixed to content
  */
 
-import { followNormalizedBlocks, ownBlocks } from '../utils/fidelity.js';
+import { followNormalizedBlocks, isRawItemCarrier, ownBlocks } from '../utils/fidelity.js';
 import type {
   NormalizedMessage,
   ContentBlock,
@@ -451,8 +451,12 @@ export class NativeFormatter implements PrefillFormatter {
         // Empty text blocks are rejected by the Anthropic API. In particular,
         // zero-width rawItem carriers (opaque provider-native items smuggled
         // through normalized history) must not leak here. Filter BEFORE the
-        // name prefix below would make them non-empty.
-        if (block.text === '') continue;
+        // name prefix below would make them non-empty. A carrier's item is
+        // its content, and it is not sent here.
+        if (block.text === '') {
+          if (isRawItemCarrier(block)) altered();
+          continue;
+        }
         let text = block.text;
         if (options.includeNames && !hasText) {
           const prefix = this.nameFormat.replace('{name}', () => participant);

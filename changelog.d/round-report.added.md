@@ -25,6 +25,17 @@
   along with the capability. All built-in formatters, and the Anthropic,
   Bedrock, Responses API and mock adapters, declare it; an undeclared path
   makes rounds `unknown`.
+- **Raw forms:** where a path sends a provider-native raw form in place of
+  the fields it stands in for (on the OpenAI Responses formatter, a block's
+  `rawItem` and a message's `openaiResponsesItems`; in the Responses API
+  adapter, a `redacted_thinking` block's reasoning `rawItem`; on the XML
+  prefill path, `rawXml`), that raw form is what the round carries. The
+  block or message counts as carried verbatim when its raw form is, and the
+  fields it stands in for are not compared with it, so a consumer that edits
+  content under a raw form must drop or replace the raw form, or the edit
+  doesn't reach the provider. A zero-width carrier (`''` text holding an
+  object `rawItem`) that a path leaves out, as every built-in path but the
+  Responses formatter does, alters its message.
 - **Provider adapters:** `ProviderRequestOptions.onContentAltered(block?)`
   takes the request's own block when one block was altered, and membrane
   attributes it to the message that block came from. Declaring adapters
