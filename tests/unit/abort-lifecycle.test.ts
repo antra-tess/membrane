@@ -107,6 +107,36 @@ describe('abort during the overloaded backoff window', () => {
   });
 });
 
+describe('abort during a retry sleep, whatever the signal was aborted with', () => {
+  // AbortController.abort(reason) rejects the sleep with that reason itself:
+  // a plain Error or a string is still the caller's cancellation.
+  for (const [label, reason] of [
+    ['a plain Error', new Error('aborted by caller')],
+    ['a string', 'stream error'],
+  ] as const) {
+    it(`stream() returns an AbortedResponse{reason:'user'} for ${label}`, async () => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(reason), 10);
+      const result = await new Membrane(new OverloadedAdapter(), SLOW_BACKOFF).stream(REQUEST, { signal: controller.signal });
+      expect(isAbortedResponse(result)).toBe(true);
+      expect((result as { reason: string }).reason).toBe('user');
+    });
+
+    it(`complete() rejects with an abort MembraneError for ${label}, keeping the reason`, async () => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(reason), 10);
+      const error = await new Membrane(new OverloadedAdapter(), SLOW_BACKOFF)
+        .complete(REQUEST, { signal: controller.signal })
+        .then(() => undefined, (e: unknown) => e);
+      expect(error).toBeInstanceOf(MembraneError);
+      expect((error as MembraneError).type).toBe('abort');
+      const raw = (error as MembraneError).rawError;
+      if (typeof reason === 'string') expect(raw).toBe(reason);
+      else expect(raw).toMatchObject({ message: 'aborted by caller' });
+    });
+  }
+});
+
 describe('abort reason reflects the cause', () => {
   it('reports a request timeout as timeout, not as a user cancellation (XML path)', async () => {
     const result = await new Membrane(new TimingOutAdapter()).stream(REQUEST, {});
