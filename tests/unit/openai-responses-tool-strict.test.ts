@@ -9,6 +9,8 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OpenAIResponsesAPIAdapter } from '../../src/providers/openai-responses-api.js';
+import { OpenAIResponsesFormatter } from '../../src/formatters/openai-responses.js';
+import { Membrane } from '../../src/membrane.js';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -65,5 +67,31 @@ describe('OpenAIResponsesAPIAdapter tool strictness', () => {
     const native = { type: 'function', name: 'native', parameters: schema };
     const [tool] = await wireTools([native]);
     expect(tool).toEqual(native);
+  });
+
+  it('sends strict: false through the full Membrane + Responses formatter path', async () => {
+    // The formatter turns membrane tools into native Responses tools before the
+    // adapter sees them, so the adapter's own defaulting never applies there.
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        id: 'resp_1', model: 'gpt-5.6', status: 'completed',
+        output: [{ type: 'message', id: 'msg_1', role: 'assistant', status: 'completed',
+          content: [{ type: 'output_text', text: 'ok' }] }],
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const membrane = new Membrane(
+      new OpenAIResponsesAPIAdapter({ apiKey: 'sk-test' }),
+      { formatter: new OpenAIResponsesFormatter(), assistantParticipant: 'Sol' },
+    );
+    await membrane.complete({
+      messages: [{ participant: 'User', content: [{ type: 'text', text: 'Save the newest image.' }] }],
+      config: { model: 'gpt-5.6', maxTokens: 64 },
+      tools: [{ name: 'save_recent_image', description: 'd', inputSchema: schema as any }],
+    });
+    const body = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body));
+    expect(body.tools).toHaveLength(1);
+    expect(body.tools[0]).toMatchObject({ type: 'function', name: 'save_recent_image', strict: false });
   });
 });
