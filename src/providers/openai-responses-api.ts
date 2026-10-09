@@ -506,7 +506,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
       // strict unless the tool says so. Verbatim Responses tools are untouched.
       if (rawTool?.type === 'function' && rawTool.name) return rawTool;
       if (rawTool?.type === 'function' && rawTool.function) {
-        return { type: 'function', strict: false, ...rawTool.function };
+        return { type: 'function', ...rawTool.function, strict: rawTool.function.strict ?? false };
       }
       return {
         type: 'function',

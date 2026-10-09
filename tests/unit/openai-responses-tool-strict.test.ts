@@ -45,6 +45,14 @@ describe('OpenAIResponsesAPIAdapter tool strictness', () => {
     expect(tool).toMatchObject({ type: 'function', name: 'read', strict: false });
   });
 
+  it('treats a present-but-undefined strict as unset, in either format', async () => {
+    const tools = await wireTools([
+      { name: 'a', description: 'd', inputSchema: schema, strict: undefined },
+      { type: 'function', function: { name: 'b', parameters: schema, strict: undefined } },
+    ]);
+    expect(tools.map((t) => t.strict)).toEqual([false, false]);
+  });
+
   it('keeps an explicit strict: true in either format', async () => {
     const tools = await wireTools([
       { name: 'a', description: 'd', inputSchema: schema, strict: true },
