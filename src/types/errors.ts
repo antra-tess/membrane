@@ -390,8 +390,13 @@ const OVERLOADED_PATTERN = /\b529\b|overloaded_error/i;
 const AUTH_REASONS = new Set(['api_key_invalid', 'api_key_expired', 'access_token_expired']);
 const AUTH_CODES = new Set(['invalid_api_key', 'authentication_error', 'unauthenticated', 'permission_error', 'permission_denied']);
 
-/** A retry hint stated only in prose: Azure OpenAI's "Please retry after 60 seconds." */
-const RETRY_AFTER_PROSE = /\bretry after (\d+(?:\.\d+)?) ?(?:s|sec|secs|seconds)?\b/i;
+/**
+ * A retry hint stated only in prose: Azure OpenAI's "Please retry after 60
+ * seconds." The unit is required and a sentence boundary must follow, so
+ * minutes, hours, a timestamp or "retry after 3 attempts" never read as a
+ * wait in seconds.
+ */
+const RETRY_AFTER_PROSE = /\bretry after (\d+(?:\.\d+)?) ?(?:s|secs?|seconds?)(?=\s*(?:[.!;,)]|$))/i;
 
 /** Socket-level failure codes on an error or its `cause` (Node, undici, Bun). */
 const NETWORK_ERROR_CODES = new Set([
@@ -575,7 +580,6 @@ export function errorFromProviderStatus(params: {
     `${params.provider} API error ${status ?? code ?? 'failure'}: ${detail}${
       fields.param ? ` (param: ${fields.param})` : ''
     }`;
-  const retryAfterMs = params.retryAfterMs ?? fields.retryAfterMs ?? retryAfterFromProse(detail);
   // A router's generic message ("Provider returned error") classifies by the
   // upstream provider's own text beside it.
   const evidence = fields.upstreamMessage ? `${detail}\n${fields.upstreamMessage}` : detail;
@@ -584,6 +588,11 @@ export function errorFromProviderStatus(params: {
     status !== undefined
       ? { ...classifyByStatus(status, code, evidence, fields.reason), httpStatus: status }
       : classifyMessage(fields.upstreamMessage ? `${message}\n${fields.upstreamMessage}` : message);
+  // A wait read from prose is believed only for an error that asks to be
+  // retried: a stated wait is a hold for anyone who honours it, and a 400
+  // whose text happens to say "retry after" asks for none.
+  const retryAfterMs = params.retryAfterMs ?? fields.retryAfterMs
+    ?? (classification.type === 'rate_limit' || classification.type === 'server' ? retryAfterFromProse(detail) : undefined);
 
   return new MembraneError({
     type: classification.type,

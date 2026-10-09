@@ -170,6 +170,29 @@ describe('retry hints and codes carried outside the usual fields', () => {
     expect(error.retryAfterMs).toBe(60_000);
   });
 
+  it('reads prose only as stated seconds, and only on an error that asks to be retried', async () => {
+    // Not a wait in seconds: another unit, a timestamp, a count of attempts.
+    for (const message of [
+      'Too many requests. Please retry after 5 minutes.',
+      'Too many requests. Retry after 1 hour',
+      'Too many requests. Please retry after 2026-10-09T15:00:00Z',
+      'Rate limited; do not retry after 3 attempts',
+    ]) {
+      stubHttpFailure(429, { error: { message } });
+      const error = await failure(new OpenAIAdapter({ apiKey: 'zz-key-openai' }));
+      expect(error.type, message).toBe('rate_limit');
+      expect(error.retryAfterMs, message).toBeUndefined();
+    }
+    // A 400 whose text says "retry after N seconds" states no wait to honour.
+    stubHttpFailure(400, { error: { message: 'Invalid model name. Please retry after 30 seconds.' } });
+    const invalid = await failure(new OpenAIAdapter({ apiKey: 'zz-key-openai' }));
+    expect(invalid.type).toBe('invalid_request');
+    expect(invalid.retryAfterMs).toBeUndefined();
+    // A transient 503 that states one is believed.
+    stubHttpFailure(503, { error: { message: 'Service is busy. Please retry after 12 seconds.' } });
+    expect((await failure(new OpenAIAdapter({ apiKey: 'zz-key-openai' }))).retryAfterMs).toBe(12_000);
+  });
+
   it('a retry-after header still wins over prose', async () => {
     stubHttpFailure(429, { error: { message: 'Please retry after 60 seconds.' } }, { 'retry-after': '7' });
     expect((await failure(new OpenAIAdapter({ apiKey: 'zz-key-openai' }))).retryAfterMs).toBe(7_000);
