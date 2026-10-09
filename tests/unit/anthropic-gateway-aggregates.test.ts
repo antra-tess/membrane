@@ -64,3 +64,34 @@ describe('Anthropic gateway aggregates keep main precedence', () => {
     expect(classify(apiError(status, code, 'plain provider failure'))).toMatchObject({ type, retryable: false, httpStatus: status, providerErrorCode: code });
   });
 });
+
+// ---------------------------------------------------------------------------
+// A wait read from prose belongs to the guarded reader alone.
+// ---------------------------------------------------------------------------
+
+describe('the Anthropic adapter reads no loose prose wait', () => {
+  const adapter = () => new AnthropicAdapter({ apiKey: 'zz-key', cacheKeepalive: { enabled: false } });
+  const classify = (error: unknown) => (adapter() as any).handleError(error, wire);
+  const apiError = (status: number | undefined, type: string, message: string, headers: Record<string, string> = {}) =>
+    new Anthropic.APIError(status, { error: { type, message } }, undefined, new Headers(headers));
+
+  it('a 400 saying "do not retry after 3 attempts" states no wait', () => {
+    const got = classify(apiError(400, 'invalid_request_error', 'invalid model; do not retry after 3 attempts'));
+    expect(got).toMatchObject({ type: 'invalid_request', retryable: false });
+    expect(got.retryAfterMs).toBeUndefined();
+  });
+
+  it('a mid-stream "retry after 5 minutes" states no wait in seconds', () => {
+    const got = classify(apiError(undefined, 'overloaded_error', 'Please retry after 5 minutes.'));
+    expect(got).toMatchObject({ retryable: true });
+    expect(got.retryAfterMs).toBeUndefined();
+  });
+
+  it('a mid-stream retryable error stating its wait in seconds is still read, by the guarded reader (control)', () => {
+    expect(classify(apiError(undefined, 'overloaded_error', 'Please retry after 5 seconds.'))).toMatchObject({ retryable: true, retryAfterMs: 5000 });
+  });
+
+  it('a retry-after header is still the wait (control)', () => {
+    expect(classify(apiError(429, 'rate_limit_error', 'zz slow down', { 'retry-after': '7' }))).toMatchObject({ type: 'rate_limit', retryAfterMs: 7000 });
+  });
+});
