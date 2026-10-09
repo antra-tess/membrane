@@ -140,11 +140,16 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
       messages: items as unknown as BuildResult['messages'],
       systemContent: hasImportedSystemItem ? undefined : options.systemPrompt,
       stopSequences: options.additionalStopSequences ?? [],
+      // `strict: false` explicitly: the Responses API treats an omitted
+      // `strict` as true, which makes every property required, so models fill
+      // optional arguments with zero values ("", 0) that handlers read as real
+      // input. Membrane tool schemas are not written for strict mode.
       nativeTools: options.tools?.map(tool => ({
         type: 'function',
         name: tool.name,
         description: tool.description,
         parameters: tool.inputSchema,
+        strict: false,
       })),
       ready: true,
     };
