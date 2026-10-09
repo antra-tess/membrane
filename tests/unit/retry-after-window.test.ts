@@ -98,7 +98,7 @@ describe('complete(): the provider wait is a lower bound', () => {
   });
 
   it('treats an unusable stated wait as one it cannot honor in the call', async () => {
-    for (const unusable of [Number.NaN, Number.POSITIVE_INFINITY, -1]) {
+    for (const unusable of [Number.NaN, Number.POSITIVE_INFINITY]) {
       const adapter = new FailingAdapter(1, limited(unusable));
       adapter.queueResponse('zz-recovered');
       const { membrane, waits } = recording(adapter, { maxRetries: 3, retryDelayMs: 1_000, maxRetryDelayMs: 30_000 });
@@ -107,6 +107,16 @@ describe('complete(): the provider wait is a lower bound', () => {
       expect(adapter.calls).toBe(1);
       expect(waits).toEqual([]);
     }
+  });
+
+  it('treats a negative stated wait as already over: the retry goes out on the backoff', async () => {
+    // A custom adapter's negative wait; the built-in readers clamp one to 0 first.
+    const adapter = new FailingAdapter(1, limited(-1_000));
+    adapter.queueResponse('zz-recovered');
+    const { membrane, waits } = recording(adapter, { maxRetries: 3, retryDelayMs: 1_000, maxRetryDelayMs: 30_000 });
+    await membrane.complete(zzRequest);
+    expect(adapter.calls).toBe(2);
+    expect(waits).toEqual([1_000]);
   });
 
   it('applies the overload schedule budget to a 529 retry-after', async () => {
@@ -419,8 +429,15 @@ describe('through the real Anthropic adapter: a wait stated in retry-after-ms', 
     expect(sent).toEqual([0, 1_000]);
   });
 
-  it('a retry-after-ms that is not a non-negative finite number leaves retry-after to state the wait (control)', async () => {
-    for (const unusable of ['zz-soon', '-5', 'Infinity', '']) {
+  it('a negative retry-after-ms is a wait already over, as in @anthropic-ai/sdk, not a reason to read retry-after', async () => {
+    const sent = network([refused(429, { 'retry-after-ms': '-5', 'retry-after': '120' }), completed]);
+    const { value } = await settle(overClaude().complete(claudeRequest));
+    expect(value?.content[0]).toMatchObject({ type: 'text', text: 'zz-recovered' });
+    expect(sent).toEqual([0, 1_000]);
+  });
+
+  it('a retry-after-ms that is not a finite number leaves retry-after to state the wait (control)', async () => {
+    for (const unusable of ['zz-soon', 'Infinity', '']) {
       const sent = network([refused(429, { 'retry-after-ms': unusable, 'retry-after': '20' }), completed]);
       const { value } = await settle(overClaude().complete(claudeRequest));
       expect(value?.content[0], unusable).toMatchObject({ type: 'text', text: 'zz-recovered' });

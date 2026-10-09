@@ -3015,17 +3015,21 @@ export class Membrane {
   /**
    * Whether a provider's stated wait can be honored inside this call. A
    * `retry-after` longer than the schedule's `maxRetryDelayMs` (or one that
-   * is not a usable number) is never retried early and never slept through:
+   * is not a finite number) is never retried early and never slept through:
    * the call ends, and the classified error carries `retryAfterMs` intact so
    * the caller (which owns pacing across calls) can wait the provider out.
    * Retrying earlier would add traffic with no evidence it can succeed;
    * sleeping longer than the configured budget would park the call.
+   *
+   * A negative wait is already over, so it fits: the backoff paces the retry
+   * (see calculateRetryDelay). The readers clamp one to 0 before it gets
+   * here; this keeps the same meaning for a wait a custom adapter states.
    */
   private providerWaitFitsRetryWindow(overloaded: boolean, errorInfo: ErrorInfo): boolean {
     const retryAfterMs = errorInfo.retryAfterMs;
     if (retryAfterMs === undefined) return true;
     const { maxRetryDelayMs } = overloaded ? this.retryConfig.overloaded : this.retryConfig;
-    return Number.isFinite(retryAfterMs) && retryAfterMs >= 0 && retryAfterMs <= maxRetryDelayMs;
+    return Number.isFinite(retryAfterMs) && retryAfterMs <= maxRetryDelayMs;
   }
 
   /**

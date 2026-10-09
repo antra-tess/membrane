@@ -595,19 +595,39 @@ function firstString(...candidates: unknown[]): string | undefined {
   return undefined;
 }
 
-/** `retry-after` is either delta-seconds or an HTTP-date (RFC 9110). */
-function parseRetryAfterHeader(value: string | null | undefined): number | undefined {
-  if (!value) return undefined;
-  const trimmed = value.trim();
-  if (/^\d+(\.\d+)?$/.test(trimmed)) return Math.round(parseFloat(trimmed) * 1000);
-  const parsedDate = Date.parse(trimmed);
-  if (!Number.isNaN(parsedDate)) return Math.max(0, parsedDate - Date.now());
+/**
+ * A provider's stated wait off response headers, in the order
+ * `@anthropic-ai/sdk` reads them: `retry-after-ms` (milliseconds), then
+ * `retry-after` (delta-seconds, or an HTTP-date per RFC 9110). Every adapter
+ * reads it here, so a wait stated only in milliseconds is honored on all of
+ * them. A wait below zero, or a date already past, is over: 0. A value that
+ * is neither a finite number nor a date states nothing, and the next header
+ * is read.
+ */
+export function statedWaitFromHeaders(
+  headers: { get(name: string): string | null } | undefined,
+): number | undefined {
+  const millis = headers?.get?.('retry-after-ms')?.trim();
+  if (millis) {
+    const ms = Number(millis);
+    if (Number.isFinite(ms)) return Math.max(0, Math.round(ms));
+  }
+  const header = headers?.get?.('retry-after')?.trim();
+  if (!header) return undefined;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds)) return Math.max(0, Math.round(seconds * 1000));
+  const at = Date.parse(header);
+  if (!Number.isNaN(at)) return Math.max(0, at - Date.now());
   return undefined;
 }
 
-/** Body-carried retry hints: google's `retryDelay: '21s'`, or bare seconds. */
+/**
+ * Body-carried retry hints: google's `retryDelay: '21s'`, or bare seconds. A
+ * negative wait is over (0), as it is in a header: the in-call rule that ends
+ * a call over an unusable wait should never see one from a reader.
+ */
 function parseRetryDelayValue(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value)) return Math.round(value * 1000);
+  if (typeof value === 'number' && Number.isFinite(value)) return Math.max(0, Math.round(value * 1000));
   if (typeof value !== 'string') return undefined;
   const seconds = value.trim().match(/^(\d+(?:\.\d+)?)s?$/);
   return seconds?.[1] ? Math.round(parseFloat(seconds[1]) * 1000) : undefined;
@@ -624,7 +644,7 @@ function retryAfterFromBody(root: Record<string, unknown>, errorNode: Record<str
     }
   }
   const millis = errorNode.retry_after_ms ?? root.retry_after_ms;
-  if (typeof millis === 'number' && Number.isFinite(millis)) return Math.round(millis);
+  if (typeof millis === 'number' && Number.isFinite(millis)) return Math.max(0, Math.round(millis));
   return parseRetryDelayValue(errorNode.retry_after ?? root.retry_after ?? errorNode.retryAfter ?? root.retryAfter);
 }
 
@@ -804,7 +824,7 @@ export function errorFromHttpResponse(
     provider,
     status: response.status,
     body: parsedBody,
-    retryAfterMs: parseRetryAfterHeader(response.headers?.get('retry-after')),
+    retryAfterMs: statedWaitFromHeaders(response.headers),
     code: amznErrorType(response.headers?.get('x-amzn-errortype')),
     rawRequest,
   });

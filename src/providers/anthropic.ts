@@ -21,6 +21,7 @@ import {
   authError,
   classifyError,
   errorFromProviderStatus,
+  statedWaitFromHeaders,
   isTypedAbortError,
   networkError,
   serverError,
@@ -961,25 +962,16 @@ export class AnthropicAdapter implements ProviderAdapter {
    * and the one nobody was reading — with the message regex kept only for
    * errors that carry no headers (mid-stream SSE rethrows).
    *
-   * `retry-after-ms` comes before `retry-after`, the order `@anthropic-ai/sdk`
-   * reads them in. With the SDK's own retries off (`maxRetries: 0`), this is
-   * the only reader, so a wait stated only in milliseconds would otherwise be
-   * lost. Zero is a stated wait of zero. A value that is not a non-negative
-   * finite number states nothing, and `retry-after` is read instead.
+   * The headers are read by the shared `statedWaitFromHeaders`, the same
+   * reader every adapter's HTTP boundary uses: `retry-after-ms` before
+   * `retry-after`, the order `@anthropic-ai/sdk` reads them in. With the SDK's
+   * own retries off (`maxRetries: 0`), this is the only reader, so a wait
+   * stated only in milliseconds would otherwise be lost. Zero is a stated wait
+   * of zero, and so is a negative wait: it is already over.
    */
   private parseRetryAfter(error: { message: string; headers?: Headers }): number | undefined {
-    const millis = error.headers?.get?.('retry-after-ms')?.trim();
-    if (millis) {
-      const ms = Number(millis);
-      if (Number.isFinite(ms) && ms >= 0) return Math.round(ms);
-    }
-    const header = error.headers?.get?.('retry-after');
-    if (header) {
-      const seconds = Number(header.trim());
-      if (Number.isFinite(seconds)) return Math.round(seconds * 1000);
-      const at = Date.parse(header.trim());
-      if (!Number.isNaN(at)) return Math.max(0, at - Date.now());
-    }
+    const stated = statedWaitFromHeaders(error.headers);
+    if (stated !== undefined) return stated;
     const match = error.message.match(/retry after (\d+)/i);
     if (match && match[1]) {
       return parseInt(match[1], 10) * 1000;
