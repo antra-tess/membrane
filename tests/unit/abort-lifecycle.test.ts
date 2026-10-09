@@ -60,6 +60,39 @@ class TimingOutAdapter implements ProviderAdapter {
   }
 }
 
+/**
+ * Rejects the way fetch does when the caller's signal fires: with the
+ * signal's own reason. For `AbortSignal.timeout()` that is a DOMException
+ * named `TimeoutError`, not `AbortError`.
+ */
+class SignalReasonAdapter implements ProviderAdapter {
+  readonly name = 'zz-signal-reason';
+
+  supportsModel(): boolean {
+    return true;
+  }
+
+  private untilAborted(options?: ProviderRequestOptions): Promise<never> {
+    return new Promise((_resolve, reject) => {
+      const signal = options?.signal;
+      if (!signal) return;
+      if (signal.aborted) {
+        reject(signal.reason);
+        return;
+      }
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+  }
+
+  async complete(_request: ProviderRequest, options?: ProviderRequestOptions): Promise<ProviderResponse> {
+    return this.untilAborted(options);
+  }
+
+  async stream(_request: ProviderRequest, _callbacks: StreamCallbacks, options?: ProviderRequestOptions): Promise<ProviderResponse> {
+    return this.untilAborted(options);
+  }
+}
+
 const REQUEST: NormalizedRequest = {
   messages: [{ participant: 'User', content: [{ type: 'text', text: 'zz hello' }] }],
   config: { model: 'zz-model', maxTokens: 100 },
@@ -170,5 +203,47 @@ describe('abort reason reflects the cause', () => {
       expect(aborted).toBeDefined();
       expect((aborted as { reason: string }).reason).toBe('timeout');
     }
+  });
+});
+
+describe("a caller's own deadline is a cancellation on every path, whatever the error is named", () => {
+  // The caller's signal is authoritative: AbortSignal.timeout() fires with a
+  // TimeoutError, and naming that a provider timeout would be classification
+  // by name, one layer up from classification by text.
+  it('rejects in flight with a TimeoutError named for the caller’s own deadline', async () => {
+    const signal = AbortSignal.timeout(10);
+    const reason = await new SignalReasonAdapter().complete({} as ProviderRequest, { signal }).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(reason).toBeInstanceOf(DOMException);
+    expect((reason as DOMException).name).toBe('TimeoutError');
+  });
+
+  for (const [label, request] of [['XML', REQUEST], ['native', NATIVE_REQUEST]] as const) {
+    it(`stream() returns AbortedResponse{reason:'user'} (${label} path)`, async () => {
+      const result = await new Membrane(new SignalReasonAdapter()).stream(request, { signal: AbortSignal.timeout(10) });
+      expect(isAbortedResponse(result)).toBe(true);
+      expect((result as { reason: string }).reason).toBe('user');
+    });
+
+    it(`streamYielding() emits aborted with reason 'user' (${label} path)`, async () => {
+      const events: StreamEvent[] = [];
+      for await (const event of new Membrane(new SignalReasonAdapter()).streamYielding(request, { signal: AbortSignal.timeout(10) })) {
+        events.push(event);
+      }
+      const aborted = events.find((e) => e.type === 'aborted');
+      expect(aborted).toBeDefined();
+      expect((aborted as { reason: string }).reason).toBe('user');
+    });
+  }
+
+  it('complete() rejects with an abort MembraneError', async () => {
+    const error = await new Membrane(new SignalReasonAdapter())
+      .complete(REQUEST, { signal: AbortSignal.timeout(10) })
+      .then(() => undefined, (e: unknown) => e);
+    expect(error).toBeInstanceOf(MembraneError);
+    expect((error as MembraneError).type).toBe('abort');
+    expect((error as MembraneError).retryable).toBe(false);
   });
 });

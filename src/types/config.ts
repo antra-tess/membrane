@@ -13,7 +13,13 @@ import type { PrefillFormatter } from '../formatters/types.js';
 // ============================================================================
 
 export interface RetryConfig {
-  /** Maximum number of retry attempts (default: 3) */
+  /**
+   * Bound on TOTAL attempts for a retryable error, the first included: 3
+   * means one try and up to two retries; 0 or 1 means no retries
+   * (default: 0). A retryable rate limit (429) gets at least 5 attempts
+   * whatever this says, and a provider capacity error (529) follows
+   * `overloaded`, whose bound is also total attempts.
+   */
   maxRetries: number;
 
   /** Initial retry delay in milliseconds (default: 1000) */

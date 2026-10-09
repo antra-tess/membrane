@@ -448,6 +448,19 @@ export class Membrane {
         // A not-ready build never reached the provider. Preserve its public
         // wait-and-rebuild subtype instead of wrapping it as a transport error.
         if (error instanceof MembraneNotReadyError) throw error;
+        // The caller's signal fired: a cancellation, whatever the in-flight
+        // error is named (AbortSignal.timeout() rejects with a TimeoutError),
+        // and never retried. The error stays on it as evidence.
+        if (options.signal?.aborted) {
+          if (isTypedAbortError(error)) throw this.attachRawRequest(error, rawRequest);
+          throw new MembraneError({
+            type: 'abort',
+            message: 'Request was aborted',
+            retryable: false,
+            rawError: error,
+            rawRequest,
+          });
+        }
         const classifiedError = this.attachRawRequest(error, rawRequest);
         const errorInfo = classifyError(classifiedError);
 
@@ -1378,8 +1391,8 @@ export class Membrane {
 
       return response;
     } catch (error) {
-      // Check if this is an abort error
-      if (this.isAbortError(error)) {
+      // A cancellation, by the caller's signal or a typed abort.
+      if (this.isCancellation(error, signal)) {
         // Only use NEW content (after initial prefill) for partial content
         const fullAccumulated = parser.getAccumulated();
         const newContent = fullAccumulated.slice(initialPrefillLength);
@@ -1664,8 +1677,8 @@ export class Membrane {
         },
       };
     } catch (error) {
-      // Check if this is an abort error
-      if (this.isAbortError(error)) {
+      // A cancellation, by the caller's signal or a typed abort.
+      if (this.isCancellation(error, signal)) {
         return this.buildAbortedResponse(
           allTextAccumulated,
           turnUsage.total,
@@ -3032,6 +3045,10 @@ export class Membrane {
     // stampede it's backing off from. [delay/2, delay) keeps the wait long.
     const backoffMs = overloaded ? Math.floor(delay / 2 + Math.random() * (delay / 2)) : delay;
 
+    // A stated wait can only lengthen the backoff, and the ceiling still caps
+    // it. So a zero or negative wait (a 429 with retry_after_ms: -1000) loses
+    // to the backoff and can't make the loop spin. Keep the max(): never trust
+    // a stated wait alone to pace retries.
     const retryAfterMs = errorInfo?.retryAfterMs;
     if (retryAfterMs === undefined) return backoffMs;
     return Math.min(maxRetryDelayMs, Math.max(backoffMs, retryAfterMs));
@@ -3116,6 +3133,19 @@ export class Membrane {
    */
   private isAbortError(error: unknown): boolean {
     return isTimeoutAbortError(error) || isTypedAbortError(error);
+  }
+
+  /**
+   * Whether a caught failure is a cancellation, judged by provenance first.
+   * If the caller's own signal has fired, the request was cancelled whatever
+   * the in-flight error is named: `AbortSignal.timeout()` rejects a fetch with
+   * a DOMException named `TimeoutError`, not `AbortError`, and classifying that
+   * by its name would report the caller's own deadline as a provider timeout
+   * on one path and a cancellation on another. Otherwise only a typed abort
+   * counts (see isAbortError).
+   */
+  private isCancellation(error: unknown, signal?: AbortSignal): boolean {
+    return signal?.aborted === true || this.isAbortError(error);
   }
 
   /**
@@ -3857,7 +3887,7 @@ export class Membrane {
 
       stream.emit({ type: 'complete', response });
     } catch (error) {
-      if (this.isAbortError(error)) {
+      if (this.isCancellation(error, stream.signal)) {
         const fullAccumulated = parser.getAccumulated();
         const newContent = fullAccumulated.slice(initialPrefillLength);
         stream.emit({
@@ -4201,7 +4231,7 @@ export class Membrane {
 
       stream.emit({ type: 'complete', response });
     } catch (error) {
-      if (this.isAbortError(error)) {
+      if (this.isCancellation(error, stream.signal)) {
         stream.emit({
           type: 'aborted',
           reason: this.abortReason(error, stream.signal),
