@@ -448,6 +448,19 @@ export class Membrane {
         // A not-ready build never reached the provider. Preserve its public
         // wait-and-rebuild subtype instead of wrapping it as a transport error.
         if (error instanceof MembraneNotReadyError) throw error;
+        // The caller's signal fired: a cancellation, whatever the in-flight
+        // error is named (AbortSignal.timeout() rejects with a TimeoutError),
+        // and never retried. The error stays on it as evidence.
+        if (options.signal?.aborted) {
+          if (isTypedAbortError(error)) throw this.attachRawRequest(error, rawRequest);
+          throw new MembraneError({
+            type: 'abort',
+            message: 'Request was aborted',
+            retryable: false,
+            rawError: error,
+            rawRequest,
+          });
+        }
         const classifiedError = this.attachRawRequest(error, rawRequest);
         const errorInfo = classifyError(classifiedError);
 
@@ -483,6 +496,18 @@ export class Membrane {
           try {
             await this.sleep(delay, options.signal);
           } catch (sleepError) {
+            // The caller's signal fired: that is a cancellation whatever it
+            // was aborted with (a plain Error, a string), not an unknown
+            // failure. The reason stays on the error as evidence.
+            if (options.signal?.aborted) {
+              throw new MembraneError({
+                type: 'abort',
+                message: 'Request was aborted',
+                retryable: false,
+                rawError: sleepError,
+                rawRequest,
+              });
+            }
             throw this.attachRawRequest(sleepError, rawRequest);
           }
           continue;
@@ -633,7 +658,10 @@ export class Membrane {
           try {
             await this.sleep(delay, options.signal);
           } catch (sleepError) {
-            if (this.isAbortError(sleepError)) {
+            // The caller's signal is authoritative: whatever it was aborted
+            // with — a DOMException, a plain Error, a string — this is the
+            // documented cancellation, not an error to throw.
+            if (options.signal?.aborted || this.isAbortError(sleepError)) {
               return this.buildAbortedResponse(
                 '',
                 { inputTokens: 0, outputTokens: 0 },
@@ -1363,8 +1391,8 @@ export class Membrane {
 
       return response;
     } catch (error) {
-      // Check if this is an abort error
-      if (this.isAbortError(error)) {
+      // A cancellation, by the caller's signal or a typed abort.
+      if (this.isCancellation(error, signal)) {
         // Only use NEW content (after initial prefill) for partial content
         const fullAccumulated = parser.getAccumulated();
         const newContent = fullAccumulated.slice(initialPrefillLength);
@@ -1649,8 +1677,8 @@ export class Membrane {
         },
       };
     } catch (error) {
-      // Check if this is an abort error
-      if (this.isAbortError(error)) {
+      // A cancellation, by the caller's signal or a typed abort.
+      if (this.isCancellation(error, signal)) {
         return this.buildAbortedResponse(
           allTextAccumulated,
           turnUsage.total,
@@ -2987,17 +3015,21 @@ export class Membrane {
   /**
    * Whether a provider's stated wait can be honored inside this call. A
    * `retry-after` longer than the schedule's `maxRetryDelayMs` (or one that
-   * is not a usable number) is never retried early and never slept through:
+   * is not a finite number) is never retried early and never slept through:
    * the call ends, and the classified error carries `retryAfterMs` intact so
    * the caller (which owns pacing across calls) can wait the provider out.
    * Retrying earlier would add traffic with no evidence it can succeed;
    * sleeping longer than the configured budget would park the call.
+   *
+   * A negative wait is already over, so it fits: the backoff paces the retry
+   * (see calculateRetryDelay). The readers clamp one to 0 before it gets
+   * here; this keeps the same meaning for a wait a custom adapter states.
    */
   private providerWaitFitsRetryWindow(overloaded: boolean, errorInfo: ErrorInfo): boolean {
     const retryAfterMs = errorInfo.retryAfterMs;
     if (retryAfterMs === undefined) return true;
     const { maxRetryDelayMs } = overloaded ? this.retryConfig.overloaded : this.retryConfig;
-    return Number.isFinite(retryAfterMs) && retryAfterMs >= 0 && retryAfterMs <= maxRetryDelayMs;
+    return Number.isFinite(retryAfterMs) && retryAfterMs <= maxRetryDelayMs;
   }
 
   /**
@@ -3017,6 +3049,10 @@ export class Membrane {
     // stampede it's backing off from. [delay/2, delay) keeps the wait long.
     const backoffMs = overloaded ? Math.floor(delay / 2 + Math.random() * (delay / 2)) : delay;
 
+    // A stated wait can only lengthen the backoff, and the ceiling still caps
+    // it. So a zero or negative wait (a 429 with retry_after_ms: -1000) loses
+    // to the backoff and can't make the loop spin. Keep the max(): never trust
+    // a stated wait alone to pace retries.
     const retryAfterMs = errorInfo?.retryAfterMs;
     if (retryAfterMs === undefined) return backoffMs;
     return Math.min(maxRetryDelayMs, Math.max(backoffMs, retryAfterMs));
@@ -3101,6 +3137,19 @@ export class Membrane {
    */
   private isAbortError(error: unknown): boolean {
     return isTimeoutAbortError(error) || isTypedAbortError(error);
+  }
+
+  /**
+   * Whether a caught failure is a cancellation, judged by provenance first.
+   * If the caller's own signal has fired, the request was cancelled whatever
+   * the in-flight error is named: `AbortSignal.timeout()` rejects a fetch with
+   * a DOMException named `TimeoutError`, not `AbortError`, and classifying that
+   * by its name would report the caller's own deadline as a provider timeout
+   * on one path and a cancellation on another. Otherwise only a typed abort
+   * counts (see isAbortError).
+   */
+  private isCancellation(error: unknown, signal?: AbortSignal): boolean {
+    return signal?.aborted === true || this.isAbortError(error);
   }
 
   /**
@@ -3842,7 +3891,7 @@ export class Membrane {
 
       stream.emit({ type: 'complete', response });
     } catch (error) {
-      if (this.isAbortError(error)) {
+      if (this.isCancellation(error, stream.signal)) {
         const fullAccumulated = parser.getAccumulated();
         const newContent = fullAccumulated.slice(initialPrefillLength);
         stream.emit({
@@ -4186,7 +4235,7 @@ export class Membrane {
 
       stream.emit({ type: 'complete', response });
     } catch (error) {
-      if (this.isAbortError(error)) {
+      if (this.isCancellation(error, stream.signal)) {
         stream.emit({
           type: 'aborted',
           reason: this.abortReason(error, stream.signal),

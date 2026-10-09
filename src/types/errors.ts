@@ -493,6 +493,14 @@ interface ProviderErrorFields {
   code?: string;
   param?: string;
   retryAfterMs?: number;
+  /** google.rpc.ErrorInfo `reason` from `details[]`, e.g. `API_KEY_INVALID`. */
+  reason?: string;
+  /**
+   * The upstream provider's own message, when a router wraps it: OpenRouter
+   * puts the provider's raw error body in `error.metadata.raw` beside a
+   * generic "Provider returned error". Read for classification only.
+   */
+  upstreamMessage?: string;
 }
 
 /**
@@ -539,14 +547,46 @@ const NON_RETRYABLE_RATE_LIMIT_CODES = new Set([
   'insufficient_credits',
 ]);
 
+/**
+ * The forms providers use for a request that exceeds the model's context.
+ * Anthropic: "input length and `max_tokens` exceed context limit: N + M >
+ * L" and "prompt is too long: N tokens > M maximum"; Gemini: "The input
+ * token count (N) exceeds the maximum number of input tokens allowed (M)";
+ * OpenAI: `context_length_exceeded` / "maximum context length". Read only
+ * under a 400/422 (or with no status at all, after the 5xx arm).
+ */
 const CONTEXT_LENGTH_PATTERN =
-  /context[ _-]?length|context window|maximum context|too many tokens|token limit|prompt is too long|too long/i;
+  /context[ _-]?(?:length|limit|window)|maximum context|too many tokens|token limit|prompt is too long|too long|exceeds? the maximum number of (?:input )?tokens|input token count/i;
 
 const RATE_LIMIT_PATTERN = /\b429\b|rate[ _-]?limit|too many requests/i;
 
 const SERVER_STATUS_PATTERN = /\b(500|502|503|504|529)\b/;
 
 const OVERLOADED_PATTERN = /\b529\b|overloaded_error/i;
+
+/**
+ * Structured evidence that a 400 is a credential failure, not a malformed
+ * request: Google answers a bad key with HTTP 400 INVALID_ARGUMENT whose
+ * `details[]` ErrorInfo reason is `API_KEY_INVALID`, and some gateways send
+ * OpenAI-style `invalid_api_key` codes with a 400. The status stays as sent.
+ */
+const AUTH_REASONS = new Set(['api_key_invalid', 'api_key_expired', 'access_token_expired']);
+const AUTH_CODES = new Set(['invalid_api_key', 'authentication_error', 'unauthenticated', 'permission_error', 'permission_denied']);
+
+/**
+ * A retry hint stated only in prose: Azure OpenAI's "Please retry after 60
+ * seconds." The unit is required and a sentence boundary must follow, so
+ * minutes, hours, a timestamp or "retry after 3 attempts" never read as a
+ * wait in seconds.
+ */
+const RETRY_AFTER_PROSE = /\bretry after (\d+(?:\.\d+)?) ?(?:s|secs?|seconds?)(?=\s*(?:[.!;,)]|$))/i;
+
+/** Socket-level failure codes on an error or its `cause` (Node, undici, Bun). */
+const NETWORK_ERROR_CODES = new Set([
+  'econnreset', 'econnrefused', 'enotfound', 'eai_again', 'epipe', 'ehostunreach', 'enetunreach', 'econnaborted',
+  'und_err_socket', 'connectionrefused', 'connectionclosed', 'connectionreset',
+]);
+const TIMEOUT_ERROR_CODES = new Set(['etimedout', 'und_err_connect_timeout', 'und_err_headers_timeout', 'und_err_body_timeout']);
 
 function firstString(...candidates: unknown[]): string | undefined {
   for (const candidate of candidates) {
@@ -555,19 +595,39 @@ function firstString(...candidates: unknown[]): string | undefined {
   return undefined;
 }
 
-/** `retry-after` is either delta-seconds or an HTTP-date (RFC 9110). */
-function parseRetryAfterHeader(value: string | null | undefined): number | undefined {
-  if (!value) return undefined;
-  const trimmed = value.trim();
-  if (/^\d+(\.\d+)?$/.test(trimmed)) return Math.round(parseFloat(trimmed) * 1000);
-  const parsedDate = Date.parse(trimmed);
-  if (!Number.isNaN(parsedDate)) return Math.max(0, parsedDate - Date.now());
+/**
+ * A provider's stated wait off response headers, in the order
+ * `@anthropic-ai/sdk` reads them: `retry-after-ms` (milliseconds), then
+ * `retry-after` (delta-seconds, or an HTTP-date per RFC 9110). Every adapter
+ * reads it here, so a wait stated only in milliseconds is honored on all of
+ * them. A wait below zero, or a date already past, is over: 0. A value that
+ * is neither a finite number nor a date states nothing, and the next header
+ * is read.
+ */
+export function statedWaitFromHeaders(
+  headers: { get(name: string): string | null } | undefined,
+): number | undefined {
+  const millis = headers?.get?.('retry-after-ms')?.trim();
+  if (millis) {
+    const ms = Number(millis);
+    if (Number.isFinite(ms)) return Math.max(0, Math.round(ms));
+  }
+  const header = headers?.get?.('retry-after')?.trim();
+  if (!header) return undefined;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds)) return Math.max(0, Math.round(seconds * 1000));
+  const at = Date.parse(header);
+  if (!Number.isNaN(at)) return Math.max(0, at - Date.now());
   return undefined;
 }
 
-/** Body-carried retry hints: google's `retryDelay: '21s'`, or bare seconds. */
+/**
+ * Body-carried retry hints: google's `retryDelay: '21s'`, or bare seconds. A
+ * negative wait is over (0), as it is in a header: the in-call rule that ends
+ * a call over an unusable wait should never see one from a reader.
+ */
 function parseRetryDelayValue(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value)) return Math.round(value * 1000);
+  if (typeof value === 'number' && Number.isFinite(value)) return Math.max(0, Math.round(value * 1000));
   if (typeof value !== 'string') return undefined;
   const seconds = value.trim().match(/^(\d+(?:\.\d+)?)s?$/);
   return seconds?.[1] ? Math.round(parseFloat(seconds[1]) * 1000) : undefined;
@@ -584,7 +644,7 @@ function retryAfterFromBody(root: Record<string, unknown>, errorNode: Record<str
     }
   }
   const millis = errorNode.retry_after_ms ?? root.retry_after_ms;
-  if (typeof millis === 'number' && Number.isFinite(millis)) return Math.round(millis);
+  if (typeof millis === 'number' && Number.isFinite(millis)) return Math.max(0, Math.round(millis));
   return parseRetryDelayValue(errorNode.retry_after ?? root.retry_after ?? errorNode.retryAfter ?? root.retryAfter);
 }
 
@@ -614,6 +674,13 @@ export function extractProviderErrorFields(body: unknown): ProviderErrorFields {
   const errorNode =
     nested !== null && typeof nested === 'object' ? (nested as Record<string, unknown>) : root;
 
+  const metadata = errorNode.metadata;
+  const upstreamRaw =
+    metadata !== null && typeof metadata === 'object' ? (metadata as Record<string, unknown>).raw : undefined;
+  const upstream = upstreamRaw !== undefined && upstreamRaw !== null && upstreamRaw !== body
+    ? extractProviderErrorFields(upstreamRaw)
+    : undefined;
+
   return {
     message: firstString(errorNode.message, errorNode.Message, root.message, root.Message, errorNode.detail),
     // A numeric code can be an HTTP-shaped status or a provider-local number.
@@ -623,16 +690,35 @@ export function extractProviderErrorFields(body: unknown): ProviderErrorFields {
       ?? firstString(errorNode.code, errorNode.status, errorNode.type, root.__type, root.code),
     param: firstString(errorNode.param),
     retryAfterMs: retryAfterFromBody(root, errorNode),
+    reason: errorInfoReason(errorNode.details ?? root.details),
+    upstreamMessage: upstream?.message ?? (typeof upstreamRaw === 'string' ? upstreamRaw : undefined),
   };
+}
+
+/** The `reason` of a google.rpc.ErrorInfo entry in `details[]`, if any. */
+function errorInfoReason(details: unknown): string | undefined {
+  if (!Array.isArray(details)) return undefined;
+  for (const detail of details) {
+    if (detail && typeof detail === 'object') {
+      const reason = (detail as Record<string, unknown>).reason;
+      if (typeof reason === 'string' && reason.trim() !== '') return reason;
+    }
+  }
+  return undefined;
 }
 
 function classifyByStatus(
   status: number,
   code: string | undefined,
   message: string,
+  reason?: string,
 ): { type: MembraneErrorType; retryable: boolean } {
   const normalizedCode = code?.toLowerCase() ?? '';
 
+  if ((status === 400 || status === 422)
+    && (AUTH_REASONS.has(reason?.toLowerCase() ?? '') || AUTH_CODES.has(normalizedCode))) {
+    return { type: 'auth', retryable: false };
+  }
   if (status === 429) {
     return { type: 'rate_limit', retryable: !NON_RETRYABLE_RATE_LIMIT_CODES.has(normalizedCode) };
   }
@@ -683,11 +769,13 @@ export function errorFromProviderStatus(params: {
   body?: unknown;
   message?: string;
   retryAfterMs?: number | undefined;
+  /** A provider code carried outside the body (Bedrock's `x-amzn-ErrorType` header), used when the body names none. */
+  code?: string | undefined;
   rawError?: unknown;
   rawRequest?: unknown;
 }): MembraneError {
   const fields = extractProviderErrorFields(params.body);
-  const code = fields.code;
+  const code = fields.code ?? params.code;
   const status = params.status ?? statusForProviderCode(code) ?? params.fallbackStatus;
   const detail = firstString(params.message, fields.message) ?? renderBody(params.body);
   const message =
@@ -695,12 +783,19 @@ export function errorFromProviderStatus(params: {
     `${params.provider} API error ${status ?? code ?? 'failure'}: ${detail}${
       fields.param ? ` (param: ${fields.param})` : ''
     }`;
-  const retryAfterMs = params.retryAfterMs ?? fields.retryAfterMs;
+  // A router's generic message ("Provider returned error") classifies by the
+  // upstream provider's own text beside it.
+  const evidence = fields.upstreamMessage ? `${detail}\n${fields.upstreamMessage}` : detail;
 
   const classification =
     status !== undefined
-      ? { ...classifyByStatus(status, code, detail), httpStatus: status }
-      : classifyMessage(message);
+      ? { ...classifyByStatus(status, code, evidence, fields.reason), httpStatus: status }
+      : classifyMessage(fields.upstreamMessage ? `${message}\n${fields.upstreamMessage}` : message);
+  // A wait read from prose is believed only for an error that asks to be
+  // retried: a stated wait is a hold for anyone who honours it, and a 400
+  // whose text happens to say "retry after" asks for none.
+  const retryAfterMs = params.retryAfterMs ?? fields.retryAfterMs
+    ?? (classification.type === 'rate_limit' || classification.type === 'server' ? retryAfterFromProse(detail) : undefined);
 
   return new MembraneError({
     type: classification.type,
@@ -729,9 +824,22 @@ export function errorFromHttpResponse(
     provider,
     status: response.status,
     body: parsedBody,
-    retryAfterMs: parseRetryAfterHeader(response.headers?.get('retry-after')),
+    retryAfterMs: statedWaitFromHeaders(response.headers),
+    code: amznErrorType(response.headers?.get('x-amzn-errortype')),
     rawRequest,
   });
+}
+
+/** Bedrock names its exception in a header: `ThrottlingException:http://internal.amazon.com/...`. */
+function amznErrorType(value: string | null | undefined): string | undefined {
+  const name = value?.split(':')[0]?.trim();
+  return name ? name : undefined;
+}
+
+/** A retry hint stated only in the message, when neither header nor body carries one. */
+function retryAfterFromProse(message: string): number | undefined {
+  const seconds = message.match(RETRY_AFTER_PROSE)?.[1];
+  return seconds ? Math.round(parseFloat(seconds) * 1000) : undefined;
 }
 
 /**
@@ -854,6 +962,27 @@ function classifyMessage(rawMessage: string): {
   return { type: 'unknown', retryable: false };
 }
 
+/**
+ * A transport failure named by its code, on the error or its `cause`: Node's
+ * `fetch failed` hides `ECONNREFUSED` in `cause.code`, and Bun's "Unable to
+ * connect. Is the computer able to access the url?" carries
+ * `code: 'ConnectionRefused'` (the same text for a DNS failure). The message
+ * names neither.
+ */
+function classifySocketCode(error: Error): { type: MembraneErrorType; retryable: boolean; httpStatus?: number } | undefined {
+  const codes = [
+    (error as { code?: unknown }).code,
+    ((error as { cause?: unknown }).cause as { code?: unknown } | undefined)?.code,
+  ];
+  for (const code of codes) {
+    if (typeof code !== 'string') continue;
+    const key = code.toLowerCase();
+    if (NETWORK_ERROR_CODES.has(key)) return { type: 'network', retryable: true };
+    if (TIMEOUT_ERROR_CODES.has(key)) return { type: 'timeout', retryable: true };
+  }
+  return undefined;
+}
+
 export function classifyError(error: unknown): ErrorInfo {
   if (error instanceof MembraneError) {
     return error.toErrorInfo();
@@ -874,7 +1003,7 @@ export function classifyError(error: unknown): ErrorInfo {
       };
     }
 
-    const classification = classifyMessage(error.message);
+    const classification = classifySocketCode(error) ?? classifyMessage(error.message);
     if (classification.type !== 'unknown') {
       return {
         type: classification.type,

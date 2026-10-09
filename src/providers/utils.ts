@@ -44,12 +44,13 @@ function readDurationSeconds(...candidates: unknown[]): number | undefined {
   return undefined;
 }
 
+/** A frame's stated wait. Below zero it is over: 0, as in a header or a body. */
 function readFrameRetryAfterMs(fields: StreamErrorFrameFields): number | undefined {
   const explicitMilliseconds = readNumericField(fields.retry_after_ms, fields.retryAfterMs);
-  if (explicitMilliseconds !== undefined) return explicitMilliseconds;
+  if (explicitMilliseconds !== undefined) return Math.max(0, Math.round(explicitMilliseconds));
 
   const seconds = readDurationSeconds(fields.retry_after, fields.retryAfter, fields.retryDelay, fields.retry_delay);
-  return seconds === undefined ? undefined : Math.round(seconds * 1000);
+  return seconds === undefined ? undefined : Math.max(0, Math.round(seconds * 1000));
 }
 
 /**
