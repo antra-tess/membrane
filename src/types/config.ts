@@ -17,8 +17,8 @@ export interface RetryConfig {
    * Bound on TOTAL attempts for a retryable error, the first included: 3
    * means one try and up to two retries; 0 or 1 means no retries
    * (default: 0). A retryable rate limit (429) gets at least 5 attempts
-   * whatever this says, and a provider capacity error (529) follows
-   * `overloaded`, whose bound is also total attempts.
+   * whatever this says, and a provider capacity error (529) gets the larger
+   * of this and `overloaded.maxRetries`, on the `overloaded` schedule.
    */
   maxRetries: number;
 

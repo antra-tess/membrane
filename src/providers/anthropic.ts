@@ -958,24 +958,24 @@ export class AnthropicAdapter implements ProviderAdapter {
   }
 
   /**
-   * The stated wait off the response headers first — the authoritative source,
-   * and the one nobody was reading — with the message regex kept only for
-   * errors that carry no headers (mid-stream SSE rethrows).
-   *
-   * The headers are read by the shared `statedWaitFromHeaders`, the same
-   * reader every adapter's HTTP boundary uses: `retry-after-ms` before
-   * `retry-after`, the order `@anthropic-ai/sdk` reads them in. With the SDK's
-   * own retries off (`maxRetries: 0`), this is the only reader, so a wait
-   * stated only in milliseconds would otherwise be lost. Zero is a stated wait
-   * of zero, and so is a negative wait: it is already over.
+   * The stated wait off the response headers: the authoritative source, and
+   * the one nobody was reading. They are read by the shared
+   * `statedWaitFromHeaders`, the same reader every adapter's HTTP boundary
+   * uses: `retry-after-ms` before `retry-after`, the order `@anthropic-ai/sdk`
+   * reads them in. With the SDK's own retries off (`maxRetries: 0`), this is
+   * the only header reader, so a wait stated only in milliseconds would
+   * otherwise be lost. Zero is a stated wait of zero, and so is a negative
+   * wait: it is already over. An error that carries no headers (a mid-stream
+   * SSE rethrow) states no wait here; errorFromProviderStatus then reads its
+   * message through the guarded prose reader.
    */
-  private parseRetryAfter(error: { message: string; headers?: Headers }): number | undefined {
+  private parseRetryAfter(error: { headers?: Headers }): number | undefined {
     const stated = statedWaitFromHeaders(error.headers);
     if (stated !== undefined) return stated;
-    const match = error.message.match(/retry after (\d+)/i);
-    if (match && match[1]) {
-      return parseInt(match[1], 10) * 1000;
-    }
+    // No prose fallback here: a wait read from a message belongs to the
+    // shared, guarded reader (errorFromProviderStatus), which believes one only
+    // as stated seconds on a retryable error. A loose /retry after (\d+)/ over
+    // any status made 'do not retry after 3 attempts' a three-second hold.
     return undefined;
   }
 }

@@ -93,6 +93,35 @@ class SignalReasonAdapter implements ProviderAdapter {
   }
 }
 
+/** One native tool round, then (if asked) a final answer. */
+class ToolRoundAdapter implements ProviderAdapter {
+  readonly name = 'zz-tool-round';
+  calls = 0;
+
+  supportsModel(): boolean {
+    return true;
+  }
+
+  async complete(): Promise<ProviderResponse> {
+    throw new Error('not used');
+  }
+
+  async stream(_request: ProviderRequest, callbacks: StreamCallbacks): Promise<ProviderResponse> {
+    this.calls++;
+    if (this.calls === 1) {
+      callbacks.onChunk('zz checking');
+      return {
+        content: [{ type: 'text', text: 'zz checking' }, { type: 'tool_use', id: 'zz-tu-1', name: 'zz_noop', input: {} }] as never,
+        stopReason: 'tool_use' as never,
+        usage: { inputTokens: 10, outputTokens: 5 },
+        raw: {},
+      };
+    }
+    callbacks.onChunk('zz done');
+    return { content: [{ type: 'text', text: 'zz done' }] as never, stopReason: 'end_turn' as never, usage: { inputTokens: 10, outputTokens: 5 }, raw: {} };
+  }
+}
+
 const REQUEST: NormalizedRequest = {
   messages: [{ participant: 'User', content: [{ type: 'text', text: 'zz hello' }] }],
   config: { model: 'zz-model', maxTokens: 100 },
@@ -245,5 +274,31 @@ describe("a caller's own deadline is a cancellation on every path, whatever the 
     expect(error).toBeInstanceOf(MembraneError);
     expect((error as MembraneError).type).toBe('abort');
     expect((error as MembraneError).retryable).toBe(false);
+  });
+});
+
+describe('a cancel while the stream waits for tool results reports one abort', () => {
+  // cancel() emits aborted itself and rejects the pending tool wait with a
+  // plain Error; the catch must not report the same cancellation again.
+  it('streamYielding() emits exactly one aborted when the consumer cancels at the tool wait', async () => {
+    const stream = new Membrane(new ToolRoundAdapter()).streamYielding(NATIVE_REQUEST, {});
+    const events: StreamEvent[] = [];
+    for await (const event of stream) {
+      events.push(event);
+      if (event.type === 'tool-calls') setTimeout(() => stream.cancel(), 10);
+    }
+    const aborted = events.filter((e) => e.type === 'aborted');
+    expect(events.map((e) => e.type)).toContain('tool-calls');
+    expect(aborted).toHaveLength(1);
+    expect((aborted[0] as { reason: string }).reason).toBe('user');
+  });
+
+  it("streamYielding() emits exactly one aborted when the caller's own deadline fires at the tool wait", async () => {
+    const stream = new Membrane(new ToolRoundAdapter()).streamYielding(NATIVE_REQUEST, { signal: AbortSignal.timeout(30) });
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+    const aborted = events.filter((e) => e.type === 'aborted');
+    expect(aborted).toHaveLength(1);
+    expect((aborted[0] as { reason: string }).reason).toBe('user');
   });
 });
