@@ -942,11 +942,12 @@ export class AnthropicAdapter implements ProviderAdapter {
   }
 
   /**
-   * `retry-after` off the response headers first — the authoritative source,
-   * and the one nobody was reading — with the message regex kept only for
-   * errors that carry no headers (mid-stream SSE rethrows).
+   * `retry-after` off the response headers: the authoritative source, and the
+   * one nobody was reading. An error that carries no headers (a mid-stream SSE
+   * rethrow) states no wait here; errorFromProviderStatus then reads its
+   * message through the guarded prose reader.
    */
-  private parseRetryAfter(error: { message: string; headers?: Headers }): number | undefined {
+  private parseRetryAfter(error: { headers?: Headers }): number | undefined {
     const header = error.headers?.get?.('retry-after');
     if (header) {
       const seconds = Number(header.trim());
@@ -954,10 +955,10 @@ export class AnthropicAdapter implements ProviderAdapter {
       const at = Date.parse(header.trim());
       if (!Number.isNaN(at)) return Math.max(0, at - Date.now());
     }
-    const match = error.message.match(/retry after (\d+)/i);
-    if (match && match[1]) {
-      return parseInt(match[1], 10) * 1000;
-    }
+    // No prose fallback here: a wait read from a message belongs to the
+    // shared, guarded reader (errorFromProviderStatus), which believes one only
+    // as stated seconds on a retryable error. A loose /retry after (\d+)/ over
+    // any status made 'do not retry after 3 attempts' a three-second hold.
     return undefined;
   }
 }

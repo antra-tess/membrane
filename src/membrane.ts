@@ -3841,7 +3841,12 @@ export class Membrane {
 
       stream.emit({ type: 'complete', response });
     } catch (error) {
-      if (this.isCancellation(error, stream.signal)) {
+      // cancel() has already emitted the terminal aborted event, for the
+      // consumer's cancel and for the caller's signal alike (linked through
+      // onExternalAbort), and it rejects a pending tool wait with a plain
+      // Error. Reporting again here would deliver a second aborted.
+      if (stream.isCancelled) return;
+      if (this.isAbortError(error)) {
         const fullAccumulated = parser.getAccumulated();
         const newContent = fullAccumulated.slice(initialPrefillLength);
         stream.emit({
@@ -4185,7 +4190,9 @@ export class Membrane {
 
       stream.emit({ type: 'complete', response });
     } catch (error) {
-      if (this.isCancellation(error, stream.signal)) {
+      // As above: a cancelled stream has already reported its abort.
+      if (stream.isCancelled) return;
+      if (this.isAbortError(error)) {
         stream.emit({
           type: 'aborted',
           reason: this.abortReason(error, stream.signal),
