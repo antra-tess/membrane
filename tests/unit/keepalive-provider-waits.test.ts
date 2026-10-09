@@ -190,6 +190,31 @@ describe('keepalive model holds', () => {
     expect(holdsSoFar()[before]).toBe(5 * MIN);
   });
 
+  it('an accepted poke that writes instead of reading still ends the run: the next refusal backs off one check interval', async () => {
+    // After a storm the cache has expired, so the first accepted poke writes.
+    let mode: 'refuse' | 'write' = 'refuse';
+    const refusedAt: number[] = [];
+    const wrote = { usage: { cache_read_input_tokens: 0, cache_creation_input_tokens: 5000 } };
+    const send = vi.fn(() => {
+      if (mode === 'write') return Promise.resolve(wrote);
+      refusedAt.push(Date.now());
+      return Promise.reject(new Classified('zz 529', true, undefined));
+    });
+    const { ka, events } = setup(send, { maxIneffective: 99 });
+    for (const system of ['one', 'two', 'three', 'four']) ka.record(wire('claude-a', system), undefined, 'stream');
+    const holds = () => (events.filter((e) => e.type === 'held') as Array<{ until: number }>).map((e, i) => e.until - refusedAt[i]!);
+    await vi.advanceTimersByTimeAsync(80 * MIN);
+    expect(holds().slice(0, 3)).toEqual([5 * MIN, 10 * MIN, 20 * MIN]);
+    mode = 'write';
+    await vi.advanceTimersByTimeAsync(60 * MIN);
+    expect(events.some((e) => e.type === 'ineffective')).toBe(true);
+    mode = 'refuse';
+    const before = refusedAt.length;
+    await vi.advanceTimersByTimeAsync(60 * MIN);
+    expect(refusedAt.length).toBeGreaterThan(before);
+    expect(holds()[before]).toBe(5 * MIN);
+  });
+
   it('a poke refused as NOT retryable still counts toward the breaker, whatever wait it states; the wait still holds the model', async () => {
     const send = vi.fn(() => Promise.reject(new Classified('zz 400 with a hint', false, 50 * MIN)));
     const { ka, events } = setup(send, { maxConsecutiveErrors: 3 });

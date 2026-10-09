@@ -286,8 +286,8 @@ export class CacheKeepalive {
    * Per model, how many pokes in a row the provider has refused as retryable.
    * Each such refusal holds the model on a doubling schedule, so a capacity
    * storm that states no wait (a 529 overloaded_error usually doesn't) paces
-   * the keepalive instead of latching its breaker. A poke that succeeds resets
-   * its model's run.
+   * the keepalive instead of latching its breaker. A poke the provider accepts
+   * ends its model's run, whether it read or wrote.
    */
   private refusals = new Map<string, number>();
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -442,6 +442,10 @@ export class CacheKeepalive {
         request: payload, outcome: 'success', response: { ...res },
       });
       this.consecutiveErrors = 0;
+      // Any accepted poke ends its model's run of refusals, including one that
+      // wrote instead of reading: after a storm that is the likeliest first
+      // success, since the cache expired meanwhile.
+      this.refusals.delete(String(lin.wire.model ?? ''));
 
       const read = res.usage?.cache_read_input_tokens ?? 0;
       const wrote = res.usage?.cache_creation_input_tokens ?? 0;
@@ -468,7 +472,6 @@ export class CacheKeepalive {
 
       lin.ineffective = 0;
       lin.lastTouchAt = Date.now();
-      this.refusals.delete(String(lin.wire.model ?? ''));
       this.emit({ type: 'refreshed', key, lane: lin.lane, readTokens: read, idleMs });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
