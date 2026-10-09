@@ -282,6 +282,14 @@ export class CacheKeepalive {
    * stop() drops every hold.
    */
   private holds = new Map<string, number>();
+  /**
+   * Per model, how many pokes in a row the provider has refused as retryable.
+   * Each such refusal holds the model on a doubling schedule, so a capacity
+   * storm that states no wait (a 529 overloaded_error usually doesn't) paces
+   * the keepalive instead of latching its breaker. A poke that succeeds resets
+   * its model's run.
+   */
+  private refusals = new Map<string, number>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false;
   private consecutiveErrors = 0;
@@ -460,6 +468,7 @@ export class CacheKeepalive {
 
       lin.ineffective = 0;
       lin.lastTouchAt = Date.now();
+      this.refusals.delete(String(lin.wire.model ?? ''));
       this.emit({ type: 'refreshed', key, lane: lin.lane, readTokens: read, idleMs });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -469,19 +478,36 @@ export class CacheKeepalive {
           request: payload, outcome: 'error', error: err,
         });
       }
-      // The provider's stated wait, if it gave one, holds every lineage of this
-      // model. A refusal the provider classifies as retryable that states a
-      // wait is then paced, not blind repetition: it does not count toward the
-      // breaker (the count stays where it was; it is not reset). A failure that
-      // is not retryable still counts, whatever wait it states.
+      // A refusal the provider classifies as retryable is paced, never counted
+      // toward the breaker (the count stays where it was; it is not reset):
+      // every lineage of the model is held until the later of the provider's
+      // stated wait, if it gave one a hold accepts (holdModel's own test), and
+      // the model's own backoff, which doubles with each refusal in a row from
+      // one check interval up to the refresh window. So an overload storm that
+      // states no wait backs the keepalive off and it resumes after; it never
+      // repeats a refused poke unpaced either (#48365). A failure that is not
+      // retryable, or that nothing classifies, still counts, whatever wait it
+      // states; a wait it states still holds the model.
       let classified: KeepaliveFailureClassification | undefined;
       try { classified = this.classify?.(err); } catch { classified = undefined; }
-      // Exempt only when the stated wait is one a hold accepts (holdModel's own
-      // test): a negative or NaN hint states no wait, so it paces nothing.
-      const accepted = holdDeadline(classified?.retryAfterMs, Date.now()) !== undefined;
-      if (accepted) this.holdModel(String(lin.wire.model ?? ''), classified!.retryAfterMs, message);
-      const paced = classified?.retryable === true && accepted;
-      if (!paced) this.consecutiveErrors += 1;
+      const model = String(lin.wire.model ?? '');
+      const paced = classified?.retryable === true;
+      if (paced) {
+        const run = (this.refusals.get(model) ?? 0) + 1;
+        this.refusals.set(model, run);
+        const backoffMs = Math.min(
+          this.cfg.refreshAfterMs,
+          this.cfg.checkIntervalMs * 2 ** Math.min(run - 1, 30),
+        );
+        const statedUntil = holdDeadline(classified!.retryAfterMs, Date.now());
+        const stated = statedUntil === undefined ? undefined : classified!.retryAfterMs as number;
+        this.holdModel(model, stated === undefined ? backoffMs : Math.max(stated, backoffMs), message);
+      } else {
+        if (holdDeadline(classified?.retryAfterMs, Date.now()) !== undefined) {
+          this.holdModel(model, classified!.retryAfterMs, message);
+        }
+        this.consecutiveErrors += 1;
+      }
       this.emit({ type: 'error', key, error: message, consecutive: this.consecutiveErrors });
 
       // Back this lineage off immediately rather than retrying on the next tick.
@@ -544,5 +570,6 @@ export class CacheKeepalive {
     }
     this.lineages.clear();
     this.holds.clear();
+    this.refusals.clear();
   }
 }

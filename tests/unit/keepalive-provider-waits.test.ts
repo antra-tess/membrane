@@ -112,17 +112,82 @@ describe('keepalive model holds', () => {
     expect(send).toHaveBeenCalledTimes(4);
   });
 
-  it('a retryable refusal whose hint states no wait (negative, NaN) holds nothing and counts toward the breaker (#48365)', async () => {
-    for (const hint of [-1, Number.NaN]) {
-      const send = vi.fn(() => Promise.reject(new Classified('zz 429 with an unusable hint', true, hint)));
+  it('a retryable refusal that states no usable wait (none, negative, NaN) is paced by the backoff, never counted, and never repeated unpaced (#48365)', async () => {
+    for (const hint of [undefined, -1, Number.NaN]) {
+      const sent: number[] = [];
+      const send = vi.fn(() => {
+        sent.push(Date.now());
+        return Promise.reject(new Classified('zz 529 overloaded', true, hint));
+      });
       const { ka, events } = setup(send, { maxConsecutiveErrors: 1 });
-      ka.record(wire(), undefined, 'stream');
+      ka.record(wire('claude-a', 'one'), undefined, 'stream');
+      ka.record(wire('claude-a', 'two'), undefined, 'stream');
+      ka.record(wire('claude-a', 'three'), undefined, 'stream');
       await vi.advanceTimersByTimeAsync(6 * 60 * MIN);
-      expect(send, String(hint)).toHaveBeenCalledTimes(1);
-      expect(events.some((e) => e.type === 'held'), String(hint)).toBe(false);
-      expect(events.some((e) => e.type === 'disabled'), String(hint)).toBe(true);
+      const label = String(hint);
+      expect(events.some((e) => e.type === 'disabled'), label).toBe(false);
+      expect((events.filter((e) => e.type === 'error') as Array<{ consecutive: number }>).every((e) => e.consecutive === 0), label).toBe(true);
+      // Every refused poke held the model, so two never went out inside one hold:
+      // the gaps between refused pokes of this model grow, from one check interval.
+      const held = events.filter((e) => e.type === 'held') as Array<{ until: number | null }>;
+      expect(held.length, label).toBe(sent.length);
+      for (let i = 1; i < sent.length; i++) expect(sent[i]! - sent[i - 1]!, label).toBeGreaterThanOrEqual(5 * MIN);
+      expect(sent.length, label).toBeGreaterThan(3);
       ka.stop();
+      vi.setSystemTime(START);
     }
+  });
+
+  it('an overload storm that states no wait backs the keepalive off, and its pokes resume after it, across lineages refused together', async () => {
+    // slimepriestess's probe on #103: three lineages of one model due together,
+    // a ten-minute storm of 529s with no retry-after, then six calm hours.
+    const stormFrom = START + 40 * MIN;
+    const stormTo = START + 50 * MIN;
+    const send = vi.fn(() => {
+      const now = Date.now();
+      return now >= stormFrom && now < stormTo
+        ? Promise.reject(new Classified('zz 529 overloaded_error', true, undefined))
+        : Promise.resolve(hit);
+    });
+    const { ka, events } = setup(send, { maxConsecutiveErrors: 3 });
+    for (const system of ['one', 'two', 'three']) ka.record(wire('claude-sonnet-4-5', system), undefined, 'stream');
+    await vi.advanceTimersByTimeAsync(50 * MIN);
+    const stormErrors = events.filter((e) => e.type === 'error') as Array<{ consecutive: number }>;
+    expect(stormErrors).toHaveLength(1);
+    expect(stormErrors[0]!.consecutive).toBe(0);
+    const before = events.filter((e) => e.type === 'refreshed').length;
+    await vi.advanceTimersByTimeAsync(6 * 60 * MIN);
+    expect(events.some((e) => e.type === 'disabled')).toBe(false);
+    // Every lineage is kept warm again after the storm, on its usual cadence.
+    const refreshedAfter = (events.filter((e) => e.type === 'refreshed') as Array<{ key: string }>).slice(before);
+    expect(new Set(refreshedAfter.map((e) => e.key)).size).toBe(3);
+    expect(refreshedAfter.length).toBeGreaterThanOrEqual(3 * 6);
+  });
+
+  it('each refusal in a run doubles the hold from one check interval, and a poke that succeeds ends the run', async () => {
+    let refuse = true;
+    const refusedAt: number[] = [];
+    const send = vi.fn(() => {
+      if (!refuse) return Promise.resolve(hit);
+      refusedAt.push(Date.now());
+      return Promise.reject(new Classified('zz 529', true, undefined));
+    });
+    const { ka, events } = setup(send);
+    for (const system of ['one', 'two', 'three', 'four']) ka.record(wire('claude-a', system), undefined, 'stream');
+    const holdsSoFar = () => (events.filter((e) => e.type === 'held') as Array<{ until: number }>).map((e, i) => e.until - refusedAt[i]!);
+
+    await vi.advanceTimersByTimeAsync(80 * MIN);
+    expect(holdsSoFar().slice(0, 3)).toEqual([5 * MIN, 10 * MIN, 20 * MIN]);
+
+    refuse = false;
+    await vi.advanceTimersByTimeAsync(60 * MIN);
+    expect(events.some((e) => e.type === 'refreshed')).toBe(true);
+
+    refuse = true;
+    const before = refusedAt.length;
+    await vi.advanceTimersByTimeAsync(60 * MIN);
+    expect(refusedAt.length).toBeGreaterThan(before);
+    expect(holdsSoFar()[before]).toBe(5 * MIN);
   });
 
   it('a poke refused as NOT retryable still counts toward the breaker, whatever wait it states; the wait still holds the model', async () => {
