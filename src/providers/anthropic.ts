@@ -22,7 +22,9 @@ import {
   classifyError,
   errorFromProviderStatus,
   isTypedAbortError,
+  networkError,
   serverError,
+  timeoutError,
   withRawRequest,
   unsupportedError,
 } from '../types/index.js';
@@ -866,6 +868,16 @@ export class AnthropicAdapter implements ProviderAdapter {
     // the stream catch throws its typed timeout before calling handleError.
     if (error instanceof Anthropic.APIUserAbortError || isTypedAbortError(error)) {
       return abortError(undefined, rawRequest);
+    }
+
+    // The SDK's transport failures carry no status ("Connection error.",
+    // `cause: TypeError: fetch failed`), so the status path below can't type
+    // them. They are the SDK's own types: the timeout subclass first.
+    if (error instanceof Anthropic.APIConnectionTimeoutError) {
+      return timeoutError(error.message, error, rawRequest);
+    }
+    if (error instanceof Anthropic.APIConnectionError) {
+      return networkError(error.message, error, rawRequest);
     }
 
     if (error instanceof Anthropic.APIError) {

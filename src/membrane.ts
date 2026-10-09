@@ -476,6 +476,18 @@ export class Membrane {
           try {
             await this.sleep(delay, options.signal);
           } catch (sleepError) {
+            // The caller's signal fired: that is a cancellation whatever it
+            // was aborted with (a plain Error, a string), not an unknown
+            // failure. The reason stays on the error as evidence.
+            if (options.signal?.aborted) {
+              throw new MembraneError({
+                type: 'abort',
+                message: 'Request was aborted',
+                retryable: false,
+                rawError: sleepError,
+                rawRequest,
+              });
+            }
             throw this.attachRawRequest(sleepError, rawRequest);
           }
           continue;
@@ -621,7 +633,10 @@ export class Membrane {
           try {
             await this.sleep(delay, options.signal);
           } catch (sleepError) {
-            if (this.isAbortError(sleepError)) {
+            // The caller's signal is authoritative: whatever it was aborted
+            // with — a DOMException, a plain Error, a string — this is the
+            // documented cancellation, not an error to throw.
+            if (options.signal?.aborted || this.isAbortError(sleepError)) {
               return this.buildAbortedResponse(
                 '',
                 { inputTokens: 0, outputTokens: 0 },
