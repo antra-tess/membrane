@@ -497,9 +497,16 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
 
       // Responses function definitions are flat. Accept them verbatim, while
       // also adapting Membrane and Chat Completions function schemas.
+      //
+      // The Responses API defaults an omitted `strict` to TRUE (Chat
+      // Completions defaults it to false). Strict mode makes every property
+      // required, so the model fills optional arguments with zero values
+      // ("", 0) that handlers then read as real input. Adapted schemas are not
+      // written for strict mode, so they keep Chat Completions semantics: not
+      // strict unless the tool says so. Verbatim Responses tools are untouched.
       if (rawTool?.type === 'function' && rawTool.name) return rawTool;
       if (rawTool?.type === 'function' && rawTool.function) {
-        return { type: 'function', ...rawTool.function };
+        return { type: 'function', strict: false, ...rawTool.function };
       }
       return {
         type: 'function',
@@ -510,7 +517,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
           rawTool?.inputSchema ??
           rawTool?.input_schema ??
           { type: 'object', properties: {} },
-        ...(rawTool?.strict !== undefined ? { strict: rawTool.strict } : {}),
+        strict: rawTool?.strict ?? false,
       };
     });
   }
