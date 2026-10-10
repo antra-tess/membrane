@@ -83,9 +83,15 @@ describe('the bound', () => {
       expect(bounded.length).toBeLessThanOrEqual(2_000);
     }
     // One pair straddling each computed cut, at every nearby position (June's
-    // 99,000-unit case is one of these).
+    // 99,000-unit case is one of these). The head cut falls within the first
+    // 2,100 units and the tail cut within the last 600, so both ranges are
+    // walked whole.
     for (const n of [5_000, 99_000]) {
-      for (let at = 1; at < n - 1; at += at < 2_100 || at > n - 600 ? 1 : 997) {
+      const nearCuts = [
+        ...Array.from({ length: 2_099 }, (_, i) => i + 1),
+        ...Array.from({ length: 599 }, (_, i) => n - 600 + i),
+      ];
+      for (const at of nearCuts) {
         const text = `${'x'.repeat(at - 1)}😀${'x'.repeat(n - at - 1)}`;
         const bounded = boundErrorText(text, 2_000);
         expect(bounded.length).toBeLessThanOrEqual(2_000);
@@ -180,6 +186,19 @@ describe('the bound', () => {
     expect(boundRawError(fits)).toBe(fits);
     const error = bigError({ text: wide });
     expect(utf8(error.rawError)).toBeLessThanOrEqual(MAX_RAW_ERROR_JSON_BYTES);
+  });
+
+  it('keeps the failure when the rawError throws on being asked whether it is an Error', () => {
+    // instanceof walks the prototype chain, so a Proxy whose getPrototypeOf
+    // throws gets past serializeError's guarded reads: the constructor's own
+    // catch is what keeps the failure being reported.
+    const hostile = new Proxy({}, { getPrototypeOf() { throw new Error('zz-prototype trap failed'); } });
+    let error: MembraneError | undefined;
+    expect(() => {
+      error = new MembraneError({ type: 'invalid_request', retryable: false, message: 'zz-original provider failure', rawError: hostile });
+    }).not.toThrow();
+    expect(error!.message).toBe('zz-original provider failure');
+    expect(error!.rawError).toEqual({ truncated: true, unserializable: '[unreadable: Error: zz-prototype trap failed]' });
   });
 
   it('keeps the failure when an Error property getter throws', () => {

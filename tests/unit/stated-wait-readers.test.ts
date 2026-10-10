@@ -92,6 +92,19 @@ describe('a negative stated wait is over, wherever it is read', () => {
     expect(thrown).toMatchObject({ type: 'rate_limit', retryAfterMs: 0 });
   });
 
+  it('an SSE error frame with a negative retry_after in seconds carries a wait of 0', () => {
+    const thrown = (() => {
+      try {
+        throwOnStreamErrorFrame({ error: { type: 'rate_limit_error', message: 'zz-slow down', retry_after: -5 } }, 'zz-provider');
+      } catch (error) {
+        return error as MembraneError;
+      }
+      return undefined;
+    })();
+    expect(thrown).toBeInstanceOf(MembraneError);
+    expect(thrown).toMatchObject({ type: 'rate_limit', retryAfterMs: 0 });
+  });
+
   it('a negative retry-after header, in seconds or milliseconds, reads as 0', () => {
     expect(statedWaitFromHeaders(new Headers({ 'retry-after': '-5' }))).toBe(0);
     expect(statedWaitFromHeaders(new Headers({ 'retry-after-ms': '-5', 'retry-after': '120' }))).toBe(0);

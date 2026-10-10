@@ -98,14 +98,18 @@ describe('complete(): the provider wait is a lower bound', () => {
   });
 
   it('treats an unusable stated wait as one it cannot honor in the call', async () => {
-    for (const unusable of [Number.NaN, Number.POSITIVE_INFINITY]) {
-      const adapter = new FailingAdapter(1, limited(unusable));
-      adapter.queueResponse('zz-recovered');
-      const { membrane, waits } = recording(adapter, { maxRetries: 3, retryDelayMs: 1_000, maxRetryDelayMs: 30_000 });
-      const error = await membrane.complete(zzRequest).then(() => undefined, (e: MembraneError) => e);
-      expect(error?.type).toBe('rate_limit');
-      expect(adapter.calls).toBe(1);
-      expect(waits).toEqual([]);
+    // Under an unbounded budget, only the finiteness check stops an infinite
+    // wait from being slept.
+    for (const maxRetryDelayMs of [30_000, Number.POSITIVE_INFINITY]) {
+      for (const unusable of [Number.NaN, Number.POSITIVE_INFINITY]) {
+        const adapter = new FailingAdapter(1, limited(unusable));
+        adapter.queueResponse('zz-recovered');
+        const { membrane, waits } = recording(adapter, { maxRetries: 3, retryDelayMs: 1_000, maxRetryDelayMs });
+        const error = await membrane.complete(zzRequest).then(() => undefined, (e: MembraneError) => e);
+        expect(error?.type).toBe('rate_limit');
+        expect(adapter.calls).toBe(1);
+        expect(waits).toEqual([]);
+      }
     }
   });
 
