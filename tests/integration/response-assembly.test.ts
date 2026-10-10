@@ -7,6 +7,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import { AnthropicXmlFormatter } from '../../src/formatters/anthropic-xml.js';
 import { Membrane } from '../../src/membrane.js';
 import type { ProviderAdapter, ProviderRequest, ProviderResponse, StreamCallbacks, NormalizedRequest } from '../../src/types/index.js';
 
@@ -143,7 +144,7 @@ describe('Response Assembly', () => {
       const adapter = createMockAdapter({
         streamChunks: [apiResponse],
       });
-      const membrane = new Membrane(adapter);
+      const membrane = new Membrane(adapter, { formatter: new AnthropicXmlFormatter({ toolMode: 'xml' }) });
       const request = createMultiTurnRequest();
 
       const result = await membrane.stream(request);
@@ -166,7 +167,7 @@ describe('Response Assembly', () => {
       const adapter = createMockAdapter({
         streamChunks: ['Here is my response.'],
       });
-      const membrane = new Membrane(adapter);
+      const membrane = new Membrane(adapter, { formatter: new AnthropicXmlFormatter({ toolMode: 'xml' }) });
       const request = createMultiTurnRequest();
 
       const result = await membrane.stream(request);
@@ -184,7 +185,7 @@ describe('Response Assembly', () => {
     it('rawAssistantText should equal concatenated chunks', async () => {
       const chunks = ['First ', 'second ', 'third.'];
       const adapter = createMockAdapter({ streamChunks: chunks });
-      const membrane = new Membrane(adapter);
+      const membrane = new Membrane(adapter, { formatter: new AnthropicXmlFormatter({ toolMode: 'xml' }) });
 
       const receivedChunks: string[] = [];
       const result = await membrane.stream(createMultiTurnRequest(), {
@@ -201,7 +202,7 @@ describe('Response Assembly', () => {
       const adapter = createMockAdapter({
         streamChunks: ['Single response text'],
       });
-      const membrane = new Membrane(adapter);
+      const membrane = new Membrane(adapter, { formatter: new AnthropicXmlFormatter({ toolMode: 'xml' }) });
 
       const result = await membrane.stream(createMultiTurnRequest());
 
@@ -216,7 +217,7 @@ describe('Response Assembly', () => {
       const adapter = createMockAdapter({
         streamChunks: [responseText],
       });
-      const membrane = new Membrane(adapter);
+      const membrane = new Membrane(adapter, { formatter: new AnthropicXmlFormatter({ toolMode: 'xml' }) });
 
       const result = await membrane.stream(createMultiTurnRequest());
 
@@ -234,7 +235,7 @@ describe('Response Assembly', () => {
   describe('raw request/response accuracy', () => {
     it('onRequest should receive actual provider request format', async () => {
       const adapter = createMockAdapter({});
-      const membrane = new Membrane(adapter);
+      const membrane = new Membrane(adapter, { formatter: new AnthropicXmlFormatter({ toolMode: 'xml' }) });
 
       let capturedRequest: unknown;
       await membrane.stream(createMultiTurnRequest(), {
@@ -249,7 +250,7 @@ describe('Response Assembly', () => {
 
     it('raw.request should match onRequest callback', async () => {
       const adapter = createMockAdapter({});
-      const membrane = new Membrane(adapter);
+      const membrane = new Membrane(adapter, { formatter: new AnthropicXmlFormatter({ toolMode: 'xml' }) });
 
       let capturedRequest: unknown;
       const result = await membrane.stream(createMultiTurnRequest(), {
@@ -266,7 +267,7 @@ describe('Response with thinking blocks', () => {
     const adapter = createMockAdapter({
       streamChunks: ['<thinking>Let me think...</thinking>Here is my answer.'],
     });
-    const membrane = new Membrane(adapter);
+    const membrane = new Membrane(adapter, { formatter: new AnthropicXmlFormatter({ toolMode: 'xml' }) });
 
     const result = await membrane.stream(createMultiTurnRequest());
 
@@ -283,7 +284,7 @@ describe('Response with thinking blocks', () => {
     const adapter = createMockAdapter({
       streamChunks: ['<thinking>Thoughts</thinking>Response'],
     });
-    const membrane = new Membrane(adapter);
+    const membrane = new Membrane(adapter, { formatter: new AnthropicXmlFormatter({ toolMode: 'xml' }) });
 
     const result = await membrane.stream(createMultiTurnRequest());
 
@@ -323,7 +324,7 @@ describe('Multi-request logging', () => {
       { chunks: ['Done with the tool.'], stopReason: 'end_turn' },
     ]);
 
-    const membrane = new Membrane(adapter);
+    const membrane = new Membrane(adapter, { formatter: new AnthropicXmlFormatter({ toolMode: 'xml' }) });
     const request = createMultiTurnRequest();
 
     await membrane.stream(request, {
@@ -365,7 +366,7 @@ describe('Multi-request logging', () => {
       { chunks: ['Done.'], stopReason: 'end_turn' },
     ]);
 
-    const membrane = new Membrane(adapter);
+    const membrane = new Membrane(adapter, { formatter: new AnthropicXmlFormatter({ toolMode: 'xml' }) });
 
     await membrane.stream(createMultiTurnRequest(), {
       onResponse: (res) => { capturedResponses.push(res); },
@@ -400,7 +401,7 @@ describe('Multi-request logging', () => {
       { chunks: ['Final response.'], stopReason: 'end_turn' },
     ]);
 
-    const membrane = new Membrane(adapter);
+    const membrane = new Membrane(adapter, { formatter: new AnthropicXmlFormatter({ toolMode: 'xml' }) });
 
     await membrane.stream(createMultiTurnRequest(), {
       onRequest: (req) => { capturedRequests.push(req); },
@@ -437,7 +438,7 @@ describe('Multi-request logging', () => {
       { chunks: ['Final response after tool.'], stopReason: 'end_turn' },
     ]);
 
-    const membrane = new Membrane(adapter);
+    const membrane = new Membrane(adapter, { formatter: new AnthropicXmlFormatter({ toolMode: 'xml' }) });
 
     await membrane.stream(createMultiTurnRequest(), {
       onRequest: (req) => { capturedRequests.push(req); },
@@ -496,7 +497,7 @@ describe('Multi-request logging', () => {
       { chunks: ['Final response.'], stopReason: 'end_turn' },
     ]);
 
-    const membrane = new Membrane(adapter);
+    const membrane = new Membrane(adapter, { formatter: new AnthropicXmlFormatter({ toolMode: 'xml' }) });
 
     await membrane.stream(createMultiTurnRequest(), {
       onRequest: (req) => { capturedRequests.push(req); },
@@ -556,7 +557,7 @@ describe('Multi-request logging', () => {
       { chunks: ['Final response.'], stopReason: 'end_turn' },
     ]);
 
-    const membrane = new Membrane(adapter);
+    const membrane = new Membrane(adapter, { formatter: new AnthropicXmlFormatter({ toolMode: 'xml' }) });
 
     await membrane.stream(createMultiTurnRequest(), {
       onRequest: (req) => { capturedRequests.push(req); },
@@ -604,7 +605,7 @@ describe('Multi-request logging', () => {
       { chunks: ['Final response.'], stopReason: 'end_turn' },
     ]);
 
-    const membrane = new Membrane(adapter);
+    const membrane = new Membrane(adapter, { formatter: new AnthropicXmlFormatter({ toolMode: 'xml' }) });
 
     await membrane.stream(createMultiTurnRequest(), {
       onBlock: (event) => { blockEvents.push(event); },
@@ -663,7 +664,7 @@ describe('Multi-request logging', () => {
       { chunks: ['More thinking</thinking>Final response.'], stopReason: 'end_turn' },
     ]);
 
-    const membrane = new Membrane(adapter);
+    const membrane = new Membrane(adapter, { formatter: new AnthropicXmlFormatter({ toolMode: 'xml' }) });
 
     // Request with thinking enabled
     const request: NormalizedRequest = {
@@ -727,7 +728,7 @@ describe('Multi-request logging', () => {
       { chunks: ['Final response.'], stopReason: 'end_turn' },
     ]);
 
-    const membrane = new Membrane(adapter);
+    const membrane = new Membrane(adapter, { formatter: new AnthropicXmlFormatter({ toolMode: 'xml' }) });
 
     // Should throw with clear error message
     await expect(membrane.stream(createMultiTurnRequest(), {
@@ -743,7 +744,7 @@ describe('Edge cases', () => {
     const adapter = createMockAdapter({
       streamChunks: [''],
     });
-    const membrane = new Membrane(adapter);
+    const membrane = new Membrane(adapter, { formatter: new AnthropicXmlFormatter({ toolMode: 'xml' }) });
 
     const result = await membrane.stream(createMultiTurnRequest());
 
@@ -755,7 +756,7 @@ describe('Edge cases', () => {
     const adapter = createMockAdapter({
       streamChunks: ['   \n\n   '],
     });
-    const membrane = new Membrane(adapter);
+    const membrane = new Membrane(adapter, { formatter: new AnthropicXmlFormatter({ toolMode: 'xml' }) });
 
     const result = await membrane.stream(createMultiTurnRequest());
 
@@ -767,7 +768,7 @@ describe('Edge cases', () => {
     const adapter = createMockAdapter({
       streamChunks: ['Short response'],
     });
-    const membrane = new Membrane(adapter);
+    const membrane = new Membrane(adapter, { formatter: new AnthropicXmlFormatter({ toolMode: 'xml' }) });
 
     // Build a long conversation
     const messages = [];

@@ -37,6 +37,11 @@ export interface FormatterConfig {
 }
 
 export interface BuildOptions {
+  /** The caller owns a later complete-request cache-budget check/clamp (Membrane
+   * checks after hooks). Standalone builds check by default. CM-owned markers
+   * always assert here because they may not be displaced. */
+  deferCacheBudgetCheck?: boolean;
+
   /** How to handle multiple participants */
   participantMode: 'simple' | 'multiuser';
 
@@ -85,7 +90,9 @@ export interface BuildOptions {
 
   /** Custom content for the synthetic user message when first message is assistant role.
    *  In prefill formatters: defaults to '<cmd>cat untitled.txt</cmd>' with a CLI simulation
-   *  system prompt when no system prompt is configured, or '[Start]' when a system prompt is set. */
+   *  system prompt when no system prompt is configured, or '[Start]' when a system prompt is set.
+   *  In native construction: the leading user turn the tool-pair normalizer synthesizes,
+   *  '[continuing]' by default and in place of text that is only whitespace. */
   prefillUserMessage?: string;
 
   /**
@@ -119,12 +126,49 @@ export interface BuildOptions {
  */
 export type NormalizeEvent =
   | { kind: 'block_re_roled'; blockType: string; from: 'user' | 'assistant'; to: 'user' | 'assistant' }
+  /**
+   * A tool_result was moved so it sits in the user envelope immediately
+   * following its own tool_use. `fromEnvelope > toEnvelope` is phase 3's
+   * hoist: the result lived downstream of its cycle and was pulled back into
+   * it. `fromEnvelope < toEnvelope` is the converse sweep: the result had
+   * been appended ahead of its own cycle and was pushed down into it.
+   */
   | { kind: 'tool_result_hoisted'; toolUseId: string; fromEnvelope: number; toEnvelope: number }
   | { kind: 'interloper_deferred'; blockType: string; fromEnvelope: number }
   | { kind: 'synthetic_pending_result'; toolUseId: string; reason: 'trailing' | 'mid_stream' }
-  | { kind: 'orphan_tool_result_textified'; toolUseId: string }
+  /**
+   * A tool_result whose tool_use id appears nowhere in the message list was
+   * rewritten as a text block. `recoveredChars` is the length of the payload
+   * carried across — array-form content is flattened, so a zero here means
+   * the result genuinely had no recoverable text, never that structure was
+   * dropped on the floor.
+   */
+  | { kind: 'orphan_tool_result_textified'; toolUseId: string; recoveredChars: number }
+  /**
+   * A tool_result whose tool_use exists but whose own cycle is already
+   * satisfied (a duplicate re-append after a cancellation or stream restart)
+   * was rewritten as a text block. It could not be relocated without
+   * displacing the real result, and dropping it would lose content.
+   *
+   * `reason` names which duplicate shape the producer emitted, since the two
+   * point at different producer bugs:
+   *   - `'cycle_closed'`      → the copy is outside its paired envelope and
+   *                             its own cycle already holds a result, so it
+   *                             had nowhere to be relocated to.
+   *   - `'duplicate_in_cycle'`→ the copy arrived inside its own cycle's user
+   *                             envelope, behind a result that already
+   *                             answered that call. Pairing is one-to-one, so
+   *                             the first result consumes the id and every
+   *                             later copy of it is textified here.
+   */
+  | {
+      kind: 'stray_tool_result_textified';
+      toolUseId: string;
+      fromEnvelope: number;
+      recoveredChars: number;
+      reason: 'cycle_closed' | 'duplicate_in_cycle';
+    }
   | { kind: 'pending_in_flight'; toolUseId: string }
-  | { kind: 'cache_suppressed_for_synthetic'; envelopeIndex: number }
   | {
       /**
        * Fires when the first envelope after re-roling is assistant and a
@@ -276,12 +320,34 @@ export interface StreamParser {
 // Prefill Formatter Interface
 // ============================================================================
 
+/** Source context when parsing visible text between native thinking blocks. */
+export interface ContentParseContext {
+  /** Complete visible response text, excluding provider thinking blocks. */
+  readonly visibleText: string;
+  /** Start of the current content span in visibleText, in String.slice units. */
+  readonly offset: number;
+}
+
 export interface PrefillFormatter {
   /** Formatter name for identification */
   readonly name: string;
 
   /** Whether this formatter uses prefill (vs native pass-through) */
   readonly usesPrefill: boolean;
+
+  /**
+   * Whether this formatter can carry provider-native tool definitions —
+   * i.e. whether `buildMessages` can populate `BuildResult.nativeTools`.
+   *
+   * `Membrane.resolveToolMode` reads this to pick the default tool mode:
+   * native wherever the formatter can carry it, XML/prefill only for a
+   * formatter that genuinely cannot (a text-completion surface) or when the
+   * caller opts in explicitly.
+   */
+  readonly supportsNativeTools: boolean;
+
+  /** Whether this formatter can encode tool definitions/results in an XML protocol. */
+  readonly supportsXmlTools: boolean;
 
   /** Participant prefix template for native tool requests. Uses {name}; defaults to '{name}: '. */
   readonly nameFormat?: string;
@@ -349,6 +415,11 @@ export interface PrefillFormatter {
    * Extracts text, thinking, tool_use blocks, etc.
    *
    * `tools` is used exactly as in {@link PrefillFormatter.parseToolCalls}.
+   * When context is supplied, content is a span of the complete visible text.
+   * Preserve whole-response operations (such as prefix trimming) using that
+   * context. Custom parsers and decorators must honor/forward it rather than
+   * treating an internal span as a fresh response. Calls without context keep
+   * whole-response semantics.
    */
-  parseContentBlocks(content: string, tools?: ToolDefinition[]): ContentBlock[];
+  parseContentBlocks(content: string, tools?: ToolDefinition[], context?: ContentParseContext): ContentBlock[];
 }

@@ -70,6 +70,7 @@ class RecordingXmlAdapter implements ProviderAdapter {
 }
 
 const REQUEST: NormalizedRequest = {
+  toolMode: 'xml',
   messages: [{ participant: 'User', content: [{ type: 'text', text: 'zz please shoot' }] }],
   config: { model: 'zz-model', maxTokens: 100 },
 };

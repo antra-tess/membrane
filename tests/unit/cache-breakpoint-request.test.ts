@@ -29,7 +29,7 @@ async function captureRawRequest(request: NormalizedRequest): Promise<RawRequest
   adapter.queueResponse('Test response');
   const membrane = new Membrane(adapter);
   let rawRequest: RawRequest | null = null;
-  await membrane.complete(request, {
+  await membrane.complete({ ...request, toolMode: 'xml' }, {
     onRequest: (req) => {
       rawRequest = req as RawRequest;
     },

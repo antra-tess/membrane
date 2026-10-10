@@ -24,11 +24,12 @@ import type {
 import {
   MembraneError,
   abortError,
-  authError,
-  contextLengthError,
+  classifyError,
+  errorFromHttpResponse,
+  errorFromProviderStatus,
+  isTypedAbortError,
   networkError,
-  rateLimitError,
-  serverError,
+  withRawRequest,
 } from '../types/index.js';
 import { createCombinedSignal, SSELineParser, safeParseJson, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame } from './utils.js';
 
@@ -532,6 +533,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
       content,
       outputItems,
       stopReason: this.getStopReason(response, outputItems),
+      providerStopReason: response.incomplete_details?.reason ?? response.status,
       stopSequence: undefined,
       usage: {
         inputTokens: response.usage?.input_tokens ?? 0,
@@ -705,34 +707,9 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
 
   private async assertSuccessfulHTTPResponse(response: Response, rawRequest: unknown): Promise<void> {
     if (response.ok) return;
-    const detail = await response.text();
-    const message = `OpenAI Responses API error: ${response.status} ${detail}`;
-    const status = response.status;
-    if (status === 401 || status === 403) {
-      throw new MembraneError({ type: 'auth', message, retryable: false, httpStatus: status, rawError: detail, rawRequest });
-    }
-    if (status === 429) {
-      const retryAfter = response.headers.get('retry-after');
-      const seconds = retryAfter == null ? NaN : Number(retryAfter);
-      const date = retryAfter == null ? NaN : Date.parse(retryAfter);
-      const delay = Number.isFinite(seconds) ? Math.max(0, seconds * 1000)
-        : Number.isFinite(date) ? Math.max(0, date - Date.now()) : undefined;
-      throw rateLimitError(message, delay, detail, rawRequest);
-    }
-    if (status >= 500) throw serverError(message, status, detail, rawRequest);
-    if (status === 400 && /context_length|maximum context|token limit|too long/i.test(detail)) {
-      throw contextLengthError(message, detail, rawRequest);
-    }
-    throw new MembraneError({ type: 'invalid_request', message, retryable: false, httpStatus: status, rawError: detail, rawRequest });
+    throw errorFromHttpResponse(this.name, response, await response.text(), rawRequest);
   }
 
-  /**
-   * A terminal response can carry a structured `error` object on a 200, from
-   * the stream's terminal frame or from a non-streaming body. That payload
-   * never reaches an HTTP-status boundary classifier — the status was 200 —
-   * so it is classified here, by the same helper and the same token lists as
-   * every other provider error payload.
-   */
   private assertSuccessfulAPIResponse(
     response: OpenAIResponsesAPIResponse,
     rawRequest?: unknown,
@@ -743,56 +720,12 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
   }
 
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
-    // A deadline abort is a timeout and stays one. Collapsing it into a bare
-    // abortError() here is what erased the identity before Membrane's
-    // caller-signal > timeout > error ladder could read it.
     if (isDeadlineAbort(error)) return deadlineTimeoutError(error, rawRequest);
-    if (error instanceof MembraneError) return error;
-    if (error instanceof Error) {
-      const message = error.message;
-      if (message.includes('429') || message.includes('rate_limit')) {
-        const retryMatch = message.match(/retry after (\d+)/i);
-        const retryAfter = retryMatch?.[1] ? Number(retryMatch[1]) * 1000 : undefined;
-        return rateLimitError(message, retryAfter, error, rawRequest);
-      }
-      if (
-        message.includes('401') ||
-        message.includes('invalid_api_key') ||
-        message.includes('Incorrect API key')
-      ) {
-        return authError(message, error, rawRequest);
-      }
-      if (
-        message.includes('context_length') ||
-        message.includes('maximum context') ||
-        message.includes('too long')
-      ) {
-        return contextLengthError(message, error, rawRequest);
-      }
-      if (
-        message.includes('500') ||
-        message.includes('502') ||
-        message.includes('503') ||
-        message.includes('server_error')
-      ) {
-        return serverError(message, undefined, error, rawRequest);
-      }
-      if (error.name === 'AbortError') return abortError(undefined, rawRequest);
-      if (
-        message.includes('network') ||
-        message.includes('fetch') ||
-        message.includes('ECONNREFUSED')
-      ) {
-        return networkError(message, error, rawRequest);
-      }
-    }
+    if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
+    if (isTypedAbortError(error)) return abortError(undefined, rawRequest);
 
-    return new MembraneError({
-      type: 'unknown',
-      message: error instanceof Error ? error.message : String(error),
-      retryable: false,
-      rawError: error,
-      rawRequest,
-    });
+    const info = classifyError(error);
+    info.rawRequest = rawRequest;
+    return new MembraneError(info);
   }
 }
