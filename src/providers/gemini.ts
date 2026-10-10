@@ -11,6 +11,7 @@
  * Endpoint: generativelanguage.googleapis.com/v1beta
  */
 
+import { captureRequestSelection, ToolResultImagePolicy, type ToolResultImageMode } from './tool-result-image-policy.js';
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -28,17 +29,29 @@ import {
   abortError,
   networkError,
 } from '../types/index.js';
-import { createCombinedSignal, textOnlyToolResultContent, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
+import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
+import { toolOutputParts, omittedToolResultContent, holdsImageBytes } from './tool-result-images.js';
+import { resolveImageMediaType } from '../utils/image-media.js';
 
 // ============================================================================
 // Gemini API Types
 // ============================================================================
 
+// https://ai.google.dev/gemini-api/docs/image-understanding#supported-formats
+// Unlike Chat image inputs, Gemini supports HEIC/HEIF but not GIF.
+const GEMINI_IMAGE_MEDIA_TYPES = new Set([
+  'image/png', 'image/jpeg', 'image/webp', 'image/heic', 'image/heif',
+]);
+
 interface GeminiPart {
   text?: string;
   inlineData?: { mimeType: string; data: string };
   functionCall?: { name: string; args: Record<string, unknown> };
-  functionResponse?: { name: string; response: Record<string, unknown> };
+  functionResponse?: {
+    name: string;
+    response: Record<string, unknown>;
+    parts?: { inlineData: { mimeType: string; data: string } }[];
+  };
 }
 
 interface GeminiContent {
@@ -134,6 +147,10 @@ function geminiUsageToProviderUsage(
 // ============================================================================
 
 export interface GeminiAdapterConfig {
+  /** Tool-result image policy (default: auto). Explicit media/omit wins over
+   * registry knowledge; auto is pinned per model on first tool-image use. */
+  toolResultImages?: ToolResultImageMode;
+
   /** Google AI API key */
   apiKey?: string;
 
@@ -150,6 +167,7 @@ export interface GeminiAdapterConfig {
 
 export class GeminiAdapter implements ProviderAdapter {
   readonly name = 'gemini';
+  readonly toolResultImageMediaTypes: ReadonlySet<string> = GEMINI_IMAGE_MEDIA_TYPES;
 
   /**
    * NOT ESTABLISHED. Google documents `cachedContentTokenCount` but the probes
@@ -165,11 +183,13 @@ export class GeminiAdapter implements ProviderAdapter {
   private apiKey: string;
   private baseURL: string;
   private defaultMaxTokens: number;
+  private readonly toolImagePolicy: ToolResultImagePolicy;
 
   constructor(config: GeminiAdapterConfig = {}) {
     this.apiKey = config.apiKey ?? process.env.GOOGLE_API_KEY ?? '';
     this.baseURL = (config.baseURL ?? 'https://generativelanguage.googleapis.com/v1beta').replace(/\/$/, '');
     this.defaultMaxTokens = config.defaultMaxTokens ?? 4096;
+    this.toolImagePolicy = new ToolResultImagePolicy(config.toolResultImages, () => true);
 
     if (!this.apiKey) {
       throw new Error('Google AI API key not provided');
@@ -184,12 +204,13 @@ export class GeminiAdapter implements ProviderAdapter {
     request: ProviderRequest,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const geminiRequest = this.buildRequest(request);
+    const selection = captureRequestSelection(request);
+    const geminiRequest = this.buildRequest(request, options, selection);
     options?.onRequest?.(geminiRequest);
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
-      const url = `${this.baseURL}/models/${request.model}:generateContent?key=${this.apiKey}`;
+      const url = `${this.baseURL}/models/${selection.model}:generateContent?key=${this.apiKey}`;
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -208,7 +229,7 @@ export class GeminiAdapter implements ProviderAdapter {
         throw new Error(`Gemini API error: ${data.error.code} ${data.error.message}`);
       }
 
-      return this.parseResponse(data, request.model, geminiRequest);
+      return this.parseResponse(data, selection.model, geminiRequest);
     } catch (error) {
       throw this.handleError(error, geminiRequest);
     } finally {
@@ -221,12 +242,13 @@ export class GeminiAdapter implements ProviderAdapter {
     callbacks: StreamCallbacks,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const geminiRequest = this.buildRequest(request);
+    const selection = captureRequestSelection(request);
+    const geminiRequest = this.buildRequest(request, options, selection);
     options?.onRequest?.(geminiRequest);
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
-      const url = `${this.baseURL}/models/${request.model}:streamGenerateContent?alt=sse&key=${this.apiKey}`;
+      const url = `${this.baseURL}/models/${selection.model}:streamGenerateContent?alt=sse&key=${this.apiKey}`;
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -339,7 +361,7 @@ export class GeminiAdapter implements ProviderAdapter {
         stopReason: this.mapFinishReason(finishReason),
         stopSequence: undefined,
         usage: geminiUsageToProviderUsage(lastUsage),
-        model: lastModelVersion ?? request.model,
+        model: lastModelVersion ?? selection.model,
         rawRequest: geminiRequest,
         raw: { finishReason, usage: lastUsage },
       };
@@ -354,8 +376,9 @@ export class GeminiAdapter implements ProviderAdapter {
   // Request Building
   // --------------------------------------------------------------------------
 
-  private buildRequest(request: ProviderRequest): GeminiRequest {
-    const contents = this.convertMessages(request.messages as any[], request.model);
+  private buildRequest(request: ProviderRequest, options?: ProviderRequestOptions, selection = captureRequestSelection(request)): GeminiRequest {
+    const media = Object.prototype.propertyIsEnumerable.call(selection.extra ?? {}, 'contents') ? false : this.toolImagePolicy.resolve(selection.model, request.messages as any[], options);
+    const contents = this.convertMessages(request.messages as any[], selection.model, media);
     const maxTokens = request.maxTokens || this.defaultMaxTokens;
 
     const geminiRequest: GeminiRequest = { contents };
@@ -399,7 +422,7 @@ export class GeminiAdapter implements ProviderAdapter {
     }
 
     // Auto-detect image generation models by name
-    if (request.model?.includes('image')) {
+    if (selection.model?.includes('image')) {
       geminiRequest.generationConfig.responseModalities = ['TEXT', 'IMAGE'];
     }
 
@@ -411,8 +434,8 @@ export class GeminiAdapter implements ProviderAdapter {
     }
 
     // Extra params — deep-merge generationConfig to preserve auto-detected settings
-    if (request.extra) {
-      const { normalizedMessages, prompt, generationConfig: extraGenConfig, ...rest } = request.extra as Record<string, unknown>;
+    if (selection.extra) {
+      const { normalizedMessages, prompt, generationConfig: extraGenConfig, ...rest } = selection.extra as Record<string, unknown>;
       Object.assign(geminiRequest, rest);
       if (extraGenConfig && typeof extraGenConfig === 'object') {
         Object.assign(geminiRequest.generationConfig, extraGenConfig);
@@ -422,8 +445,17 @@ export class GeminiAdapter implements ProviderAdapter {
     return geminiRequest;
   }
 
-  private convertMessages(messages: any[], model?: string): GeminiContent[] {
+  private convertMessages(messages: any[], model?: string, media = false): GeminiContent[] {
     const contents: GeminiContent[] = [];
+    const toolNames = new Map<string, string>();
+    let pendingToolImages: GeminiPart[] = [];
+    const flushToolImages = () => {
+      if (pendingToolImages.length) {
+        contents.push({ role: 'user', parts: pendingToolImages });
+        pendingToolImages = [];
+      }
+    };
+    const nativeToolImages = model?.startsWith('gemini-3') ?? false;
 
     // Gemini 3.x requires thought_signature on image parts from model outputs.
     // Images that round-trip through Discord lose their thought_signature metadata,
@@ -431,9 +463,10 @@ export class GeminiAdapter implements ProviderAdapter {
     // model-role images, we fall back to embedding the source URL as text — Gemini
     // auto-fetches URLs from text content, enabling iterative editing without
     // thought_signature. User images pass through as normal inlineData.
-    const useUrlForModelImages = model?.startsWith('gemini-3');
+    const useUrlForModelImages = nativeToolImages;
 
     for (const msg of messages) {
+      if (!Array.isArray(msg.content) || !msg.content.some((b: any) => b.type === 'tool_result')) flushToolImages();
       const role: 'user' | 'model' = msg.role === 'assistant' ? 'model' : 'user';
 
       // Simple string content
@@ -446,6 +479,7 @@ export class GeminiAdapter implements ProviderAdapter {
       if (Array.isArray(msg.content)) {
         const parts: GeminiPart[] = [];
         const toolResultParts: GeminiPart[] = [];
+        const toolImages: GeminiPart[] = [];
 
         for (const block of msg.content) {
           if (block.type === 'text') {
@@ -483,6 +517,7 @@ export class GeminiAdapter implements ProviderAdapter {
               });
             }
           } else if (block.type === 'tool_use') {
+            toolNames.set(block.id, block.name);
             parts.push({
               functionCall: {
                 name: block.name,
@@ -490,22 +525,73 @@ export class GeminiAdapter implements ProviderAdapter {
               },
             });
           } else if (block.type === 'tool_result') {
-            const resultContent = textOnlyToolResultContent(block.content);
-            toolResultParts.push({
-              functionResponse: {
-                name: block.name ?? block.tool_use_id ?? 'unknown',
-                response: { result: resultContent },
-              },
-            });
+            const id = block.tool_use_id ?? block.toolUseId;
+            const name = block.name ?? toolNames.get(id) ?? id ?? 'unknown';
+            const output = media ? toolOutputParts(block.content, block.is_error ?? block.isError) : null;
+            const functionResponse: NonNullable<GeminiPart['functionResponse']> = {
+              name,
+              response: {},
+            };
+            if (output) {
+              // Gemini 3 binds inline media to this functionResponse. Indexed
+              // markers keep text/image ordering. Earlier models get sibling media
+              // after the complete response batch, in the same user Content.
+              const result: unknown[] = [];
+              const media: NonNullable<typeof functionResponse.parts> = [];
+              let imageIndex = 0;
+              for (const part of output) {
+                if (part.type === 'text') {
+                  result.push(part.text);
+                  continue;
+                }
+                const source = part.source;
+                if (!holdsImageBytes(source)) {
+                  // No bytes to omit: the block keeps its own JSON text, as main
+                  // sends it, address included.
+                  result.push(JSON.stringify(part.block));
+                  continue;
+                }
+                if (source?.type !== 'base64' || typeof source.data !== 'string' || !source.data) {
+                  result.push('[image omitted: Gemini tool results require inline base64 image data]');
+                  continue;
+                }
+                const mimeType = resolveImageMediaType(source.data, source.media_type ?? source.mediaType);
+                if (!mimeType || !this.toolResultImageMediaTypes.has(mimeType)) {
+                  result.push('[image omitted: unsupported Gemini image media type]');
+                  continue;
+                }
+                const inlineData = { mimeType, data: source.data };
+                imageIndex++;
+                if (nativeToolImages) {
+                  media.push({ inlineData });
+                  result.push('[Image ' + imageIndex + ' in function response parts.]');
+                } else {
+                  const label = 'Image ' + imageIndex + ' from tool result ' + JSON.stringify(id);
+                  result.push('[' + label + ' follows in this message.]');
+                  toolImages.push({ text: '[' + label + ']' }, { inlineData });
+                }
+              }
+              functionResponse.response = {
+                [(block.is_error ?? block.isError) ? 'error' : 'result']: result,
+              };
+              if (media.length) functionResponse.parts = media;
+            } else {
+              functionResponse.response = {
+                result: omittedToolResultContent(block.content),
+              };
+            }
+            toolResultParts.push({ functionResponse });
           }
         }
 
         // Tool results go in a user message
         if (toolResultParts.length > 0) {
           contents.push({ role: 'user', parts: toolResultParts });
+          pendingToolImages.push(...toolImages);
         }
 
         if (parts.length > 0) {
+          flushToolImages();
           contents.push({ role, parts });
         }
 
@@ -519,6 +605,7 @@ export class GeminiAdapter implements ProviderAdapter {
       contents.push({ role, parts: [{ text: String(msg.content) }] });
     }
 
+    flushToolImages();
     // Gemini requires alternating user/model roles.
     // Merge consecutive same-role messages.
     return this.mergeConsecutiveRoles(contents);

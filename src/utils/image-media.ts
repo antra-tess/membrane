@@ -151,7 +151,13 @@ export function shedImagesToFitByteBudget(
 /** Loud agent-facing stand-in for an image the API would reject. The agent
  *  must be clearly aware an image was stripped — silence here reads as
  *  "there was no image". Also warns on stderr for ops visibility. */
-export function strippedImagePlaceholder(mediaType: unknown): { type: 'text'; text: string } {
+export function strippedImagePlaceholder(
+  mediaType: unknown,
+  acceptedMediaTypes?: ReadonlySet<string>,
+): { type: 'text'; text: string } {
+  const formats = acceptedMediaTypes
+    ? [...acceptedMediaTypes].map(type => type.replace(/^image\//, '')).join('/')
+    : 'jpeg/png/gif/webp';
   console.warn(
     `[membrane] image block stripped: unsupported media type "${String(mediaType)}"`,
   );
@@ -159,7 +165,7 @@ export function strippedImagePlaceholder(mediaType: unknown): { type: 'text'; te
     type: 'text',
     text:
       `[system: an image that belongs here was NOT shown to you — its media type ` +
-      `"${String(mediaType)}" is not accepted by the model API (only jpeg/png/gif/webp are). ` +
+      `"${String(mediaType)}" is not accepted by the model API (only ${formats} are). ` +
       `You are not seeing this image. If it matters, ask for it in a supported format.]`,
   };
 }

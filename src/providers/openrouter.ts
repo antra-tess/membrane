@@ -4,6 +4,7 @@
  * Handles OpenAI-compatible API with tool_calls format
  */
 
+import { captureRequestSelection, effectiveChatModel, ToolResultImagePolicy, type RequestModelSelection, type ToolResultImageMode, type ToolResultImageConversionOptions, waitForImageDecision } from './tool-result-image-policy.js';
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -23,7 +24,8 @@ import {
   abortError,
   networkError,
 } from '../types/index.js';
-import { safeParseJson, textOnlyToolResultContent, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
+import { safeParseJson, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
+import { hasToolResultImages, chatToolResultContent, nativeChatToolContent, validatedChatImagePart } from './tool-result-images.js';
 
 // ============================================================================
 // Types
@@ -127,6 +129,10 @@ interface OpenRouterResponse {
 // ============================================================================
 
 export interface OpenRouterAdapterConfig {
+  /** Tool-result image policy (default: auto). Explicit media/omit wins over
+   * registry knowledge; auto is pinned per model on first tool-image use. */
+  toolResultImages?: ToolResultImageMode;
+
   /** API key (defaults to OPENROUTER_API_KEY env var) */
   apiKey?: string;
   
@@ -179,6 +185,8 @@ export class OpenRouterAdapter implements ProviderAdapter {
   private httpReferer: string;
   private xTitle: string;
   private defaultMaxTokens: number;
+  private readonly toolImagePolicy: ToolResultImagePolicy<Promise<boolean>>;
+  private modelImageInputs?: Promise<{ inputs: ReadonlyMap<string, boolean>; failure?: string }>;
 
   constructor(config: OpenRouterAdapterConfig = {}) {
     this.apiKey = config.apiKey ?? process.env.OPENROUTER_API_KEY ?? '';
@@ -186,6 +194,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
     this.httpReferer = config.httpReferer ?? 'https://membrane.local';
     this.xTitle = config.xTitle ?? 'Membrane';
     this.defaultMaxTokens = config.defaultMaxTokens ?? 4096;
+    this.toolImagePolicy = new ToolResultImagePolicy(config.toolResultImages, model => this.lookupModelImageInput(model));
     
     if (!this.apiKey) {
       throw new Error('OpenRouter API key not provided');
@@ -201,14 +210,20 @@ export class OpenRouterAdapter implements ProviderAdapter {
     request: ProviderRequest,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const openRouterRequest = this.buildRequest(request);
-    options?.onRequest?.(openRouterRequest);
-
+    const selection = captureRequestSelection(request);
+    const { signal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
-      const response = await this.makeRequest(openRouterRequest, options);
-      return this.parseResponse(response, request.model, openRouterRequest);
-    } catch (error) {
-      throw this.handleError(error, openRouterRequest);
+      const media = await this.resolveToolImages(request, selection, options, signal);
+      const openRouterRequest = this.buildRequest(request, media, selection);
+      options?.onRequest?.(openRouterRequest);
+      try {
+        const response = await this.makeRequest(openRouterRequest, { ...options, signal, timeoutMs: undefined });
+        return this.parseResponse(response, selection.model, openRouterRequest);
+      } catch (error) {
+        throw this.handleError(error, openRouterRequest);
+      }
+    } finally {
+      cleanup?.();
     }
   }
 
@@ -217,13 +232,27 @@ export class OpenRouterAdapter implements ProviderAdapter {
     callbacks: StreamCallbacks,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const openRouterRequest = this.buildRequest(request);
-    openRouterRequest.stream = true;
-    // Request usage data in stream for cache metrics
-    openRouterRequest.stream_options = { include_usage: true };
-    options?.onRequest?.(openRouterRequest);
-
+    const selection = captureRequestSelection(request);
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
+    try {
+      const media = await this.resolveToolImages(request, selection, options, combinedSignal);
+      const openRouterRequest = this.buildRequest(request, media, selection);
+      openRouterRequest.stream = true;
+      // Request usage data in stream for cache metrics
+      openRouterRequest.stream_options = { include_usage: true };
+      options?.onRequest?.(openRouterRequest);
+      return await this.makeStreamRequest(openRouterRequest, selection.model, callbacks, combinedSignal);
+    } finally {
+      cleanup?.();
+    }
+  }
+
+  private async makeStreamRequest(
+    openRouterRequest: any,
+    requestedModel: string,
+    callbacks: StreamCallbacks,
+    combinedSignal?: AbortSignal,
+  ): Promise<ProviderResponse> {
     try {
       const response = await fetch(`${this.baseURL}/chat/completions`, {
         method: 'POST',
@@ -378,12 +407,10 @@ export class OpenRouterAdapter implements ProviderAdapter {
         message.tool_calls = toolCalls;
       }
 
-      return this.parseStreamedResponse(message, finishReason, servedModel ?? request.model, streamUsage, openRouterRequest);
+      return this.parseStreamedResponse(message, finishReason, servedModel ?? requestedModel, streamUsage, openRouterRequest);
 
     } catch (error) {
       throw this.handleError(error, openRouterRequest);
-    } finally {
-      cleanup?.();
     }
   }
 
@@ -396,11 +423,68 @@ export class OpenRouterAdapter implements ProviderAdapter {
     };
   }
 
-  private buildRequest(request: ProviderRequest): any {
-    const messages = this.convertMessages(request.messages as any[]);
+  private async resolveToolImages(request: ProviderRequest, selection: RequestModelSelection, options?: ProviderRequestOptions, signal?: AbortSignal): Promise<boolean> {
+    try {
+      signal?.throwIfAborted();
+      // A whole native payload override is caller-owned. Replaced normalized
+      // images cannot trigger a lookup or freeze a model's first-use decision.
+      if (Object.prototype.propertyIsEnumerable.call(selection.extra ?? {}, 'messages')) return false;
+      const model = effectiveChatModel(selection);
+      return await waitForImageDecision(this.toolImagePolicy.resolve(model, request.messages as any[], options), signal);
+    } catch (error) {
+      throw this.handleError(error);
+    }
+  }
+
+  private async lookupModelImageInput(model: string): Promise<boolean> {
+    // One public catalogue snapshot per adapter lifetime. Its timeout belongs to
+    // the lookup, not to any caller: cancelling one waiter cannot cancel others
+    // or pin a false decision merely because that caller left.
+    this.modelImageInputs ??= this.fetchModelImageInputs();
+    const { inputs, failure } = await this.modelImageInputs;
+    const known = inputs.get(model);
+    if (known === undefined) {
+      // The decision is pinned, so this warns once per model per adapter.
+      console.warn(
+        `[membrane:openrouter] tool-result images for ${JSON.stringify(model)} will be omitted for this adapter's lifetime: ` +
+        (failure ? `the model catalogue lookup failed (${failure})` : 'the model is not in the model catalogue') +
+        '. Set toolResultImages, or media.imageInput in the model registry, to decide explicitly.',
+      );
+    }
+    return known ?? false;
+  }
+
+  private async fetchModelImageInputs(): Promise<{ inputs: ReadonlyMap<string, boolean>; failure?: string }> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(new Error('no answer within 5 s')), 5000);
+    try {
+      const work = (async () => {
+        const response = await fetch('https://openrouter.ai/api/v1/models', { signal: controller.signal });
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        const catalogue = await response.json() as { data?: unknown };
+        if (!Array.isArray(catalogue?.data)) throw new Error('the response has no data array');
+        const inputs = new Map<string, boolean>();
+        for (const model of catalogue.data) {
+          if (typeof model?.id !== 'string') continue;
+          const modalities = model.architecture?.input_modalities;
+          inputs.set(model.id, Array.isArray(modalities) && modalities.includes('image'));
+        }
+        return { inputs };
+      })();
+      // Bound the body read too, even if a nonstandard fetch ignores abort.
+      return await waitForImageDecision(work, controller.signal);
+    } catch (error) {
+      return { inputs: new Map(), failure: String((error as Error)?.message ?? error).slice(0, 200) };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private buildRequest(request: ProviderRequest, media = false, selection = captureRequestSelection(request)): any {
+    const messages = this.convertMessages(request.messages as any[], media);
     
     const params: any = {
-      model: request.model,
+      model: selection.model,
       messages,
       max_tokens: request.maxTokens || this.defaultMaxTokens,
     };
@@ -435,7 +519,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
     }
 
     // Anthropic models (routed via OpenRouter) reject both temperature and top_p.
-    const isAnthropicModel = /claude|anthropic/i.test(request.model);
+    const isAnthropicModel = /claude|anthropic/i.test(selection.model);
     if (request.topP !== undefined && !(isAnthropicModel && request.temperature !== undefined)) {
       params.top_p = request.topP;
     }
@@ -476,18 +560,21 @@ export class OpenRouterAdapter implements ProviderAdapter {
     }
     
     // Apply extra params (filter out internal membrane fields)
-    if (request.extra) {
-      const { normalizedMessages, prompt, ...rest } = request.extra as Record<string, unknown>;
+    if (selection.extra) {
+      const { normalizedMessages, prompt, ...rest } = selection.extra as Record<string, unknown>;
       Object.assign(params, rest);
     }
     
     return params;
   }
 
-  private convertMessages(messages: any[]): OpenRouterMessage[] {
+  private convertMessages(messages: any[], media = false): OpenRouterMessage[] {
     // Use flatMap to handle one-to-many expansion (multiple tool_results → multiple messages)
     return messages.flatMap(msg => {
       // If it's already in OpenRouter format, pass through
+      const nativeToolImages = msg.role === 'tool' && msg.tool_call_id && Array.isArray(msg.content)
+        && msg.content.some((p: any) => p.type === 'image_url');
+      if (nativeToolImages) return [{ ...msg, content: nativeChatToolContent(msg.content, media) }];
       if (msg.role && (typeof msg.content === 'string' || msg.content === null || msg.tool_calls)) {
         return [msg as OpenRouterMessage];
       }
@@ -519,7 +606,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
             } else {
               textParts.push(block.text);
             }
-          } else if (block.type === 'image') {
+          } else if (block.type === 'image' || block.type === 'image_url') {
             hasImages = true;
             // Migrate any already-collected textParts into contentBlocks
             // (we didn't know we'd need array format until hitting an image)
@@ -528,7 +615,9 @@ export class OpenRouterAdapter implements ProviderAdapter {
             }
             textParts.length = 0;
 
-            if (block.source?.type === 'base64') {
+            if (block.type === 'image_url') {
+              contentBlocks.push(validatedChatImagePart(block));
+            } else if (block.source?.type === 'base64') {
               const mediaType = block.source.media_type ?? block.source.mediaType ?? 'image/png';
               contentBlocks.push({
                 type: 'image_url',
@@ -585,7 +674,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
             toolResults.push({
               role: 'tool' as const,
               tool_call_id: block.tool_use_id || block.toolUseId,
-              content: textOnlyToolResultContent(block.content),
+              content: chatToolResultContent(block, media),
             });
           }
         }
@@ -802,17 +891,20 @@ export class OpenRouterAdapter implements ProviderAdapter {
 // ============================================================================
 
 /**
- * Convert normalized content blocks to OpenRouter format
+ * Convert normalized content blocks to OpenRouter format.
+ * Defaults to tool-image omission. Explicit media is a caller-owned native-media
+ * choice; relocated user images cannot later be identified as tool output.
  */
 export function toOpenRouterMessages(
-  messages: { role: string; content: ContentBlock[] }[]
+  messages: { role: string; content: ContentBlock[] }[],
+  options: ToolResultImageConversionOptions = {}
 ): OpenRouterMessage[] {
   const result: OpenRouterMessage[] = [];
   
   for (const msg of messages) {
     const textParts: string[] = [];
     const toolCalls: OpenRouterToolCall[] = [];
-    const toolResults: { id: string; content: string }[] = [];
+    const toolResults: { id: string; content: ReturnType<typeof chatToolResultContent> }[] = [];
     
     for (const block of msg.content) {
       if (block.type === 'text') {
@@ -829,11 +921,27 @@ export function toOpenRouterMessages(
       } else if (block.type === 'tool_result') {
         toolResults.push({
           id: block.toolUseId,
-          content: textOnlyToolResultContent(block.content),
+          content: chatToolResultContent(block, options.toolResultImages === 'media'),
         });
       }
     }
     
+    // In a user envelope, image-bearing results precede sibling user text; an
+    // assistant turn keeps its calls first. Image-free envelopes keep their
+    // legacy ordering.
+    const appendToolResults = () => {
+      for (const tr of toolResults) {
+        result.push({
+          role: 'tool',
+          tool_call_id: tr.id,
+          content: tr.content,
+        });
+      }
+    };
+    const hasImages = msg.content.some(block => block.type === 'tool_result' && hasToolResultImages(block.content));
+    const resultsFirst = hasImages && msg.role === 'user';
+    if (resultsFirst) appendToolResults();
+
     // Add main message
     if (textParts.length > 0 || toolCalls.length > 0) {
       const message: OpenRouterMessage = {
@@ -845,15 +953,7 @@ export function toOpenRouterMessages(
       }
       result.push(message);
     }
-    
-    // Add tool results as separate messages
-    for (const tr of toolResults) {
-      result.push({
-        role: 'tool',
-        tool_call_id: tr.id,
-        content: tr.content,
-      });
-    }
+    if (!resultsFirst) appendToolResults();
   }
   
   return result;

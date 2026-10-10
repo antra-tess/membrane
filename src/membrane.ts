@@ -265,6 +265,7 @@ export class Membrane {
           : undefined;
 
         const adapterCall = this.adapter.complete(finalRequest, {
+          getModelImageInput: model => this.registry?.getCapabilities(model)?.media?.imageInput,
           signal: receiptGuard ? receiptGuard.signal : options.signal,
           timeoutMs: options.timeoutMs,
           onRequest: (req) => {
@@ -2225,6 +2226,9 @@ export class Membrane {
       // formatter's constructor-time mode alone, so request.toolMode was a
       // second, disconnected source of truth on this path.
       toolMode: this.resolveToolMode(request, activeFormatter),
+      ...(this.adapter.toolResultImageMediaTypes
+        ? { toolResultImageMediaTypes: this.adapter.toolResultImageMediaTypes }
+        : {}),
       thinking: request.config.thinking,
       systemPrompt: request.system,
       promptCaching: request.promptCaching ?? this.config.defaultPromptCaching ?? true, // Default true for backward compat
@@ -2346,6 +2350,7 @@ export class Membrane {
       : undefined;
     const observedOptions = {
       ...adapterOptions,
+      getModelImageInput: (model: string) => this.registry?.getCapabilities(model)?.media?.imageInput,
       ...(receiptGuard ? { signal: receiptGuard.signal } : {}),
       onRequest: (wireRequest: unknown) => {
         if (useWireReceipt) {

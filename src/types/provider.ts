@@ -218,6 +218,15 @@ export interface ProviderAdapter {
    * reported through onRequest. Decorators must forward this capability. */
   readonly cacheReceiptBasis?: 'provider-request' | 'wire-request';
 
+  /**
+   * Lowercase MIME types accepted for images nested in native tool results.
+   * NativeFormatter uses this policy before the transport sees complete()
+   * history. Omit to retain its JPEG/PNG/GIF/WebP default. The adapter still
+   * validates direct requests and live tool results at its wire boundary.
+   * Wrappers must forward this capability.
+   */
+  readonly toolResultImageMediaTypes?: ReadonlySet<string>;
+
   /** Check if this adapter handles a model */
   supportsModel(modelId: string): boolean;
   
@@ -284,6 +293,10 @@ export interface ProviderRequest {
 }
 
 export interface ProviderRequestOptions {
+  /** Caller registry knowledge for the adapter's effective wire model. Undefined
+   * means unknown. Tool-image auto mode consults this on first image use only;
+   * its answer is pinned per adapter/model. Decorators forward this option. */
+  getModelImageInput?: (model: string) => boolean | undefined;
   signal?: AbortSignal;
   timeoutMs?: number;
   /** Abort if no SSE event arrives within this many ms (default: 120000) */
