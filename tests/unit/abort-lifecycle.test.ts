@@ -127,6 +127,13 @@ const REQUEST: NormalizedRequest = {
   config: { model: 'zz-model', maxTokens: 100 },
 };
 
+/**
+ * The XML path, selected explicitly: on the default formatter, a request
+ * without `toolMode` resolves native (resolveToolMode), so REQUEST alone
+ * never reaches streamWithXmlTools or runXmlToolsYielding.
+ */
+const XML_REQUEST: NormalizedRequest = { ...REQUEST, toolMode: 'xml' };
+
 const NATIVE_REQUEST: NormalizedRequest = {
   ...REQUEST,
   toolMode: 'native',
@@ -201,7 +208,7 @@ describe('abort during a retry sleep, whatever the signal was aborted with', () 
 
 describe('abort reason reflects the cause', () => {
   it('reports a request timeout as timeout, not as a user cancellation (XML path)', async () => {
-    const result = await new Membrane(new TimingOutAdapter()).stream(REQUEST, {});
+    const result = await new Membrane(new TimingOutAdapter()).stream(XML_REQUEST, {});
     expect(isAbortedResponse(result)).toBe(true);
     expect((result as { reason: string }).reason).toBe('timeout');
   });
@@ -223,7 +230,7 @@ describe('abort reason reflects the cause', () => {
   });
 
   it('reports timeout on the yielding paths too', async () => {
-    for (const request of [REQUEST, NATIVE_REQUEST]) {
+    for (const request of [XML_REQUEST, NATIVE_REQUEST]) {
       const events: StreamEvent[] = [];
       for await (const event of new Membrane(new TimingOutAdapter()).streamYielding(request)) {
         events.push(event);
@@ -235,10 +242,19 @@ describe('abort reason reflects the cause', () => {
   });
 });
 
-describe("a caller's own deadline is a cancellation on every path, whatever the error is named", () => {
-  // The caller's signal is authoritative: AbortSignal.timeout() fires with a
-  // TimeoutError, and naming that a provider timeout would be classification
-  // by name, one layer up from classification by text.
+/** A caller's signal aborted at 10ms with a string reason, as agent-framework's abortInference(reason) aborts when its caller gives one. */
+function abortedWithString(): AbortSignal {
+  const controller = new AbortController();
+  setTimeout(() => controller.abort('cancelled by agent'), 10);
+  return controller.signal;
+}
+
+describe("a caller's own signal is a cancellation on every path, whatever it was aborted with", () => {
+  // The caller's signal is authoritative. fetch rejects with the signal's
+  // reason: AbortSignal.timeout() gives a TimeoutError, and abort(reason)
+  // gives the reason itself (agent-framework passes its caller's reason, a
+  // string, when one is given). Judging either by its type would be
+  // classification by name, one layer up from classification by text.
   it('rejects in flight with a TimeoutError named for the caller’s own deadline', async () => {
     const signal = AbortSignal.timeout(10);
     const reason = await new SignalReasonAdapter().complete({} as ProviderRequest, { signal }).then(
@@ -249,37 +265,44 @@ describe("a caller's own deadline is a cancellation on every path, whatever the 
     expect((reason as DOMException).name).toBe('TimeoutError');
   });
 
-  for (const [label, request] of [['XML', REQUEST], ['native', NATIVE_REQUEST]] as const) {
-    it(`stream() returns AbortedResponse{reason:'user'} (${label} path)`, async () => {
-      const result = await new Membrane(new SignalReasonAdapter()).stream(request, { signal: AbortSignal.timeout(10) });
-      expect(isAbortedResponse(result)).toBe(true);
-      expect((result as { reason: string }).reason).toBe('user');
-    });
+  for (const [why, signal] of [
+    ['a deadline (AbortSignal.timeout)', () => AbortSignal.timeout(10)],
+    ['a string reason', abortedWithString],
+  ] as const) {
+    for (const [label, request] of [['XML', XML_REQUEST], ['native', NATIVE_REQUEST]] as const) {
+      it(`stream() returns AbortedResponse{reason:'user'} for ${why} (${label} path)`, async () => {
+        const result = await new Membrane(new SignalReasonAdapter()).stream(request, { signal: signal() });
+        expect(isAbortedResponse(result)).toBe(true);
+        expect((result as { reason: string }).reason).toBe('user');
+      });
 
-    it(`streamYielding() emits aborted with reason 'user' (${label} path)`, async () => {
-      const events: StreamEvent[] = [];
-      for await (const event of new Membrane(new SignalReasonAdapter()).streamYielding(request, { signal: AbortSignal.timeout(10) })) {
-        events.push(event);
-      }
-      const aborted = events.find((e) => e.type === 'aborted');
-      expect(aborted).toBeDefined();
-      expect((aborted as { reason: string }).reason).toBe('user');
+      it(`streamYielding() emits one aborted with reason 'user' for ${why} (${label} path)`, async () => {
+        const events: StreamEvent[] = [];
+        for await (const event of new Membrane(new SignalReasonAdapter()).streamYielding(request, { signal: signal() })) {
+          events.push(event);
+        }
+        const aborted = events.filter((e) => e.type === 'aborted');
+        expect(aborted).toHaveLength(1);
+        expect((aborted[0] as { reason: string }).reason).toBe('user');
+      });
+    }
+
+    it(`complete() rejects with an abort MembraneError for ${why}`, async () => {
+      const error = await new Membrane(new SignalReasonAdapter())
+        .complete(REQUEST, { signal: signal() })
+        .then(() => undefined, (e: unknown) => e);
+      expect(error).toBeInstanceOf(MembraneError);
+      expect((error as MembraneError).type).toBe('abort');
+      expect((error as MembraneError).retryable).toBe(false);
     });
   }
-
-  it('complete() rejects with an abort MembraneError', async () => {
-    const error = await new Membrane(new SignalReasonAdapter())
-      .complete(REQUEST, { signal: AbortSignal.timeout(10) })
-      .then(() => undefined, (e: unknown) => e);
-    expect(error).toBeInstanceOf(MembraneError);
-    expect((error as MembraneError).type).toBe('abort');
-    expect((error as MembraneError).retryable).toBe(false);
-  });
 });
 
-describe('a cancel while the stream waits for tool results reports one abort', () => {
-  // cancel() emits aborted itself and rejects the pending tool wait with a
-  // plain Error; the catch must not report the same cancellation again.
+describe('a cancelled yielding stream reports one abort', () => {
+  // cancel() emits aborted itself, and then the work it cancelled fails: a
+  // pending tool wait rejects with a plain Error, and an in-flight provider
+  // call rejects with its signal's AbortError. The catch must not report the
+  // same cancellation again.
   it('streamYielding() emits exactly one aborted when the consumer cancels at the tool wait', async () => {
     const stream = new Membrane(new ToolRoundAdapter()).streamYielding(NATIVE_REQUEST, {});
     const events: StreamEvent[] = [];
@@ -301,4 +324,22 @@ describe('a cancel while the stream waits for tool results reports one abort', (
     expect(aborted).toHaveLength(1);
     expect((aborted[0] as { reason: string }).reason).toBe('user');
   });
+
+  for (const [label, request] of [['XML', XML_REQUEST], ['native', NATIVE_REQUEST]] as const) {
+    it(`streamYielding() emits exactly one aborted when the consumer cancels mid-request (${label} path)`, async () => {
+      const stream = new Membrane(new SignalReasonAdapter()).streamYielding(request, {});
+      setTimeout(() => stream.cancel(), 10);
+      const events: StreamEvent[] = [];
+      // A consumer that takes its time with each event, as an agent loop
+      // does, is still reading when the provider's rejection arrives.
+      for await (const event of stream) {
+        events.push(event);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      const aborted = events.filter((e) => e.type === 'aborted');
+      expect(aborted).toHaveLength(1);
+      expect((aborted[0] as { reason: string }).reason).toBe('user');
+      expect(events.some((e) => e.type === 'error')).toBe(false);
+    });
+  }
 });
