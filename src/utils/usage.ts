@@ -98,6 +98,18 @@ export function resetUnconvertibleProviderItemWarnings(): void {
  * The four tool loops (callback/yielding × XML/native) each carried their own
  * copy of the accumulate-and-price block; this is the single one they share.
  */
+/**
+ * `ProviderResponse.unreportedUsage` for a provider's raw input and output
+ * counts: each that is not a number is unreported (its usage value is a 0
+ * default). Spread into a ProviderResponse.
+ */
+export function unreportedUsage(input: unknown, output: unknown): { unreportedUsage?: Array<'inputTokens' | 'outputTokens'> } {
+  const missing: Array<'inputTokens' | 'outputTokens'> = [];
+  if (typeof input !== 'number') missing.push('inputTokens');
+  if (typeof output !== 'number') missing.push('outputTokens');
+  return missing.length > 0 ? { unreportedUsage: missing } : {};
+}
+
 export class TurnUsageAccumulator {
   private readonly rounds: TurnRoundUsage[] = [];
   private readonly tokens: DetailedUsage = { inputTokens: 0, outputTokens: 0 };
@@ -175,6 +187,12 @@ export class TurnUsageAccumulator {
   /** The model that served the LAST round, or undefined if no round named one. */
   get lastServedModel(): string | undefined {
     return this.lastServed;
+  }
+
+  /** The latest round's own usage (a copy), or undefined before any round. */
+  get lastRound(): TurnRoundUsage | undefined {
+    const round = this.rounds[this.rounds.length - 1];
+    return round ? { model: round.model, usage: { ...round.usage } } : undefined;
   }
 
   /** One entry per provider round, in order — the audit trail behind the summed total. */

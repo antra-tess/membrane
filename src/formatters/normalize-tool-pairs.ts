@@ -97,6 +97,19 @@ export interface NormalizeOptions {
   pendingToolCallIds?: ReadonlySet<string>;
   /** See `BuildOptions.onNormalize`. */
   onEvent?: (event: NormalizeEvent) => void;
+  /**
+   * Hears each input block the normalizer rewrote as a new object with
+   * different content: an orphan tool_result textified (phase 5). For a
+   * caller that follows its blocks by object identity (request fidelity).
+   */
+  onBlockRewritten?: (original: ProviderBlock, replacement: ProviderBlock) => void;
+  /**
+   * Hears each input block the normalizer replaced with a copy that carries
+   * the same content: phase 5.5 drops `cache_control` by copying, never by
+   * mutating the caller's block. For a caller that follows its blocks by
+   * object identity (request fidelity).
+   */
+  onBlockCopied?: (original: ProviderBlock, copy: ProviderBlock) => void;
 }
 
 export interface NormalizeResult {
@@ -166,7 +179,7 @@ export function normalizeToolPairs(
   // ---------------------------------------------------------------------
   // Phase 5: resolve orphans
   // ---------------------------------------------------------------------
-  const orphanRes = resolveOrphans(envelopes, pending, onEvent);
+  const orphanRes = resolveOrphans(envelopes, pending, onEvent, options.onBlockRewritten);
   envelopes = orphanRes.envelopes;
   const ready = orphanRes.ready;
 
@@ -188,7 +201,7 @@ export function normalizeToolPairs(
   let pendingCacheSuppressionRef: Envelope | null = null;
   if (orphanRes.firstSyntheticEnvelope !== null) {
     const ref = envelopes[orphanRes.firstSyntheticEnvelope]!;
-    const suppressed = suppressCacheControlFrom(envelopes, orphanRes.firstSyntheticEnvelope);
+    const suppressed = suppressCacheControlFrom(envelopes, orphanRes.firstSyntheticEnvelope, options.onBlockCopied);
     if (suppressed) {
       pendingCacheSuppressionRef = ref;
     }
@@ -495,6 +508,7 @@ function resolveOrphans(
   envelopes: Envelope[],
   pending: ReadonlySet<string>,
   onEvent: (e: NormalizeEvent) => void,
+  onBlockRewritten?: NormalizeOptions['onBlockRewritten'],
 ): OrphanResolution {
   let ready = true;
   let firstSyntheticEnvelope: number | null = null;
@@ -519,10 +533,12 @@ function resolveOrphans(
         const inner = (block as { content?: unknown }).content;
         const innerText = typeof inner === 'string' ? inner : '';
         onEvent({ kind: 'orphan_tool_result_textified', toolUseId: id ?? '<missing>' });
-        return {
+        const replacement: ProviderBlock = {
           type: 'text',
           text: `[orphan tool_result for ${id ?? '<missing>'}]: ${innerText}`,
         };
+        onBlockRewritten?.(block, replacement);
+        return replacement;
       }
       return block;
     });
@@ -582,14 +598,17 @@ function resolveOrphans(
 function suppressCacheControlFrom(
   envelopes: Envelope[],
   startIndex: number,
+  onBlockCopied?: NormalizeOptions['onBlockCopied'],
 ): boolean {
   // Strip cache_control from blocks at-or-after startIndex. We must NOT
   // mutate the caller's input blocks (envelopes share references with
   // the input via rebuildEnvelopes), so clone-on-write: replace any
   // block carrying cache_control with a shallow copy that omits it.
   // The envelope's content array is replaced wholesale via .map; this
-  // is the only place in the normalizer that creates new block objects
-  // out of existing ones (synthetics aside).
+  // and orphan textification (phase 5) are the only places in the
+  // normalizer that make new block objects out of existing ones
+  // (synthetics aside), and each one tells the caller (`onBlockCopied`,
+  // `onBlockRewritten`).
   //
   // Returns whether any block was actually suppressed, so the caller
   // can decide whether to emit telemetry. Emission is deferred until
@@ -603,6 +622,7 @@ function suppressCacheControlFrom(
       const { cache_control: _drop, ...rest } = block as ProviderBlock & {
         cache_control?: unknown;
       };
+      onBlockCopied?.(block, rest as ProviderBlock);
       return rest as ProviderBlock;
     });
   }

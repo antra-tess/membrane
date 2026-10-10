@@ -40,6 +40,12 @@ export interface BuildOptions {
   /** How to handle multiple participants */
   participantMode: 'simple' | 'multiuser';
 
+  /**
+   * Where to record alterations: indices into `messages` whose non-empty
+   * content the build did not carry verbatim (utils/fidelity.ts).
+   */
+  fidelity?: import('../utils/fidelity.js').FidelityNotes;
+
   /** Name of the assistant participant */
   assistantParticipant: string;
 
@@ -285,6 +291,14 @@ export interface PrefillFormatter {
 
   /** Participant prefix template for native tool requests. Uses {name}; defaults to '{name}: '. */
   readonly nameFormat?: string;
+
+  /**
+   * True when `buildMessages` records, in `BuildOptions.fidelity`, every
+   * consumer message whose non-empty content it did not carry verbatim (see
+   * utils/fidelity.ts). A formatter that doesn't declare this leaves a
+   * round's fidelity unknown.
+   */
+  readonly reportsAlterations?: boolean;
 
   /**
    * The tool mode this formatter instance was EXPLICITLY constructed with, if

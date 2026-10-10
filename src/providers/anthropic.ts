@@ -2,11 +2,13 @@
  * Anthropic provider adapter
  */
 
+import { unreportedUsage } from '../utils/usage.js';
 import Anthropic, { type ClientOptions } from '@anthropic-ai/sdk';
 import { stripEmptyTextBlocks, stripEmptyTextRequest } from '../utils/empty-text.js';
 import { resolveImageMediaType, isAcceptedImageMediaType, assertWithinByteBudget, shedImagesToFitByteBudget } from '../utils/image-media.js';
 import type {
   ProviderAdapter,
+  ProviderInputTransformation,
   ProviderRequest,
   ProviderRequestOptions,
   ProviderResponse,
@@ -117,6 +119,50 @@ function extractBetaHeader(headers: ClientOptions['defaultHeaders']): string | u
   return undefined;
 }
 
+/** Beta flag for thinking-binding controls (`thinking.block_binding`) and
+ *  the `input_transformations` report that comes back with them. Shared with
+ *  the Bedrock adapter, where it rides in `anthropic_beta`. */
+export const THINKING_BINDING_BETA = 'thinking-binding-controls-2026-08-01';
+
+/** Whether a built request asks for thinking-binding controls, which need
+ *  their beta. Read from the final body, so a thinking config passed through
+ *  `extra` counts too. */
+export function sendsBlockBinding(params: { thinking?: unknown }): boolean {
+  const binding = (params.thinking as { block_binding?: unknown } | null | undefined)?.block_binding;
+  return binding !== undefined && binding !== null;
+}
+
+/**
+ * A response's `input_transformations` (Anthropic and Bedrock alike), each
+ * entry with the block at its `messages.{i}.content.{j}` path in `messages`,
+ * the messages as sent. Both adapters send a request's thinking blocks as
+ * the request's own objects, so that is the block membrane built. Nothing
+ * when the response carried no report.
+ */
+export function readInputTransformations(
+  raw: unknown,
+  messages: unknown,
+): { inputTransformations?: ProviderInputTransformation[] } {
+  if (!Array.isArray(raw)) return {};
+  const sent = Array.isArray(messages) ? messages : [];
+  const inputTransformations: ProviderInputTransformation[] = [];
+  for (const entry of raw) {
+    if (entry === null || typeof entry !== 'object') continue;
+    const { type, reason, path } = entry as { type?: unknown; reason?: unknown; path?: unknown };
+    if (typeof type !== 'string') continue;
+    const at = typeof path === 'string' ? /^messages\.(\d+)\.content\.(\d+)$/.exec(path) : null;
+    const content = at ? (sent[Number(at[1])] as { content?: unknown } | undefined)?.content : undefined;
+    const block = at && Array.isArray(content) ? content[Number(at[2])] : undefined;
+    inputTransformations.push({
+      type,
+      ...(typeof reason === 'string' ? { reason } : {}),
+      ...(typeof path === 'string' ? { path } : {}),
+      ...(block !== undefined ? { block } : {}),
+    });
+  }
+  return { inputTransformations };
+}
+
 /** Resolve whether a thinking config is enabled on a request. Thinking can
  *  arrive top-level OR smuggled through `extra` (see the sampling gate in
  *  buildRequest) — both the sampling strip and the beta header must agree on
@@ -197,6 +243,8 @@ export interface AnthropicAdapterConfig {
 
 export class AnthropicAdapter implements ProviderAdapter {
   readonly name = 'anthropic';
+  /** Carries message content verbatim, and reports the nested tool-result blocks it can't carry. */
+  readonly reportsContentAlterations = true;
   readonly cacheReceiptBasis = 'wire-request' as const;
 
   /**
@@ -318,11 +366,11 @@ export class AnthropicAdapter implements ProviderAdapter {
     request: ProviderRequest,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const anthropicRequest = this.buildRequest(request);
+    const anthropicRequest = this.buildRequest(request, options?.onContentAltered);
     const fullRequest = { ...anthropicRequest, stream: false as const };
     options?.onRequest?.(fullRequest);
 
-    const headers = this.betaHeaders(request);
+    const headers = this.betaHeaders(request, anthropicRequest);
     this.cacheKeepalive?.record(
       fullRequest as unknown as Record<string, unknown>, headers, 'complete',
     );
@@ -343,7 +391,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     callbacks: StreamCallbacks,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const anthropicRequest = this.buildRequest(request);
+    const anthropicRequest = this.buildRequest(request, options?.onContentAltered);
     // Note: stream is implicitly true when using .stream()
     const fullRequest = { ...anthropicRequest, stream: true };
     options?.onRequest?.(fullRequest);
@@ -352,7 +400,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     // gaps. `stream: true` is dropped at replay time (transport, not cache key).
     this.cacheKeepalive?.record(
       fullRequest as unknown as Record<string, unknown>,
-      this.betaHeaders(request),
+      this.betaHeaders(request, anthropicRequest),
       'stream',
     );
 
@@ -403,7 +451,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     try {
       const stream = await session.client.messages.stream(anthropicRequest, {
         signal: session.signal,
-        headers: this.liveHeaders(this.betaHeaders(request), 'stream'),
+        headers: this.liveHeaders(this.betaHeaders(request, anthropicRequest), 'stream'),
       });
 
       // Accumulate response metadata from SSE events directly, so we can
@@ -411,6 +459,9 @@ export class AnthropicAdapter implements ProviderAdapter {
       let model = '';
       let inputTokens = 0;
       let outputTokens = 0;
+      // Whether the stream reported each count (an unreported one stays a 0 default).
+      let inputReported = false;
+      let outputReported = false;
       let cacheCreationTokens: number | undefined;
       let cacheReadTokens: number | undefined;
       let cacheCreation5mTokens: number | undefined;
@@ -422,6 +473,9 @@ export class AnthropicAdapter implements ProviderAdapter {
       let sawTerminalEvent = false;
       let stopSequence: string | undefined;
       let stopDetails: unknown;
+      // The thinking-binding report: final in message_start, replaced by a
+      // message_delta's after a server-side model fallback.
+      let inputTransformations: unknown;
 
       // Content block tracking — finalized on content_block_stop
       const contentBlocks: Record<string, unknown>[] = [];
@@ -478,8 +532,10 @@ export class AnthropicAdapter implements ProviderAdapter {
         resetIdleTimer();
         if (event.type === 'message_start') {
           model = event.message.model;
+          inputTransformations = (event.message as { input_transformations?: unknown }).input_transformations;
           const usage = event.message.usage as unknown as Record<string, unknown>;
           inputTokens = typeof usage.input_tokens === 'number' ? usage.input_tokens : 0;
+          inputReported = typeof usage.input_tokens === 'number';
           cacheCreationTokens = typeof usage.cache_creation_input_tokens === 'number'
             ? usage.cache_creation_input_tokens : undefined;
           cacheReadTokens = typeof usage.cache_read_input_tokens === 'number'
@@ -545,6 +601,8 @@ export class AnthropicAdapter implements ProviderAdapter {
           };
           stopReason = delta.stop_reason ?? 'end_turn';
           sawTerminalEvent = true;
+          const fallback = (event as { input_transformations?: unknown }).input_transformations;
+          if (Array.isArray(fallback)) inputTransformations = fallback;
           stopSequence = delta.stop_sequence ?? undefined;
           // stop_details carries refusal metadata (e.g., category: 'reasoning_extraction')
           stopDetails = delta.stop_details ?? undefined;
@@ -554,6 +612,7 @@ export class AnthropicAdapter implements ProviderAdapter {
             cache_read_input_tokens?: number | null;
           };
           outputTokens = deltaUsage.output_tokens ?? 0;
+          if (typeof deltaUsage.output_tokens === 'number') outputReported = true;
           // message_delta carries cumulative cache metrics — use as authoritative
           if (deltaUsage.cache_creation_input_tokens != null) {
             cacheCreationTokens = deltaUsage.cache_creation_input_tokens;
@@ -595,6 +654,8 @@ export class AnthropicAdapter implements ProviderAdapter {
           cacheCreationTokens,
           cacheReadTokens,
         },
+        ...unreportedUsage(inputReported ? inputTokens : undefined, outputReported ? outputTokens : undefined),
+        ...readInputTransformations(inputTransformations, anthropicRequest.messages),
         model,
         rawRequest: fullRequest,
         raw: {
@@ -617,6 +678,7 @@ export class AnthropicAdapter implements ProviderAdapter {
             ...(inferenceGeo ? { inference_geo: inferenceGeo } : {}),
             ...(serviceTier ? { service_tier: serviceTier } : {}),
           },
+          ...(Array.isArray(inputTransformations) ? { input_transformations: inputTransformations } : {}),
         },
       };
 
@@ -644,12 +706,6 @@ export class AnthropicAdapter implements ProviderAdapter {
     }
   }
 
-  /** Per-request headers for both create() and stream(): the interleaved-
-   *  thinking beta when thinking is enabled on a pre-4.6 Claude 4 model.
-   *  Any default anthropic-beta (oauth) is re-carried in the same header —
-   *  the SDK replaces same-key defaults instead of merging, and the API
-   *  accepts comma-separated betas. Undefined when nothing to add, so the
-   *  defaults apply untouched. */
   /** Base headers + the live dynamicHeaders stamp. Request time only: the
    *  keepalive recorder receives the base headers BEFORE this merge, so
    *  replayed touches never carry a stale telemetry value. */
@@ -663,20 +719,28 @@ export class AnthropicAdapter implements ProviderAdapter {
     return Object.keys(out).length ? out : undefined;
   }
 
-  private betaHeaders(request: ProviderRequest): Record<string, string> | undefined {
-    if (!thinkingEnabled(request) || !needsInterleavedThinkingBeta(request.model)) {
-      return undefined;
-    }
-    // Set-join so a default that already carries the interleaved beta
-    // doesn't emit it twice (the API tolerates duplicates; this is hygiene).
+  /** Per-request headers for both create() and stream(): the interleaved-
+   *  thinking beta when thinking is enabled on a pre-4.6 Claude 4 model, and
+   *  the thinking-binding beta when the built request asks for binding
+   *  controls. Any default anthropic-beta (oauth) is re-carried in the same
+   *  header — the SDK replaces same-key defaults instead of merging, and the
+   *  API accepts comma-separated betas. Undefined when nothing to add, so
+   *  the defaults apply untouched. */
+  private betaHeaders(request: ProviderRequest, built: { thinking?: unknown }): Record<string, string> | undefined {
+    const needed: string[] = [];
+    if (thinkingEnabled(request) && needsInterleavedThinkingBeta(request.model)) needed.push(INTERLEAVED_THINKING_BETA);
+    if (sendsBlockBinding(built)) needed.push(THINKING_BINDING_BETA);
+    if (needed.length === 0) return undefined;
+    // Set-join so a default that already carries a beta doesn't emit it
+    // twice (the API tolerates duplicates; this is hygiene).
     const betas = new Set(
       (this.defaultBeta ?? '').split(',').map((b) => b.trim()).filter(Boolean),
     );
-    betas.add(INTERLEAVED_THINKING_BETA);
+    for (const beta of needed) betas.add(beta);
     return { 'anthropic-beta': [...betas].join(',') };
   }
 
-  private buildRequest(request: ProviderRequest): Anthropic.MessageCreateParams {
+  private buildRequest(request: ProviderRequest, onContentAltered?: (block?: unknown) => void): Anthropic.MessageCreateParams {
     // Strip provider-specific fields (e.g., sourceUrl for Gemini) from image blocks
     // before sending to Anthropic, which rejects extra inputs.
     // Also normalize nested tool_result content blocks: Membrane uses camelCase
@@ -704,10 +768,15 @@ export class AnthropicAdapter implements ProviderAdapter {
             };
           }
           if (block.type === 'tool_result' && Array.isArray(block.content)) {
-            return {
-              ...block,
-              content: toAnthropicToolResultContent(block.content as ContentBlock[]),
-            };
+            const content = toAnthropicToolResultContent(block.content as ContentBlock[]);
+            // Nested blocks other than text and base64/URL images have no
+            // Anthropic tool_result form and are left out, and whitespace-only
+            // nested text is cleaned away. Only an exactly empty '' text block
+            // carried nothing.
+            const carried = (block.content as Array<{ type?: string; text?: unknown }>)
+              .filter((b) => !(b?.type === 'text' && (typeof b.text !== 'string' || b.text === ''))).length;
+            if (content.length !== carried) onContentAltered?.(block);
+            return { ...block, content };
           }
           return block;
         }),
@@ -816,10 +885,12 @@ export class AnthropicAdapter implements ProviderAdapter {
           delete rest.top_p;
         }
       }
+      // A passthrough `messages` replaces the built messages wholesale.
+      if (rest.messages !== undefined) onContentAltered?.();
       Object.assign(params, rest);
     }
 
-    stripEmptyTextRequest(params);
+    stripEmptyTextRequest(params, onContentAltered);
     return params;
   }
 
@@ -834,6 +905,11 @@ export class AnthropicAdapter implements ProviderAdapter {
         cacheCreationTokens: (response.usage as any).cache_creation_input_tokens,
         cacheReadTokens: (response.usage as any).cache_read_input_tokens,
       },
+      ...unreportedUsage(response.usage?.input_tokens, response.usage?.output_tokens),
+      ...readInputTransformations(
+        (response as { input_transformations?: unknown }).input_transformations,
+        (rawRequest as { messages?: unknown } | undefined)?.messages,
+      ),
       model: response.model,
       rawRequest,
       raw: response,

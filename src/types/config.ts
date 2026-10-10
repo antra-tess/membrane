@@ -113,6 +113,16 @@ export interface MembraneHooks {
    * automatic-continuation rounds. It does not accumulate generated content
    * or tool results. `rawRequest` describes the current provider round; use
    * that argument to inspect or modify the conversation actually being sent.
+   *
+   * Changing `request` in place reaches whatever is built or read from it
+   * after the hook: the native tool loop builds each later round from it
+   * (its messages are the same objects), XML continuations reuse its config
+   * and provider params, and an adapter that serializes
+   * `extra.normalizedMessages` at send time (the completions adapter, on a
+   * turn's first request) sends this round with the change. On a yielding
+   * stream, a round whose hook changed either argument, and every later
+   * round after an in-place change, reports `fidelity: 'unknown'`
+   * (`RoundReport`).
    */
   beforeRequest?: (
     request: NormalizedRequest,

@@ -11,7 +11,14 @@ type JsonObject = Record<string, unknown>;
  * final transport boundary so every call shape accepted by ProviderAdapter is
  * valid on the Codex Responses endpoint.
  */
-export function normalizeResponsesInput(messages: ProviderRequest['messages']): OpenAIResponsesInputItem[] {
+export function normalizeResponsesInput(
+  messages: ProviderRequest['messages'],
+  /**
+   * Hears each content block this normalization leaves out, and each tool
+   * result whose nested content it can't carry as it was.
+   */
+  onDropped?: () => void,
+): OpenAIResponsesInputItem[] {
   const output: unknown[] = [];
 
   for (const rawMessage of messages as unknown[]) {
@@ -20,7 +27,7 @@ export function normalizeResponsesInput(messages: ProviderRequest['messages']): 
       continue;
     }
     if (rawMessage.type !== 'message' && rawMessage.role === undefined) {
-      output.push(normalizeStandaloneItem(rawMessage));
+      output.push(normalizeStandaloneItem(rawMessage, onDropped));
       continue;
     }
 
@@ -51,18 +58,22 @@ export function normalizeResponsesInput(messages: ProviderRequest['messages']): 
     };
 
     for (const rawBlock of blocks) {
-      if (!isObject(rawBlock)) continue;
+      if (!isObject(rawBlock)) {
+        onDropped?.();
+        continue;
+      }
       if (rawBlock.type === 'text') {
         parts.push({ type: role === 'assistant' ? 'output_text' : 'input_text', text: asString(rawBlock.text) });
       } else if (rawBlock.type === 'image') {
         const imageUrl = responsesImageUrl(rawBlock);
         if (imageUrl && role !== 'assistant') parts.push({ type: 'input_image', image_url: imageUrl });
+        else onDropped?.();
       } else if (rawBlock.type === 'tool_use') {
         flush();
         output.push(normalizeStandaloneItem(rawBlock));
       } else if (rawBlock.type === 'tool_result') {
         flush();
-        output.push(normalizeStandaloneItem(rawBlock));
+        output.push(normalizeStandaloneItem(rawBlock, onDropped));
       } else if (rawBlock.type === 'redacted_thinking') {
         flush();
         output.push(reasoningInputItem(rawBlock));
@@ -77,7 +88,7 @@ export function normalizeResponsesInput(messages: ProviderRequest['messages']): 
   return output as OpenAIResponsesInputItem[];
 }
 
-function normalizeStandaloneItem(item: JsonObject): unknown {
+function normalizeStandaloneItem(item: JsonObject, onDropped?: () => void): unknown {
   if (item.type === 'tool_use') {
     return {
       type: 'function_call',
@@ -88,6 +99,8 @@ function normalizeStandaloneItem(item: JsonObject): unknown {
   }
   if (item.type === 'tool_result') {
     const content = item.content;
+    // A nested value the output can't carry is stringified or replaced by a note.
+    if (responsesToolOutputLoses(content)) onDropped?.();
     return {
       type: 'function_call_output',
       call_id: asString(item.toolUseId) || asString(item.tool_use_id),
@@ -113,6 +126,22 @@ function reasoningInputItem(block: JsonObject): unknown {
   const raw = block.rawItem;
   if (isObject(raw) && raw.type === 'reasoning') return raw;
   return { type: 'reasoning', summary: [], encrypted_content: asString(block.data) };
+}
+
+/**
+ * Whether a tool result's content loses something on its way to a Responses
+ * `function_call_output`: a nested block that is neither text nor an image
+ * the output can carry (it is JSON-stringified or replaced by a note).
+ */
+export function responsesToolOutputLoses(content: unknown): boolean {
+  if (!Array.isArray(content)) return false;
+  return content.some((block) => {
+    if (typeof block === 'string') return false;
+    if (!isObject(block)) return true;
+    if (block.type === 'text' || block.type === 'input_text' || block.type === 'input_image') return false;
+    if (block.type === 'image') return !responsesImageUrl(block);
+    return true;
+  });
 }
 
 /**
