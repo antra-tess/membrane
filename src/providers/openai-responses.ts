@@ -1,6 +1,31 @@
 /**
  * OpenAI Images API provider adapter
  *
+ * ⚠ DO NOT CONFUSE WITH THE RESPONSES API. Despite the filename and the class
+ * name `OpenAIResponsesAdapter`, nothing in this file talks to OpenAI's
+ * Responses API. The real Responses-API surfaces are:
+ *
+ *   - `src/formatters/openai-responses.ts` — the Responses input-item
+ *     formatter (`function_call` / `function_call_output` items, item ids,
+ *     encrypted reasoning), and
+ *   - `src/providers/openai-responses-api.ts` — the Responses transport
+ *     adapter (`readonly name = 'openai-responses-api'`).
+ *
+ * This file is the IMAGES adapter, and reviews or edits aimed at Responses
+ * behaviour belong in those two. The names collide by history, not design.
+ *
+ * The rename is deferred, not forgotten. The cost lands outside this repo:
+ * the original note here records consumer vendor configs matching an
+ * `openairesponses-*` prefix — a consumer-side fact this repo cannot check,
+ * carried forward as the reason of record. In-repo, `'openai-responses'` as
+ * an adapter name is only telemetry (`details.model.provider`); the sole
+ * behavioural read of an adapter name is `membrane.ts` matching
+ * `'openai-responses-api'`, i.e. the OTHER adapter. Note also that
+ * `'openai-responses'` is simultaneously the FORMATTER name, which
+ * `Membrane.buildNativeToolRequest` and `Membrane.transformRequest` do
+ * branch on — so check which of the two a name refers to before touching
+ * either.
+ *
  * Adapter for OpenAI's Images API endpoints, used for image generation
  * models like `gpt-image-1`:
  *
@@ -17,11 +42,9 @@
  * - Return base64-encoded images in `data[].b64_json`
  * - No streaming support (returns complete image)
  * - Support `size`, `quality`, `n`, `background`, `output_format`
- *
- * Note: File retains the name openai-responses.ts and class name
- * OpenAIResponsesAdapter for compatibility with existing factory
- * routing and vendor configs (`openairesponses-*` prefix).
  */
+
+import { assertPromptToolSupport } from './request-capabilities.js';
 
 import { resolveImageMediaType } from '../utils/image-media.js';
 import type {
@@ -34,12 +57,11 @@ import type {
 } from '../types/index.js';
 import {
   MembraneError,
-  rateLimitError,
-  contextLengthError,
-  authError,
-  serverError,
   abortError,
-  networkError,
+  classifyError,
+  errorFromHttpResponse,
+  isTypedAbortError,
+  withRawRequest,
 } from '../types/index.js';
 import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError } from './utils.js';
 
@@ -209,6 +231,7 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
     request: ProviderRequest,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
+    assertPromptToolSupport(request, options, this.name, { kind: 'none', extraTools: request.extra?.tools });
     const allImages = this.allowImageEditing ? this.collectImages(request) : [];
     const selected = this.selectImages(allImages);
     const inputImages = selected.map(ref => ref.dataUrl);
@@ -256,8 +279,7 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
       const response = await fetch(`${this.baseURL}/${endpoint}`, fetchOptions);
 
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`OpenAI Images API error: ${response.status} ${errorText}`);
+        throw errorFromHttpResponse(this.name, response, await response.text(), imagesRequest);
       }
 
       const data = (await response.json()) as ImagesAPIResponse;
@@ -576,79 +598,12 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
   // --------------------------------------------------------------------------
 
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
-    // A deadline abort is a timeout and stays one. Collapsing it into a bare
-    // abortError() here is what erased the identity before Membrane's
-    // caller-signal > timeout > error ladder could read it.
     if (isDeadlineAbort(error)) return deadlineTimeoutError(error, rawRequest);
-    if (error instanceof MembraneError) return error;
+    if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
+    if (isTypedAbortError(error)) return abortError(undefined, rawRequest);
 
-    if (error instanceof Error) {
-      const message = error.message;
-
-      if (message.includes('429') || message.includes('rate_limit')) {
-        const retryMatch = message.match(/retry after (\d+)/i);
-        const retryAfter = retryMatch?.[1] ? parseInt(retryMatch[1], 10) * 1000 : undefined;
-        return rateLimitError(message, retryAfter, error, rawRequest);
-      }
-
-      if (
-        message.includes('401') ||
-        message.includes('invalid_api_key') ||
-        message.includes('Incorrect API key')
-      ) {
-        return authError(message, error, rawRequest);
-      }
-
-      if (
-        message.includes('context_length') ||
-        message.includes('maximum context') ||
-        message.includes('too long')
-      ) {
-        return contextLengthError(message, error, rawRequest);
-      }
-
-      if (
-        message.includes('content_policy') ||
-        message.includes('safety_system') ||
-        message.includes('moderation')
-      ) {
-        return new MembraneError({
-          type: 'unknown',
-          message: `Content policy violation: ${message}`,
-          retryable: false,
-          rawError: error,
-          rawRequest,
-        });
-      }
-
-      if (
-        message.includes('500') ||
-        message.includes('502') ||
-        message.includes('503') ||
-        message.includes('server_error')
-      ) {
-        return serverError(message, undefined, error, rawRequest);
-      }
-
-      if (error.name === 'AbortError') {
-        return abortError(undefined, rawRequest);
-      }
-
-      if (
-        message.includes('network') ||
-        message.includes('fetch') ||
-        message.includes('ECONNREFUSED')
-      ) {
-        return networkError(message, error, rawRequest);
-      }
-    }
-
-    return new MembraneError({
-      type: 'unknown',
-      message: error instanceof Error ? error.message : String(error),
-      retryable: false,
-      rawError: error,
-      rawRequest,
-    });
+    const info = classifyError(error);
+    info.rawRequest = rawRequest;
+    return new MembraneError(info);
   }
 }

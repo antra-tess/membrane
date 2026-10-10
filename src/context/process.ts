@@ -28,7 +28,7 @@ import {
  * block, a `contextPrefix` block when that option is set, the floating
  * tool-loop marker). Nothing reconciles those spends against
  * `cache.points`, so the module keeps one slot free rather than risk a 400
- * on the default XML path, which always marks the system block. A caller
+ * on the explicit XML path, which marks the system block. A caller
  * combining this module with MORE than one formatter spend (e.g. system
  * prompt AND `contextPrefix`) can still exceed the provider budget: the
  * module cannot see the formatter's choices from here, which is why the

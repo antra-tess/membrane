@@ -148,12 +148,12 @@ describe('throwOnStreamErrorFrame auth frames', () => {
 });
 
 describe('throwOnStreamErrorFrame unclassified frames', () => {
-  it('keeps the generic error but preserves code and type in the message', () => {
+  it('types an explicit 400 while preserving its unrecognized provider code', () => {
     const thrown = throwsFromFrame({ code: 400, type: 'zz_unrecognized_frame_1', message: 'zz malformed tool schema' });
 
-    expect(thrown).toBeInstanceOf(Error);
-    expect(thrown).not.toBeInstanceOf(MembraneError);
-    const generic = thrown as Error;
+    expect(thrown).toBeInstanceOf(MembraneError);
+    expect(thrown).toMatchObject({ type: 'invalid_request', retryable: false, httpStatus: 400, providerErrorCode: 'zz_unrecognized_frame_1' });
+    const generic = thrown as MembraneError;
     expect(generic.message).toContain('400');
     expect(generic.message).toContain('zz_unrecognized_frame_1');
     expect(generic.message).toContain('zz malformed tool schema');

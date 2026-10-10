@@ -4,6 +4,8 @@
  * Uses the Anthropic Messages API format through AWS Bedrock.
  */
 
+import { assertMessagePrefillSupported } from './request-capabilities.js';
+
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -15,11 +17,12 @@ import type {
 import {
   MembraneError,
   invalidRequestError,
-  rateLimitError,
-  contextLengthError,
-  authError,
-  serverError,
   abortError,
+  classifyError,
+  errorFromHttpResponse,
+  errorFromProviderStatus,
+  isTypedAbortError,
+  withRawRequest,
 } from '../types/index.js';
 import { stripEmptyTextRequest } from '../utils/empty-text.js';
 import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, assertTerminalEventObserved } from './utils.js';
@@ -374,11 +377,12 @@ export class BedrockAdapter implements ProviderAdapter {
     const bedrockModelId = this.toBedrockModelId(request.model);
     const bedrockRequest = this.buildRequest(request, bedrockModelId);
     const fullRequest = { modelId: bedrockModelId, ...bedrockRequest };
+    assertMessagePrefillSupported(bedrockModelId, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
-      const response = await this.invokeModel(bedrockModelId, bedrockRequest, combinedSignal);
+      const response = await this.invokeModel(bedrockModelId, bedrockRequest, combinedSignal, fullRequest);
       return this.parseResponse(response, fullRequest);
     } catch (error) {
       throw this.handleError(error, fullRequest);
@@ -395,11 +399,12 @@ export class BedrockAdapter implements ProviderAdapter {
     const bedrockModelId = this.toBedrockModelId(request.model);
     const bedrockRequest = this.buildRequest(request, bedrockModelId);
     const fullRequest = { modelId: bedrockModelId, ...bedrockRequest, stream: true };
+    assertMessagePrefillSupported(bedrockModelId, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
-      return await this.invokeModelWithStream(bedrockModelId, bedrockRequest, callbacks, combinedSignal);
+      return await this.invokeModelWithStream(bedrockModelId, bedrockRequest, callbacks, combinedSignal, fullRequest);
     } catch (error) {
       throw this.handleError(error, fullRequest);
     } finally {
@@ -545,7 +550,8 @@ export class BedrockAdapter implements ProviderAdapter {
   private async invokeModel(
     modelId: string,
     request: BedrockMessageRequest,
-    signal?: AbortSignal
+    signal: AbortSignal | undefined,
+    rawRequest: unknown
   ): Promise<BedrockMessageResponse> {
     const url = new URL(
       `${this.baseURL ?? `https://bedrock-runtime.${this.region}.amazonaws.com`}/model/${encodeURIComponent(modelId)}/invoke`
@@ -577,8 +583,7 @@ export class BedrockAdapter implements ProviderAdapter {
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
-      throw new BedrockError(response.status, errorText);
+      throw errorFromHttpResponse(this.name, response, await response.text(), rawRequest);
     }
 
     return response.json() as Promise<BedrockMessageResponse>;
@@ -588,7 +593,8 @@ export class BedrockAdapter implements ProviderAdapter {
     modelId: string,
     request: BedrockMessageRequest,
     callbacks: StreamCallbacks,
-    signal?: AbortSignal
+    signal: AbortSignal | undefined,
+    rawRequest: unknown
   ): Promise<ProviderResponse> {
     const url = new URL(
       `${this.baseURL ?? `https://bedrock-runtime.${this.region}.amazonaws.com`}/model/${encodeURIComponent(modelId)}/invoke-with-response-stream`
@@ -620,8 +626,7 @@ export class BedrockAdapter implements ProviderAdapter {
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
-      throw new BedrockError(response.status, errorText);
+      throw errorFromHttpResponse(this.name, response, await response.text(), rawRequest);
     }
 
     // Parse the binary event stream
@@ -632,7 +637,7 @@ export class BedrockAdapter implements ProviderAdapter {
     let outputTokens = 0;
     let cacheCreationTokens: number | undefined;
     let cacheReadTokens: number | undefined;
-    let stopReason: string = 'end_turn';
+    let stopReason: string | undefined;
     let sawTerminalEvent = false;
     let stopSequence: string | undefined;
     let fullText = '';
@@ -779,6 +784,9 @@ export class BedrockAdapter implements ProviderAdapter {
                   } else if (eventData.delta?.type === 'signature_delta' && (eventData.delta as any).signature) {
                     if (contentBlocks[currentBlockIndex]) {
                       contentBlocks[currentBlockIndex]!.signature = (contentBlocks[currentBlockIndex]!.signature ?? '') + (eventData.delta as any).signature;
+                      // Reported as it accumulates, so a stream that ends before
+                      // content_block_stop still keeps the signature it received.
+                      callbacks.onThinkingSignature?.(currentBlockIndex, contentBlocks[currentBlockIndex]!.signature!);
                     }
                   } else if (eventData.delta?.type === 'input_json_delta' && (eventData.delta as any).partial_json !== undefined) {
                     // Tool-call arguments stream as input_json_delta fragments.
@@ -890,7 +898,7 @@ export class BedrockAdapter implements ProviderAdapter {
         return { type: b.type as 'text', text: b.text };
       }),
       model: modelId,
-      stop_reason: stopReason as BedrockMessageResponse['stop_reason'],
+      stop_reason: (stopReason ?? 'end_turn') as BedrockMessageResponse['stop_reason'],
       stop_sequence: stopSequence ?? null,
       usage: {
         input_tokens: inputTokens,
@@ -900,7 +908,7 @@ export class BedrockAdapter implements ProviderAdapter {
       },
     };
 
-    return this.parseResponse(finalMessage, { modelId, ...request, stream: true });
+    return { ...this.parseResponse(finalMessage, rawRequest), providerStopReason: stopReason };
   }
 
   private parseResponse(response: BedrockMessageResponse, rawRequest: unknown): ProviderResponse {
@@ -933,6 +941,7 @@ export class BedrockAdapter implements ProviderAdapter {
     return {
       content,
       stopReason: response.stop_reason ?? 'end_turn',
+      providerStopReason: response.stop_reason ?? undefined,
       stopSequence: response.stop_sequence ?? undefined,
       usage: {
         inputTokens: response.usage.input_tokens,
@@ -946,47 +955,31 @@ export class BedrockAdapter implements ProviderAdapter {
     };
   }
 
+  /**
+   * HTTP failures are classified at the fetch boundary. What reaches here is
+   * a synthesized stream-event failure (BedrockError, which carries the
+   * status its exception type implies), a typed abort, or a non-HTTP
+   * throwable.
+   */
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
-    // A deadline abort is a timeout and stays one. Collapsing it into a bare
-    // abortError() here is what erased the identity before Membrane's
-    // caller-signal > timeout > error ladder could read it.
     if (isDeadlineAbort(error)) return deadlineTimeoutError(error, rawRequest);
-    // Already-classified failures (e.g. the stream-integrity guards) keep
-    // their type and retryability instead of being re-derived from a string.
-    if (error instanceof MembraneError) return error;
+    if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
+    if (isTypedAbortError(error)) return abortError(undefined, rawRequest);
 
     if (error instanceof BedrockError) {
-      const status = error.status;
-      const message = error.message;
-
-      if (status === 429) {
-        return rateLimitError(message, undefined, error, rawRequest);
-      }
-
-      if (status === 401 || status === 403) {
-        return authError(message, error, rawRequest);
-      }
-
-      if (message.includes('context') || message.includes('too long') || message.includes('token')) {
-        return contextLengthError(message, error, rawRequest);
-      }
-
-      if (status >= 500) {
-        return serverError(message, status, error, rawRequest);
-      }
+      return errorFromProviderStatus({
+        provider: this.name,
+        status: error.status,
+        body: error.message,
+        message: error.message,
+        rawError: error,
+        rawRequest,
+      });
     }
 
-    if (error instanceof Error && error.name === 'AbortError') {
-      return abortError(undefined, rawRequest);
-    }
-
-    return new MembraneError({
-      type: 'unknown',
-      message: error instanceof Error ? error.message : String(error),
-      retryable: false,
-      rawError: error,
-      rawRequest,
-    });
+    const info = classifyError(error);
+    info.rawRequest = rawRequest;
+    return new MembraneError(info);
   }
 }
 

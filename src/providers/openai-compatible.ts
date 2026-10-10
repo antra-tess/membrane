@@ -12,6 +12,8 @@
  * Uses the standard OpenAI chat completions format with tool_calls support.
  */
 
+import { assertMessagePrefillSupported } from './request-capabilities.js';
+
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -23,12 +25,11 @@ import type {
 } from '../types/index.js';
 import {
   MembraneError,
-  rateLimitError,
-  contextLengthError,
-  authError,
-  serverError,
   abortError,
-  networkError,
+  classifyError,
+  errorFromHttpResponse,
+  isTypedAbortError,
+  withRawRequest,
 } from '../types/index.js';
 import { safeParseJson, textOnlyToolResultContent, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
 
@@ -182,6 +183,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
     const openAIRequest = this.buildRequest(request);
+    assertMessagePrefillSupported(openAIRequest.model, openAIRequest.messages, options, this.name, openAIRequest);
     options?.onRequest?.(openAIRequest);
 
     try {
@@ -202,6 +204,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     // Ask for usage in the stream — without this the endpoint sends no usage
     // frame at all and every streamed call reports 0/0 tokens.
     openAIRequest.stream_options = { include_usage: true };
+    assertMessagePrefillSupported(openAIRequest.model, openAIRequest.messages, options, this.name, openAIRequest);
     options?.onRequest?.(openAIRequest);
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
@@ -214,8 +217,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`API error: ${response.status} ${errorText}`);
+        throw errorFromHttpResponse(this.name, response, await response.text(), openAIRequest);
       }
 
       const reader = response.body?.getReader();
@@ -227,7 +229,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       const sseParser = new SSELineParser();
       let accumulated = '';
       let reasoning = '';
-      let finishReason = 'stop';
+      let finishReason: string | undefined;
       let sawTerminalEvent = false;
       let toolCalls: OpenAIToolCall[] = [];
       let streamUsage: OpenAIResponse['usage'] | undefined;
@@ -555,8 +557,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`API error: ${response.status} ${errorText}`);
+        throw errorFromHttpResponse(this.name, response, await response.text(), request);
       }
 
       return await response.json() as OpenAIResponse;
@@ -572,6 +573,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     return {
       content: this.messageToContent(message),
       stopReason: this.mapFinishReason(choice?.finish_reason),
+      providerStopReason: choice?.finish_reason ?? undefined,
       stopSequence: undefined,
       usage: {
         inputTokens: response.usage?.prompt_tokens ?? 0,
@@ -585,7 +587,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
 
   private parseStreamedResponse(
     message: OpenAIMessage,
-    finishReason: string,
+    finishReason: string | undefined,
     requestedModel: string,
     streamUsage?: OpenAIResponse['usage'],
     rawRequest?: unknown
@@ -593,6 +595,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     return {
       content: this.messageToContent(message),
       stopReason: this.mapFinishReason(finishReason),
+      providerStopReason: finishReason,
       stopSequence: undefined,
       usage: {
         // Zeros only as the genuinely-absent fallback: an endpoint that
@@ -602,7 +605,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       },
       model: requestedModel,
       rawRequest,
-      raw: { message, finish_reason: finishReason, usage: streamUsage },
+      raw: { message, finish_reason: finishReason ?? 'stop', usage: streamUsage },
     };
   }
 
@@ -652,50 +655,19 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     }
   }
 
+  /**
+   * HTTP failures are classified at the fetch boundary, where status,
+   * headers and body are still live; this handles what is left — typed
+   * aborts and non-HTTP throwables — through the shared last-resort table.
+   */
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
-    // A deadline abort is a timeout and stays one. Collapsing it into a bare
-    // abortError() here is what erased the identity before Membrane's
-    // caller-signal > timeout > error ladder could read it.
     if (isDeadlineAbort(error)) return deadlineTimeoutError(error, rawRequest);
-    // Already-classified failures (e.g. the stream-integrity guards) keep
-    // their type and retryability instead of being re-derived from a string.
-    if (error instanceof MembraneError) return error;
+    if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
+    if (isTypedAbortError(error)) return abortError(undefined, rawRequest);
 
-    if (error instanceof Error) {
-      const message = error.message;
-
-      if (message.includes('429') || message.includes('rate')) {
-        return rateLimitError(message, undefined, error, rawRequest);
-      }
-
-      if (message.includes('401') || message.includes('auth') || message.includes('Unauthorized')) {
-        return authError(message, error, rawRequest);
-      }
-
-      if (message.includes('context') || message.includes('too long') || message.includes('maximum context')) {
-        return contextLengthError(message, error, rawRequest);
-      }
-
-      if (message.includes('500') || message.includes('502') || message.includes('503')) {
-        return serverError(message, undefined, error, rawRequest);
-      }
-
-      if (error.name === 'AbortError') {
-        return abortError(undefined, rawRequest);
-      }
-
-      if (message.includes('network') || message.includes('fetch') || message.includes('ECONNREFUSED')) {
-        return networkError(message, error, rawRequest);
-      }
-    }
-
-    return new MembraneError({
-      type: 'unknown',
-      message: error instanceof Error ? error.message : String(error),
-      retryable: false,
-      rawError: error,
-      rawRequest,
-    });
+    const info = classifyError(error);
+    info.rawRequest = rawRequest;
+    return new MembraneError(info);
   }
 }
 

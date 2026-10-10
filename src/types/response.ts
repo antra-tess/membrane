@@ -14,6 +14,8 @@ export type StopReason =
   | 'max_tokens'     // Hit token limit
   | 'stop_sequence'  // Hit stop sequence
   | 'tool_use'       // Stopped for tool use
+  | 'pause_turn'     // Provider paused a long-running turn; the caller is
+                     // expected to resume it (Anthropic pause_turn)
   | 'refusal'        // Content refused by safety
   | 'abort'          // Request was aborted
   | 'no_progress'    // Stall guard ended the turn (issue #39): consecutive
@@ -129,6 +131,13 @@ export interface StopInfo {
   
   /** Whether output was truncated */
   wasTruncated: boolean;
+
+  /**
+   * The provider's own stop token, verbatim, from ProviderResponse.providerStopReason.
+   * Omitted when the provider supplied none or a custom adapter did not report it.
+   * This can differ from the normalized reason (for example, OpenAI's length).
+   */
+  providerReason?: string;
 
   /**
    * XML tool mode: the turn ended with a tool block still open — a
