@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { NativeFormatter } from '../../src/formatters/native.js';
@@ -25,13 +25,24 @@ describe('NativeFormatter nameFormat compatibility', () => {
         'const formatter: NativeFormatter = new CustomFormatter();',
         'formatter.buildMessages([], { participantMode: "multiuser", assistantParticipant: "Assistant" });',
       ].join('\n'));
+      // The repository's own compiler, by the bin entry npm links: TypeScript 7's
+      // exports map doesn't include `typescript/bin/tsc`.
+      const typescriptPackage = createRequire(import.meta.url).resolve('typescript/package.json');
+      const tsc = join(
+        dirname(typescriptPackage),
+        (JSON.parse(readFileSync(typescriptPackage, 'utf8')) as { bin: { tsc: string } }).bin.tsc,
+      );
       const compilation = spawnSync(process.execPath, [
-        createRequire(import.meta.url).resolve('typescript/bin/tsc'), '--noEmit', '--strict', '--noImplicitOverride',
+        tsc, '--noEmit', '--strict', '--noImplicitOverride',
         '--skipLibCheck', '--target', 'ES2022', '--module', 'NodeNext', '--moduleResolution', 'NodeNext',
+        // TypeScript 7 includes no @types package that isn't named, and refuses
+        // files named on the command line beside a tsconfig.json unless told to
+        // ignore it.
+        '--types', 'node', '--ignoreConfig',
         fixture,
       ], {
         encoding: 'utf8',
-        // tsc also discovers ambient @types from its working directory.
+        // tsc resolves those types from its working directory's node_modules.
         cwd: fileURLToPath(new URL('../../', import.meta.url)),
       });
       expect(compilation.error).toBeUndefined();
