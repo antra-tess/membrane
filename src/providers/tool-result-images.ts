@@ -54,9 +54,12 @@ export function chatToolResultContent(block: any, media = false): string | ChatT
   const converted: ChatToolOutputPart[] = parts.map(part => {
     if (part.type === 'text') return part;
     const url = chatToolImageUrl(part.source);
-    return url
-      ? { type: 'image_url', image_url: { url } }
-      : { type: 'text', text: '[image omitted: unsupported image source or media type]' };
+    if (url) return { type: 'image_url', image_url: { url } };
+    // Only bytes are omitted. A source without bytes that the wire can't take
+    // as an image keeps its text, address included, as it does under omission.
+    return holdsImageBytes(part.source)
+      ? { type: 'text', text: '[image omitted: unsupported image source or media type]' }
+      : { type: 'text', text: JSON.stringify(part) };
   });
   // Keep all-omission results in the native string form so exported-helper
   // output can re-enter an adapter without losing the tool-call ID.
@@ -65,18 +68,23 @@ export function chatToolResultContent(block: any, media = false): string | ChatT
     : converted.map(part => part.type === 'text' ? part.text : '').join('\n');
 }
 
-/** Omission removes image bytes: base64 sources, which textOnlyToolResultContent
- * replaces, and data URLs, which must never become text either. A URL
- * reference carries no bytes, so it keeps its text form, address included. */
+/** Omission removes image bytes, which must never become text: base64 data
+ * and data URLs. A source without bytes keeps its text, address included. */
 export function omittedToolResultContent(content: unknown): string {
-  if (!Array.isArray(content) || !content.some(isDataUrlImage)) return textOnlyToolResultContent(content);
-  return textOnlyToolResultContent(content.map(block => isDataUrlImage(block)
+  if (!Array.isArray(content) || !content.some(holdsBytes)) return textOnlyToolResultContent(content);
+  return textOnlyToolResultContent(content.map(block => holdsBytes(block)
     ? { type: 'text', text: TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER } : block));
 }
 
-function isDataUrlImage(block: any): boolean {
-  return isSourceImage(block) && block.source.type === 'url'
-    && typeof block.source.url === 'string' && /^data:/i.test(block.source.url);
+/** Image bytes in a source: a data string, or a data URL. Any other source is
+ * a reference, an address or descriptor with no bytes to omit. */
+export function holdsImageBytes(source: any): boolean {
+  return typeof source?.data === 'string'
+    || (source?.type === 'url' && typeof source.url === 'string' && /^data:/i.test(source.url));
+}
+
+function holdsBytes(block: any): boolean {
+  return isSourceImage(block) && holdsImageBytes(block.source);
 }
 
 /** Validate caller-owned native user media with the same policy as tool media. */

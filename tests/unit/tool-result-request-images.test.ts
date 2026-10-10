@@ -350,7 +350,7 @@ describe.each(cases)('$name tool-result image transport', c => {
     expect(req).toEqual(before);
   });
 
-  it.each(['complete', 'stream'])('%s omits local/malformed image URLs and keeps only HTTP(S) remote references', async path => {
+  it.each(['complete', 'stream'])('%s sends only HTTP(S) references as images and keeps other references as text', async path => {
     const invalid = [
       'file:///tmp/screenshot.png', 'blob:https://example.test/123', 'cid:snapshot',
       'ftp://example.test/image.png', '/tmp/screenshot.png', 'https://', 'http://[bad',
@@ -359,17 +359,22 @@ describe.each(cases)('$name tool-result image transport', c => {
     const { bodies, fetch } = stub(c);
     const adapter = c.adapter();
     for (const url of [...invalid, ...valid]) {
+      const reference = { type: 'image', source: { type: 'url', url } };
       const req = { model: c.model, messages: [
         { role: 'assistant', content: [tool('one', 'snapshot')] },
-        { role: 'user', content: [result('one', [text('caption'), { type: 'image', source: { type: 'url', url } }])] },
+        { role: 'user', content: [result('one', [text('caption'), reference])] },
       ] };
       if (path === 'complete') await adapter.complete(req);
       else await adapter.stream(req, { onChunk() {} });
       const wire = JSON.stringify(bodies.at(-1));
       expect(wire).toContain('caption');
-      const supported = !c.gemini && valid.includes(url);
-      expect(wire.includes(url)).toBe(supported);
-      if (!supported) expect(wire).toContain('image omitted');
+      // An image input holds the URL in a url field of the request; a reference
+      // kept as text holds it inside the tool output's escaped JSON.
+      const asImage = !c.gemini && valid.includes(url);
+      expect(wire.includes('"url":"' + url + '"')).toBe(asImage);
+      expect(wire.includes(JSON.stringify(JSON.stringify(reference)).slice(1, -1))).toBe(!asImage);
+      expect(wire).not.toContain('inlineData');
+      expect(wire).not.toContain('image omitted');
     }
     // Only the completion/stream HTTP calls ran, never a fetch of tool URLs.
     expect(fetch).toHaveBeenCalledTimes(invalid.length + valid.length);
@@ -414,24 +419,28 @@ describe.each(cases)('$name tool-result image transport', c => {
     }
   });
 
-  it('preserves image-free serialized content and explicitly describes unsupported images', async () => {
+  it('preserves image-free serialized content and keeps sources without bytes as text', async () => {
     const { bodies, fetch } = stub(c);
     const legacy = [text('plain'), { metadata: { code: 2 } }];
+    const file = { type: 'image', source: { type: 'file', path: '/tmp/private' } };
+    const reference = { type: 'image', source: { type: 'url', url: 'https://example.test/image.png' } };
     const messages = [
       { role: 'assistant', content: [tool('one', 'snapshot'), tool('two', 'inspect')] },
       { role: 'user', content: [
         result('one', legacy),
-        result('two', [text('first'), { type: 'image', source: { type: 'file', path: '/tmp/private' } }, { type: 'image', source: { type: 'url', url: 'https://example.test/image.png' } }, text('last')]),
+        result('two', [text('first'), file, reference, text('last')]),
       ] },
     ];
     await c.adapter().complete({ model: c.model, messages });
     const body = bodies[0];
     const first = c.gemini ? body.contents.flatMap((m: any) => m.parts).find((p: any) => p.functionResponse).functionResponse.response.result : body.messages.find((m: any) => m.role === 'tool').content;
     expect(first).toBe(JSON.stringify(legacy));
-    expect(JSON.stringify(body)).toContain('image omitted');
-    expect(JSON.stringify(body)).not.toContain('/tmp/private');
-    if (c.gemini) expect(JSON.stringify(body)).not.toContain('https://example.test/image.png');
-    else expect(JSON.stringify(body)).toContain('https://example.test/image.png');
+    const wire = JSON.stringify(body);
+    const asText = (block: unknown) => JSON.stringify(JSON.stringify(block)).slice(1, -1);
+    expect(wire).toContain(asText(file));
+    expect(wire).not.toContain('image omitted');
+    if (c.gemini) expect(wire).toContain(asText(reference));
+    else expect(wire).toContain('"url":"https://example.test/image.png"');
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 });
@@ -578,11 +587,11 @@ describe.each(cases.filter(c => c.gemini))('$name wrapper transport policy', c =
 });
 
 describe.each(cases.filter(c => c.gemini))('$name results the transport cannot carry', c => {
-  it('omits a URL image source even when it carries a media type label', async () => {
+  it('omits a data URL source even when it carries a media type label', async () => {
     const { bodies } = stub(c);
     await c.adapter().complete({ model: c.model, messages: [
       { role: 'assistant', content: [tool('one', 'snapshot')] },
-      { role: 'user', content: [result('one', [{ type: 'image', source: { type: 'url', url: 'https://example.test/a.png', mediaType: 'image/png' } }])] },
+      { role: 'user', content: [result('one', [{ type: 'image', source: { type: 'url', url: 'data:image/png;base64,' + data, mediaType: 'image/png' } }])] },
     ] });
     const wire = JSON.stringify(bodies[0]);
     expect(wire).not.toContain('inlineData');

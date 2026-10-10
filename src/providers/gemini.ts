@@ -30,7 +30,7 @@ import {
   networkError,
 } from '../types/index.js';
 import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
-import { toolOutputParts, omittedToolResultContent } from './tool-result-images.js';
+import { toolOutputParts, omittedToolResultContent, holdsImageBytes } from './tool-result-images.js';
 import { resolveImageMediaType } from '../utils/image-media.js';
 
 // ============================================================================
@@ -545,6 +545,11 @@ export class GeminiAdapter implements ProviderAdapter {
                   continue;
                 }
                 const source = part.source;
+                if (!holdsImageBytes(source)) {
+                  // No bytes to omit: a reference keeps its text, address included.
+                  result.push(JSON.stringify(part));
+                  continue;
+                }
                 if (source?.type !== 'base64' || typeof source.data !== 'string' || !source.data) {
                   result.push('[image omitted: Gemini tool results require inline base64 image data]');
                   continue;
