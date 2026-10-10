@@ -186,7 +186,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
   private xTitle: string;
   private defaultMaxTokens: number;
   private readonly toolImagePolicy: ToolResultImagePolicy<Promise<boolean>>;
-  private modelImageInputs?: Promise<ReadonlyMap<string, boolean>>;
+  private modelImageInputs?: Promise<{ inputs: ReadonlyMap<string, boolean>; failure?: string }>;
 
   constructor(config: OpenRouterAdapterConfig = {}) {
     this.apiKey = config.apiKey ?? process.env.OPENROUTER_API_KEY ?? '';
@@ -441,30 +441,40 @@ export class OpenRouterAdapter implements ProviderAdapter {
     // the lookup, not to any caller: cancelling one waiter cannot cancel others
     // or pin a false decision merely because that caller left.
     this.modelImageInputs ??= this.fetchModelImageInputs();
-    return (await this.modelImageInputs).get(model) ?? false;
+    const { inputs, failure } = await this.modelImageInputs;
+    const known = inputs.get(model);
+    if (known === undefined) {
+      // The decision is pinned, so this warns once per model per adapter.
+      console.warn(
+        `[membrane:openrouter] tool-result images for ${JSON.stringify(model)} will be omitted for this adapter's lifetime: ` +
+        (failure ? `the model catalogue lookup failed (${failure})` : 'the model is not in the model catalogue') +
+        '. Set toolResultImages, or media.imageInput in the model registry, to decide explicitly.',
+      );
+    }
+    return known ?? false;
   }
 
-  private async fetchModelImageInputs(): Promise<ReadonlyMap<string, boolean>> {
+  private async fetchModelImageInputs(): Promise<{ inputs: ReadonlyMap<string, boolean>; failure?: string }> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 5000);
+    const timer = setTimeout(() => controller.abort(new Error('no answer within 5 s')), 5000);
     try {
       const work = (async () => {
         const response = await fetch('https://openrouter.ai/api/v1/models', { signal: controller.signal });
-        if (!response.ok) throw new Error('OpenRouter model catalogue unavailable');
+        if (!response.ok) throw new Error('HTTP ' + response.status);
         const catalogue = await response.json() as { data?: unknown };
+        if (!Array.isArray(catalogue?.data)) throw new Error('the response has no data array');
         const inputs = new Map<string, boolean>();
-        if (!Array.isArray(catalogue?.data)) return inputs;
         for (const model of catalogue.data) {
           if (typeof model?.id !== 'string') continue;
           const modalities = model.architecture?.input_modalities;
           inputs.set(model.id, Array.isArray(modalities) && modalities.includes('image'));
         }
-        return inputs;
+        return { inputs };
       })();
       // Bound the body read too, even if a nonstandard fetch ignores abort.
       return await waitForImageDecision(work, controller.signal);
-    } catch {
-      return new Map();
+    } catch (error) {
+      return { inputs: new Map(), failure: String((error as Error)?.message ?? error).slice(0, 200) };
     } finally {
       clearTimeout(timer);
     }

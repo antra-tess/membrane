@@ -195,6 +195,57 @@ describe('OpenRouter lookup and cancellation', () => {
   });
 });
 
+describe('OpenRouter fallback warnings', () => {
+  afterEach(() => vi.restoreAllMocks());
+  const omissionWarnings = (warn: ReturnType<typeof vi.spyOn>) =>
+    warn.mock.calls.map(call => String(call[0])).filter(line => line.includes('tool-result images'));
+  it.each([
+    ['reject', () => { throw new Error('offline'); }, 'lookup failed (offline)'],
+    ['http', () => new Response('', { status: 503 }), 'lookup failed (HTTP 503)'],
+    ['json', () => new Response('not json'), 'lookup failed ('],
+    ['shape', () => new Response(JSON.stringify({ data: {} })), 'lookup failed (the response has no data array)'],
+  ] as const)('a failed catalogue (%s) warns once per omitted model, with the reason', async (_failure, metadata, reason) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    stub(metadata as () => Response);
+    const adapter = providers[2]!.make();
+    await invoke(adapter, 'complete', 'vendor/vision');
+    await invoke(adapter, 'stream', 'vendor/vision');
+    await invoke(adapter, 'complete', 'vendor/other');
+    const lines = omissionWarnings(warn);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain('"vendor/vision" will be omitted');
+    expect(lines[0]).toContain(reason);
+    expect(lines[1]).toContain('"vendor/other" will be omitted');
+  });
+  it('a hung catalogue warns that it gave no answer in time', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    stub(() => new Promise(() => {}));
+    const pending = invoke(providers[2]!.make(), 'complete', 'vendor/vision');
+    await vi.advanceTimersByTimeAsync(5000);
+    await pending;
+    expect(omissionWarnings(warn)).toEqual([expect.stringContaining('lookup failed (no answer within 5 s)')]);
+  });
+  it('names a model the catalogue does not list, once, and stays quiet for listed models', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    stub();
+    const adapter = providers[2]!.make();
+    for (const model of ['vendor/text', 'vendor/vision', 'vendor/unknown', 'vendor/unknown']) {
+      await invoke(adapter, 'complete', model);
+    }
+    expect(omissionWarnings(warn)).toEqual([
+      expect.stringContaining('"vendor/unknown" will be omitted for this adapter\'s lifetime: the model is not in the model catalogue'),
+    ]);
+  });
+  it('stays quiet when the registry decides', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { lookup } = stub(() => { throw new Error('offline'); });
+    await invoke(providers[2]!.make(), 'complete', 'vendor/unknown', { getModelImageInput: () => false });
+    expect(lookup).not.toHaveBeenCalled();
+    expect(omissionWarnings(warn)).toHaveLength(0);
+  });
+});
+
 describe('decision waits', () => {
   it('rejects at once for a signal that is already aborted, whatever the shared work does', async () => {
     const never = new Promise<boolean>(() => {});
