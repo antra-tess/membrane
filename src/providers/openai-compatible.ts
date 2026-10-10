@@ -761,8 +761,9 @@ export function toOpenAIMessages(
       }
     }
     
-    // Results precede sibling user text, but never their own assistant calls.
-    // Image-free envelopes retain their legacy ordering.
+    // In a user envelope, image-bearing results precede sibling user text; an
+    // assistant turn keeps its calls first. Image-free envelopes keep their
+    // legacy ordering.
     const appendToolResults = () => {
       for (const tr of toolResults) {
         result.push({
@@ -773,7 +774,7 @@ export function toOpenAIMessages(
       }
     };
     const hasImages = msg.content.some(block => block.type === 'tool_result' && hasToolResultImages(block.content));
-    const resultsFirst = hasImages && msg.role === 'user' && toolCalls.length === 0;
+    const resultsFirst = hasImages && msg.role === 'user';
     if (resultsFirst) appendToolResults();
 
     // Add main message
