@@ -216,13 +216,77 @@ describe('keepalive model holds', () => {
   });
 
   it('a poke refused as NOT retryable still counts toward the breaker, whatever wait it states; the wait still holds the model', async () => {
-    const send = vi.fn(() => Promise.reject(new Classified('zz 400 with a hint', false, 50 * MIN)));
+    const sentAt: number[] = [];
+    const send = vi.fn(() => {
+      sentAt.push(Date.now() - START);
+      return Promise.reject(new Classified('zz 400 with a hint', false, 50 * MIN));
+    });
     const { ka, events } = setup(send, { maxConsecutiveErrors: 3 });
     ka.record(wire(), undefined, 'stream');
     await vi.advanceTimersByTimeAsync(24 * 60 * MIN);
     expect((events.filter((e) => e.type === 'error') as Array<{ consecutive: number }>).map((e) => e.consecutive)).toEqual([1, 2, 3]);
     expect(events.some((e) => e.type === 'disabled')).toBe(true);
     expect(send).toHaveBeenCalledTimes(3);
+    // The lineage alone would be due again 45 minutes after each refusal; the
+    // stated 50 holds it, so the pokes come 50 minutes apart.
+    expect(events.filter((e) => e.type === 'held')).toHaveLength(3);
+    expect(sentAt).toEqual([45 * MIN, 95 * MIN, 145 * MIN]);
+  });
+
+  it('a run of refusals holds the model no longer than refreshAfterMs', async () => {
+    const refusedAt: number[] = [];
+    const send = vi.fn(() => {
+      refusedAt.push(Date.now());
+      return Promise.reject(new Classified('zz 529', true, undefined));
+    });
+    const { ka, events } = setup(send);
+    for (const system of ['one', 'two', 'three', 'four']) ka.record(wire('claude-a', system), undefined, 'stream');
+    await vi.advanceTimersByTimeAsync(125 * MIN);
+    const holds = (events.filter((e) => e.type === 'held') as Array<{ until: number }>).map((e, i) => e.until - refusedAt[i]!);
+    // 5, 10, 20 and 40 minutes, then the refresh window: 80 would be past it.
+    expect(holds.slice(0, 5)).toEqual([5 * MIN, 10 * MIN, 20 * MIN, 40 * MIN, 45 * MIN]);
+  });
+
+  it("a retryable refusal's own short wait still waits out the model's backoff", async () => {
+    const refusedAt: number[] = [];
+    const send = vi.fn(() => {
+      refusedAt.push(Date.now());
+      return Promise.reject(new Classified('zz 429', true, 1 * MIN));
+    });
+    const { ka, events } = setup(send);
+    ka.record(wire('claude-a', 'one'), undefined, 'stream');
+    ka.record(wire('claude-a', 'two'), undefined, 'stream');
+    await vi.advanceTimersByTimeAsync(45 * MIN);
+    const held = events.filter((e) => e.type === 'held') as Array<{ until: number }>;
+    expect(held[0]!.until - refusedAt[0]!).toBe(5 * MIN);
+  });
+
+  it('a classifier that throws leaves the refusal counted, as one nothing classified', async () => {
+    const send = vi.fn(() => Promise.reject(new Classified('zz 529', true, undefined)));
+    const events: KeepaliveEvent[] = [];
+    const ka = new CacheKeepalive(send as never, {
+      refreshAfterMs: 45 * MIN, checkIntervalMs: 5 * MIN, maxIdleMs: 7 * 24 * 60 * MIN, maxConsecutiveErrors: 3,
+      onEvent: (event) => events.push(event),
+    }, () => { throw new Error('zz classifier bug'); });
+    keepalives.push(ka);
+    ka.record(wire(), undefined, 'stream');
+    await vi.advanceTimersByTimeAsync(45 * MIN);
+    expect((events.filter((e) => e.type === 'error') as Array<{ consecutive: number }>).map((e) => e.consecutive)).toEqual([1]);
+    expect(events.some((e) => e.type === 'held')).toBe(false);
+  });
+
+  it('a paced refusal never trips the breaker, even at maxConsecutiveErrors 0', async () => {
+    const outcomes: Array<() => Promise<unknown>> = [
+      () => Promise.reject(new Classified('zz 529', true, undefined)),
+      () => Promise.reject(new Error('zz plain failure')),
+    ];
+    const send = vi.fn(() => (outcomes.shift() ?? (() => Promise.resolve(hit)))());
+    const { ka, events } = setup(send, { maxConsecutiveErrors: 0 });
+    ka.record(wire(), undefined, 'stream');
+    await vi.advanceTimersByTimeAsync(45 * MIN);
+    expect(events.some((e) => e.type === 'disabled')).toBe(false);
+    await vi.advanceTimersByTimeAsync(60 * MIN);
+    expect(events.filter((e) => e.type === 'disabled')).toHaveLength(1);
   });
 
   it("another lineage of the same model already due in the same tick is skipped once a poke receives the wait", async () => {
@@ -240,6 +304,7 @@ describe('keepalive model holds', () => {
 
 /** The keepalive's private hold map, read only to check what it retains. */
 const holdsOf = (ka: CacheKeepalive) => (ka as unknown as { holds: Map<string, number> }).holds;
+const refusalsOf = (ka: CacheKeepalive) => (ka as unknown as { refusals: Map<string, number> }).refusals;
 
 describe('keepalive holds are kept only while their wait is outstanding', () => {
   it('passed holds are dropped before a new hold is set, with no lineage and no timer (foreground-only traffic)', async () => {
@@ -285,6 +350,15 @@ describe('keepalive holds are kept only while their wait is outstanding', () => 
     ka.holdModel('claude-b', 60 * MIN, 'zz 429');
     ka.stop();
     expect(holdsOf(ka).size).toBe(0);
+  });
+
+  it('stop() drops every run of refusals too', async () => {
+    const { ka } = setup(vi.fn(() => Promise.reject(new Classified('zz 529', true, undefined))));
+    ka.record(wire(), undefined, 'stream');
+    await vi.advanceTimersByTimeAsync(45 * MIN);
+    expect(refusalsOf(ka).size).toBe(1);
+    ka.stop();
+    expect(refusalsOf(ka).size).toBe(0);
   });
 });
 
