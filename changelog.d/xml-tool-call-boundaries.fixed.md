@@ -16,9 +16,10 @@
   `tool_use`. A value that contains markup for an optional declared parameter
   the call doesn't otherwise include keeps the call as parsed, with a warning:
   membrane's loops dispatch it, and a no-loop result returns it as a call. So
-  does text before an invoke's first parameter that contains no markup, such
-  as a model's commentary: no value precedes it to have been cut, and the tool
-  never receives it. Before, a miskeyed closer read through to the next
+  does text before an invoke's first parameter that contains no markup apart
+  from complete comments and processing instructions, such as a model's
+  commentary: no value precedes it to have been cut, and the tool never
+  receives it. Before, a miskeyed closer read through to the next
   well-formed one, and the call dispatched with the next parameter swallowed
   into the previous value; text inside an invoke outside every parameter was
   ignored, so the tail of a value cut at a literal closing tag, or a value

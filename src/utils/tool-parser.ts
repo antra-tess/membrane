@@ -541,6 +541,12 @@ function parseInvokeParameters(
 // digit or another symbol (`a < b`, `<-`) it is prose.
 const TAG_START = /<[/!?:_\p{L}]/u;
 
+// A complete comment or processing instruction is markup that carries nothing:
+// no value the parser could have missed. Taken out before the markup test, so
+// one before the first parameter is commentary like any other. An unterminated
+// one, a CDATA section or a declaration is still markup.
+const VALUELESS_MARKUP = /<!--[\s\S]*?-->|<\?[\s\S]*?\?>/g;
+
 /**
  * Non-whitespace text inside an invoke but outside every parameter.
  *
@@ -553,8 +559,9 @@ const TAG_START = /<[/!?:_\p{L}]/u;
  * real closer forgotten, even a cut's tail holds no markup. Refused.
  *
  * Before the first parameter, no value precedes it to have been cut. Text
- * there that holds no markup is taken as commentary and kept out of the call:
- * the call is sent as parsed, with a warning that makes no claim about intent.
+ * there that holds no markup, apart from complete comments and processing
+ * instructions, is taken as commentary and kept out of the call: the call is
+ * sent as parsed, with a warning that makes no claim about intent.
  * Markup there may be a parameter the parser doesn't read (an element per
  * parameter, another namespace, a single-quoted name), whose value the call
  * would lose: refused.
@@ -602,7 +609,7 @@ function noteTextOutsideParameters(
         `the call has text outside every parameter, starting \`${quoted}\`, and no parameter the parser reads`
       ),
     });
-  } else if (TAG_START.test(stray)) {
+  } else if (TAG_START.test(stray.replace(VALUELESS_MARKUP, ''))) {
     findings.push({
       at,
       refusal: refusalMessage(

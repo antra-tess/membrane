@@ -278,6 +278,10 @@ describe('text outside every parameter', () => {
     it.each([
       ['commentary', 'Updating the board now:', 'Updating the board now:'],
       ['commentary whose `<` starts no tag', 'Moving it along <- since a < b:', 'Moving it along <- since a < b:'],
+      // Markup, but it carries nothing: main dispatched these with every value intact.
+      ['a complete comment', '<!-- updating the board -->', '<!-- updating the board -->'],
+      ['a processing instruction', '<?xml version="1.0"?>', '<?xml version="1.0"?>'],
+      ['commentary holding a comment', 'Updating <!-- see below --> now:', 'Updating <!-- see below --> now:'],
       [
         'long commentary, quoted by its start',
         'Updating the board now, then I will tell the channel:',
@@ -333,6 +337,10 @@ describe('text outside every parameter', () => {
       ['a single-quoted parameter name', "<parameter name='quote'>q</parameter>", "<parameter name='quote'>q</parameter>"],
       ['a value whose opener is missing', 'q</parameter>', 'q</parameter>'],
       ['commentary holding a tag', 'Marking it <b>done</b>:', 'Marking it <b>done</b>:'],
+      // A comment carries nothing, but these can hold a value.
+      ['an unterminated comment', '<!-- updating the board', '<!-- updating the board'],
+      ['a CDATA section', '<![CDATA[q]]>', '<![CDATA[q]]>'],
+      ['an element beside a comment', '<!-- q --><quote>q</quote>', '<!-- q --><quote>q</quote>'],
     ])('refuses text that holds markup (%s): it holds no parameter the parser reads', (_shape, text, quoted) => {
       for (const options of [TOOLS, undefined]) {
         const parsed = parseToolCalls(leading(text), options);
