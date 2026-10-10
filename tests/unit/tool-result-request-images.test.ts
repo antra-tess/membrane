@@ -311,6 +311,18 @@ describe.each(cases)('$name tool-result image transport', c => {
     if (!c.gemini) expect(wire.includes('data:image/png;base64,' + data)).toBe(true);
   });
 
+  it('keeps tool data named image with an untyped source as text', async () => {
+    const { bodies } = stub(c);
+    const untyped = { type: 'image', source: { camera: 3 } };
+    await c.adapter().complete({ model: c.model, messages: [
+      { role: 'assistant', content: [tool('one', 'snapshot')] },
+      { role: 'user', content: [result('one', [text('caption'), untyped])] },
+    ] });
+    const wire = JSON.stringify(bodies[0]);
+    expect(wire).toContain(JSON.stringify(JSON.stringify(untyped)).slice(1, -1));
+    expect(wire).not.toMatch(/image omitted|NOT shown/);
+  });
+
 
   it.each(['complete', 'stream', 'yielding'])('%s history uses the transport policy for HEIC/HEIF tool images', async path => {
     const heic = Buffer.from('\x00\x00\x00\x18ftypheic\x00\x00\x00\x00heic').toString('base64');
@@ -562,5 +574,75 @@ describe.each(cases.filter(c => c.gemini))('$name wrapper transport policy', c =
     const { bodies } = stub(c);
     await new Membrane(adapter, { formatter: new NativeFormatter() }).complete(req);
     expect(JSON.stringify(bodies[0])).toContain('"data":"' + bytes + '"');
+  });
+});
+
+describe.each(cases.filter(c => c.gemini))('$name results the transport cannot carry', c => {
+  it('omits a URL image source even when it carries a media type label', async () => {
+    const { bodies } = stub(c);
+    await c.adapter().complete({ model: c.model, messages: [
+      { role: 'assistant', content: [tool('one', 'snapshot')] },
+      { role: 'user', content: [result('one', [{ type: 'image', source: { type: 'url', url: 'https://example.test/a.png', mediaType: 'image/png' } }])] },
+    ] });
+    const wire = JSON.stringify(bodies[0]);
+    expect(wire).not.toContain('inlineData');
+    expect(wire).toContain('Gemini tool results require inline base64 image data');
+  });
+
+  it('reports an image-bearing error result under response.error', async () => {
+    const { bodies } = stub(c);
+    await c.adapter().complete({ model: c.model, messages: [
+      { role: 'assistant', content: [tool('one', 'snapshot')] },
+      { role: 'user', content: [result('one', [text('failed'), image()], true)] },
+    ] });
+    const response = bodies[0].contents.flatMap((m: any) => m.parts).find((p: any) => p.functionResponse).functionResponse.response;
+    expect(Object.keys(response)).toEqual(['error']);
+    expect(JSON.stringify(response.error)).toContain('failed');
+  });
+
+  it.each(['complete', 'stream'])('%s history names the formats Gemini accepts when it drops an image', async path => {
+    const gif = Buffer.from('GIF89a123456789').toString('base64');
+    const req = request(c);
+    req.tools = undefined; // Streaming history is formatter-built only without native tools.
+    req.messages[2]!.content = [
+      result('one', [{ type: 'image', source: { type: 'base64', data: gif, mediaType: 'image/gif' } }]),
+      result('two', 'plain'),
+    ] as any;
+    const { bodies } = stub(c);
+    const membrane = new Membrane(c.adapter(), { formatter: new NativeFormatter() });
+    if (path === 'complete') await membrane.complete(req);
+    else await membrane.stream(req);
+    const wire = JSON.stringify(bodies[0]);
+    expect(wire).not.toContain(gif);
+    expect(wire).toContain('only png/jpeg/webp/heic/heif are');
+  });
+});
+
+describe.each(cases.filter(c => c.gemini && !c.nativeImages))('$name sibling image placement', c => {
+  it('places sibling images before a following message with string content', async () => {
+    const { bodies } = stub(c);
+    await c.adapter().complete({ model: c.model, messages: [
+      { role: 'assistant', content: [tool('one', 'snapshot')] },
+      { role: 'user', content: [result('one', [image()])] },
+      { role: 'assistant', content: 'seen' },
+      { role: 'user', content: 'next' },
+    ] });
+    const contents = bodies[0].contents;
+    const imageAt = contents.findIndex((m: any) => m.parts.some((p: any) => p.inlineData));
+    const replyAt = contents.findIndex((m: any) => m.role === 'model' && m.parts.some((p: any) => p.text === 'seen'));
+    expect(imageAt).toBeGreaterThanOrEqual(0);
+    expect(imageAt).toBeLessThan(replyAt);
+  });
+
+  it('places sibling images before text that follows the result in the same message', async () => {
+    const { bodies } = stub(c);
+    await c.adapter().complete({ model: c.model, messages: [
+      { role: 'assistant', content: [tool('one', 'snapshot')] },
+      { role: 'user', content: [result('one', [image()]), text('and also')] },
+    ] });
+    const parts = bodies[0].contents.flatMap((m: any) => m.parts);
+    const imageAt = parts.findIndex((p: any) => p.inlineData);
+    expect(imageAt).toBeGreaterThanOrEqual(0);
+    expect(imageAt).toBeLessThan(parts.findIndex((p: any) => p.text === 'and also'));
   });
 });

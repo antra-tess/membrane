@@ -1,5 +1,7 @@
+import { getEventListeners } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
+import { waitForImageDecision } from '../../src/providers/tool-result-image-policy.js';
 import { NativeFormatter } from '../../src/formatters/native.js';
 import { OpenAIAdapter } from '../../src/providers/openai.js';
 import { OpenAICompatibleAdapter, toOpenAIMessages } from '../../src/providers/openai-compatible.js';
@@ -99,7 +101,7 @@ describe.each(providers)('$name capability policy', p => {
 });
 
 describe('OpenAI text-only families', () => {
-  it.each(['o1-mini', 'o1-mini-2024-09-12', 'o1-preview', 'o1-preview-2024-09-12', 'gpt-oss-20b', 'gpt-oss-120b', 'o3-mini', 'o3-mini-2025-01-31', 'gpt-3.5-turbo', 'gpt-4', 'gpt-4-0613', 'gpt-4-32k', 'gpt-4-1106-preview', 'gpt-4-0125-preview', 'gpt-4-turbo-preview'])('%s defaults to omission', async model => {
+  it.each(['o1-mini', 'o1-mini-2024-09-12', 'o1-preview', 'o1-preview-2024-09-12', 'gpt-oss-20b', 'gpt-oss-120b', 'o3-mini', 'o3-mini-2025-01-31', 'gpt-3.5-turbo', 'gpt-4', 'gpt-4-0314', 'gpt-4-0613', 'gpt-4-32k', 'gpt-4-1106-preview', 'gpt-4-0125-preview', 'gpt-4-turbo-preview'])('%s defaults to omission', async model => {
     const { bodies } = stub();
     await invoke(providers[0]!.make(), 'complete', model);
     expect(hasPixels(bodies[0])).toBe(false);
@@ -134,6 +136,14 @@ describe('OpenRouter lookup and cancellation', () => {
     expect(bodies.map(hasPixels)).toEqual([false, false]);
     expect(lookup).toHaveBeenCalledTimes(1);
   });
+  it('skips malformed catalogue entries without failing the snapshot', async () => {
+    const { bodies } = stub(() => new Response(JSON.stringify({ data: [
+      null, { architecture: { input_modalities: ['image'] } }, { id: 7 },
+      { id: 'vendor/vision', architecture: { input_modalities: ['text', 'image'] } },
+    ] })));
+    await invoke(providers[2]!.make(), 'complete', 'vendor/vision');
+    expect(bodies.map(hasPixels)).toEqual([true]);
+  });
   it('shares concurrent resolution without one caller abort cancelling the lookup', async () => {
     let finish!: (value: Response) => void;
     const { bodies, lookup } = stub(() => new Promise(resolve => { finish = resolve; }));
@@ -159,12 +169,12 @@ describe('OpenRouter lookup and cancellation', () => {
     await invoke(adapter, 'complete', 'vendor/vision');
     expect(bodies.map(hasPixels)).toEqual([true]);
   });
-  it('includes metadata time in the caller deadline and retains its timeout provenance', async () => {
+  it.each(['complete', 'stream'])('%s includes metadata time in the caller deadline and retains its timeout provenance', async method => {
     vi.useFakeTimers();
     let finish!: (value: Response) => void;
     const { bodies } = stub(() => new Promise(resolve => { finish = resolve; }));
     const adapter = providers[2]!.make();
-    const first = invoke(adapter, 'complete', 'vendor/vision', { timeoutMs: 20 }).catch(error => error);
+    const first = invoke(adapter, method, 'vendor/vision', { timeoutMs: 20 }).catch(error => error);
     await vi.advanceTimersByTimeAsync(20);
     expect(await first).toMatchObject({ type: 'timeout', name: 'TimeoutAbortError' });
     expect(bodies).toHaveLength(0);
@@ -182,6 +192,26 @@ describe('OpenRouter lookup and cancellation', () => {
     expect(bodies.map(hasPixels)).toEqual([false]);
     await invoke(adapter, 'stream', 'vendor/vision');
     expect(lookup).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('decision waits', () => {
+  it('rejects at once for a signal that is already aborted, whatever the shared work does', async () => {
+    const never = new Promise<boolean>(() => {});
+    const settled = await Promise.race([
+      waitForImageDecision(never, AbortSignal.abort('gone')).then(() => 'resolved', reason => reason),
+      new Promise(resolve => setTimeout(resolve, 50, 'still waiting')),
+    ]);
+    expect(settled).toBe('gone');
+  });
+  it('leaves no abort listener on a long-lived caller signal', async () => {
+    stub();
+    const adapter = providers[2]!.make();
+    const controller = new AbortController();
+    for (const method of ['complete', 'stream', 'complete']) {
+      await invoke(adapter, method, 'vendor/vision', { signal: controller.signal });
+    }
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
   });
 });
 
@@ -438,6 +468,16 @@ describe('review regressions', () => {
       const callIndex = output.findIndex(m => m.role === 'assistant');
       expect(output[callIndex + 1]).toMatchObject({ role: 'tool', tool_call_id: 'one' });
       expect(output.at(-1)).toMatchObject({ role: 'user', content: 'interloper' });
+    });
+    it(name + ' helper keeps an image-free envelope in the order main gives it', () => {
+      const input = messages(false);
+      (input[2]!.content as any[]).push(text('interloper'));
+      const output = convert(input as any);
+      const callIndex = output.findIndex(m => m.role === 'assistant');
+      expect(output.slice(callIndex + 1)).toEqual([
+        { role: 'user', content: 'interloper' },
+        { role: 'tool', tool_call_id: 'one', content: JSON.stringify([text('caption')]) },
+      ]);
     });
     it(name + ' helper preserves an image-free array own toJSON', () => {
       const content: any = [text('raw internal')];
