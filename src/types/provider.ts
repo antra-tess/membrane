@@ -340,6 +340,22 @@ export interface ProviderRequestOptions {
   onContentAltered?: (block?: unknown) => void;
 }
 
+/** One entry of a provider's report on what it did with a request's input (ProviderResponse.inputTransformations). */
+export interface ProviderInputTransformation {
+  /** The provider's entry type, such as 'thinking_dropped' or 'thinking_mismatch_allowed'. */
+  type: string;
+  /** Why, as the provider names it. */
+  reason?: string;
+  /** Where the block is in the request the provider received, as it names it: `messages.{i}.content.{j}`. */
+  path?: string;
+  /**
+   * The request's own block object at that path, when the adapter could
+   * resolve it (as `ProviderRequestOptions.onContentAltered` takes one), so
+   * membrane can say which message it came from.
+   */
+  block?: unknown;
+}
+
 export interface ProviderResponse {
   /** Raw response content */
   content: unknown;
@@ -381,6 +397,16 @@ export interface ProviderResponse {
    * reports (UsageEvent.round) leave them out. Absent when both were reported.
    */
   unreportedUsage?: Array<'inputTokens' | 'outputTokens'>;
+
+  /**
+   * What the provider reported doing with blocks of this request's messages
+   * before the model saw them, one entry per block, in request order:
+   * Anthropic's `input_transformations`, which come back when the request
+   * asks for thinking-binding controls (`thinking.block_binding`). Empty
+   * when the provider reported nothing to report; absent when the response
+   * carried no report.
+   */
+  inputTransformations?: ProviderInputTransformation[];
   
   /** Model that actually ran */
   model: string;

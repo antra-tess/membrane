@@ -103,6 +103,7 @@ export type {
   ProviderRequest,
   ProviderRequestOptions,
   ProviderResponse,
+  ProviderInputTransformation,
   StreamCallbacks,
   UsageCacheConvention,
 } from './provider.js';
@@ -132,6 +133,7 @@ export type {
   UsageEvent,
   RoundReport,
   RoundUsage,
+  ThinkingBindingEntry,
   CompleteEvent,
   ErrorEvent,
   AbortedEvent,

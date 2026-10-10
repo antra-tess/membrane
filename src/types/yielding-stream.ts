@@ -133,6 +133,57 @@ export interface RoundReport {
    * one in place). With 'unknown', an empty `altered` proves nothing.
    */
   fidelity: 'established' | 'unknown';
+  /**
+   * The signed thinking this round's request sent back that failed the
+   * provider's binding check, as the provider reported it: Anthropic's
+   * `input_transformations`, which come back when `thinking.blockBinding` is
+   * set. Absent when the response carried no report; both lists empty when
+   * it reported that nothing failed. This is the provider's account, beside
+   * `altered`, which is membrane's: a dropped block was carried on the
+   * request verbatim and removed before the model saw it. Entries of a type
+   * membrane doesn't know are left out.
+   */
+  thinking?: {
+    /** Blocks the provider removed before the model saw them (`thinking_dropped`). */
+    dropped: ThinkingBindingEntry[];
+    /**
+     * Blocks that failed the check and were shown to the model anyway,
+     * because the check isn't enforced for this request
+     * (`thinking_mismatch_allowed`). Where it is enforced they would have been
+     * dropped, or the request refused. The provider lists these block by
+     * block while a drop can take more, so they are a lower bound on what
+     * enforcement would remove.
+     */
+    mismatchAllowed: ThinkingBindingEntry[];
+  };
+}
+
+/**
+ * One signed thinking block that failed a provider's binding check
+ * (RoundReport.thinking).
+ */
+export interface ThinkingBindingEntry {
+  /**
+   * Which check it failed, as the provider names it:
+   * 'prefix_binding_mismatch' (the conversation before it differs from the
+   * one it was minted in), 'model_binding_mismatch',
+   * 'organization_binding_mismatch' or 'end_user_binding_mismatch'.
+   */
+  reason: string;
+  /**
+   * Where it was in the request the provider received,
+   * `messages.{i}.content.{j}`. Membrane's build merges and adds messages,
+   * so these are the request's coordinates, not the consumer's.
+   */
+  path: string;
+  /** The consumer message it came from, in `altered.messages`' coordinates, when membrane can say. */
+  message?: number;
+  /** The injected message it came from, in `altered.injected`'s coordinates. */
+  injected?: [number, number];
+  /** The earlier round of this stream whose content it was (`ToolContext.roundContent`). */
+  round?: number;
+  /** Its index in that message's content (or that round's), when exactly one block there is it. */
+  block?: number;
 }
 
 /**

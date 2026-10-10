@@ -11,6 +11,8 @@ import type {
   ContentBlock,
   ProviderAdapter,
   ProviderResponse,
+  ProviderInputTransformation,
+  NormalizedMessage,
   ModelRegistry,
   MembraneConfig,
   StreamOptions,
@@ -71,6 +73,7 @@ import type {
   ToolCallsEvent,
   RoundReport,
   RoundUsage,
+  ThinkingBindingEntry,
 } from './types/yielding-stream.js';
 import type { PrefillFormatter, StreamParser } from './formatters/types.js';
 import { AnthropicXmlFormatter } from './formatters/anthropic-xml.js';
@@ -95,6 +98,9 @@ import {
 } from './utils/image-media.js';
 import { getDefaultPricing } from './registry/default-pricing.js';
 import { FidelityNotes, followNormalizedBlocks, isRawItemCarrier, ownBlocks, requestFingerprint, type MessageOrigin } from './utils/fidelity.js';
+
+/** Anthropic's thinking-binding controls, as a thinking config carries them. */
+type BlockBindingParam = { prefix_mismatch_behavior: 'error' | 'drop_block' };
 
 // ============================================================================
 // Membrane Class
@@ -1856,10 +1862,10 @@ export class Membrane {
     }
 
     // Build thinking config for native extended thinking (budget clamped to max_tokens)
-    // Fable/Mythos models: thinking is always on and unconfigurable; sampling params are removed.
-    // Sending thinking config or temperature returns a 400 — omit both entirely.
+    // Fable/Mythos models: thinking is always on, so no sampling params and,
+    // unless binding controls are asked for, no thinking config (buildThinkingParam).
     const alwaysOnThinking = Membrane.isAlwaysThinkingModel(request.config.model);
-    const thinking = alwaysOnThinking ? undefined : this.buildThinkingParam(request.config);
+    const thinking = this.buildThinkingParam(request.config);
 
     // Anthropic requires temperature=1 when extended thinking is enabled
     const temperature = alwaysOnThinking ? undefined : (thinking ? 1 : request.config.temperature);
@@ -2165,10 +2171,11 @@ export class Membrane {
    * Used by transformRequest, buildContinuationRequest, and buildContinuationRequestWithImages.
    */
   private getBaseProviderParams(config: NormalizedRequest['config']) {
-    // Fable/Mythos models: thinking always on (unconfigurable), sampling params removed — omit both.
+    // Fable/Mythos models: thinking always on, so no sampling params and,
+    // unless binding controls are asked for, no thinking config (buildThinkingParam).
     const alwaysOnThinking = Membrane.isAlwaysThinkingModel(config.model);
     // Build thinking config for native extended thinking
-    const thinking = alwaysOnThinking ? undefined : this.buildThinkingParam(config);
+    const thinking = this.buildThinkingParam(config);
     // Anthropic requires temperature=1 when extended thinking is enabled
     const temperature = alwaysOnThinking ? undefined : (thinking ? 1 : config.temperature);
     return {
@@ -2185,9 +2192,12 @@ export class Membrane {
   }
 
   /**
-   * Models with always-on, unconfigurable thinking (Claude Fable/Mythos family).
-   * These reject `thinking` config and sampling params (`temperature`, `top_p`, `top_k`)
-   * with a 400 — callers must omit them entirely.
+   * Models with always-on thinking (Claude Fable/Mythos family). Membrane
+   * sends them no sampling params (`temperature`, `top_p`, `top_k`) and no
+   * thinking config, which the family has rejected with a 400. The exception
+   * is the binding controls (`thinking.blockBinding`), sent as
+   * `{ type: 'adaptive', block_binding }`, which Fable 5 and Fable 5.1
+   * accepted (2026-10-10; Fable 5.1 also accepted a budgeted config then).
    */
   private static isAlwaysThinkingModel(model: string | undefined): boolean {
     return /\b(fable|mythos)\b/i.test(model ?? '');
@@ -2203,14 +2213,22 @@ export class Membrane {
    * the API will reject.
    */
   private buildThinkingParam(config: NormalizedRequest['config']):
-    | { type: 'adaptive'; display?: 'summarized' | 'omitted' }
-    | { type: 'enabled'; budget_tokens: number; display?: 'summarized' | 'omitted' }
+    | { type: 'adaptive'; display?: 'summarized' | 'omitted'; block_binding?: BlockBindingParam }
+    | { type: 'enabled'; budget_tokens: number; display?: 'summarized' | 'omitted'; block_binding?: BlockBindingParam }
     | undefined {
+    const blockBinding = config.thinking?.blockBinding;
+    const binding = blockBinding
+      ? { block_binding: { prefix_mismatch_behavior: blockBinding.prefixMismatchBehavior } }
+      : {};
+    // Thinking is always on for these: only binding controls are sent, when asked for.
+    if (Membrane.isAlwaysThinkingModel(config.model)) {
+      return blockBinding ? { type: 'adaptive', ...binding } : undefined;
+    }
     if (!config.thinking?.enabled) return undefined;
 
     const display = config.thinking.display;
     if ((config.thinking.type ?? 'enabled') === 'adaptive') {
-      return { type: 'adaptive', ...(display ? { display } : {}) };
+      return { type: 'adaptive', ...(display ? { display } : {}), ...binding };
     }
 
     const requested = config.thinking.budgetTokens ?? 5000;
@@ -2220,7 +2238,7 @@ export class Membrane {
       // Can't fit a valid thinking budget under max_tokens — skip thinking
       return undefined;
     }
-    return { type: 'enabled', budget_tokens: budget, ...(display ? { display } : {}) };
+    return { type: 'enabled', budget_tokens: budget, ...(display ? { display } : {}), ...binding };
   }
 
   /**
@@ -2329,6 +2347,12 @@ export class Membrane {
     /** Injected positions altered before any build (tool blocks stripped on supply). */
     injectedAlterations?: ReadonlyArray<readonly [number, number]>;
     injectedBatch?: { batch: number; applied: number };
+    /**
+     * The provider's report on the request's input (the response's
+     * `inputTransformations`), and the messages the build was handed, in its
+     * indices, for finding each block in its message.
+     */
+    thinking?: { entries: readonly ProviderInputTransformation[]; messages: readonly NormalizedMessage[] };
   }): RoundReport {
     const messages: number[] = [];
     const injected = new Map<string, [number, number]>();
@@ -2356,7 +2380,59 @@ export class Membrane {
       ...(input.injectedBatch ? { injectedBatch: input.injectedBatch } : {}),
       altered: { messages, injected: injectedPairs },
       fidelity: input.fidelity.established ? 'established' : 'unknown',
+      ...(input.thinking
+        ? { thinking: Membrane.thinkingReport(input.thinking.entries, input.fidelity, input.origins, input.thinking.messages) }
+        : {}),
     };
+  }
+
+  /**
+   * The provider's account of the signed thinking it removed or let through
+   * (RoundReport.thinking). Each block is placed where the build says it came
+   * from: the message that owns the request's block, through `origins`, and
+   * the block in that message with the same signature (or redacted data).
+   */
+  private static thinkingReport(
+    entries: readonly ProviderInputTransformation[],
+    fidelity: FidelityNotes,
+    origins: readonly MessageOrigin[] | undefined,
+    messages: readonly NormalizedMessage[],
+  ): NonNullable<RoundReport['thinking']> {
+    const dropped: ThinkingBindingEntry[] = [];
+    const mismatchAllowed: ThinkingBindingEntry[] = [];
+    for (const entry of entries) {
+      const list = entry.type === 'thinking_dropped' ? dropped
+        : entry.type === 'thinking_mismatch_allowed' ? mismatchAllowed
+          : undefined;
+      if (!list) continue;
+      const placed: ThinkingBindingEntry = { reason: entry.reason ?? '', path: entry.path ?? '' };
+      const at = fidelity.ownerOf(entry.block);
+      if (at !== undefined) {
+        const origin: MessageOrigin = origins ? (origins[at] ?? { kind: 'own' }) : { kind: 'input', index: at };
+        if (origin.kind === 'input') placed.message = origin.index;
+        else if (origin.kind === 'injected') placed.injected = [origin.batch, origin.index];
+        else if (origin.round !== undefined) placed.round = origin.round;
+        const index = Membrane.thinkingBlockIndex(messages[at]?.content, entry.block);
+        if (index !== undefined && (placed.message ?? placed.injected ?? placed.round) !== undefined) placed.block = index;
+      }
+      list.push(placed);
+    }
+    return { dropped, mismatchAllowed };
+  }
+
+  /** The one block of `content` a request's thinking block was built from: same type, and the same signature or redacted data. */
+  private static thinkingBlockIndex(content: readonly ContentBlock[] | undefined, sent: unknown): number | undefined {
+    const wire = sent as { type?: unknown; signature?: unknown; data?: unknown } | null | undefined;
+    const key = wire?.type === 'thinking' ? 'signature' : wire?.type === 'redacted_thinking' ? 'data' : undefined;
+    if (!content || !key || typeof wire![key] !== 'string') return undefined;
+    let found: number | undefined;
+    for (let i = 0; i < content.length; i++) {
+      const block = content[i] as unknown as { type?: unknown; signature?: unknown; data?: unknown };
+      if (block.type !== wire!.type || block[key] !== wire![key]) continue;
+      if (found !== undefined) return undefined;
+      found = i;
+    }
+    return found;
   }
 
   private async streamOnce(
@@ -3511,6 +3587,9 @@ export class Membrane {
               fidelity: roundFidelity,
               // The prefill transcript carries no injected message.
               ...(injectedBatches > 0 ? { injectedBatch: { batch: injectedBatches - 1, applied: 0 } } : {}),
+              ...(streamResult.inputTransformations
+                ? { thinking: { entries: streamResult.inputTransformations, messages: request.messages } }
+                : {}),
             }),
           });
         }
@@ -4074,6 +4153,9 @@ export class Membrane {
               origins,
               injectedAlterations,
               ...(carriedBatch ? { injectedBatch: carriedBatch } : {}),
+              ...(streamResult.inputTransformations
+                ? { thinking: { entries: streamResult.inputTransformations, messages } }
+                : {}),
             }),
           });
         }
@@ -4144,7 +4226,7 @@ export class Membrane {
             participant: assistantName,
             content: responseBlocks,
           });
-          origins.push({ kind: 'own' });
+          origins.push({ kind: 'own', round: rounds - 1 });
 
           origins.push({ kind: 'own' });
           messages.push({

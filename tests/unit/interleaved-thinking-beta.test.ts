@@ -40,11 +40,11 @@ function headersFor(
     apiKey: 'test-key',
     defaultHeaders: defaultHeaders as never,
   });
-  return (
-    adapter as unknown as {
-      betaHeaders(r: ProviderRequest): Record<string, string> | undefined;
-    }
-  ).betaHeaders(request);
+  const internals = adapter as unknown as {
+    betaHeaders(r: ProviderRequest, built: unknown): Record<string, string> | undefined;
+    buildRequest(r: ProviderRequest): unknown;
+  };
+  return internals.betaHeaders(request, internals.buildRequest(request));
 }
 
 /** Build a Bedrock request body via a constructed adapter. */

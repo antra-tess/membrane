@@ -46,6 +46,27 @@ export interface GenerationConfig {
      * Opus 4.7+ default to 'omitted' — set 'summarized' to receive thinking text.
      */
     display?: 'summarized' | 'omitted';
+    /**
+     * What the API does with a signed thinking block this request sends back
+     * when the conversation before it differs from the one it was minted in
+     * (Anthropic's block binding). 'error' fails the request with a 400;
+     * 'drop_block' removes the failing blocks and the request proceeds,
+     * without the reasoning they held. A response then reports the blocks
+     * that failed a binding check: on yielding streams as
+     * `RoundReport.thinking`, and elsewhere as the provider's own
+     * `input_transformations` on the raw response.
+     *
+     * Setting it sends `thinking.block_binding` with the
+     * `thinking-binding-controls-2026-08-01` beta (the Anthropic and Bedrock
+     * adapters), also to a model whose thinking is always on, whose thinking
+     * config is otherwise left out. Fable 5 and Fable 5.1 accepted that
+     * config on 2026-10-10. Mythos hasn't been tried, and the family has
+     * refused thinking configs with a 400 before, so for a Mythos model
+     * setting it may fail every request; Bedrock may refuse the beta. Left
+     * unset, neither is sent, and the account's default applies, which isn't
+     * the same on every account.
+     */
+    blockBinding?: { prefixMismatchBehavior: 'error' | 'drop_block' };
   };
   
   /** Image generation config (Gemini) */

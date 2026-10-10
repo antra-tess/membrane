@@ -98,9 +98,15 @@ export class FidelityNotes {
    * is unattributed rather than letting an altered message look intact.
    */
   alterBlock(block?: unknown): void {
-    const occurrences = block !== null && typeof block === 'object' ? this.owners.get(block) : undefined;
-    if (occurrences && new Set(occurrences).size === 1) this.alter(occurrences[0]!);
+    const owner = this.ownerOf(block);
+    if (owner !== undefined) this.alter(owner);
     else this.unattributed = true;
+  }
+
+  /** The message an occurrence of `block` came from, when this build emitted it for exactly one. */
+  ownerOf(block: unknown): number | undefined {
+    const occurrences = block !== null && typeof block === 'object' ? this.owners.get(block) : undefined;
+    return occurrences && new Set(occurrences).size === 1 ? occurrences[0] : undefined;
   }
 
   /**
@@ -192,8 +198,11 @@ export type MessageOrigin =
   | { kind: 'input'; index: number }
   /** Message `index` of injected batch `batch`. */
   | { kind: 'injected'; batch: number; index: number }
-  /** Built by membrane itself (an assistant round, a tool_result envelope). */
-  | { kind: 'own' };
+  /**
+   * Built by membrane itself: an assistant round (`round` is the stream's
+   * round it holds), or a tool_result envelope.
+   */
+  | { kind: 'own'; round?: number };
 
 /**
  * A structural fingerprint of a provider request, for telling whether a
