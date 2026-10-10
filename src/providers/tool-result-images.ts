@@ -65,13 +65,18 @@ export function chatToolResultContent(block: any, media = false): string | ChatT
     : converted.map(part => part.type === 'text' ? part.text : '').join('\n');
 }
 
-/** Omit normalized sources too, including data URLs that must never become text. */
+/** Omission removes image bytes: base64 sources, which textOnlyToolResultContent
+ * replaces, and data URLs, which must never become text either. A URL
+ * reference carries no bytes, so it keeps its text form, address included. */
 export function omittedToolResultContent(content: unknown): string {
-  if (!hasToolResultImages(content)) return textOnlyToolResultContent(content);
-  return textOnlyToolResultContent(Array.isArray(content)
-    ? content.map(block => isSourceImage(block)
-      ? { type: 'text', text: TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER } : block)
-    : content);
+  if (!Array.isArray(content) || !content.some(isDataUrlImage)) return textOnlyToolResultContent(content);
+  return textOnlyToolResultContent(content.map(block => isDataUrlImage(block)
+    ? { type: 'text', text: TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER } : block));
+}
+
+function isDataUrlImage(block: any): boolean {
+  return isSourceImage(block) && block.source.type === 'url'
+    && typeof block.source.url === 'string' && /^data:/i.test(block.source.url);
 }
 
 /** Validate caller-owned native user media with the same policy as tool media. */

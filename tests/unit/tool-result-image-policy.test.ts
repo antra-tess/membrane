@@ -423,6 +423,14 @@ describe('resolution edge cases', () => {
     await invoke(p.make('omit'), 'complete', p.model, undefined, input);
     expect(hasPixels(bodies[0])).toBe(false);
   });
+  it.each(providers)('$name omit keeps a URL reference in the text main sends', async p => {
+    const { bodies } = stub();
+    const reference = { type: 'image', source: { type: 'url', url: 'https://example.test/chart.png' } };
+    const input = messages(false);
+    (input[2]!.content as any) = [result('one', [text('caption'), reference])];
+    await invoke(p.make('omit'), 'complete', p.model, undefined, input);
+    expect(JSON.stringify(bodies[0])).toContain(JSON.stringify(JSON.stringify([text('caption'), reference])).slice(1, -1));
+  });
 });
 
 describe('native override and observer boundaries', () => {
