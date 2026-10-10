@@ -1,4 +1,4 @@
-import { TimeoutAbortError, authError, networkError, rateLimitError, serverError } from '../types/errors.js';
+import { TimeoutAbortError, errorFromProviderStatus, networkError } from '../types/errors.js';
 
 interface StreamErrorFrameFields {
   code?: unknown;
@@ -92,18 +92,15 @@ function frameTokensMatch(tokens: string[], needles: string[]): boolean {
  * so a mid-stream 429 arriving as `status: 429` (no literal "429" in the
  * message) normalized to `unknown, retryable: false` and suppressed the retry
  * the provider was explicitly asking for. Classified failures reach the caller
- * intact because every adapter's `handleError` returns a MembraneError
- * unchanged. Mapping, using the structured fields only:
- *   - 429, or a rate-limit-shaped token  -> rate_limit (retryable), carrying
- *     the frame's retry hint when it has one
- *   - 5xx, or an overloaded/server-shaped token -> server (retryable);
- *     overloaded-without-a-status takes 529 so it lands on the capacity
- *     backoff schedule, matching how anthropic.ts recovers the same shape
- *   - 401/403, or an auth-shaped token   -> auth (non-retryable)
- *   - anything else -> the previous bare Error, so the adapter's own
- *     provider-specific fallbacks still get their swing at it
- * The provider's message text is never dropped, and the raw frame plus the
- * request ride along on the classified error.
+ * intact because every adapter's handleError preserves a MembraneError. The
+ * same errorFromProviderStatus classifier serves HTTP failures and these
+ * HTTP-200 error payloads. Only HTTP-shaped error statuses (400..599) count
+ * as explicit statuses here; a transport 200 or provider-local numeric code
+ * leaves symbolic-code classification available. Existing structured-token
+ * aliases supply a fallback after the status and recognized provider code.
+ * The provider message, raw frame, retry hint and request remain attached,
+ * including for an unclassified payload. Explicit 400 frames are typed
+ * invalid_request errors rather than bare Error objects.
  *
  * `errorNoun` names what carried the payload. It defaults to the SSE case, and
  * exists because the same `{ error: { code, message } }` object also arrives on
@@ -123,7 +120,10 @@ export function throwOnStreamErrorFrame(
 
   const fields: StreamErrorFrameFields =
     typeof streamError === 'object' ? (streamError as StreamErrorFrameFields) : {};
-  const httpStatus = readNumericField(fields.code, fields.status);
+  // A successful transport status or arbitrary provider-local number is not
+  // an HTTP error status. Neither may suppress a usable symbolic error code.
+  const httpStatus = [fields.status, fields.code].map(value => readNumericField(value))
+    .find(value => value !== undefined && Number.isInteger(value) && value >= 400 && value <= 599);
   const tokens = readFrameClassificationTokens(fields);
   const providerMessage =
     typeof fields.message === 'string' && fields.message !== ''
@@ -135,20 +135,24 @@ export function throwOnStreamErrorFrame(
     `${httpStatus !== undefined ? ` (${httpStatus})` : ''}` +
     `${tokens.length > 0 ? ` [${tokens.join(' ')}]` : ''}: ${providerMessage}`;
 
-  if (httpStatus === 429 || frameTokensMatch(tokens, RATE_LIMIT_FRAME_TOKENS)) {
-    throw rateLimitError(description, readFrameRetryAfterMs(fields), parsed, rawRequest);
-  }
-
-  if (httpStatus === 401 || httpStatus === 403 || frameTokensMatch(tokens, AUTH_FRAME_TOKENS)) {
-    throw authError(description, parsed, rawRequest);
-  }
-
+  // Retain the adapters' established structured-token spellings as a fallback.
+  // The shared classifier gives an explicit status or known provider code priority,
+  // and owns terminal-quota versus transient-rate-limit retryability in either transport.
   const overloadedShaped = frameTokensMatch(tokens, OVERLOADED_FRAME_TOKENS);
-  if ((httpStatus !== undefined && httpStatus >= 500) || overloadedShaped || frameTokensMatch(tokens, SERVER_FRAME_TOKENS)) {
-    throw serverError(description, httpStatus ?? (overloadedShaped ? 529 : undefined), parsed, rawRequest);
-  }
-
-  throw new Error(description);
+  const fallbackStatus = frameTokensMatch(tokens, RATE_LIMIT_FRAME_TOKENS) ? 429
+    : frameTokensMatch(tokens, AUTH_FRAME_TOKENS) ? 401
+    : overloadedShaped ? 529
+    : frameTokensMatch(tokens, SERVER_FRAME_TOKENS) ? 500
+    : undefined;
+  throw errorFromProviderStatus({
+    provider: providerLabel,
+    status: httpStatus,
+    fallbackStatus,
+    body: parsed,
+    message: description,
+    retryAfterMs: readFrameRetryAfterMs(fields),
+    rawRequest,
+  });
 }
 
 /**
