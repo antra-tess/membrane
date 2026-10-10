@@ -312,6 +312,8 @@ interface ProviderErrorFields {
   retryAfterMs?: number;
   /** google.rpc.ErrorInfo `reason` from `details[]`, e.g. `API_KEY_INVALID`. */
   reason?: string;
+  /** A google.rpc.QuotaFailure in `details[]` names a quota no retry can outlast. */
+  terminalQuota?: boolean;
   /**
    * The upstream provider's own message, when a router wraps it: OpenRouter
    * puts the provider's raw error body in `error.metadata.raw` beside a
@@ -389,6 +391,18 @@ const OVERLOADED_PATTERN = /\b529\b|overloaded_error/i;
  */
 const AUTH_REASONS = new Set(['api_key_invalid', 'api_key_expired', 'access_token_expired']);
 const AUTH_CODES = new Set(['invalid_api_key', 'authentication_error', 'unauthenticated', 'permission_error', 'permission_denied']);
+
+/**
+ * 400s that refuse the account, not the request. Anthropic sends both as
+ * `invalid_request_error` with no code of their own, so only the text tells
+ * them apart: "Your credit balance is too low to access the Anthropic API"
+ * and "You have reached your specified API usage limits. You will regain
+ * access on <date>". Like a 402 they are `auth`: no retry and no change to
+ * the request succeeds until the account changes. They are read inside a
+ * router's wrapper too: whoever's account it is, `auth` never sheds history,
+ * whereas a router's quota (see quotaFailureIsTerminal) is better retried.
+ */
+const ACCOUNT_REFUSAL_PATTERN = /credit balance is too low|reached your specified API usage limits/i;
 
 /**
  * A retry hint stated only in prose: Azure OpenAI's "Please retry after 60
@@ -488,8 +502,31 @@ export function extractProviderErrorFields(body: unknown): ProviderErrorFields {
     param: firstString(errorNode.param),
     retryAfterMs: retryAfterFromBody(root, errorNode),
     reason: errorInfoReason(errorNode.details ?? root.details),
+    // The body's own details only, never a router's upstream body: through
+    // OpenRouter a Google quota may be the router's shared one, which another
+    // route can still serve.
+    terminalQuota: quotaFailureIsTerminal(errorNode.details ?? root.details),
     upstreamMessage: upstream?.message ?? (typeof upstreamRaw === 'string' ? upstreamRaw : undefined),
   };
+}
+
+/**
+ * Whether a google.rpc.QuotaFailure in `details[]` names a quota no retry can
+ * outlast: one with no allocation at all (`quotaValue` "0"; proto3 JSON
+ * renders the int64 as a string), or a daily window (a `quotaId` naming
+ * PerDay or Daily, which is how gemini-cli's own classifier reads it). A
+ * per-minute quota stays retryable.
+ */
+function quotaFailureIsTerminal(details: unknown): boolean {
+  if (!Array.isArray(details)) return false;
+  return details.some((detail) => {
+    const violations = detail && typeof detail === 'object' ? (detail as Record<string, unknown>).violations : undefined;
+    return Array.isArray(violations) && violations.some((violation) => {
+      if (!violation || typeof violation !== 'object') return false;
+      const { quotaValue, quotaId } = violation as Record<string, unknown>;
+      return quotaValue === '0' || (typeof quotaId === 'string' && /PerDay|Daily/.test(quotaId));
+    });
+  });
 }
 
 /** The `reason` of a google.rpc.ErrorInfo entry in `details[]`, if any. */
@@ -509,15 +546,17 @@ function classifyByStatus(
   code: string | undefined,
   message: string,
   reason?: string,
+  terminalQuota = false,
 ): { type: MembraneErrorType; retryable: boolean } {
   const normalizedCode = code?.toLowerCase() ?? '';
 
   if ((status === 400 || status === 422)
-    && (AUTH_REASONS.has(reason?.toLowerCase() ?? '') || AUTH_CODES.has(normalizedCode))) {
+    && (AUTH_REASONS.has(reason?.toLowerCase() ?? '') || AUTH_CODES.has(normalizedCode)
+      || ACCOUNT_REFUSAL_PATTERN.test(message))) {
     return { type: 'auth', retryable: false };
   }
   if (status === 429) {
-    return { type: 'rate_limit', retryable: !NON_RETRYABLE_RATE_LIMIT_CODES.has(normalizedCode) };
+    return { type: 'rate_limit', retryable: !NON_RETRYABLE_RATE_LIMIT_CODES.has(normalizedCode) && !terminalQuota };
   }
   if (status === 408) return { type: 'timeout', retryable: true };
   if (status === 401 || status === 402 || status === 403) return { type: 'auth', retryable: false };
@@ -586,7 +625,7 @@ export function errorFromProviderStatus(params: {
 
   const classification =
     status !== undefined
-      ? { ...classifyByStatus(status, code, evidence, fields.reason), httpStatus: status }
+      ? { ...classifyByStatus(status, code, evidence, fields.reason, fields.terminalQuota), httpStatus: status }
       : classifyMessage(fields.upstreamMessage ? `${message}\n${fields.upstreamMessage}` : message);
   // A wait read from prose is believed only for an error that asks to be
   // retried: a stated wait is a hold for anyone who honours it, and a 400

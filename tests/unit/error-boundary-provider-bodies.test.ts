@@ -3,10 +3,12 @@
  *
  * The status-guarded classifier must read each form a provider actually
  * sends: a context overflow in Anthropic's and Gemini's own words (and inside
- * OpenRouter's wrapper), a bad Google key that arrives as a 400, a retry hint
- * stated only in prose, Bedrock's exception type in a header, and transport
- * failures that carry no status at all. Anything typed wrongly here reaches
- * agent-framework's poison-history breaker as `invalid_request`.
+ * OpenRouter's wrapper), a bad Google key that arrives as a 400, a refusal of
+ * the account that Anthropic sends as a 400, a Gemini quota no retry can
+ * outlast, a retry hint stated only in prose, Bedrock's exception type in a
+ * header, and transport failures that carry no status at all. Anything typed
+ * wrongly here reaches agent-framework's poison-history breaker as
+ * `invalid_request`, or is retried for nothing.
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -157,6 +159,133 @@ describe('a credential failure sent as a 400 is auth', () => {
     const error = await failure(new OpenAIAdapter({ apiKey: 'zz-key-openai' }));
     expect(error.type).toBe('auth');
     expect(error.httpStatus).toBe(400);
+  });
+});
+
+describe('a refusal of the account sent as a 400 is auth', () => {
+  const anthropic400 = (message: string) =>
+    anthropicHandled(new Anthropic.APIError(
+      400,
+      { type: 'error', error: { type: 'invalid_request_error', message }, request_id: 'req_zz' },
+      undefined,
+      undefined as never,
+    ));
+
+  it('anthropic: "Your credit balance is too low"', () => {
+    const error = anthropic400(
+      'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.',
+    );
+    expect(error.type).toBe('auth');
+    expect(error.retryable).toBe(false);
+    expect(error.httpStatus).toBe(400);
+    expect(error.providerErrorCode).toBe('invalid_request_error');
+  });
+
+  it('anthropic: "You have reached your specified API usage limits"', () => {
+    const error = anthropic400(
+      'You have reached your specified API usage limits. You will regain access on 2026-11-01 at 00:00 UTC.',
+    );
+    expect(error.type).toBe('auth');
+    expect(error.retryable).toBe(false);
+    expect(error.httpStatus).toBe(400);
+  });
+
+  it('anthropic: a 400 about the request itself stays invalid_request', () => {
+    const error = anthropic400('messages: roles must alternate between "user" and "assistant", but found multiple "user" roles in a row');
+    expect(error.type).toBe('invalid_request');
+    expect(error.httpStatus).toBe(400);
+  });
+
+  it("openrouter: the same refusal inside the router's wrapper is auth too", async () => {
+    stubHttpFailure(400, {
+      error: {
+        code: 400,
+        message: 'Provider returned error',
+        metadata: {
+          provider_name: 'Anthropic',
+          raw: JSON.stringify({
+            type: 'error',
+            error: {
+              type: 'invalid_request_error',
+              message: 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.',
+            },
+          }),
+        },
+      },
+    });
+    const error = await failure(new OpenRouterAdapter({ apiKey: 'zz-key-openrouter' }));
+    expect(error.type).toBe('auth');
+    expect(error.retryable).toBe(false);
+    expect(error.httpStatus).toBe(400);
+  });
+});
+
+describe('a 429 for a quota no retry can outlast is not retryable', () => {
+  /** A Gemini API 429 in the shape google-gemini/gemini-cli#9248 quotes. */
+  const quota429 = (quotaId: string, quotaValue: string) => ({
+    error: {
+      code: 429,
+      message:
+        'You exceeded your current quota, please check your plan and billing details. ' +
+        'For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits.\n' +
+        `* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: ${quotaValue}\n` +
+        'Please retry in 34.074824224s.',
+      status: 'RESOURCE_EXHAUSTED',
+      details: [
+        {
+          '@type': 'type.googleapis.com/google.rpc.QuotaFailure',
+          violations: [
+            {
+              quotaMetric: 'generativelanguage.googleapis.com/generate_content_free_tier_requests',
+              quotaId,
+              quotaDimensions: { location: 'global', model: 'gemini-2.5-pro' },
+              quotaValue,
+            },
+          ],
+        },
+        { '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '34s' },
+      ],
+    },
+  });
+
+  it('gemini: a quota with no allocation at all ("quotaValue": "0")', async () => {
+    stubHttpFailure(429, quota429('GenerateRequestsPerMinutePerProjectPerModel-FreeTier', '0'));
+    const error = await failure(new GeminiAdapter({ apiKey: 'zz-key-gemini' }));
+    expect(error.type).toBe('rate_limit');
+    expect(error.retryable).toBe(false);
+    expect(error.httpStatus).toBe(429);
+    expect(error.providerErrorCode).toBe('RESOURCE_EXHAUSTED');
+    expect(error.retryAfterMs).toBe(34_000);
+  });
+
+  it('gemini: a daily quota, used up', async () => {
+    stubHttpFailure(429, quota429('GenerateRequestsPerDayPerProjectPerModel-FreeTier', '50'));
+    const error = await failure(new GeminiAdapter({ apiKey: 'zz-key-gemini' }));
+    expect(error.type).toBe('rate_limit');
+    expect(error.retryable).toBe(false);
+  });
+
+  it('gemini: a per-minute quota stays retryable', async () => {
+    stubHttpFailure(429, quota429('GenerateRequestsPerMinutePerProjectPerModel-FreeTier', '15'));
+    const error = await failure(new GeminiAdapter({ apiKey: 'zz-key-gemini' }));
+    expect(error.type).toBe('rate_limit');
+    expect(error.retryable).toBe(true);
+  });
+
+  it("openrouter: an upstream Google quota stays retryable, since it may be the router's own", async () => {
+    stubHttpFailure(429, {
+      error: {
+        code: 429,
+        message: 'Provider returned error',
+        metadata: {
+          provider_name: 'Google AI Studio',
+          raw: JSON.stringify(quota429('GenerateRequestsPerMinutePerProjectPerModel-FreeTier', '0')),
+        },
+      },
+    });
+    const error = await failure(new OpenRouterAdapter({ apiKey: 'zz-key-openrouter' }));
+    expect(error.type).toBe('rate_limit');
+    expect(error.retryable).toBe(true);
   });
 });
 
