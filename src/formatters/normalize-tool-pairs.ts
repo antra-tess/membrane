@@ -305,8 +305,13 @@ function requiredRoleOf(block: ProviderBlock): RequiredRole {
     case 'tool_use':
     case 'thinking':
     case 'redacted_thinking':
+    // XML-history carriers: native builders send them through here so each
+    // keeps its speaker's side whatever message held it, then send them as
+    // text (carriersAsText in formatters/native.ts).
+    case 'tool_attempt':
       return 'assistant';
     case 'tool_result':
+    case 'tool_notice':
       return 'user';
     default:
       if (block.type.startsWith('tool_') || block.type.startsWith('thinking')) {

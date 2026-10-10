@@ -3,7 +3,7 @@
  */
 
 import type { ContentBlock } from './content.js';
-import type { ToolCall, ToolResult } from './tools.js';
+import type { ToolCall, ToolResult, TurnToolCallNotice } from './tools.js';
 
 // ============================================================================
 // Stop Reason
@@ -277,6 +277,23 @@ export interface NormalizedResponse {
    * Empty if no tools were called or tool execution was disabled.
    */
   toolResults: ToolResult[];
+
+  /**
+   * XML mode: the parser's notices about this turn's `<function_calls>`
+   * blocks — one per refused or warned invoke, located by `block` (the
+   * block's 0-based index in the turn's text) and `invoke`. A refused invoke
+   * is in neither `toolCalls` nor `content` as a tool_use; a warned one is
+   * among them, eligible for dispatch as parsed. When membrane ran the tool
+   * loop, it also wrote each block's notices into the envelope it injected
+   * after that block, recorded for continuation and replay: the model reads
+   * them when the turn continues, which `maxToolDepth` and the resumption cap
+   * can prevent after the last round. `answered` says which: a notice whose
+   * block nothing answered — it never closed, or no loop ran — is carried only
+   * here. A caller running its own loop (`complete()`, or `stream()` without
+   * onToolCalls) answers them with its results. Absent when there are none,
+   * and in native mode.
+   */
+  toolCallNotices?: TurnToolCallNotice[];
 
   /** Why generation stopped */
   stopReason: StopReason;

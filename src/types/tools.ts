@@ -121,22 +121,84 @@ export interface ToolContext {
    * same turn or the next request fails API validation.
    */
   roundContent?: import('./content.js').ContentBlock[];
+
+  /**
+   * XML mode: the parser's notices about this round's `<function_calls>`
+   * block — one per refused or warned invoke, `invoke` indexing the block's
+   * invoke openers. A refused invoke is not among the calls. Membrane also
+   * writes the notices into the `<function_results>` it injects after the
+   * results, so the model reads them; a consumer persisting the round keeps
+   * them as a `tool_notice` block after its tool_results.
+   */
+  notices?: ToolCallNotice[];
 }
 
 // ============================================================================
 // Tool Parsing
 // ============================================================================
 
+/**
+ * What the XML tool-call parser found wrong with one invoke of a
+ * `<function_calls>` block.
+ *
+ * A `refused` invoke was not dispatched: its parameter boundaries are
+ * malformed in a way that would change the caller's arguments (a miskeyed or
+ * missing closing tag swallowed a required parameter, a value was cut at a
+ * literal closing tag, markup before the first parameter may hold a parameter
+ * the parser doesn't read, text follows a CDATA value). It never becomes a
+ * ToolCall or a tool_use. A `warning` invoke is a call as parsed — dispatched
+ * in membrane's loops, eligible for dispatch in a parse result a caller acts
+ * on — with the parse's oddity stated (a value contains markup for an optional
+ * parameter the call doesn't otherwise include, or text before the first
+ * parameter that holds no markup but complete comments and processing
+ * instructions was not passed to the tool). `message` is written for the
+ * model that made the call; it says what was observed and, for a refusal, how
+ * to send the text as data.
+ */
+export interface ToolCallNotice {
+  /** 0-based ordinal of the invoke's opening tag among the block's invoke openers. */
+  invoke: number;
+  /** The invoke's tool name, as written. */
+  toolName: string;
+  kind: 'refused' | 'warning';
+  message: string;
+}
+
+/** A {@link ToolCallNotice} located within a turn. */
+export interface TurnToolCallNotice extends ToolCallNotice {
+  /** The 0-based index of its `<function_calls>` block in the turn's text. */
+  block: number;
+  /**
+   * Whether the harness answered its block in-band: the notice is in the
+   * envelope membrane injected and recorded after the block, so also a
+   * `tool_notice` in the response content. It says nothing about whether a
+   * later provider request presented it. A loop consumer also had it with the
+   * round: on the yielding loop's `tool-calls` or `tool-attempt` event, or on
+   * `ToolContext.notices` when the callback loop dispatched the round (an
+   * all-refused round calls no executor, so the callback loop's caller has it
+   * only here). False when nothing answered the block: it never closed before
+   * the turn ended, or no loop ran (`complete()`, `stream()` without
+   * onToolCalls).
+   */
+  answered: boolean;
+}
+
 export interface ParsedToolCalls {
-  /** Parsed tool calls */
+  /** Parsed tool calls: the block's dispatchable invokes, in document order. */
   calls: ToolCall[];
-  
+
+  /**
+   * The block's refused and warned invokes. A block whose every invoke was
+   * refused has no calls and at least one notice.
+   */
+  notices: ToolCallNotice[];
+
   /** Text before the tool calls block */
   beforeText: string;
-  
+
   /** Text after the tool calls block */
   afterText: string;
-  
+
   /** The full matched tool calls XML block */
   fullMatch: string;
 }

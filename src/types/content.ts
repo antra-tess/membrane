@@ -2,6 +2,8 @@
  * Content block types for normalized messages
  */
 
+import type { ToolCallNotice } from './tools.js';
+
 // ============================================================================
 // Cache Control (Anthropic prompt caching)
 // ============================================================================
@@ -160,6 +162,43 @@ export interface ToolResultContent {
   rawItem?: unknown;
 }
 
+/**
+ * A `<function_calls>` block, in prefill/XML mode, that dispatched nothing:
+ * the parser refused every invoke in it (see {@link ToolNoticeContent}), or
+ * the turn ended before the block closed (rawXml then runs from its opener to
+ * the end of the turn's text).
+ *
+ * It is the model's own text, kept so replay shows the attempt exactly as
+ * written. It is not a call — nothing ran, and no tool_result answers it — so
+ * it is never a tool_use, and it is not prose either: it is never outward
+ * speech. When at least one invoke in a block is a call (dispatched, or
+ * eligible for dispatch), the tool_use blocks carry the block's `rawXml`
+ * instead and no tool_attempt is needed.
+ * Prefill formatters replay `rawXml` verbatim; other formatters render it as
+ * the assistant's text.
+ */
+export interface ToolAttemptContent {
+  type: 'tool_attempt';
+  /** The full `<function_calls>…</function_calls>` block, exactly as written. */
+  rawXml: string;
+}
+
+/**
+ * The harness's notice about a `<function_calls>` block's refused or warned
+ * invokes: what the model read, inside the `<function_results>` that answered
+ * the block, after every result.
+ *
+ * It is the harness speaking — like tool_result, not like the assistant — and
+ * it sits after the round's tool_result blocks. Prefill formatters render it
+ * back into the same `<function_results>` envelope the live loop wrote; other
+ * formatters render it as attributed text on the harness side, after any
+ * tool_result blocks. It is never passed to a provider as a block of its own.
+ */
+export interface ToolNoticeContent {
+  type: 'tool_notice';
+  notices: ToolCallNotice[];
+}
+
 // ============================================================================
 // Thinking Content
 // ============================================================================
@@ -201,6 +240,8 @@ export type ContentBlock =
   // Tools
   | ToolUseContent
   | ToolResultContent
+  | ToolAttemptContent
+  | ToolNoticeContent
   // Thinking
   | ThinkingContent
   | RedactedThinkingContent;
@@ -239,6 +280,14 @@ export function isToolUseContent(block: ContentBlock): block is ToolUseContent {
 
 export function isToolResultContent(block: ContentBlock): block is ToolResultContent {
   return block.type === 'tool_result';
+}
+
+export function isToolAttemptContent(block: ContentBlock): block is ToolAttemptContent {
+  return block.type === 'tool_attempt';
+}
+
+export function isToolNoticeContent(block: ContentBlock): block is ToolNoticeContent {
+  return block.type === 'tool_notice';
 }
 
 export function isThinkingContent(block: ContentBlock): block is ThinkingContent {
