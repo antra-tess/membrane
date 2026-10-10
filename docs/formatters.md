@@ -1,182 +1,189 @@
 # Formatters
 
-Formatters control how conversations are serialized for different LLM providers and models. They handle:
+Formatters build provider requests, parse responses, encode tool definitions and results, and supply stop sequences. Membrane selects one active formatter for each call. The tool carrier, parser prefill, and actual transport representation are separate facts.
 
-- **Request building**: Converting normalized messages to provider-specific format
-- **Response parsing**: Parsing streaming responses and extracting content blocks
-- **Tool handling**: Formatting tool definitions and results
-- **Stop sequences**: Generating appropriate stop conditions
+## Tool mode and defaults
 
-## Available Formatters
+Membrane defaults to native tools when the active formatter declares native support. This applies to `complete()`, `stream()`, and `streamYielding()`, with or without a tool list. With the default `AnthropicXmlFormatter`, resolved native mode builds a real native conversation through `NativeFormatter`; it does not manufacture an assistant prefix or the XML transcript's CLI scaffolding.
+
+The mode is selected in this order:
+
+1. An explicit request `toolMode: 'native'` or `'xml'`.
+2. The active formatter's explicit constructor `configuredToolMode`.
+3. The formatter's declared native capability.
+
+`'auto'` uses that precedence rather than overriding a configured mode. When tools are declared, the selected formatter must support their carrier. A formatter without native support does not necessarily support XML tools.
+
+To retain the transcript-prefill protocol, select XML explicitly on a compatible transport and model:
+
+```typescript
+await membrane.stream({
+	messages,
+	tools,
+	toolMode: 'xml',
+	config: { model: 'claude-haiku-4-5', maxTokens: 1024 },
+});
+```
+
+The native and XML paths intentionally produce different request bytes and cache prefixes. Native response text remains text, including XML-looking examples. XML tool decoding, closing-tag reconstruction, and XML diagnostics require a selected XML-capable formatter in XML mode. Plain CompletionsFormatter output follows its own text parser, including final and aborted stream content. To retain the old textual-tool fallback from native `complete()`, select an XML-capable formatter and `toolMode: 'xml'`. Native mode preserves caller-authored assistant-ended history; it does not append an invented user turn or silently re-role that history to satisfy a provider restriction.
+
+Provider block types keep streamed thinking out of a plain formatter’s text parser. Thinking chunks carry non-visible metadata. Received thinking snapshots, signatures, and redacted blocks remain typed in final and partial content. The plain formatter parses visible text spans between those blocks with whole-response context, so internal spaces and newlines retain their positions. Its `rawAssistantText` contains text rather than native thinking or synthetic XML wrappers. Native aborted responses also expose observed `partialContent`, including completed rounds and the current text/thinking prefix; their raw chunk accumulation is unchanged. Explicit XML retains its tagged parser and continuation behavior.
+
+## Available formatters
 
 ### AnthropicXmlFormatter
 
-The default formatter for Anthropic Claude models. Uses prefill-based formatting with XML tool syntax.
+This is Membrane's default formatter. It supports both native tool input and the explicit XML transcript protocol. Native mode uses native role/content blocks, native tool history and thinking, context prefixes, caller stop sequences, and the native media policy. XML mode uses participant-labelled transcript text, `<function_calls>`/`<function_results>`, parser prefill, and an optional literal `<thinking>` prefix.
+
+The following options configure the XML representation:
 
 ```typescript
 import { AnthropicXmlFormatter } from '@animalabs/membrane';
 
 const formatter = new AnthropicXmlFormatter({
-  toolMode: 'xml',                    // 'xml' or 'native'
-  toolInjectionMode: 'conversation',  // 'conversation' or 'system'
-  toolInjectionPosition: 10,          // messages from end
-  maxParticipantsForStop: 10,
+	toolMode: 'xml',
+	toolInjectionMode: 'conversation', // or 'system'
+	toolInjectionPosition: 10,         // messages from the end
+	maxParticipantsForStop: 10,
 });
 ```
 
-**Features:**
-- Participant-based message format (Name: content)
-- XML tool syntax (<function_calls>, <function_results>)
-- <thinking> block support for extended thinking
-- Prompt caching with cache_control markers (see below)
-- Context prefix for simulacrum seeding
-
-## Prompt Caching
-
-Anthropic supports prompt caching to reduce costs for repeated prefixes. Membrane provides two ways to control cache breakpoints:
-
-### 1. Explicit cache breakpoints (recommended)
-
-Set `cacheBreakpoint: true` on messages that should be cached:
-
-```typescript
-const messages: NormalizedMessage[] = [
-  { participant: 'User', content: [...] },
-  { participant: 'Claude', content: [...], cacheBreakpoint: true }, // Cache up to here
-  { participant: 'User', content: [...] },
-  { participant: 'Claude', content: [...], cacheBreakpoint: true }, // Second cache point
-  { participant: 'User', content: [...] },
-  { participant: 'Claude', content: [...] }, // Current turn
-];
-```
-
-This gives you full control over where cache boundaries are placed. Anthropic supports up to 4 cache breakpoints.
-
-### 2. Callback-based (for automatic rolling cache)
-
-Use `hasCacheMarker` callback for dynamic cache boundaries:
-
-```typescript
-const result = formatter.buildMessages(messages, {
-  promptCaching: true,
-  hasCacheMarker: (message, index) => {
-    // Your logic to determine cache boundaries
-    return index === someDynamicIndex;
-  },
-});
-```
-
-### Cache marker behavior
-
-When `promptCaching: true`:
-- System prompt automatically gets `cache_control`
-- Context prefix (if provided) gets `cache_control`
-- Messages with `cacheBreakpoint: true` flush with `cache_control`
-- `hasCacheMarker` callback flushes content BEFORE the marked message
-
-The `cacheMarkersApplied` count in `BuildResult` tells you how many markers were applied.
+Direct `buildMessages()` calls use the constructor's mode unless `BuildOptions.toolMode` supplies one. Membrane resolves the mode once for its selected path and passes it to the build. An explicit constructor mode also participates in Membrane's precedence above.
 
 ### NativeFormatter
 
-Pass-through formatter for native API usage without prefill.
+This formatter maps participants to native user/assistant roles without a manufactured prefill. It supports native API tools, simple two-party or multiuser conversations, context prefixes, and caller-provided stop sequences. Multiuser mode can prefix non-assistant text with a configurable name format:
 
 ```typescript
 import { NativeFormatter } from '@animalabs/membrane';
 
-const formatter = new NativeFormatter({
-  nameFormat: '{name}: ',
-});
+const formatter = new NativeFormatter({ nameFormat: '{name}: ' });
 ```
 
-**Features:**
-- Direct user/assistant role mapping
-- Native API tool calling
-- No stop sequences (API handles)
-- Simple and multiuser modes
+In simple mode, supply `humanParticipant` and `assistantParticipant`; other participants are rejected. Multiuser mode supports multiple names. Tool-pair normalization and media sanitation run in `buildMessages()`, including on native streaming and yielding paths. Native loop floating-cache placement is a separate post-build operation. Native names use the existing colon-to-double-underscore encoding. Returned calls are matched to declared names so literal double underscores survive. Colliding encoded definitions fail before dispatch.
 
 ### CompletionsFormatter
 
-Formatter for base/completion models (e.g., /v1/completions endpoint).
+This formatter produces a single-prompt carrier for text-completion use. It supports end-of-turn tokens, configurable name/message separators, participant-derived stop sequences, and image stripping. It encodes neither native nor XML tool definitions, so tool-bearing Membrane requests using it fail with a typed `unsupported` error instead of silently losing the tools.
 
 ```typescript
 import { CompletionsFormatter } from '@animalabs/membrane';
 
 const formatter = new CompletionsFormatter({
-  eotToken: '<|eot|>',
-  nameFormat: '{name}: ',
-  messageSeparator: '\n\n',
-  maxParticipantsForStop: 10,
+	eotToken: '<|eot|>',
+	nameFormat: '{name}: ',
+	messageSeparator: '\n\n',
+	maxParticipantsForStop: 10,
 });
 ```
 
-**Features:**
-- Single-prompt serialization
-- End-of-turn tokens
-- Auto-generated stop sequences from participants
-- Images stripped (not supported)
+A prompt string may seed a parser through `assistantPrefill` without being an assistant-role Messages turn. The actual adapter determines that distinction. `OpenAICompletionsAdapter`, including a renamed instance, uses a prompt endpoint and remains exempt from the Messages-prefill rule. It rejects nonempty native tool lists in `request.tools` or `extra.tools` that it would discard. For XML tools through this adapter, use an XML-capable formatter and an explicit `providerParams.prompt` carrying the tool description; that caller-owned prompt is preserved. The normal normalized-message serialization does not carry the formatter's injected XML definitions.
 
-## Usage
+### OpenAIResponsesFormatter
 
-### Instance-level formatter
+The Responses formatter owns its provider-native input-item representation, including opaque reasoning and item identity. Membrane keeps its configured formatter authoritative when the Responses adapter requires that representation. It supports native tools, not XML tool definitions.
+
+## Prefill compatibility
+
+Some Anthropic models reject a Messages request whose final role is assistant. The original contribution measured this on 2026-08-25 for Sonnet 4.6, Opus 4.6/4.7/4.8, Sonnet 5, and Fable 5. The maintainer re-measured the table on 2026-09-14 and confirmed Opus 5 and Fable 5.1 as well. Haiku 4.5 and Sonnet 4.5 accepted prefill; Haiku also accepted prefill with thinking enabled. Mythos entries in the table remain labelled family inferences rather than new measurements. These live observations belong to the original contribution and maintainer review; the correction's tests use mocked transports.
+
+The shared table is `src/registry/model-capabilities.ts`. It recognizes direct and dated IDs, dotted OpenRouter versions, `bedrock:` aliases, Bedrock inference-profile/ARN spellings, and Vertex suffixes. Unknown models retain the legacy capable default.
+
+The Anthropic, Bedrock, OpenRouter, OpenAI Chat, and OpenAI-compatible adapters inspect the final converted model and message tail, after Membrane's `beforeRequest` hook and native parameter overrides. A known incompatible request fails locally with a non-retryable `unsupported` error. The error identifies the model and, for Membrane calls, the selected formatter. Use a native-capable formatter/native mode to avoid a manufactured prefill. If the supplied history itself ends with an assistant turn, provide a genuine user turn or choose a prefill-capable model.
+
+XML streaming runners also declare that their continuation protocol needs assistant prefill. A message adapter can therefore reject an incompatible model before the first provider/tool round even if a custom formatter's first body is user-ended. Each later send is checked again, including plain and image continuations after a model/body override. `complete()` does not declare a future-loop requirement because it does not execute a tool loop.
+
+`ProviderRequestOptions.requestContext` carries `formatterName`, resolved `toolMode`, `toolsDeclared`, and `requiresAssistantPrefill` outside provider JSON and cache receipts. Adapter decorators forward options unchanged, including `promptMessages` when supplied. `OpenAICompletionsAdapter` gives explicit `extra.prompt` and `extra.normalizedMessages` priority over that optional current-loop input. Third-party adapters receive this context and own validation of their final representation; the transport checks described here cover the listed built-ins. A formatter name alone cannot establish transport semantics.
+
+## Prompt caching
+
+Anthropic allows up to four cache-control breakpoints across messages, system content, and tools. A breakpoint on a message covers that message and its preceding prefix.
+
+### Explicit breakpoints
+
+```typescript
+const messages: NormalizedMessage[] = [
+	{ participant: 'User', content: [...] },
+	{ participant: 'Claude', content: [...], cacheBreakpoint: true },
+	{ participant: 'User', content: [...] },
+	{ participant: 'Claude', content: [...], cacheBreakpoint: true },
+	{ participant: 'User', content: [...] },
+];
+```
+
+### Callback-based breakpoints
+
+A direct formatter build can mark the boundary before a message:
+
+```typescript
+const result = formatter.buildMessages(messages, {
+	participantMode: 'multiuser',
+	assistantParticipant: 'Claude',
+	promptCaching: true,
+	hasCacheMarker: (_message, index) => index === someDynamicIndex,
+});
+```
+
+With prompt caching enabled, explicit message breakpoints and context-prefix markers are retained. System/tool fallback markers depend on the selected representation and existing markers; they are not unconditional extra markers. A formatter's optional `cacheMarkersApplied` describes its build-time count. Membrane's reported request count is reconciled with its final marker policy.
+
+For `cacheMarkers: 'membrane-system'`, Membrane applies the complete-request clamp after hooks, retaining the deepest permitted markers. For `cacheMarkers: 'cm-owned'`, it rejects an excess budget instead of displacing caller-owned markers. Native streaming still spends only the remaining budget on floating tool-loop markers and withholds them across prefix-rewriting normalization repairs.
+
+Standalone `NativeFormatter.buildMessages()` checks its complete built budget by default. `BuildOptions.deferCacheBudgetCheck: true` explicitly delegates that check to a later complete-request boundary, as Membrane does; CM-owned builds still assert their budget. Thus native Membrane calls share the final clamp policy while standalone callers keep a usable fail-loud boundary. Native stream and yielding paths that formerly used the legacy builder keep automatic prompt-serialization input in `ProviderRequestOptions.promptMessages`, outside the request and its receipt hash. This preserves opaque normalized-message metadata. The existing complete/XML and configured Responses representations retain their earlier `extra.normalizedMessages` contract.
+
+## Selecting a formatter
+
+### Instance-level selection
 
 ```typescript
 import { Membrane, AnthropicXmlFormatter } from '@animalabs/membrane';
 
 const membrane = new Membrane(adapter, {
-  formatter: new AnthropicXmlFormatter({ toolMode: 'xml' }),
+	formatter: new AnthropicXmlFormatter({ toolMode: 'xml' }),
 });
 ```
 
-### Per-request override
+### Per-call selection
+
+`complete()` and `stream()` accept a formatter override in their second argument:
 
 ```typescript
-import { NativeFormatter } from '@animalabs/membrane';
-
-await membrane.stream({
-  formatter: new NativeFormatter(),
-  // ...other options
-});
+await membrane.stream(request, { formatter: new NativeFormatter() });
 ```
 
-## Creating Custom Formatters
+Yielding calls use the instance formatter and the request's tool-mode choice. The configured Responses formatter remains authoritative when the transport requires Responses input items.
 
-Implement the PrefillFormatter interface:
+## Creating custom formatters
+
+Custom response parsers receive `parseContentBlocks(content, tools?, context?)`. The optional third argument is `ContentParseContext { visibleText, offset }`: the complete visible response and the current span's start offset, using `String.slice` units. Streaming assembly supplies it when parsing visible text around native thinking blocks, for both final and partial output. Prefix-sensitive or other whole-response-sensitive parsers must use this context rather than treating every span as a new response. Decorators must forward it. An optional parameter keeps existing call signatures valid; it does not make an existing whole-response assumption safe for spans. Literal, span-independent parsing needs no behavioral change. Calls without context keep their whole-response semantics, and the existing tool-schema argument remains second.
+
+Implement `PrefillFormatter` and declare both carrier flags as booleans. Missing declarations in JavaScript produce an explicit diagnostic; absence does not silently select XML. `usesPrefill` describes parser seeding, not an exemption from a transport's prefill restriction.
 
 ```typescript
-import type { PrefillFormatter, BuildOptions, BuildResult } from '@animalabs/membrane';
+import type { PrefillFormatter, BuildOptions, BuildResult, ContentParseContext, ToolDefinition } from '@animalabs/membrane';
 
 class CustomFormatter implements PrefillFormatter {
-  readonly name = 'custom';
-  readonly usesPrefill = true;
+	readonly name = 'custom';
+	readonly usesPrefill = true;
+	readonly supportsNativeTools = false;
+	readonly supportsXmlTools = true;
 
-  buildMessages(messages, options): BuildResult {
-    // Convert messages to your format
-    return {
-      messages: [...],
-      assistantPrefill: '...',
-      stopSequences: [...],
-    };
-  }
+	buildMessages(messages, options: BuildOptions): BuildResult {
+		// Encode the selected carrier, preserving caller fields and ownership.
+		return { messages: [...], assistantPrefill: '...', stopSequences: [...] };
+	}
 
-  createStreamParser() {
-    // Return a parser for your format
-  }
+	createStreamParser() {
+		// Return a parser for this representation.
+	}
 
-  parseToolCalls(content) {
-    // Extract tool calls from content
-    return [];
-  }
-
-  hasToolUse(content) {
-    return false;
-  }
-
-  parseContentBlocks(content) {
-    return [{ type: 'text', text: content }];
-  }
-
-  formatToolResults(results) {
-    return JSON.stringify(results);
-  }
+	parseToolCalls(content) { return []; }
+	hasToolUse(content) { return false; }
+	parseContentBlocks(content: string, _tools?: ToolDefinition[], context?: ContentParseContext) {
+		// Literal passthrough preserves span semantics. Prefix-sensitive parsing uses context.
+		return [{ type: 'text', text: content }];
+	}
+	formatToolResults(results) { return JSON.stringify(results); }
 }
 ```
+
+The unmerged PR's former `buildsAssistantMessagePrefill` flag is replaced by the actual native/XML carrier declarations. A formatter may manufacture no prefill while the caller's history still ends with assistant; conversely a prompt adapter may turn an assistant envelope into ordinary prompt text. Final transport checks and XML-runner context handle those separate cases.

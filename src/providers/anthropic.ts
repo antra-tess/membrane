@@ -2,6 +2,8 @@
  * Anthropic provider adapter
  */
 
+import { assertMessagePrefillSupported } from './request-capabilities.js';
+
 import Anthropic, { type ClientOptions } from '@anthropic-ai/sdk';
 import { stripEmptyTextBlocks, stripEmptyTextRequest } from '../utils/empty-text.js';
 import { resolveImageMediaType, isAcceptedImageMediaType, assertWithinByteBudget, shedImagesToFitByteBudget } from '../utils/image-media.js';
@@ -15,14 +17,19 @@ import type {
 } from '../types/index.js';
 import {
   MembraneError,
-  rateLimitError,
-  contextLengthError,
-  invalidRequestError,
-  authError,
-  serverError,
   abortError,
+  authError,
+  classifyError,
+  errorFromProviderStatus,
+  statedWaitFromHeaders,
+  isTypedAbortError,
+  networkError,
+  serverError,
+  timeoutError,
+  withRawRequest,
   unsupportedError,
 } from '../types/index.js';
+import { statusForProviderCode } from '../types/errors.js';
 import { flattenRootSchemaUnion } from './anthropic-tool-schema.js';
 import { assertTerminalEventObserved } from './utils.js';
 import { fetchWithCredentials, validateCredential, type CredentialContext, type CredentialResolver } from './credentials.js';
@@ -223,6 +230,15 @@ export class AnthropicAdapter implements ProviderAdapter {
     const clientOptions: ClientOptions = {
       baseURL: config.baseURL,
       defaultHeaders: config.defaultHeaders,
+      // Membrane's retry policy is the only retry policy inside a call, as it
+      // is for every fetch-based adapter. Left at its default (two retries of
+      // 408/409/429/5xx and connection failures before Membrane saw the
+      // error), the SDK replaced a stated retry-after of 60 s or more with its
+      // own backoff of about a second, slept through shorter waits beyond
+      // Membrane's maxRetryDelayMs, retried what Membrane's default policy
+      // leaves to the caller, and multiplied the attempt counts Membrane
+      // documents by up to three.
+      maxRetries: 0,
     };
     this.defaultBeta = extractBetaHeader(config.defaultHeaders);
     this.dynamicHeaders = config.dynamicHeaders;
@@ -258,6 +274,9 @@ export class AnthropicAdapter implements ProviderAdapter {
             wire as unknown as Anthropic.MessageCreateParamsNonStreaming, headers,
           ),
           config.cacheKeepalive ?? {},
+          // Pokes report the SDK's own error in their receipts; the keepalive
+          // reads the stated wait and retryability as the adapter classifies them.
+          (error) => this.handleError(error),
         );
   }
 
@@ -285,9 +304,11 @@ export class AnthropicAdapter implements ProviderAdapter {
             failure = error instanceof MembraneError ? error : authError(
               `Credential resolution failed: ${error instanceof Error ? error.message : String(error)}`, error,
             );
-            // SDK 0.52 retries thrown fetch errors as connection failures.
-            // Abort this operation to bypass that loop, then restore the
-            // original error at the complete/stream/keepalive boundary.
+            // SDK 0.52 treats a thrown fetch error as a connection failure,
+            // which it retries whenever its own retries are enabled (this
+            // client disables them). Abort this operation so it ends here
+            // either way, then restore the original error at the
+            // complete/stream/keepalive boundary.
             abort.abort(failure);
             throw failure;
           }
@@ -320,6 +341,7 @@ export class AnthropicAdapter implements ProviderAdapter {
   ): Promise<ProviderResponse> {
     const anthropicRequest = this.buildRequest(request);
     const fullRequest = { ...anthropicRequest, stream: false as const };
+    assertMessagePrefillSupported(fullRequest.model, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
 
     const headers = this.betaHeaders(request);
@@ -334,7 +356,7 @@ export class AnthropicAdapter implements ProviderAdapter {
 
       return this.parseResponse(response, fullRequest);
     } catch (error) {
-      throw this.handleError(error, fullRequest);
+      throw this.holdKeepaliveFor(fullRequest.model, this.handleError(error, fullRequest));
     }
   }
 
@@ -346,6 +368,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     const anthropicRequest = this.buildRequest(request);
     // Note: stream is implicitly true when using .stream()
     const fullRequest = { ...anthropicRequest, stream: true };
+    assertMessagePrefillSupported(fullRequest.model, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
 
     // Snapshot the primary lane's prefix so it can be held warm across idle
@@ -419,6 +442,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       let inferenceGeo: string | undefined;
       let serviceTier: string | undefined;
       let stopReason: string = 'end_turn';
+      let providerStopReason: string | undefined;
       let sawTerminalEvent = false;
       let stopSequence: string | undefined;
       let stopDetails: unknown;
@@ -524,6 +548,9 @@ export class AnthropicAdapter implements ProviderAdapter {
             const block = contentBlocks[currentBlockIndex];
             if (block && block.type === 'thinking' && sig) {
               block.signature = ((block.signature as string | undefined) ?? '') + sig;
+              // Reported as it accumulates, so a stream that ends before
+              // content_block_stop still keeps the signature it received.
+              callbacks.onThinkingSignature?.(currentBlockIndex, block.signature as string);
             }
           } else if ((event.delta as { type: string }).type === 'input_json_delta') {
             currentBlockInputJson += (event.delta as { partial_json: string }).partial_json;
@@ -544,6 +571,7 @@ export class AnthropicAdapter implements ProviderAdapter {
             stop_details?: unknown;
           };
           stopReason = delta.stop_reason ?? 'end_turn';
+          providerStopReason = delta.stop_reason ?? undefined;
           sawTerminalEvent = true;
           stopSequence = delta.stop_sequence ?? undefined;
           // stop_details carries refusal metadata (e.g., category: 'reasoning_extraction')
@@ -588,6 +616,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       return {
         content: contentBlocks,
         stopReason,
+        providerStopReason,
         stopSequence,
         usage: {
           inputTokens,
@@ -640,7 +669,7 @@ export class AnthropicAdapter implements ProviderAdapter {
           rawRequest: fullRequest,
         });
       }
-      throw this.handleError(session.failure() ?? error, fullRequest);
+      throw this.holdKeepaliveFor(fullRequest.model, this.handleError(session.failure() ?? error, fullRequest));
     }
   }
 
@@ -827,6 +856,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     return {
       content: response.content,
       stopReason: response.stop_reason ?? 'end_turn',
+      providerStopReason: response.stop_reason ?? undefined,
       stopSequence: response.stop_sequence ?? undefined,
       usage: {
         inputTokens: response.usage.input_tokens,
@@ -840,110 +870,126 @@ export class AnthropicAdapter implements ProviderAdapter {
     };
   }
 
+  /**
+   * A stated wait from a foreground call holds this model's background
+   * keepalive pokes until it passes, whatever the failure's retryability
+   * (the wait says when, not whether; the caller decides about its own
+   * request). Returns the error unchanged.
+   */
+  private holdKeepaliveFor(model: string, error: MembraneError): MembraneError {
+    if (error.retryAfterMs !== undefined) this.cacheKeepalive?.holdModel(model, error.retryAfterMs, error.message);
+    return error;
+  }
+
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
-    // Already-classified failures (e.g. the stream-integrity guards) keep
-    // their type and retryability instead of being re-derived from a string.
-    if (error instanceof MembraneError) return error;
+    if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
+
+    // A cancellation is a type, never a phrase — not even the SDK's own exact
+    // phrase, which any caller can produce. The instanceof arm is what
+    // actually catches the SDK abort: APIUserAbortError inherits `name ===
+    // 'Error'` (measured against @anthropic-ai/sdk 0.52), so isTypedAbortError
+    // does NOT match it; isTypedAbortError covers the other typed shapes —
+    // DOMException AbortError, name === 'AbortError', and a membrane abort.
+    // The idle watchdog that motivated the old message arm never reaches here:
+    // the stream catch throws its typed timeout before calling handleError.
+    if (error instanceof Anthropic.APIUserAbortError || isTypedAbortError(error)) {
+      return abortError(undefined, rawRequest);
+    }
+
+    // A connection failure is a type too. The SDK wraps a fetch that threw
+    // (reset, refused, DNS) as APIConnectionError, whose fixed message
+    // "Connection error." carries no status, body or network word, and its
+    // own request timeout as the APIConnectionTimeoutError subclass. Classify
+    // them as the fetch adapters classify a failed fetch, so a caller's retry
+    // policy sees a retryable failure. The SDK's own retries used to absorb
+    // most of these before they reached here.
+    if (error instanceof Anthropic.APIConnectionTimeoutError) {
+      return timeoutError(error.message, error, rawRequest);
+    }
+    if (error instanceof Anthropic.APIConnectionError) {
+      return networkError(error.message, error, rawRequest);
+    }
 
     if (error instanceof Anthropic.APIError) {
-      // Mid-stream SSE `error` events are rethrown by the SDK as APIError
-      // with status === undefined (sdk core/streaming.js), so the HTTP
-      // status branches below would never match them — overloaded_error
-      // (529) most commonly arrives exactly this way and used to fall
-      // through to `unknown, retryable: false`. Recover the effective
-      // status from the error body's type instead.
-      const bodyType = (error.error as { error?: { type?: string } } | undefined)?.error?.type;
-      const status = error.status ?? (bodyType !== undefined ? {
-        invalid_request_error: 400,
-        authentication_error: 401,
-        permission_error: 403,
-        not_found_error: 404,
-        request_too_large: 413,
-        rate_limit_error: 429,
-        api_error: 500,
-        overloaded_error: 529,
-      }[bodyType] : undefined);
       const message = error.message;
 
-      if (status === 429) {
-        // Try to parse retry-after
-        const retryAfter = this.parseRetryAfter(error);
-        return rateLimitError(message, retryAfter, error, rawRequest);
-      }
+      const gw = message.toLowerCase();
 
-      if (status === 401) {
-        return authError(message, error, rawRequest);
-      }
-
-      // Context-length is a client-side request-shape problem — it only ever
-      // arrives as a 400 (invalid_request_error). Without the status guard, a
-      // transient 5xx whose body happens to contain "context" or "too long"
-      // (e.g. "Internal error: context processing failed") was misclassified
-      // as non-retryable context_length, silently suppressing retries.
-      if (status === 400 && (message.includes('context') || message.includes('too long'))) {
-        return contextLengthError(message, error, rawRequest);
-      }
-
-      // 400 invalid_request_error — malformed payload (e.g. orphan tool_use_id,
-      // unknown model, schema violation). Retrying with the same payload is
-      // guaranteed to produce the same 400, so classify these as non-retryable
-      // here. Previously these fell through to the generic `unknown` branch
-      // below, which left them with `retryable: false` but also with no
-      // structured type — making framework-level error policies unable to
-      // distinguish them from genuinely unknown errors.
-      if (status === 400) {
-        return invalidRequestError(message, error, rawRequest);
-      }
-
-      if (status !== undefined && status >= 500) {
-        return serverError(message, status, error, rawRequest);
-      }
-
-      // Safety net: if the SSE error body wasn't parseable JSON, neither
-      // status nor bodyType resolves — match the message itself rather
-      // than let a transient capacity error become non-retryable.
-      if (message.toLowerCase().includes('overloaded')) {
-        return serverError(message, 529, error, rawRequest);
-      }
+      // Mid-stream SSE `error` events are rethrown by the SDK as APIError
+      // with status === undefined (sdk core/streaming.js) — overloaded_error
+      // (529) most commonly arrives exactly this way. The shared table
+      // recovers the effective status from the body's error type, so those
+      // no longer fall through to `unknown, retryable: false`.
+      const classified = errorFromProviderStatus({
+        provider: this.name,
+        status: error.status,
+        body: error.error,
+        message,
+        retryAfterMs: this.parseRetryAfter(error),
+        rawError: error,
+        rawRequest,
+      });
 
       // Vercel AI Gateway wraps transient upstream outages (a fallback
       // provider 503, routing churn on a sunsetting model) in non-5xx
       // aggregate errors whose body carries gateway routing metadata. The
       // SAME request frequently succeeds on retry once a live provider is
-      // picked, so classify these as retryable instead of terminal.
-      const gw = message.toLowerCase();
-      if (gw.includes("providermetadata") || gw.includes("fallbacksavailable") ||
-          gw.includes("modelattempts") || gw.includes("temporarily unavailable") ||
-          gw.includes("no_providers_available")) {
-        return serverError(message, status ?? 503, error, rawRequest);
+      // picked, so such an aggregate stays a retryable server error whatever
+      // other status it reports. This exception belongs to this adapter alone.
+      // Statuses that describe the caller's own request or account — 400, 401
+      // and 429 (terminal quota included), sent or implied by the provider
+      // code — still classify normally, and a 5xx is retryable either way. The
+      // exception keeps the provider code, retry hint and raw evidence.
+      const status = error.status ?? statusForProviderCode(classified.providerErrorCode);
+      const gatewayAggregate = gw.includes("providermetadata") || gw.includes("fallbacksavailable") ||
+        gw.includes("modelattempts") || gw.includes("temporarily unavailable") ||
+        gw.includes("no_providers_available");
+      if (gatewayAggregate && status !== 400 && status !== 401 && status !== 429 && !(status !== undefined && status >= 500)) {
+        return new MembraneError({
+          type: 'server',
+          message,
+          retryable: true,
+          httpStatus: gw.includes('overloaded') ? 529 : status ?? 503,
+          retryAfterMs: classified.retryAfterMs,
+          providerErrorCode: classified.providerErrorCode,
+          rawError: error,
+          rawRequest,
+        });
+      }
+      if (classified.type !== 'unknown') return classified;
+
+      // Safety net: if the SSE error body wasn't parseable JSON, neither
+      // status nor body type resolves — match the message itself rather
+      // than let a transient capacity error become non-retryable.
+      if (gw.includes('overloaded')) {
+        return serverError(message, 529, error, rawRequest);
       }
     }
 
-    if (
-      error instanceof Error &&
-      (error.name === 'AbortError' ||
-        error.name === 'APIUserAbortError' ||
-        error.message === 'Request was aborted.')
-    ) {
-      return abortError(undefined, rawRequest);
-    }
-
-    return new MembraneError({
-      type: 'unknown',
-      message: error instanceof Error ? error.message : String(error),
-      retryable: false,
-      rawError: error,
-      rawRequest,
-    });
+    const info = classifyError(error);
+    info.rawRequest = rawRequest;
+    return new MembraneError(info);
   }
 
-  private parseRetryAfter(error: { message: string }): number | undefined {
-    // Try to extract retry-after from headers or message
-    const message = error.message;
-    const match = message.match(/retry after (\d+)/i);
-    if (match && match[1]) {
-      return parseInt(match[1], 10) * 1000;
-    }
+  /**
+   * The stated wait off the response headers: the authoritative source, and
+   * the one nobody was reading. They are read by the shared
+   * `statedWaitFromHeaders`, the same reader every adapter's HTTP boundary
+   * uses: `retry-after-ms` before `retry-after`, the order `@anthropic-ai/sdk`
+   * reads them in. With the SDK's own retries off (`maxRetries: 0`), this is
+   * the only header reader, so a wait stated only in milliseconds would
+   * otherwise be lost. Zero is a stated wait of zero, and so is a negative
+   * wait: it is already over. An error that carries no headers (a mid-stream
+   * SSE rethrow) states no wait here; errorFromProviderStatus then reads its
+   * message through the guarded prose reader.
+   */
+  private parseRetryAfter(error: { headers?: Headers }): number | undefined {
+    const stated = statedWaitFromHeaders(error.headers);
+    if (stated !== undefined) return stated;
+    // No prose fallback here: a wait read from a message belongs to the
+    // shared, guarded reader (errorFromProviderStatus), which believes one only
+    // as stated seconds on a retryable error. A loose /retry after (\d+)/ over
+    // any status made 'do not retry after 3 attempts' a three-second hold.
     return undefined;
   }
 }
