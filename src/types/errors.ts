@@ -46,6 +46,18 @@ export type MembraneErrorType =
   | 'rate_limit'
   | 'context_length'
   | 'invalid_request'
+  /**
+   * The provider refused a signed thinking block the request sent back.
+   * Either it was minted in another conversation, or what came before it
+   * has changed since (Anthropic's block binding, under its default or
+   * `'error'`), or its signature was altered, which is refused under
+   * `'drop_block'` too. The request as a whole is well formed: the fix is to
+   * leave that block out, or, for the binding, to ask the provider to drop
+   * such blocks (Anthropic's
+   * `thinking.block_binding.prefix_mismatch_behavior: 'drop_block'`). Not
+   * retryable as it stands.
+   */
+  | 'thinking_binding'
   | 'auth'
   | 'server'
   | 'network'
@@ -375,6 +387,18 @@ const NON_RETRYABLE_RATE_LIMIT_CODES = new Set([
 const CONTEXT_LENGTH_PATTERN =
   /context[ _-]?(?:length|limit|window)|maximum context|too many tokens|token limit|prompt is too long|too long|exceeds? the maximum number of (?:input )?tokens|input token count/i;
 
+/**
+ * Anthropic's 400 for a signed thinking block it won't accept in this
+ * request: "messages.1.content.0: Invalid `signature` in `thinking` block.
+ * The block is bound to a different conversation. Remove the block, or set
+ * `thinking.block_binding.prefix_mismatch_behavior` to "drop_block". Content
+ * before this block differs from when it was created, first at
+ * `messages.0.content.0`.", and, for a block whose signature was altered,
+ * the first sentence alone, under every behavior (both live, 2026-10-10).
+ * Read only under a 400.
+ */
+const THINKING_BINDING_PATTERN = /invalid `signature` in `(?:redacted_)?thinking` block/i;
+
 const RATE_LIMIT_PATTERN = /\b429\b|rate[ _-]?limit|too many requests/i;
 
 const SERVER_STATUS_PATTERN = /\b(500|502|503|504|529)\b/;
@@ -523,6 +547,9 @@ function classifyByStatus(
   if (status === 401 || status === 402 || status === 403) return { type: 'auth', retryable: false };
   if (status === 413) return { type: 'context_length', retryable: false };
   if (status === 404) return { type: 'invalid_request', retryable: false };
+  // A refused thinking block isn't a malformed request: a consumer that sheds
+  // or rewrites its newest message over invalid_request mustn't act on it.
+  if (status === 400 && THINKING_BINDING_PATTERN.test(message)) return { type: 'thinking_binding', retryable: false };
   // Context-length is a request-shape problem and only ever arrives as a 4xx.
   // Checking the message BEFORE the status would let a transient 5xx whose
   // body happens to say "context" or "too long" become a non-retryable
