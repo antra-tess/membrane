@@ -152,16 +152,26 @@ export class GeminiAdapter implements ProviderAdapter {
   readonly name = 'gemini';
 
   /**
-   * NOT ESTABLISHED. Google documents `cachedContentTokenCount` but the probes
-   * available on 2026-08-25 could not produce a cache hit to measure against:
-   * three identical 10,893-token calls to gemini-3.5-flash-lite never reported
-   * the field (implicit caching did not trigger), and explicit `cachedContents`
-   * is refused on the free tier (429,
-   * TotalCachedContentStorageTokensPerModelFreeTier limit=0). Declared honestly
-   * rather than guessed — membrane passes the counts through and warns once if
-   * a cache read ever arrives.
+   * Cache-inclusive: `promptTokenCount` (read as `inputTokens`) counts the
+   * cached span `cachedContentTokenCount` (read as `cacheReadTokens`)
+   * reports, so membrane subtracts it to reach the fresh input.
+   *
+   * The basis is Google's definition, not a measured hit. The UsageMetadata
+   * reference (https://ai.google.dev/api/generate-content, read 2026-10-10)
+   * says `promptTokenCount` is "Number of tokens in the prompt. When
+   * cachedContent is set, this is still the total effective prompt size
+   * meaning this includes the number of tokens in the cached content", and
+   * that `totalTokenCount` is "prompt + thoughts + response candidates",
+   * with no cached term of its own. That second sentence is about explicit
+   * caching (`cachedContent`), which membrane never sets: a hit through
+   * membrane is implicit, and for it the inclusion is inferred from the
+   * field's definition and the total, not stated. No probe has measured
+   * one: on 2026-08-25, three identical 10,893-token calls to
+   * gemini-3.5-flash-lite never reported the field (implicit caching did not
+   * trigger), and explicit `cachedContents` is refused on the free tier
+   * (429, TotalCachedContentStorageTokensPerModelFreeTier limit=0).
    */
-  readonly usageCacheConvention = 'unknown' as const;
+  readonly usageCacheConvention = 'cache-inclusive' as const;
   private apiKey: string;
   private baseURL: string;
   private defaultMaxTokens: number;
