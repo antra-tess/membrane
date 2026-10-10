@@ -101,6 +101,151 @@ const newAdapter = (extra: ConstructorParameters<typeof AnthropicAdapter>[0] = {
   new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false }, ...extra });
 const timing = { idleTimeoutMs: IDLE_MS, firstEventTimeoutMs: IDLE_MS };
 
+describe('optional response generation progress watchdog', () => {
+  const progressMs = IDLE_MS * 2;
+  const configured = () => newAdapter({ progressTimeoutMs: progressMs });
+  const stalled = { type: 'timeout', retryable: false, providerErrorCode: 'response_progress_timeout' };
+
+  it('expires on post-start pings and aborts the owned transport', async () => {
+    stubFetch(init => liveResponse(init, async io => {
+      io.emit(messageStart()); await keepalives(io, LIVE_MS * 3);
+    }));
+    await expect(configured().stream(request, { onChunk() {} }, timing)).rejects.toMatchObject(stalled);
+    expect(probes[0]?.torn).toBe(true);
+  });
+
+  it('uses response inactivity for configured pre-start pings, preserving a live transport', async () => {
+    stubFetch(init => liveResponse(init, io => keepalives(io, LIVE_MS * 3)));
+    await expect(configured().stream(request, { onChunk() {} }, timing)).rejects.toMatchObject(stalled);
+    expect(probes[0]?.torn).toBe(true);
+  });
+
+  it('allows a productive first event after the old first-event deadline while pings arrive', async () => {
+    stubFetch(init => liveResponse(init, async io => {
+      await keepalives(io, IDLE_MS + 2 * PING_MS);
+      io.emit(messageStart());
+      for (const part of answer()) io.emit(part);
+      io.close();
+    }));
+    const result = await configured().stream(request, { onChunk() {} }, timing);
+    expect(result.stopReason).toBe('end_turn');
+  });
+
+  it('preserves earlier first-event silence even when response progress is configured', async () => {
+    stubFetch(init => liveResponse(init, io => io.untilDone()));
+    await expect(configured().stream(request, { onChunk() {} }, timing)).rejects.toMatchObject({
+      type: 'timeout', retryable: true, message: expect.stringMatching(/first-event timeout/),
+    });
+    expect(probes[0]?.torn).toBe(true);
+  });
+
+  it('isolates a response-progress timeout from a concurrently productive request', async () => {
+    stubFetch((init, call) => liveResponse(init, async io => {
+      io.emit(messageStart());
+      if (call === 0) { await keepalives(io, LIVE_MS * 3); return; }
+      io.emit(frame('content_block_start', { index: 0, content_block: { type: 'text', text: '' } }));
+      for (let elapsed = 0; elapsed < LIVE_MS && !io.isDone(); elapsed += PING_MS) {
+        io.emit(frame('content_block_delta', { index: 0, delta: { type: 'text_delta', text: 'x' } }));
+        await io.sleep(PING_MS);
+      }
+      io.emit(frame('content_block_stop', { index: 0 }));
+      io.emit(frame('message_delta', { delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 2 } }));
+      io.close();
+    }));
+    const adapter = configured();
+    const [expired, completed] = await Promise.allSettled([
+      adapter.stream(request, { onChunk() {} }, timing),
+      adapter.stream(request, { onChunk() {} }, timing),
+    ]);
+    expect(expired).toMatchObject({ status: 'rejected', reason: stalled });
+    if (expired.status !== 'rejected') throw Error('expected expired request');
+    expect(expired.reason.rawError.watchdog).toMatchObject({
+      startedAt: expect.any(String), lastTransportAt: expect.any(String), lastSdkEventAt: expect.any(String),
+      progressSequence: 0, progressTimeoutMs: progressMs,
+    });
+    expect(Object.keys(expired.reason.rawError.watchdog).sort()).toEqual([
+      'lastProgressAt', 'lastSdkEventAt', 'lastTransportAt', 'progressSequence', 'progressSource', 'progressTimeoutMs', 'startedAt',
+    ]);
+    expect(completed).toMatchObject({ status: 'fulfilled', value: { stopReason: 'end_turn' } });
+  });
+
+  it.each(['text_delta', 'thinking_delta', 'input_json_delta', 'signature_delta'])(
+    'continues %s generation past a full inactivity window', async type => {
+      stubFetch(init => liveResponse(init, async io => {
+        io.emit(messageStart());
+        const content = type === 'thinking_delta' || type === 'signature_delta'
+          ? { type: 'thinking', thinking: '', signature: '' }
+          : type === 'input_json_delta' ? { type: 'tool_use', id: 'call_test', name: 'fixture', input: {} }
+          : { type: 'text', text: '' };
+        io.emit(frame('content_block_start', { index: 0, content_block: content }));
+        if (type === 'input_json_delta') io.emit(frame('content_block_delta', { index: 0, delta: { type, partial_json: '{"value":"' } }));
+        for (let elapsed = 0; elapsed < LIVE_MS && !io.isDone(); elapsed += PING_MS) {
+          const field = type === 'text_delta' ? 'text' : type === 'thinking_delta' ? 'thinking'
+            : type === 'input_json_delta' ? 'partial_json' : 'signature';
+          io.emit(frame('content_block_delta', { index: 0, delta: { type, [field]: 'x' } }));
+          await io.sleep(PING_MS);
+        }
+        if (type === 'input_json_delta') io.emit(frame('content_block_delta', { index: 0, delta: { type, partial_json: '"}' } }));
+        io.emit(frame('content_block_stop', { index: 0 }));
+        io.emit(frame('message_delta', { delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 4 } }));
+        io.close();
+      }));
+      const result = await configured().stream(request, { onChunk() {} }, timing);
+      expect(result.stopReason).toBe('end_turn');
+      expect(result.content).toHaveLength(1);
+    },
+  );
+
+  it.each(['empty-text', 'empty-signature', 'metadata'])('does not count %s as progress', async mode => {
+    stubFetch(init => liveResponse(init, async io => {
+      io.emit(messageStart());
+      io.emit(frame('content_block_start', { index: 0, content_block: mode === 'empty-signature'
+        ? { type: 'thinking', thinking: '', signature: '' } : { type: 'text', text: '' } }));
+      for (let elapsed = 0; elapsed < LIVE_MS * 3 && !io.isDone(); elapsed += PING_MS) {
+        io.emit(mode === 'metadata'
+          ? frame('content_block_start', { index: 0, content_block: { type: 'text', text: '' } })
+          : frame('content_block_delta', { index: 0, delta: mode === 'empty-text'
+            ? { type: 'text_delta', text: '' } : { type: 'signature_delta', signature: '' } }));
+        await io.sleep(PING_MS);
+      }
+    }));
+    await expect(configured().stream(request, { onChunk() {} }, timing)).rejects.toMatchObject(stalled);
+  });
+
+  it('preserves the earlier transport silence failure', async () => {
+    stubFetch(init => liveResponse(init, async io => { io.emit(messageStart()); await io.untilDone(); }));
+    await expect(configured().stream(request, { onChunk() {} }, timing)).rejects.toMatchObject({ type: 'timeout', retryable: true });
+  });
+
+  it('preserves caller cancellation and isolates concurrent requests', async () => {
+    stubFetch((init, call) => liveResponse(init, async io => {
+      io.emit(messageStart());
+      if (call === 0) { await keepalives(io, LIVE_MS * 3); return; }
+      for (let elapsed = 0; elapsed < LIVE_MS && !io.isDone(); elapsed += PING_MS) {
+        if (!elapsed) io.emit(frame('content_block_start', { index: 0, content_block: { type: 'text', text: '' } }));
+        io.emit(frame('content_block_delta', { index: 0, delta: { type: 'text_delta', text: 'x' } }));
+        await io.sleep(PING_MS);
+      }
+      io.emit(frame('content_block_stop', { index: 0 }));
+      io.emit(frame('message_delta', { delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 2 } }));
+      io.close();
+    }));
+    const adapter = configured(), caller = new AbortController();
+    const pending = Promise.allSettled([
+      adapter.stream(request, { onChunk() {} }, { ...timing, signal: caller.signal }),
+      adapter.stream(request, { onChunk() {} }, timing),
+    ]);
+    setTimeout(() => caller.abort(), IDLE_MS);
+    const [cancelled, completed] = await pending;
+    expect(cancelled).toMatchObject({ status: 'rejected', reason: { type: 'abort' } });
+    expect(completed).toMatchObject({ status: 'fulfilled', value: { stopReason: 'end_turn' } });
+  });
+
+  it.each([0, -1, Infinity, NaN, 1.5, 2147483648])('rejects invalid configured window %s', value => {
+    expect(() => newAdapter({ progressTimeoutMs: value })).toThrow(/progressTimeoutMs/);
+  });
+});
+
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();

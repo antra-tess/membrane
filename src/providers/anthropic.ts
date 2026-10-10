@@ -145,6 +145,11 @@ export interface DynamicHeadersContext {
 }
 
 export interface AnthropicAdapterConfig {
+  /** Optional stream response inactivity window, disabled by default.
+   * Nonempty text, thinking, tool JSON and signature deltas renew it.
+   * Keepalives and metadata do not. This never bounds total request duration.
+   * Expiry aborts the request with a nonretryable response_progress_timeout. */
+  progressTimeoutMs?: number;
   /** API key (defaults to ANTHROPIC_API_KEY env var) */
   apiKey?: string | null;
 
@@ -229,6 +234,8 @@ function observeBodyActivity(base: SdkFetch, observe?: () => void): SdkFetch {
 }
 
 export class AnthropicAdapter implements ProviderAdapter {
+  readonly supportsProgressTimeout = true;
+  private readonly progressTimeoutMs?: number;
   readonly name = 'anthropic';
   readonly cacheReceiptBasis = 'wire-request' as const;
 
@@ -253,6 +260,8 @@ export class AnthropicAdapter implements ProviderAdapter {
   private readonly dynamicHeaders?: (ctx?: DynamicHeadersContext) => Record<string, string | number | null | undefined>;
 
   constructor(config: AnthropicAdapterConfig = {}) {
+    this.validateProgressTimeout(config.progressTimeoutMs);
+    this.progressTimeoutMs = config.progressTimeoutMs;
     const clientOptions: ClientOptions = {
       baseURL: config.baseURL,
       defaultHeaders: config.defaultHeaders,
@@ -384,6 +393,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     callbacks: StreamCallbacks,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
+    const progressMs = this.progressTimeoutMs;
     const anthropicRequest = this.buildRequest(request);
     // Note: stream is implicitly true when using .stream()
     const fullRequest = { ...anthropicRequest, stream: true };
@@ -413,7 +423,9 @@ export class AnthropicAdapter implements ProviderAdapter {
     // with a cache miss, the API sends only SSE `ping` keepalives until
     // message_start — and the SDK swallows pings before they reach this loop
     // (core/streaming: `if (sse.event === 'ping') continue`). Transport body
-    // bytes, pings included, re-arm the idle timer only after the first event.
+    // bytes, pings included, re-arm the idle timer only after the first event
+    // unless the separate response-progress policy is configured. That policy
+    // owns initial response inactivity and keeps pre-event pings transport-live.
     // The first event retains a fixed longer deadline; killing at idleMs turned
     // every long-TTFT request into a spurious "idle timeout" (Cairn, 600k
     // context, 2026-07-20: repeated deaths at exactly 120s). Give the first
@@ -423,6 +435,12 @@ export class AnthropicAdapter implements ProviderAdapter {
     let idleTimer: ReturnType<typeof setTimeout> | null = null;
     let idleTimedOut = false;
     let sawEvent = false;
+    let progressTimer: ReturnType<typeof setTimeout> | undefined;
+    let progressTimedOut = false;
+    const startedAt = new Date().toISOString();
+    let lastTransportAt: string | undefined, lastSdkEventAt: string | undefined;
+    let lastProgressAt: string | undefined, progressSource: string | undefined;
+    let progressSequence = 0;
 
     // Link caller's signal so external cancellation still works
     const onExternalAbort = () => idleAbort.abort();
@@ -433,22 +451,32 @@ export class AnthropicAdapter implements ProviderAdapter {
 
     const resetIdleTimer = () => {
       if (idleTimer) clearTimeout(idleTimer);
+      if (idleAbort.signal.aborted) return;
       idleTimer = setTimeout(
-        () => { idleTimedOut = true; idleAbort.abort(); },
+        () => { if (!idleAbort.signal.aborted) { idleTimedOut = true; idleAbort.abort(); } },
         sawEvent ? idleMs : firstEventMs,
       );
     };
+    const resetProgressTimer = () => {
+      if (progressMs === undefined || idleAbort.signal.aborted) return;
+      if (progressTimer) clearTimeout(progressTimer);
+      progressTimer = setTimeout(() => {
+        if (!idleAbort.signal.aborted) { progressTimedOut = true; idleAbort.abort(); }
+      }, progressMs);
+    };
 
     // Body bytes (including SSE pings the SDK filters before the loop below)
-    // prove transport liveness after the first SDK event. They re-arm the idle
-    // timer without extending the fixed first-event deadline; `settled` keeps
-    // late chunks from re-arming after cleanup.
+    // prove transport liveness. Ordinary callers retain the fixed first-event
+    // deadline; configured callers renew transport even before the first event.
+    // Raw bytes never reset response progress. Late chunks cannot re-arm timers.
     let settled = false;
     const onTransportActivity = () => {
-      if (sawEvent && !settled && !idleAbort.signal.aborted) resetIdleTimer();
+      lastTransportAt = new Date().toISOString();
+      if ((sawEvent || progressMs !== undefined) && !settled && !idleAbort.signal.aborted) resetIdleTimer();
     };
 
     resetIdleTimer();
+    resetProgressTimer();
     let session: ReturnType<AnthropicAdapter['credentialSession']> | undefined;
 
     try {
@@ -526,8 +554,22 @@ export class AnthropicAdapter implements ProviderAdapter {
       };
 
       for await (const event of stream) {
+        lastSdkEventAt = new Date().toISOString();
         sawEvent = true;
         resetIdleTimer();
+        if (event.type === 'content_block_delta') {
+          const delta = event.delta;
+          const value = delta.type === 'text_delta' ? delta.text
+            : delta.type === 'thinking_delta' ? delta.thinking
+            : delta.type === 'input_json_delta' ? delta.partial_json
+            : delta.type === 'signature_delta' ? delta.signature : undefined;
+          if (typeof value === 'string' && value.length > 0 && !idleAbort.signal.aborted) {
+            lastProgressAt = lastSdkEventAt;
+            progressSource = delta.type;
+            progressSequence++;
+            resetProgressTimer();
+          }
+        }
         if (event.type === 'message_start') {
           model = event.message.model;
           const usage = event.message.usage as unknown as Record<string, unknown>;
@@ -620,7 +662,9 @@ export class AnthropicAdapter implements ProviderAdapter {
       // Clean up idle timer and external signal listener
       settled = true;
       if (idleTimer) clearTimeout(idleTimer);
+      if (progressTimer) clearTimeout(progressTimer);
       options?.signal?.removeEventListener('abort', onExternalAbort);
+      if (progressTimedOut) throw new Error('Response progress watchdog expired');
 
       // A block still open here never received its content_block_stop: the
       // turn ended mid-block. Finalize it so the accumulated text is not lost
@@ -677,7 +721,17 @@ export class AnthropicAdapter implements ProviderAdapter {
       // Clean up timer on error path too
       settled = true;
       if (idleTimer) clearTimeout(idleTimer);
+      if (progressTimer) clearTimeout(progressTimer);
       options?.signal?.removeEventListener('abort', onExternalAbort);
+
+      if (progressTimedOut) {
+        throw new MembraneError({ type: 'timeout', retryable: false,
+          providerErrorCode: 'response_progress_timeout',
+          message: `No observable response progress within ${progressMs}ms`,
+          rawError: { watchdog: { startedAt, lastTransportAt, lastSdkEventAt,
+            lastProgressAt, progressSource, progressSequence, progressTimeoutMs: progressMs } },
+          rawRequest: fullRequest });
+      }
 
       // Our own idle watchdog fired: whatever shape the SDK wrapped the
       // abort into (AbortError, APIUserAbortError "Request was aborted.",
@@ -695,6 +749,13 @@ export class AnthropicAdapter implements ProviderAdapter {
         });
       }
       throw this.handleError(session?.failure() ?? error, fullRequest);
+    }
+  }
+
+  private validateProgressTimeout(value: number | undefined): void {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value <= 0 || value > 2_147_483_647)) {
+      throw new MembraneError({ type: 'invalid_request', retryable: false,
+        message: 'progressTimeoutMs must be a positive integer no greater than 2147483647', rawError: undefined });
     }
   }
 
