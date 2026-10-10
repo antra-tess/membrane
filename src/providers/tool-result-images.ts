@@ -7,7 +7,7 @@ import { isAcceptedImageMediaType, resolveImageMediaType } from '../utils/image-
  */
 export type ToolOutputPart =
   | { type: 'text'; text: string }
-  | { type: 'image'; source: any };
+  | { type: 'image'; source: any; block: unknown };
 
 export type ChatToolOutputPart =
   | { type: 'text'; text: string }
@@ -29,7 +29,7 @@ export function toolOutputParts(content: unknown, isError = false): ToolOutputPa
   const parts: ToolOutputPart[] = isError ? [{ type: 'text', text: '[Tool result error]' }] : [];
   for (const block of content) {
     if (isSourceImage(block)) {
-      parts.push({ type: 'image', source: block.source });
+      parts.push({ type: 'image', source: block.source, block });
     } else if (carriesInlineImageData(block)) {
       // Keep #84's omission protection for MCP/generated_image payloads even
       // when a normalized image in the same result activates media conversion.
@@ -56,10 +56,11 @@ export function chatToolResultContent(block: any, media = false): string | ChatT
     const url = chatToolImageUrl(part.source);
     if (url) return { type: 'image_url', image_url: { url } };
     // Only bytes are omitted. A source without bytes that the wire can't take
-    // as an image keeps its text, address included, as it does under omission.
+    // as an image keeps the block's own JSON text, as main sends it and as
+    // omission keeps it, address included.
     return holdsImageBytes(part.source)
       ? { type: 'text', text: '[image omitted: unsupported image source or media type]' }
-      : { type: 'text', text: JSON.stringify(part) };
+      : { type: 'text', text: JSON.stringify(part.block) };
   });
   // Keep all-omission results in the native string form so exported-helper
   // output can re-enter an adapter without losing the tool-call ID.

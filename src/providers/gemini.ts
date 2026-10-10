@@ -546,8 +546,9 @@ export class GeminiAdapter implements ProviderAdapter {
                 }
                 const source = part.source;
                 if (!holdsImageBytes(source)) {
-                  // No bytes to omit: a reference keeps its text, address included.
-                  result.push(JSON.stringify(part));
+                  // No bytes to omit: the block keeps its own JSON text, as main
+                  // sends it, address included.
+                  result.push(JSON.stringify(part.block));
                   continue;
                 }
                 if (source?.type !== 'base64' || typeof source.data !== 'string' || !source.data) {

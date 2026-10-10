@@ -359,7 +359,7 @@ describe.each(cases)('$name tool-result image transport', c => {
     const { bodies, fetch } = stub(c);
     const adapter = c.adapter();
     for (const url of [...invalid, ...valid]) {
-      const reference = { type: 'image', source: { type: 'url', url } };
+      const reference = { type: 'image', source: { type: 'url', url }, alt: 'a chart' };
       const req = { model: c.model, messages: [
         { role: 'assistant', content: [tool('one', 'snapshot')] },
         { role: 'user', content: [result('one', [text('caption'), reference])] },
