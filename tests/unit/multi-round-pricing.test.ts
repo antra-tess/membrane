@@ -108,7 +108,7 @@ function zzRequest(mode: 'xml' | 'native'): NormalizedRequest {
     messages: [{ role: 'user', content: [{ type: 'text', text: 'zz-prompt' }] }],
     config: { model: ZZ_REQUESTED_MODEL, maxTokens: 64 },
     tools: [zzTool],
-    ...(mode === 'native' ? { toolMode: 'native' } : {}),
+    toolMode: mode,
   } as unknown as NormalizedRequest;
 }
 
