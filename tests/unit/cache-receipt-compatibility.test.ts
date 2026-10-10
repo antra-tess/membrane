@@ -78,7 +78,7 @@ function scriptedAdapter(stops: string[]) {
     ...options,
     onRequest: raw => { wire.push(raw); options?.onRequest?.(raw); },
   });
-  (adapter as any).client = { messages: { stream: async () => {
+  (adapter as any).client = { withOptions() { return this; }, messages: { stream: async () => {
     const stop = stops[attempts++]!;
     return (async function* () {
       yield { type: 'message_start', message: { model: request.config.model, content: [], usage: { input_tokens: 2, output_tokens: 0 } } };

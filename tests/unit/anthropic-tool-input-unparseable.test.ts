@@ -45,6 +45,7 @@ const truncatedArguments = '{"path":"/zz/fld1.ts","new_string":"const ite1 = ';
 function adapterStreamingTruncatedToolCall(): AnthropicAdapter {
   const adapter = new AnthropicAdapter({ apiKey: 'zz-key' });
   (adapter as any).client = {
+    withOptions() { return this; },
     messages: {
       stream: async () => fakeAnthropicStream([
         { type: 'message_start', message: { model: 'claude-zz-1', usage: { input_tokens: 10 } } },
@@ -69,6 +70,7 @@ function adapterStreamingTruncatedToolCall(): AnthropicAdapter {
 function adapterStreamingUnterminatedToolCall(): AnthropicAdapter {
   const adapter = new AnthropicAdapter({ apiKey: 'zz-key' });
   (adapter as any).client = {
+    withOptions() { return this; },
     messages: {
       stream: async () => fakeAnthropicStream([
         { type: 'message_start', message: { model: 'claude-zz-1', usage: { input_tokens: 10 } } },
@@ -108,6 +110,7 @@ describe('AnthropicAdapter streaming: unparseable tool_use input', () => {
   it('leaves the marker off a call whose arguments parsed', async () => {
     const adapter = new AnthropicAdapter({ apiKey: 'zz-key' });
     (adapter as any).client = {
+      withOptions() { return this; },
       messages: {
         stream: async () => fakeAnthropicStream([
           { type: 'message_start', message: { model: 'claude-zz-1', usage: { input_tokens: 10 } } },
