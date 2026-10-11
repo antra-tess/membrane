@@ -49,7 +49,11 @@ import { encodeCdata, readPayload } from './xml-payload.js';
  * empty), only these envelopes speak for the harness: only they answer a
  * block (parseToolCalls selects among the blocks they have not answered), only
  * their results are tool results, and only their notices are read, their
- * recorded refusals deciding their block. Each is also a speaker boundary:
+ * recorded refusals deciding their block. An envelope answers the block that
+ * starts at its `answers` offset, wherever the envelope sits: text the model
+ * wrote after its block, a lookalike included, can stand between them, and a
+ * block once answered is never selected again. Without `answers`, an envelope
+ * answers the block it directly follows. Each is also a speaker boundary:
  * markup the model wrote before an envelope never pairs with a tag inside or
  * after it, so an opener the model left unclosed cannot swallow the call an
  * envelope answers, or the envelope. An offset pair that does not span exactly
@@ -64,7 +68,14 @@ import { encodeCdata, readPayload } from './xml-payload.js';
 export interface ToolParseOptions {
   tools?: ToolDefinition[];
   historyLength?: number;
-  harnessEnvelopes?: ReadonlyArray<{ start: number; end: number }>;
+  harnessEnvelopes?: ReadonlyArray<HarnessEnvelope>;
+}
+
+/** An envelope the caller injected: its offsets, and the start of the block it answers. */
+export interface HarnessEnvelope {
+  start: number;
+  end: number;
+  answers?: number;
 }
 
 /** 16+ digits, no decimal: beyond Number.MAX_SAFE_INTEGER (Discord snowflakes). */
@@ -325,10 +336,12 @@ function parseParamValue(
  *
  * CDATA is the spelling a model reaches for when a value must arrive exactly,
  * so its payload is never trimmed, never stripped of framing newlines (those
- * sit outside the sections) and never guessed into another type: a declared,
- * nullable, undeclared, untyped or unresolved parameter receives the payload
- * as a string, and `null` stays the text "null". A parameter declared as a
- * non-string type parses its payload as JSON exactly as a raw value would.
+ * sit outside the sections) and never guessed into another type: a parameter
+ * declared `string` (nullable or not), undeclared, untyped or unresolved
+ * receives the payload as a string, and `null` stays the text "null". A
+ * parameter declared as a single non-string type, nullable or not, parses its
+ * payload as JSON exactly as a raw value would, so `null` under a nullable one
+ * is null.
  */
 function parseCdataValue(
   payload: string,
@@ -429,19 +442,33 @@ interface BoundaryFinding {
 
 const CDATA_ADVICE = 'To send this text as data, write the value as CDATA.';
 
-function refusalMessage(observation: string): string {
-  return `${observation}; nothing was sent. ${CDATA_ADVICE}`;
+// For a refusal with no value at fault: text where no parameter holds it.
+// Markup-free, since a notice's markup reaches the model as entities.
+const PARAMETER_ADVICE = 'Write each argument inside its own parameter element, and leave other text out of the call.';
+
+function refusalMessage(observation: string, advice: string = CDATA_ADVICE): string {
+  return `${observation}; nothing was sent. ${advice}`;
 }
 
 function quoteStart(text: string): string {
   return text.length > 40 ? `${text.slice(0, 40)}…` : text;
 }
 
-// A closing tag for the parameter element in a namespace the parser does not
-// recognize, at the end of the text before an absorbed opener (whitespace
-// allowed between). `antml:` closers are recognized, so they end a value and
-// can never be inside one.
-const UNRECOGNIZED_PARAMETER_CLOSER_AT_END = /<\/([^\s<>/:]+):parameter>\s*$/;
+// A closing tag that the parser does not recognize as a parameter closer, so
+// it doesn't end the value it stands in: any closing tag whose name begins with
+// `param` (a misspelling such as `</param>`, `</paramter>`, `</parameters>` or
+// `</parameter >`, and other names such as `</parameterList>`), or a
+// `parameter` closer in another namespace (`</x:parameter>`). A namespaced
+// `param` is another vocabulary's element (XSLT's `</xsl:param>`), not one.
+// Recognized closers end a value, so they can never be inside one.
+const UNRECOGNIZED_PARAMETER_CLOSER = /<\/(?:[^\s<>/:]+:parameter|param\w*)\s*>/;
+
+// A parameter opener inside a raw value, in any namespace or none, with either
+// quote: every spelling the parser refuses elsewhere as a parameter it doesn't
+// read. The local name is `parameter`, so `<param name="…">` in a C# doc
+// comment or `<xsl:param name="…">` in XSLT is not one.
+// Groups: 1 = quote, 2 = name.
+const ABSORBED_OPENER_REGEX = /<(?:[^\s<>/:]+:)?parameter\s+name=(["'])((?:(?!\1)[^<>])+)\1\s*>/g;
 
 /**
  * Parse the parameters of one invoke body, and check their boundaries.
@@ -450,31 +477,36 @@ const UNRECOGNIZED_PARAMETER_CLOSER_AT_END = /<\/([^\s<>/:]+):parameter>\s*$/;
  * closing tag. A value written as CDATA is its payload exactly (see
  * {@link parseCdataValue}). What would make the arguments differ from what the
  * caller wrote is found here, and the call is refused rather than sent:
- *   - a raw value holding a closing parameter tag in an unrecognized namespace
- *     followed by an opener for a declared parameter the call lacks (Linn's
- *     miskeyed close);
- *   - a raw value holding an opener for an unconditionally required parameter
- *     the call lacks (an unclosed or wrongly closed value swallowed it);
+ *   - a raw value holding a closing tag for a parameter element that the
+ *     parser doesn't recognize, followed by a parameter opener of any name
+ *     (Linn's miskeyed close, or a misspelled one): the closer shows the value
+ *     was meant to end there;
+ *   - a raw value holding an opener for a parameter the tool declares and the
+ *     call lacks, required or optional (an unclosed or wrongly closed value
+ *     swallowed it). Dispatching would store the swallowed markup, which can't
+ *     be taken back; a refusal costs one retry;
  *   - non-whitespace text after a parameter (a value cut at a literal closing
  *     tag, or a parameter never closed), markup before the first parameter
  *     (perhaps a parameter the parser doesn't read), or any text in a call
  *     with no parameter the parser reads;
  *   - text after a CDATA value's last section, before its closer.
- * A raw value holding an opener for an optional declared parameter the call
- * lacks keeps the call as parsed, with a warning that makes no claim about
- * intent. So does markup-free text before the first parameter, such as a
- * model's commentary: no value precedes it to have been cut, and it is not
- * passed to the tool.
+ * Markup-free text before the first parameter, such as a model's commentary,
+ * keeps the call as parsed, with a warning that makes no claim about intent:
+ * no value precedes it to have been cut, and it is not passed to the tool.
+ * An opener for a parameter the call includes, or one the tool doesn't declare,
+ * with no unrecognized closer before it, is the value's own text.
  * CDATA payloads are never inspected: they are what the caller meant.
  *
  * `toolName` is the name the invoke actually dispatches under — for a
  * re-anchored head, the innermost one — so the schema consulted per parameter
- * is the schema of the tool that will receive it.
+ * is the schema of the tool that will receive it. `historyEnd` is where
+ * history ends, relative to `body`.
  */
 function parseInvokeParameters(
   body: ScanText,
   toolName: string,
-  tools?: ToolDefinition[]
+  tools?: ToolDefinition[],
+  historyEnd = 0
 ): ParsedParameters {
   const input: Record<string, unknown> = {};
   const schema = invokeSchemaFor(tools, toolName);
@@ -492,7 +524,10 @@ function parseInvokeParameters(
     const closerLength = `</${paramMatch[4] ?? ''}parameter>`.length;
     const valueEnd = paramMatch.index + paramMatch[0].length - closerLength;
     const valueStart = valueEnd - (paramMatch[3] ?? '').length;
-    const payload = readPayload(body.original, valueStart, valueEnd);
+    // A payload history opened ends where history ends, as the structural walk
+    // reads it: a `]]>` the live turn writes does not close it.
+    const bound = valueStart < historyEnd && historyEnd < valueEnd ? historyEnd : valueEnd;
+    const payload = readPayload(body.original, valueStart, bound);
 
     if (payload.kind === 'cdata') {
       const suffix = body.original.slice(payload.end, valueEnd);
@@ -524,9 +559,7 @@ function parseInvokeParameters(
   }
   noteTextOutsideParameters(body, gapStart, body.masked.length, previous, false, findings);
 
-  if (schema !== undefined) {
-    for (const value of rawValues) noteAbsorbedParameters(value, schema, input, findings);
-  }
+  for (const value of rawValues) noteAbsorbedParameters(value, schema, input, findings);
 
   findings.sort((a, b) => a.at - b.at);
   const refusal = findings.find(finding => finding.refusal !== undefined)?.refusal;
@@ -569,7 +602,11 @@ const VALUELESS_MARKUP = /<!--[\s\S]*?-->|<\?[\s\S]*?\?>/g;
  * In a call with no parameter the parser reads, any text is refused: a value
  * written without its parameter tag reads just like commentary, and a tool
  * that declares no parameters may still accept some (an open object schema, a
- * root union the reading can't merge).
+ * root union the reading can't merge). Complete comments and processing
+ * instructions alone carry no value, so they are commentary there too.
+ *
+ * Neither refusal before a parameter has a value at fault, so their advice is
+ * the parameter element rather than CDATA.
  */
 function noteTextOutsideParameters(
   body: ScanText,
@@ -602,19 +639,28 @@ function noteTextOutsideParameters(
           'a value was probably cut short at a literal closing tag'
       ),
     });
-  } else if (!parameterFollows) {
+  } else if (!parameterFollows && /\S/.test(stray.replace(VALUELESS_MARKUP, ''))) {
     findings.push({
       at,
       refusal: refusalMessage(
-        `the call has text outside every parameter, starting \`${quoted}\`, and no parameter the parser reads`
+        `the call has text outside every parameter, starting \`${quoted}\`, and no parameter the parser reads`,
+        PARAMETER_ADVICE
       ),
+    });
+  } else if (!parameterFollows) {
+    findings.push({
+      at,
+      warning:
+        `the call has text outside every parameter, starting \`${quoted}\`, ` +
+        'which holds no value and was not passed to the tool',
     });
   } else if (TAG_START.test(stray.replace(VALUELESS_MARKUP, ''))) {
     findings.push({
       at,
       refusal: refusalMessage(
         `the call has text before its first parameter that is outside every parameter, starting \`${quoted}\`: ` +
-          'it contains markup, but no parameter the parser reads'
+          'it contains markup, but no parameter the parser reads',
+        PARAMETER_ADVICE
       ),
     });
   } else {
@@ -627,44 +673,37 @@ function noteTextOutsideParameters(
   }
 }
 
-/** Openers inside a raw value that name a declared parameter the call lacks. */
+/**
+ * Parameter markup a raw value absorbed: an opener after a closing tag the
+ * parser doesn't recognize, whatever its name, and, with the tool's schema,
+ * an opener for a parameter the tool declares and the call lacks.
+ */
 function noteAbsorbedParameters(
   value: { name: string; at: number; text: string },
-  schema: InvokeSchema,
+  schema: InvokeSchema | undefined,
   input: Record<string, unknown>,
   findings: BoundaryFinding[]
 ): void {
-  PARAMETER_OPEN_REGEX.lastIndex = 0;
+  const closer = UNRECOGNIZED_PARAMETER_CLOSER.exec(value.text);
+  ABSORBED_OPENER_REGEX.lastIndex = 0;
   let opener: RegExpExecArray | null;
-  while ((opener = PARAMETER_OPEN_REGEX.exec(value.text)) !== null) {
+  while ((opener = ABSORBED_OPENER_REGEX.exec(value.text)) !== null) {
     const absorbed = opener[2] ?? '';
-    if (Object.hasOwn(input, absorbed)) continue;
-    const declaration = schema.reading.parameters.get(absorbed);
-    if (declaration === undefined) continue;
-
+    const missing = !Object.hasOwn(input, absorbed);
     const at = value.at + opener.index;
-    const closer = UNRECOGNIZED_PARAMETER_CLOSER_AT_END.exec(value.text.slice(0, opener.index));
-    if (closer) {
+    if (closer !== null && closer.index < opener.index) {
       findings.push({
         at,
         refusal: refusalMessage(
-          `the value of ${value.name} contains the closing tag \`${closer[0].trimEnd()}\`, which the parser ` +
-            `doesn't recognize, followed by markup for parameter ${absorbed}, which is missing`
+          `the value of ${value.name} contains the closing tag \`${closer[0]}\`, which the parser ` +
+            `doesn't recognize, followed by markup for parameter ${absorbed}` +
+            (missing && schema?.reading.names.has(absorbed) ? ', which is missing' : '')
         ),
       });
-    } else if (declaration.required) {
+    } else if (missing && schema?.reading.names.has(absorbed)) {
       findings.push({
         at,
-        refusal: refusalMessage(
-          `the value of ${value.name} contains markup for required parameter ${absorbed}, which is missing`
-        ),
-      });
-    } else {
-      findings.push({
-        at,
-        warning:
-          `the value of ${value.name} contains markup for parameter ${absorbed}, ` +
-          "which the call doesn't otherwise include",
+        refusal: refusalMessage(`the value of ${value.name} contains markup for parameter ${absorbed}, which is missing`),
       });
     }
   }
@@ -699,11 +738,19 @@ const INVOKE_REANCHOR_REGEX = new RegExp(INVOKE_REGEX.source);
 // block fix, since an opener that never closed is invisible to INVOKE_REGEX.
 const INVOKE_OPEN_REGEX = /<(antml:)?invoke\s+name=/g;
 
+// The name of the invoke head that starts exactly at `lastIndex`, quoted as
+// INVOKE_REGEX quotes it. Groups: 1 = quote, 2 = name.
+const INVOKE_HEAD_NAME_AT = /<(?:antml:)?invoke\s+name=(["'])((?:(?!\1).)+)\1/y;
+
 const INVOKE_CLOSE_TAG = '</invoke>';
 
 /** One invoke as parsed: its call, or why it must not be sent. */
 interface ParsedInvoke {
-  /** 0-based ordinal of this invoke's opener among every invoke opener in its block. */
+  /**
+   * 0-based ordinal of this invoke's opener among every invoke opener in its
+   * block. An opener inside a CDATA payload is data, not an invoke, and is not
+   * counted.
+   */
   ordinal: number;
   name: string;
   input: Record<string, unknown>;
@@ -746,7 +793,11 @@ function invokeBodyOffset(invokeMatch: RegExpExecArray): number {
   return invokeMatch[0].length - closerLength - (invokeMatch[INVOKE_BODY_GROUP]?.length ?? 0);
 }
 
-function collectInvokes(inner: ScanText, tools?: ToolDefinition[]): ParsedInvokes {
+/**
+ * `historyEnd` is where history ends, relative to `inner`: a payload opened
+ * before it ends there (see {@link parseInvokeParameters}).
+ */
+function collectInvokes(inner: ScanText, tools?: ToolDefinition[], historyEnd = 0): ParsedInvokes {
   const invokes: ParsedInvoke[] = [];
   let unclosedHeads = 0;
   // Ordinals count every opener in the block, so a refused head and a
@@ -759,7 +810,12 @@ function collectInvokes(inner: ScanText, tools?: ToolDefinition[]): ParsedInvoke
     const ordinal = ordinals.get(headAt) ?? -1;
     if (body === undefined) return { ordinal, name, input: {}, warnings: [] };
     const bodyStart = headAt + invokeBodyOffset(match);
-    const parsed = parseInvokeParameters(sliceScanText(inner, bodyStart, bodyStart + body.length), name, tools);
+    const parsed = parseInvokeParameters(
+      sliceScanText(inner, bodyStart, bodyStart + body.length),
+      name,
+      tools,
+      historyEnd - bodyStart
+    );
     return { ordinal, name, ...parsed };
   };
 
@@ -775,12 +831,26 @@ function collectInvokes(inner: ScanText, tools?: ToolDefinition[]): ParsedInvoke
     }
 
     // Every opener in the body is a head that never closed, and so is the
-    // matched head itself; only the innermost one owns the closing tag.
+    // matched head itself; only the innermost one owns the closing tag. Each
+    // unclosed head is refused under its own ordinal, so the model hears that
+    // its call was not sent (a raw value quoting an invoke opener reads the
+    // same, which CDATA avoids).
     unclosedHeads += swallowedOpenerOffsets.length;
+    const bodyAt = invokeMatch.index + invokeBodyOffset(invokeMatch);
+    const headOffsets = [invokeMatch.index, ...swallowedOpenerOffsets.slice(0, -1).map((offset) => bodyAt + offset)];
+    for (const headAt of headOffsets) {
+      INVOKE_HEAD_NAME_AT.lastIndex = headAt;
+      const name = INVOKE_HEAD_NAME_AT.exec(inner.masked)?.[2] ?? '';
+      invokes.push({
+        ordinal: ordinals.get(headAt) ?? -1,
+        name,
+        input: {},
+        refusal: refusalMessage(`the call to ${name} is not closed before the next call begins`),
+        warnings: [],
+      });
+    }
 
-    const innermostAt =
-      invokeMatch.index + invokeBodyOffset(invokeMatch) +
-      swallowedOpenerOffsets[swallowedOpenerOffsets.length - 1]!;
+    const innermostAt = bodyAt + swallowedOpenerOffsets[swallowedOpenerOffsets.length - 1]!;
     const reanchoredMatch = INVOKE_REANCHOR_REGEX.exec(
       inner.masked.slice(innermostAt, invokeMatch.index + invokeMatch[0].length)
     );
@@ -1004,6 +1074,8 @@ const PAYLOAD_MASK = '\u0000';
 interface RecordedEnvelope {
   start: number;
   end: number;
+  /** The start of the block it answers, when the caller recorded one. */
+  answers?: number;
   innerContent: string;
   rawXml: string;
 }
@@ -1024,7 +1096,7 @@ function recordedEnvelopes(
   if (harnessEnvelopes === undefined) return undefined;
   const recorded: RecordedEnvelope[] = [];
   let previousEnd = 0;
-  for (const { start, end } of [...harnessEnvelopes].sort((a, b) => a.start - b.start)) {
+  for (const { start, end, answers } of [...harnessEnvelopes].sort((a, b) => a.start - b.start)) {
     if (start < previousEnd || end > text.length) continue;
     RESULTS_ELEMENT_AT.lastIndex = start;
     const element = RESULTS_ELEMENT_AT.exec(text);
@@ -1033,6 +1105,7 @@ function recordedEnvelopes(
     recorded.push({
       start,
       end,
+      ...(answers === undefined ? {} : { answers }),
       innerContent: text.slice(innerStart, innerStart + (element[1] ?? '').length),
       rawXml: element[0],
     });
@@ -1121,6 +1194,8 @@ interface ResolvedToolBlock {
   end: number;
   /** The block's inner content, masked and as written. */
   inner: ScanText;
+  /** Where `inner` begins in the text. */
+  innerStart: number;
   /** The whole block exactly as written: what a tool_use's rawXml replays. */
   fullMatch: string;
   wasSpliced: boolean;
@@ -1145,16 +1220,19 @@ function resolveToolBlock(view: ScanText, blockMatch: RegExpExecArray): Resolved
       start: blockMatch.index,
       end,
       inner: sliceScanText(view, innerStart, innerEnd),
+      innerStart,
       fullMatch: view.original.slice(blockMatch.index, end),
       wasSpliced: false,
     };
   }
 
   const reanchoredStart = innerStart + innermostOpener.index;
+  const reanchoredInnerStart = reanchoredStart + innermostOpener[0].length;
   return {
     start: reanchoredStart,
     end,
-    inner: sliceScanText(view, reanchoredStart + innermostOpener[0].length, innerEnd),
+    inner: sliceScanText(view, reanchoredInnerStart, innerEnd),
+    innerStart: reanchoredInnerStart,
     fullMatch: view.original.slice(reanchoredStart, end),
     wasSpliced: true,
   };
@@ -1170,18 +1248,13 @@ const FUNCTION_RESULTS_OPENER_MAX_LENGTH = '<function_results>'.length + 'antml:
 const SINGLE_WHITESPACE_REGEX = /\s/;
 
 /**
- * Has this block already been executed? True only when the next NON-WHITESPACE
- * token after it is a function_results opener. The previous test — "a
+ * Where the `<function_results>` opener directly after `afterPos` begins, if
+ * one does: the next NON-WHITESPACE token. The older test — "a
  * function_results opener appears anywhere in the next 100 characters" — was
  * wrong in both directions: padding past 100 characters re-selected a block
  * that had already run, and a results block belonging to some later exchange
  * marked a live call as spent.
  */
-function isFollowedByResults(text: string, afterPos: number): boolean {
-  return resultsOpenerAfter(text, afterPos) !== undefined;
-}
-
-/** Where the `<function_results>` opener directly after `afterPos` (whitespace allowed) begins, if one does. */
 function resultsOpenerAfter(text: string, afterPos: number): number | undefined {
   let scan = afterPos;
   while (scan < text.length && SINGLE_WHITESPACE_REGEX.test(text[scan]!)) scan++;
@@ -1191,23 +1264,39 @@ function resultsOpenerAfter(text: string, afterPos: number): number | undefined 
 }
 
 /**
- * Whether results already answered the block ending at `blockEnd`.
+ * Whether results already answered `block`.
  *
  * With provenance (recorded envelopes, even none), only an envelope the
- * caller injected answers a block: a lookalike the model wrote after its own
- * call leaves the call pending, so it is neither hidden nor lost. Without
- * provenance, any results span directly after the block answers it — the
- * reading raw transcripts have always had, kept for callers that cannot say
- * which envelopes they wrote; a lookalike can hide a call from them.
+ * caller injected answers a block: one recorded as answering it, wherever it
+ * sits, or one without such a record directly after it. A lookalike the model
+ * wrote after its own call leaves the call pending, so it is neither hidden nor
+ * lost, and once the harness answers it the call is never selected again.
+ * Without provenance, any results span directly after the block answers it —
+ * the reading raw transcripts have always had, kept for callers that cannot
+ * say which envelopes they wrote; a lookalike can hide a call from them.
  */
 function isAnswered(
   masked: string,
-  blockEnd: number,
+  block: { start: number; end: number },
   envelopes: readonly RecordedEnvelope[] | undefined
 ): boolean {
-  const opener = resultsOpenerAfter(masked, blockEnd);
-  if (opener === undefined) return false;
-  return envelopes === undefined || envelopes.some((envelope) => envelope.start === opener);
+  return answeringEnvelopeStart(masked, block, envelopes) !== undefined;
+}
+
+/**
+ * Where the results that answer `block` begin, if any answer it (see
+ * {@link isAnswered}).
+ */
+function answeringEnvelopeStart(
+  masked: string,
+  block: { start: number; end: number },
+  envelopes: readonly RecordedEnvelope[] | undefined
+): number | undefined {
+  const opener = resultsOpenerAfter(masked, block.end);
+  if (envelopes === undefined) return opener;
+  const recorded = envelopes.find((envelope) => envelope.answers === block.start);
+  if (recorded !== undefined) return recorded.start;
+  return envelopes.some((envelope) => envelope.start === opener && envelope.answers === undefined) ? opener : undefined;
 }
 
 /**
@@ -1239,7 +1328,7 @@ export function parseToolCalls(text: string, options?: ToolParseOptions): Parsed
 
   for (const block of collectLiveToolBlocks(view, envelopes)) {
     if (block.end <= historyLength) continue;
-    if (!isAnswered(view.masked, block.end, envelopes)) {
+    if (!isAnswered(view.masked, block, envelopes)) {
       lastUnexecutedBlock = block;
     }
   }
@@ -1251,7 +1340,11 @@ export function parseToolCalls(text: string, options?: ToolParseOptions): Parsed
   const beforeText = text.slice(0, lastUnexecutedBlock.start);
   const afterText = text.slice(lastUnexecutedBlock.end);
 
-  const { invokes } = collectInvokes(lastUnexecutedBlock.inner, options?.tools);
+  const { invokes } = collectInvokes(
+    lastUnexecutedBlock.inner,
+    options?.tools,
+    historyLength - lastUnexecutedBlock.innerStart
+  );
   const calls: ToolCall[] = invokes
     .filter((invoke) => invoke.refusal === undefined)
     .map((invoke) => ({
@@ -1588,7 +1681,9 @@ const THINKING_BLOCK_REGEX = /<(antml:)?thinking>([\s\S]*?)<\/(antml:)?thinking>
 type CandidateSpan =
   | { kind: 'thinking'; start: number; end: number; thinking: string }
   | { kind: 'calls'; start: number; end: number; resolvedBlock: ResolvedToolBlock }
-  | { kind: 'results'; start: number; end: number; innerContent: string; rawXml: string };
+  | ResultsSpan;
+
+type ResultsSpan = { kind: 'results'; start: number; end: number; innerContent: string; rawXml: string };
 
 /**
  * Keep the outermost spans, in document order. RETAINED SPANS NEVER OVERLAP:
@@ -1661,7 +1756,12 @@ function shiftSpan(span: CandidateSpan, by: number): CandidateSpan {
     ...span,
     start: span.start + by,
     end: span.end + by,
-    resolvedBlock: { ...span.resolvedBlock, start: span.resolvedBlock.start + by, end: span.resolvedBlock.end + by },
+    resolvedBlock: {
+      ...span.resolvedBlock,
+      start: span.resolvedBlock.start + by,
+      end: span.resolvedBlock.end + by,
+      innerStart: span.resolvedBlock.innerStart + by,
+    },
   };
 }
 
@@ -1881,7 +1981,11 @@ export function parseAccumulatedIntoBlocks(
   const prepended = processedText.length - text.length;
   const envelopes = recordedEnvelopes(
     processedText,
-    options?.harnessEnvelopes?.map((envelope) => ({ start: envelope.start + prepended, end: envelope.end + prepended }))
+    options?.harnessEnvelopes?.map(({ start, end, answers }) => ({
+      start: start + prepended,
+      end: end + prepended,
+      ...(answers === undefined ? {} : { answers: answers + prepended }),
+    }))
   );
   const harnessEnvelopeStarts = new Map((envelopes ?? []).map((envelope) => [envelope.start, envelope.end]));
   const isHarnessEnvelope = (span: CandidateSpan): boolean => harnessEnvelopeStarts.get(span.start) === span.end;
@@ -1923,7 +2027,10 @@ export function parseAccumulatedIntoBlocks(
   // that the filter then deleted, leaving a tool_result addressed to a
   // tool_use no longer in the response. Recorded envelopes bound every sweep
   // (see collectCandidateSpans), the payload walk included.
-  const view = structuralView(processedText, options?.historyLength, envelopes);
+  // History, in processedText's offsets: a synthetic opener stands for the
+  // prefill's, so it is history too.
+  const historyEnd = options?.historyLength ? options.historyLength + prepended : 0;
+  const view = structuralView(processedText, historyEnd, envelopes);
   const candidateSpans = collectCandidateSpans(view, envelopes);
 
   // ── Pass 2: containment ──────────────────────────────────────────────────
@@ -1937,12 +2044,17 @@ export function parseAccumulatedIntoBlocks(
   // span holds anything parseable says nothing about whether it encloses the
   // text beneath it.
   const survivingSpans = retainOutermostSpans(candidateSpans);
+  const envelopeSpans = new Map(
+    survivingSpans
+      .filter((span): span is ResultsSpan => span.kind === 'results' && isHarnessEnvelope(span))
+      .map((span) => [span.start, span])
+  );
 
   // ── Pass 3: register the survivors, in document order ────────────────────
   //
   // One ordered walk, so every call site preceding a results block is already
   // registered when that block claims — and no filtered span ever was.
-  for (const [spanIndex, span] of survivingSpans.entries()) {
+  for (const span of survivingSpans) {
     if (span.kind === 'thinking') {
       positions.push({
         start: span.start,
@@ -1965,21 +2077,17 @@ export function parseAccumulatedIntoBlocks(
 
       // Parse invoke tags in this block (both forms, in document order); an
       // invoke left open is refused and re-anchored to the call it swallowed.
-      const parsedInvokes = collectInvokes(resolvedBlock.inner, options?.tools);
+      const parsedInvokes = collectInvokes(resolvedBlock.inner, options?.tools, historyEnd - resolvedBlock.innerStart);
       unclosedInvokeHeads += parsedInvokes.unclosedHeads;
 
       // The harness already answered this block: the notices recorded in the
       // envelope it injected are what happened — exactly the invokes it
       // refused were not sent, whatever the present schemas would say. Only an
-      // envelope the caller vouches for counts (see harnessEnvelopes);
+      // envelope the caller vouches for counts (see harnessEnvelopes), the one
+      // recorded as answering this block or else one directly after it;
       // otherwise the rules decide, as they did when the block was live.
-      const following = survivingSpans[spanIndex + 1];
-      const answeredBy =
-        following?.kind === 'results' &&
-        isFollowedByResults(view.masked, resolvedBlock.end) &&
-        isHarnessEnvelope(following)
-          ? following
-          : undefined;
+      const answerStart = provenanceSupplied ? answeringEnvelopeStart(view.masked, resolvedBlock, envelopes) : undefined;
+      const answeredBy = answerStart === undefined ? undefined : envelopeSpans.get(answerStart);
       if (answeredBy) harnessAnswers.add(answeredBy);
       const blockNotices = answeredBy
         ? decodeToolCallNotices(answeredBy.innerContent)

@@ -579,3 +579,13 @@ describe('S3: the kept window never opens on an orphan tool_result', () => {
     });
   });
 });
+
+describe('calculateCharacters', () => {
+  it('counts a refused or cut call and the harness notice about it', () => {
+    const messages: NormalizedMessage[] = [
+      { participant: 'Claude', content: [{ type: 'tool_attempt', rawXml: 'x'.repeat(30) }] },
+      { participant: 'Claude', content: [{ type: 'tool_notice', notices: [{ invoke: 0, toolName: 't', kind: 'refused', message: 'y'.repeat(12) }] }] },
+    ];
+    expect(calculateCharacters(messages)).toBe(42);
+  });
+});

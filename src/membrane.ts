@@ -26,6 +26,7 @@ import type {
   ToolContext,
   RetryConfig,
   ToolDefinition,
+  ToolCallNotice,
   TurnToolCallNotice,
 } from './types/index.js';
 import { lastCacheableBlockIndex, carriersAsText } from './formatters/native.js';
@@ -62,6 +63,7 @@ import {
   hasImageInToolResults,
   formatToolResultsForSplitTurn,
   toolCallNoticesText,
+  type HarnessEnvelope,
   type ProviderImageBlock,
 } from './utils/tool-parser.js';
 import { IncrementalXmlParser, type ProcessChunkResult } from './utils/stream-parser.js';
@@ -221,6 +223,14 @@ export class Membrane {
 
   /**
    * Complete a request (non-streaming)
+   *
+   * One provider request, retried only on errors and opted-in refusals: no
+   * loop runs, so XML tool calls come back for the caller to execute and
+   * answer. A provider stop inside a CDATA payload ends the request there, as
+   * any stop does: the cut block is reported refused as unterminated
+   * (`toolCallNotices`, `answered: false`) and nothing in it is a call. A
+   * payload that must hold a stop sequence goes through `stream()`, which
+   * resumes inside payloads, or is written split across CDATA sections.
    */
   async complete(
     request: NormalizedRequest,
@@ -721,7 +731,7 @@ export class Membrane {
     // Every <function_results> envelope this loop injects, by its offsets in
     // the accumulated text: the evidence that an envelope is the harness
     // speaking, which the final parse needs (ToolParseOptions.harnessEnvelopes).
-    const harnessEnvelopes: Array<{ start: number; end: number }> = [];
+    const harnessEnvelopes: HarnessEnvelope[] = [];
     const turnEnvelopes = () => rebaseEnvelopes(harnessEnvelopes, initialPrefillLength);
 
     // Resumption spin guards (issue #39). Observed live on Ash 2026-07-26:
@@ -964,7 +974,8 @@ export class Membrane {
             if (onPreToolContent && preToolNew.trim()) {
               await onPreToolContent(preToolNew);
             }
-            injectEnvelope(parser, harnessEnvelopes, formatToolResults([], parsed.notices));
+            warnRefusedRound(warnLog, parsed.notices);
+            injectEnvelope(parser, harnessEnvelopes, formatToolResults([], parsed.notices), parsed.beforeText.length);
             if (!registerResumptionRound()) {
               lastStopReason = 'round_limit';
               break;
@@ -1124,6 +1135,7 @@ export class Membrane {
               harnessEnvelopes.push({
                 start: envelopeStart,
                 end: envelopeStart + splitContent.beforeImageXml.length + splitContent.afterImageXml.length,
+                answers: parsed.beforeText.length,
               });
               prefillResult.assistantPrefill = parser.getAccumulated();
 
@@ -1143,7 +1155,7 @@ export class Membrane {
               });
 
               // Push XML to parser for prefill (internal), but emit clean content via onChunk
-              injectEnvelope(parser, harnessEnvelopes, resultsXml);
+              injectEnvelope(parser, harnessEnvelopes, resultsXml, parsed.beforeText.length);
 
               // Emit chunk and block complete for each tool result (without XML wrapper)
               for (const result of results) {
@@ -1223,10 +1235,14 @@ export class Membrane {
             onChunk?.(streamResult.stopSequence, meta);
           }
 
-          // Resume streaming - but limit resumptions to prevent infinite loops
-          toolDepth++; // Count this as a "depth" to limit iterations
-          if (toolDepth > maxToolDepth) {
-            break;
+          // Resume streaming - but limit resumptions to prevent infinite loops.
+          // A stop inside a payload is data, not a round of anything: only the
+          // resumption guards below bound it, never the tool-round budget.
+          if (!stoppedInPayload) {
+            toolDepth++; // Count this as a "depth" to limit iterations
+            if (toolDepth > maxToolDepth) {
+              break;
+            }
           }
           if (!registerResumptionRound()) {
             lastStopReason = 'round_limit';
@@ -2848,7 +2864,7 @@ export class Membrane {
     executedToolResults: ToolResult[] = [],
     startInsideBlock: 'thinking' | 'tool_call' | 'tool_result' | null = null,
     triggeredSequence?: string,
-    harnessEnvelopes: ReadonlyArray<{ start: number; end: number }> = [],
+    harnessEnvelopes: ReadonlyArray<HarnessEnvelope> = [],
   ): NormalizedResponse {
     const usage = turnUsage.total;
     // Parse accumulated text into structured content blocks
@@ -3132,7 +3148,7 @@ export class Membrane {
     reason: 'user' | 'timeout' | 'error',
     startInsideBlock: 'thinking' | 'tool_call' | 'tool_result' | null = null,
     tools?: ToolDefinition[],
-    harnessEnvelopes: ReadonlyArray<{ start: number; end: number }> = []
+    harnessEnvelopes: ReadonlyArray<HarnessEnvelope> = []
   ): AbortedResponse {
     // Parse accumulated text into content blocks for partial content
     // If we started inside a block (from prefill), pass that context
@@ -3330,7 +3346,7 @@ export class Membrane {
 
     // Every <function_results> envelope this loop injects, by offset — see
     // streamWithXmlTools.
-    const harnessEnvelopes: Array<{ start: number; end: number }> = [];
+    const harnessEnvelopes: HarnessEnvelope[] = [];
     const turnEnvelopes = () => rebaseEnvelopes(harnessEnvelopes, initialPrefillLength);
 
     /** Count an automatic resumption; emits the visibility warning at the
@@ -3551,7 +3567,8 @@ export class Membrane {
               },
             };
             stream.emit(attemptEvent);
-            injectEnvelope(parser, harnessEnvelopes, formatToolResults([], parsed.notices));
+            warnRefusedRound(warnLog, parsed.notices);
+            injectEnvelope(parser, harnessEnvelopes, formatToolResults([], parsed.notices), parsed.beforeText.length);
             if (!registerResumptionRound()) {
               lastStopReason = 'round_limit';
               break;
@@ -3732,6 +3749,7 @@ export class Membrane {
               harnessEnvelopes.push({
                 start: envelopeStart,
                 end: envelopeStart + splitContent.beforeImageXml.length + splitContent.afterImageXml.length,
+                answers: parsed.beforeText.length,
               });
               prefillResult.assistantPrefill = parser.getAccumulated();
               parser.resetForNewIteration();
@@ -3751,7 +3769,7 @@ export class Membrane {
                 });
               }
 
-              injectEnvelope(parser, harnessEnvelopes, resultsXml);
+              injectEnvelope(parser, harnessEnvelopes, resultsXml, parsed.beforeText.length);
 
               for (const result of results) {
                 const resultContent = typeof result.content === 'string'
@@ -3833,9 +3851,13 @@ export class Membrane {
             }
           }
 
-          toolDepth++;
-          if (toolDepth > maxToolDepth) {
-            break;
+          // A stop inside a payload is data: only the resumption guards bound
+          // it, never the tool-round budget.
+          if (!stoppedInPayload) {
+            toolDepth++;
+            if (toolDepth > maxToolDepth) {
+              break;
+            }
           }
           if (!registerResumptionRound()) {
             lastStopReason = 'round_limit';
@@ -4259,7 +4281,7 @@ function rebuildParser(
   parser: StreamParser,
   text: string,
   historyLength: number,
-  harnessEnvelopes: ReadonlyArray<{ start: number; end: number }>
+  harnessEnvelopes: ReadonlyArray<HarnessEnvelope>
 ): void {
   parser.reset();
   parser.push(text.slice(0, historyLength));
@@ -4283,23 +4305,42 @@ function pushEnvelope(parser: StreamParser, text: string): void {
   else parser.push(text);
 }
 
-/** Push an envelope the loop wrote, recording where it sits as the harness's own. */
+/**
+ * One operator line for a round whose every invoke was refused: it costs a
+ * full request and runs no tool, so it should not pass unseen.
+ */
+function warnRefusedRound(warnLog: { warn(message: string): void }, notices: readonly ToolCallNotice[]): void {
+  const refused = notices.filter((notice) => notice.kind === 'refused');
+  warnLog.warn(
+    `[membrane] every invoke in the round's tool block was refused (${refused.length}: ` +
+      `${refused.map((notice) => notice.toolName).join(', ')}); the block was answered with the notices.`
+  );
+}
+
+/**
+ * Push an envelope the loop wrote in answer to the block that starts at
+ * `answers`, recording where it sits as the harness's own and which block it
+ * answers: model text after the block can stand between them, and the block
+ * must never be selected again.
+ */
 function injectEnvelope(
   parser: StreamParser,
-  harnessEnvelopes: Array<{ start: number; end: number }>,
-  envelope: string
+  harnessEnvelopes: HarnessEnvelope[],
+  envelope: string,
+  answers: number
 ): void {
   const start = parser.getAccumulated().length;
   pushEnvelope(parser, envelope);
-  harnessEnvelopes.push({ start, end: start + envelope.length });
+  harnessEnvelopes.push({ start, end: start + envelope.length, answers });
 }
 
 /** The recorded envelopes in the turn's own text, which starts after the prefill. */
-function rebaseEnvelopes(
-  harnessEnvelopes: ReadonlyArray<{ start: number; end: number }>,
-  historyLength: number
-): Array<{ start: number; end: number }> {
-  return harnessEnvelopes.map(({ start, end }) => ({ start: start - historyLength, end: end - historyLength }));
+function rebaseEnvelopes(harnessEnvelopes: ReadonlyArray<HarnessEnvelope>, historyLength: number): HarnessEnvelope[] {
+  return harnessEnvelopes.map(({ start, end, answers }) => ({
+    start: start - historyLength,
+    end: end - historyLength,
+    ...(answers === undefined ? {} : { answers: answers - historyLength }),
+  }));
 }
 
 // Native tool names must match ^[a-zA-Z0-9_-]{1,128}$.

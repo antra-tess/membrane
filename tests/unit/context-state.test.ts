@@ -36,6 +36,16 @@ describe('defaultTokenEstimator', () => {
     expect(defaultTokenEstimator(textMessage('Hello world'))).toBe(3); // 11 chars
     expect(defaultTokenEstimator(textMessage('x'.repeat(400)))).toBe(100);
   });
+
+  it('counts a refused or cut call and the harness notice about it', () => {
+    const attempt: NormalizedMessage = { participant: 'Claude', content: [{ type: 'tool_attempt', rawXml: 'x'.repeat(400) }] };
+    const notice: NormalizedMessage = {
+      participant: 'Claude',
+      content: [{ type: 'tool_notice', notices: [{ invoke: 0, toolName: 't', kind: 'refused', message: 'y'.repeat(40) }] }],
+    };
+    expect(defaultTokenEstimator(attempt)).toBe(100);
+    expect(defaultTokenEstimator(notice)).toBe(10);
+  });
 });
 
 describe('DEFAULT_CONTEXT_CONFIG', () => {

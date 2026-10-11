@@ -1,12 +1,13 @@
 /**
- * The incremental parser and CDATA payloads (shelf-376).
+ * The incremental parser and CDATA payloads.
  *
  * A parameter value written as CDATA is data: a literal `</function_calls>`,
  * `<thinking>` or `</parameter>` inside it must not move the depths the loops
  * use to tell a real stop from a false one, must not end the tool_call block
  * that typed its text, and a stop sequence inside it is not a stop. The
  * accumulated parser reads complete text by the same rule; these tests also
- * hold the two views to agreement over every way the text can arrive in chunks.
+ * hold the two views to agreement at every prefix of the text, arriving in
+ * chunks of 1, 5 and 64 characters.
  */
 import { describe, expect, it } from 'vitest';
 import { IncrementalXmlParser } from '../../src/utils/stream-parser.js';
@@ -28,6 +29,14 @@ const suffixed =
   `${CALLS_OPEN}\n<invoke name="note">\n<parameter name="text"><![CDATA[a]]> <thinking> ${CALLS_OPEN}` +
   `<invoke name="other"><parameter name="text">b</parameter>\n<parameter name="also">\n<![CDATA[c ${CALLS_CLOSE}]]>\n` +
   `</parameter>\n</invoke>\n${CALLS_CLOSE}`;
+// A self-closing parameter is no parameter: the next one's payload is one.
+const selfClosing =
+  `${CALLS_OPEN}\n<invoke name="note">\n<parameter name="empty"/>\n<parameter name="text"><![CDATA[c ${CALLS_CLOSE}]]></parameter>\n` +
+  `</invoke>\n${CALLS_CLOSE}`;
+// A stray `<` right before a parameter opener does not hide it.
+const doubled =
+  `${CALLS_OPEN}\n<invoke name="note">\n<parameter name="a">x</parameter><<parameter name="text"><![CDATA[c ${CALLS_CLOSE}]]></parameter>\n` +
+  `</invoke>\n${CALLS_CLOSE}`;
 
 /**
  * Whether the complete-text parser reads `text` as ending inside a payload:
@@ -78,6 +87,8 @@ describe('a CDATA payload in the incremental parser', () => {
     ['a call after a thinking block history left open', '<thinking>left open by an earlier turn\n', call],
     ['a call after a results block history left open', `${RESULTS_OPEN}\nleft open\n`, call],
     ['markup after a payload', '', suffixed],
+    ['a call after a self-closing parameter', '', selfClosing],
+    ['a parameter opener after a stray <', '', doubled],
   ])('%s: knows at every point of the text whether it is inside a block and a payload, as the complete-text parser does', (_name, history, turn) => {
     for (let end = 1; end <= turn.length; end++) {
       const prefix = turn.slice(0, end);
@@ -139,9 +150,12 @@ describe('a CDATA payload in the incremental parser', () => {
     parser.endHistory();
     expect(parser.isInsidePayload()).toBe(false);
 
-    // The turn's own tags are structure again.
-    parser.processChunk(`${CALLS_CLOSE}\n${CALLS_OPEN}`);
-    expect(parser.getDepths().functionCalls).toBeGreaterThan(0);
+    // The turn's own tags are structure again: its closer closes history's
+    // block, and its opener opens one.
+    parser.processChunk(CALLS_CLOSE);
+    expect(parser.getDepths().functionCalls).toBe(0);
+    parser.processChunk(`\n${CALLS_OPEN}`);
+    expect(parser.getDepths().functionCalls).toBe(1);
   });
 
   it('ends a value history left open after its payload where history ends, so the turn’s call is structure', () => {
@@ -206,5 +220,16 @@ describe('a CDATA payload in the incremental parser', () => {
     const parser = new IncrementalXmlParser();
     parser.processChunk(`${CALLS_OPEN}<invoke name="t"><parameter name="thinking_budget">5</parameter></invoke>${CALLS_CLOSE}`);
     expect(parser.getDepths()).toEqual({ functionCalls: 0, functionResults: 0, thinking: 0 });
+  });
+
+  it('leaves no depth below zero after a stray closer, so the next block is structure and its payload is tracked', () => {
+    const NAMESPACED_CLOSE = '</' + 'antml:function_calls>';
+    for (const stray of [CALLS_CLOSE, NAMESPACED_CLOSE, '</thinking>', RESULTS_CLOSE]) {
+      const parser = new IncrementalXmlParser();
+      parser.processChunk(`a stray ${stray} in prose\n`);
+      expect(parser.getDepths(), stray).toEqual({ functionCalls: 0, functionResults: 0, thinking: 0 });
+      parser.processChunk(`${CALLS_OPEN}<invoke name="t"><parameter name="x"><![CDATA[ ${CALLS_CLOSE}`);
+      expect(parser.isInsidePayload(), stray).toBe(true);
+    }
   });
 });

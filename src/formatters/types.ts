@@ -290,8 +290,10 @@ export interface StreamParser {
   /**
    * XML tool calls: add an envelope the harness injected (results and notices
    * answering a block) without reading it as markup, so a tool's output
-   * cannot move the state the model's next round is read against. Parsers
-   * without payloads need not implement it; `push` is used instead.
+   * cannot move the state the model's next round is read against. A parser
+   * that reads markup (depths, containers, payloads) implements it. One that
+   * reads none, such as a pass-through, need not: `push` is used instead, and
+   * reads nothing.
    */
   pushEnvelope?(content: string): void;
 }

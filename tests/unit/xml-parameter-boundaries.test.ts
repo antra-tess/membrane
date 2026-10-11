@@ -1,6 +1,5 @@
 /**
- * XML tool-call parameter boundaries (shelf-376; snag
- * connectome-on-behalf-of-name-swallows-closing-tag).
+ * XML tool-call parameter boundaries.
  *
  * Linn's host writes tool calls as XML parameter blocks. After
  * on_behalf_of_name's value she once typed a closing parameter tag in an
@@ -136,61 +135,148 @@ describe('absorbed parameters', () => {
         ...(absorbed === 'status' ? [] : [param('status', 'open')]),
       ),
     );
+  const refusal = (observation: string) => `${observation}; nothing was sent. To send this text as data, write the value as CDATA.`;
 
-  it.each([
-    ['missing closer', missingCloser],
-    ['mismatched closer', mismatchedCloser],
-  ])('a %s that swallows a required parameter is refused', (_shape, build) => {
-    const parsed = parseToolCalls(build('status'), TOOLS);
+  it.each(['status', 'quote'])('a missing closer that swallows declared parameter %s is refused, required or optional', (absorbed) => {
+    const parsed = parseToolCalls(missingCloser(absorbed), TOOLS);
     expect(parsed?.calls).toEqual([]);
-    expect(parsed?.notices).toMatchObject([
+    expect(parsed?.notices).toEqual([
       {
+        invoke: 0,
+        toolName: 'board_update',
         kind: 'refused',
-        message: expect.stringContaining(
-          'the value of on_behalf_of_name contains markup for required parameter status, which is missing; nothing was sent.'
+        message: refusal(`the value of on_behalf_of_name contains markup for parameter ${absorbed}, which is missing`),
+      },
+    ]);
+  });
+
+  it.each(['status', 'quote'])('a mismatched closer that swallows declared parameter %s is refused, quoting the closer', (absorbed) => {
+    const parsed = parseToolCalls(mismatchedCloser(absorbed), TOOLS);
+    expect(parsed?.calls).toEqual([]);
+    expect(parsed?.notices).toEqual([
+      {
+        invoke: 0,
+        toolName: 'board_update',
+        kind: 'refused',
+        message: refusal(
+          "the value of on_behalf_of_name contains the closing tag `</param>`, which the parser doesn't recognize, " +
+            `followed by markup for parameter ${absorbed}, which is missing`
         ),
       },
     ]);
   });
 
-  it.each([
-    ['missing closer', missingCloser],
-    ['mismatched closer', mismatchedCloser],
-  ])('a %s that swallows an optional parameter is sent as parsed, with a warning', (_shape, build) => {
-    const parsed = parseToolCalls(build('quote'), TOOLS);
-    expect(parsed?.calls).toHaveLength(1);
-    expect(parsed?.calls[0]?.input.quote).toBeUndefined();
-    expect(String(parsed?.calls[0]?.input.on_behalf_of_name)).toContain('<parameter name="quote">swallowed');
-    expect(parsed?.notices).toEqual([
-      {
-        invoke: 0,
-        toolName: 'board_update',
-        kind: 'warning',
-        message: "the value of on_behalf_of_name contains markup for parameter quote, which the call doesn't otherwise include",
-      },
-    ]);
+  describe('after a closing tag the parser does not recognize', () => {
+    const afterCloser = (closer: string, between: string, opener: string, rest: string[] = [param('status', 'open')]) =>
+      block(invoke('board_update', param('item', 'X'), `<parameter name="on_behalf_of_name">antra${closer}${between}${opener}q</parameter>`, ...rest));
+
+    it.each([
+      ['</param>'],
+      ['</paramter>'],
+      ['</parameters>'],
+      ['</parameter >'],
+      ['</antra:parameter>'],
+      ['</x:parameter >'],
+    ])('refuses an opener after %s, with any text between', (closer) => {
+      for (const between of ['', '\n', ' and then ', ' see <b>this</b> ']) {
+        const parsed = parseToolCalls(afterCloser(closer, between, '<parameter name="quote">'), TOOLS);
+        expect(parsed?.calls, `${closer}${between}`).toEqual([]);
+        expect(parsed?.notices[0]?.message).toContain(`contains the closing tag \`${closer}\`, which the parser doesn't recognize`);
+      }
+    });
+
+    it('refuses whatever the opener names: a parameter the call includes, or one the tool does not declare', () => {
+      const included = afterCloser('</param>', ' ', '<parameter name="status">', [param('status', 'open')]);
+      const undeclared = afterCloser('</param>', ' ', '<parameter name="colour">');
+      for (const [text, name] of [[included, 'status'], [undeclared, 'colour']] as const) {
+        const parsed = parseToolCalls(text, TOOLS);
+        expect(parsed?.calls).toEqual([]);
+        expect(parsed?.notices[0]?.message).toBe(
+          refusal(
+            "the value of on_behalf_of_name contains the closing tag `</param>`, which the parser doesn't recognize, " +
+              `followed by markup for parameter ${name}`
+          )
+        );
+      }
+    });
+
+    it('refuses without a schema', () => {
+      const parsed = parseToolCalls(afterCloser('</param>', ' ', '<parameter name="quote">'));
+      expect(parsed?.calls).toEqual([]);
+      expect(parsed?.notices[0]?.kind).toBe('refused');
+    });
+
+    it('reads an opener in any namespace, with either quote', () => {
+      for (const opener of ["<parameter name='quote'>", '<antra:parameter name="quote">', "<x:parameter name='quote' >"]) {
+        expect(parseToolCalls(afterCloser('</param>', ' ', opener), TOOLS)?.calls, opener).toEqual([]);
+      }
+    });
+
+    it('leaves a closer with no opener after it alone: a bare closer is data', () => {
+      const parsed = parseToolCalls(
+        block(invoke('board_update', param('item', 'mvn: <parameters><p/></parameters> and </param> done'), param('status', 'open'))),
+        TOOLS,
+      );
+      expect(parsed?.notices).toEqual([]);
+      expect(parsed?.calls[0]?.input.item).toBe('mvn: <parameters><p/></parameters> and </param> done');
+    });
+
+    it.each([
+      ['C# doc comments', '/// <param name="a">first</param>\n/// <param name="b">second</param>\n/// <returns>sum</returns>'],
+      ['an XSLT template', '<xsl:param name="x">1</xsl:param>\n<xsl:call-template name="t"><xsl:with-param name="y" select="2"/></xsl:call-template>'],
+    ])('leaves %s alone: the element is not a parameter', (_shape, text) => {
+      const parsed = parseToolCalls(block(invoke('board_update', param('item', text), param('status', 'open'))), TOOLS);
+      expect(parsed?.notices).toEqual([]);
+      expect(parsed?.calls[0]?.input).toEqual({ item: text, status: 'open' });
+    });
   });
 
-  const unions: ToolDefinition = {
-    name: 'unions',
-    description: 'Root combinators.',
-    inputSchema: {
-      type: 'object',
-      properties: { text: { type: 'string' }, a: { type: 'string' }, b: { type: 'string' }, c: { type: 'string' } },
-      allOf: [{ type: 'object', required: ['a'] }],
-      anyOf: [{ type: 'object', required: ['b', 'c'] }, { type: 'object', required: ['b'] }],
-    },
-  };
-  const swallowing = (absorbed: string) =>
-    block(invoke('unions', `<parameter name="text">unclosed`, param(absorbed, 'v')));
-
-  it('treats a parameter required by a single allOf branch as required', () => {
-    expect(parseToolCalls(swallowing('a'), { tools: [unions] })?.notices[0]?.kind).toBe('refused');
+  it('reads an absorbed opener for a declared parameter in any namespace, with either quote', () => {
+    for (const opener of ["<parameter name='quote'>", '<antra:parameter name="quote">', '<parameter name="quote" >']) {
+      const text = block(invoke('board_update', param('item', 'X'), `<parameter name="on_behalf_of_name">antra ${opener}q</parameter>`, param('status', 'open')));
+      expect(parseToolCalls(text, TOOLS)?.notices, opener).toMatchObject([
+        { kind: 'refused', message: expect.stringContaining('contains markup for parameter quote, which is missing') },
+      ]);
+    }
   });
 
-  it('treats a parameter required in every anyOf variant as required, and in only some as optional', () => {
-    expect(parseToolCalls(swallowing('b'), { tools: [unions] })?.notices[0]?.kind).toBe('refused');
-    expect(parseToolCalls(swallowing('c'), { tools: [unions] })?.notices[0]?.kind).toBe('warning');
+  describe('counts as declared every name the schema gives a parameter', () => {
+    const swallowing = (tool: string, absorbed: string) => block(invoke(tool, `<parameter name="text">unclosed`, param(absorbed, 'v')));
+    const kindOf = (tool: ToolDefinition, absorbed: string) => parseToolCalls(swallowing(tool.name, absorbed), { tools: [tool] })?.notices[0]?.kind;
+
+    it('in root combinator variants, read or not', () => {
+      const merged: ToolDefinition = {
+        name: 'merged',
+        description: 'A root union the reading merges.',
+        inputSchema: {
+          type: 'object',
+          properties: { text: { type: 'string' } },
+          anyOf: [{ type: 'object', properties: { a: { type: 'string' } } }, { type: 'object', properties: { b: { type: 'string' } } }],
+        },
+      };
+      const unread: ToolDefinition = {
+        name: 'unread',
+        description: 'A root union with a variant that is not an object schema.',
+        inputSchema: {
+          type: 'object',
+          properties: { text: { type: 'string' } },
+          oneOf: [{ type: 'object', properties: { c: { type: 'string' } } }, { $ref: '#/definitions/other' }],
+          definitions: { other: { type: 'object', properties: { d: { type: 'string' } } } },
+        },
+      };
+      expect(kindOf(merged, 'a')).toBe('refused');
+      expect(kindOf(merged, 'b')).toBe('refused');
+      expect(kindOf(unread, 'c')).toBe('refused');
+    });
+
+    it('in a required list, with no property', () => {
+      const requiredOnly: ToolDefinition = {
+        name: 'required_only',
+        description: 'Requires a key it gives no property.',
+        inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['key'] },
+      };
+      expect(kindOf(requiredOnly, 'key')).toBe('refused');
+    });
   });
 
   it('leaves a value alone when the markup names a parameter the call does include, or one the tool does not declare', () => {
@@ -201,6 +287,7 @@ describe('absorbed parameters', () => {
       invoke('board_update', param('item', 'a <parameter name="colour">red</p> literal'), param('status', 'open')),
     );
     expect(parseToolCalls(included, TOOLS)?.notices).toEqual([]);
+    expect(parseToolCalls(included, TOOLS)?.calls[0]?.input).toEqual({ item: 'a <parameter name="status">x</p> literal', status: 'open' });
     expect(parseToolCalls(undeclared, TOOLS)?.notices).toEqual([]);
     expect(parseToolCalls(undeclared, TOOLS)?.calls[0]?.input.item).toBe('a <parameter name="colour">red</p> literal');
   });
@@ -249,7 +336,9 @@ describe('text outside every parameter', () => {
 
   it('leaves whitespace and framing between parameters alone', () => {
     const spaced = `${CALLS_OPEN}\n<invoke name="board_update">\n\n  ${param('item', 'X')}\n\t${param('status', 'open')}\n\n</invoke>\n${CALLS_CLOSE}`;
-    expect(parseToolCalls(spaced, TOOLS)?.notices).toEqual([]);
+    const parsed = parseToolCalls(spaced, TOOLS);
+    expect(parsed?.notices).toEqual([]);
+    expect(parsed?.calls.map((call) => call.input)).toEqual([{ item: 'X', status: 'open' }]);
   });
 
   it('refuses markup-free text after a parameter, which a cut value can leave behind', () => {
@@ -352,7 +441,8 @@ describe('text outside every parameter', () => {
             kind: 'refused',
             message:
               `the call has text before its first parameter that is outside every parameter, starting \`${quoted}\`: ` +
-              'it contains markup, but no parameter the parser reads; nothing was sent. To send this text as data, write the value as CDATA.',
+              'it contains markup, but no parameter the parser reads; nothing was sent. ' +
+              'Write each argument inside its own parameter element, and leave other text out of the call.',
           },
         ]);
       }
@@ -402,10 +492,34 @@ describe('text outside every parameter', () => {
             kind: 'refused',
             message:
               `the call has text outside every parameter, starting \`${text}\`, and no parameter the parser reads; ` +
-              'nothing was sent. To send this text as data, write the value as CDATA.',
+              'nothing was sent. Write each argument inside its own parameter element, and leave other text out of the call.',
           },
         ]);
       }
+    });
+
+    it.each([
+      ['a complete comment', '<!-- no arguments -->'],
+      ['a processing instruction', '<?xml version="1.0"?>'],
+    ])('sends %s alone as parsed, with a warning: it carries no value', (_shape, text) => {
+      for (const options of [{ tools: [LIST_FILES] }, undefined]) {
+        const parsed = parseToolCalls(block(invoke('list_files', text)), options);
+        expect(parsed?.calls.map((call) => [call.name, call.input])).toEqual([['list_files', {}]]);
+        expect(parsed?.notices).toEqual([
+          {
+            invoke: 0,
+            toolName: 'list_files',
+            kind: 'warning',
+            message: `the call has text outside every parameter, starting \`${text}\`, which holds no value and was not passed to the tool`,
+          },
+        ]);
+      }
+    });
+
+    it('refuses a comment beside text, which can be a value written without its tag', () => {
+      const parsed = parseToolCalls(block(invoke('list_files', '<!-- path --> /tmp/a.txt')), { tools: [LIST_FILES] });
+      expect(parsed?.calls).toEqual([]);
+      expect(parsed?.notices[0]?.kind).toBe('refused');
     });
 
     it('still names a parameter left unclosed as the reason', () => {
@@ -554,13 +668,14 @@ describe('CDATA, the literal spelling', () => {
 
   it('starts no payload at a parameter-looking opener inside a raw value', () => {
     // item's raw value runs to its first closer; the opener inside it is text,
-    // so the CDATA after it is text too, and the absorbed-markup rules apply.
-    const text = block(
-      invoke('board_update', '<parameter name="item">a <parameter name="quote"><![CDATA[b]]></parameter>', param('status', 'open')),
-    );
-    const parsed = parseToolCalls(text, TOOLS);
-    expect(parsed?.calls[0]?.input.item).toBe('a <parameter name="quote"><![CDATA[b]]>');
-    expect(parsed?.notices).toMatchObject([{ kind: 'warning' }]);
+    // so the CDATA after it is text too, and the absorbed-markup rules apply:
+    // an undeclared name stays the value's own, a declared one refuses.
+    const text = (name: string) =>
+      block(invoke('board_update', `<parameter name="item">a <parameter name="${name}"><![CDATA[b]]></parameter>`, param('status', 'open')));
+    const undeclared = parseToolCalls(text('colour'), TOOLS);
+    expect(undeclared?.calls[0]?.input.item).toBe('a <parameter name="colour"><![CDATA[b]]>');
+    expect(undeclared?.notices).toEqual([]);
+    expect(parseToolCalls(text('quote'), TOOLS)?.notices).toMatchObject([{ kind: 'refused' }]);
   });
 });
 
@@ -589,8 +704,7 @@ describe('a block the text ends inside', () => {
   });
 
   it('holds the spans inside it, such as a thinking element quoted in the unfinished value', () => {
-    // Hazel's case (room-237 #45057): the thinking span inside the raw value
-    // must not hide the block's opener.
+    // The thinking span inside the raw value must not hide the block's opener.
     const quoted = `${CALLS_OPEN}<invoke name="board_update"><parameter name="item">raw <thinking>quoted</thinking> then cut`;
     const parsed = parseAccumulatedIntoBlocks(quoted, TOOLS);
     expect(parsed.blocks).toEqual([{ type: 'tool_attempt', rawXml: quoted }]);
@@ -607,7 +721,7 @@ describe('a block the text ends inside', () => {
   });
 
   it('is a call: a bare opener quoted in prose stays text, and the attempt starts at the opener its invoke follows', () => {
-    // Nell's case (room-237 #45084): a mention, not an attempt.
+    // A mention, not an attempt.
     const mention = `The parser starts a block at ${CALLS_OPEN} and reads invokes after it. That's all for today.`;
     expect(parseAccumulatedIntoBlocks(mention, TOOLS).blocks).toEqual([{ type: 'text', text: mention }]);
 
@@ -647,6 +761,18 @@ describe('answered notices', () => {
     expect(parseAccumulatedIntoBlocks(turn.text, { ...TOOLS, harnessEnvelopes: turn.harnessEnvelopes }).notices.map((n) => n.answered)).toEqual([true]);
     expect(parseAccumulatedIntoBlocks(linn, TOOLS).notices.map((n) => n.answered)).toEqual([false]);
   });
+
+  it('are located by block, each answered by its own envelope or by none', () => {
+    const warned = block(invoke('board_update', 'Updating now:', param('item', 'Y'), param('status', 's')));
+    const { notices } = parseToolCalls(linn, TOOLS)!;
+    // The first block was answered; the turn then ended after the second closed.
+    const turn = injected(linn, formatToolResults([], notices), `\n${warned}`);
+    const parsed = parseAccumulatedIntoBlocks(turn.text, { ...TOOLS, harnessEnvelopes: turn.harnessEnvelopes });
+    expect(parsed.notices.map((n) => [n.block, n.invoke, n.kind, n.answered])).toEqual([
+      [0, 0, 'refused', true],
+      [1, 0, 'warning', false],
+    ]);
+  });
 });
 
 describe('history blocks', () => {
@@ -657,6 +783,73 @@ describe('history blocks', () => {
       const text = `${history}\nI'll stop here${CALLS_CLOSE}`;
       expect(parseToolCalls(text, { ...TOOLS, historyLength: history.length, harnessEnvelopes: [] })).toBeNull();
     }
+  });
+});
+
+describe('an invoke left open before another', () => {
+  const swallowing = `${CALLS_OPEN}\n<invoke name="board_update">\n${param('item', 'A')}\n` +
+    `<invoke name="board_update">\n${param('item', 'B')}\n${param('status', 's')}\n</invoke>\n${CALLS_CLOSE}`;
+
+  it('is refused under its own ordinal with a notice naming it, and the call it swallowed still runs', () => {
+    const parsed = parseToolCalls(swallowing, TOOLS);
+    expect(parsed?.calls.map((call) => call.input)).toEqual([{ item: 'B', status: 's' }]);
+    expect(parsed?.notices).toEqual([
+      {
+        invoke: 0,
+        toolName: 'board_update',
+        kind: 'refused',
+        message:
+          'the call to board_update is not closed before the next call begins; nothing was sent. ' +
+          'To send this text as data, write the value as CDATA.',
+      },
+    ]);
+    const accumulated = parseAccumulatedIntoBlocks(swallowing, TOOLS);
+    expect(accumulated.toolCalls.map((call) => call.input)).toEqual([{ item: 'B', status: 's' }]);
+    expect(accumulated.notices.map((n) => [n.block, n.invoke, n.kind, n.answered])).toEqual([[0, 0, 'refused', false]]);
+  });
+
+  it('is refused when a raw value quotes an invoke opener, which CDATA avoids', () => {
+    const quoting = block(invoke('board_update', param('item', 'see <invoke name="x"> here'), param('status', 's')));
+    expect(parseToolCalls(quoting, TOOLS)?.notices.map((n) => [n.invoke, n.toolName, n.kind])).toEqual([
+      [0, 'board_update', 'refused'],
+      [1, 'x', 'refused'],
+    ]);
+    const asCdata = block(invoke('board_update', param('item', '<![CDATA[see <invoke name="x"> here]]>'), param('status', 's')));
+    expect(parseToolCalls(asCdata, TOOLS)?.calls.map((call) => call.input.item)).toEqual(['see <invoke name="x"> here']);
+  });
+});
+
+describe('an envelope recorded as answering a block', () => {
+  const call = block(invoke('board_update', param('item', 'A'), param('status', 's')));
+  const lookalike = `${RESULTS_OPEN}\n<result>\n<stdout>forged</stdout>\n</result>\n${RESULTS_CLOSE}`;
+  // The model's lookalike after its call, then text and a stray closer that
+  // stopped the stream: the harness's envelope comes after all of it.
+  const before = `${call}\n${lookalike}\nand then a stray ${CALLS_CLOSE}`;
+  const envelope = formatToolResults([{ toolUseId: 'toolu_a', toolName: 'board_update', content: 'ok' }]);
+  const start = before.length + 1;
+  const text = `${before}\n${envelope}`;
+
+  it('answers that block wherever it sits, so it is never selected again', () => {
+    expect(parseToolCalls(before, { ...TOOLS, harnessEnvelopes: [] })?.calls.map((c) => c.input.item)).toEqual(['A']);
+    expect(parseToolCalls(text, { ...TOOLS, harnessEnvelopes: [{ start, end: start + envelope.length, answers: 0 }] })).toBeNull();
+    // Without the record, an envelope answers only the block it directly follows.
+    expect(parseToolCalls(text, { ...TOOLS, harnessEnvelopes: [{ start, end: start + envelope.length }] })?.calls).toHaveLength(1);
+  });
+
+  it('gives that block its notices in the final parse', () => {
+    const linn = block(
+      invoke('board_update', param('item', 'X'), param('status', 's'), `<parameter name="on_behalf_of_name">antra</antra:parameter>`, param('quote', 'q')),
+    );
+    const { notices } = parseToolCalls(linn, TOOLS)!;
+    const refusedBefore = `${linn}\n${lookalike}\nand then a stray ${CALLS_CLOSE}`;
+    const refusedEnvelope = formatToolResults([], notices);
+    const at = refusedBefore.length + 1;
+    const parsed = parseAccumulatedIntoBlocks(`${refusedBefore}\n${refusedEnvelope}`, {
+      ...TOOLS,
+      harnessEnvelopes: [{ start: at, end: at + refusedEnvelope.length, answers: 0 }],
+    });
+    expect(parsed.notices.map((n) => [n.block, n.kind, n.answered])).toEqual([[0, 'refused', true]]);
+    expect(parsed.blocks.map((b) => b.type)).toEqual(['tool_attempt', 'text', 'tool_notice']);
   });
 });
 
@@ -694,6 +887,32 @@ describe('an unterminated payload', () => {
     expect(parseToolCalls(history + live, TOOLS)).toBeNull();
   });
 
+  it('opened in history, is not closed by a ]]> the live turn writes, so its call is refused', () => {
+    const history = `${CALLS_OPEN}\n<invoke name="board_update">\n<parameter name="item"><![CDATA[left open`;
+    const live = ` and closed now]]></parameter>\n${param('status', 'open')}\n</invoke>\n${CALLS_CLOSE}`;
+
+    for (const parsed of [
+      parseToolCalls(history + live, { ...TOOLS, historyLength: history.length }),
+      parseAccumulatedIntoBlocks(history + live, { ...TOOLS, historyLength: history.length }),
+    ]) {
+      expect(parsed?.notices.map((notice) => notice.message)).toEqual([
+        'the CDATA section in the value of item never ends; nothing was sent. To send this text as data, write the value as CDATA.',
+      ]);
+    }
+    expect(parseToolCalls(history + live, { ...TOOLS, historyLength: history.length })?.calls).toEqual([]);
+    // Without the boundary, the live ]]> closes it.
+    expect(parseToolCalls(history + live, TOOLS)?.calls.map((call) => call.input.item)).toEqual(['left open and closed now']);
+  });
+
+  it('opened in history, ends where history ends in parseAccumulatedIntoBlocks too', () => {
+    const history = `${CALLS_OPEN}\n<invoke name="board_update">\n<parameter name="item"><![CDATA[left open long ago`;
+    const live = `\n\n${block(invoke('board_update', param('item', 'LIVE'), param('status', 'open')))}`;
+
+    const parsed = parseAccumulatedIntoBlocks(history + live, { ...TOOLS, historyLength: history.length });
+    expect(parsed.toolCalls.map((call) => call.input)).toEqual([{ item: 'LIVE', status: 'open' }]);
+    expect(parseAccumulatedIntoBlocks(history + live, TOOLS).toolCalls).toEqual([]);
+  });
+
   it('ended in history but with its value left open, ends with history too, so the live turn still calls', () => {
     const history = `${CALLS_OPEN}\n<invoke name="board_update">\n<parameter name="item"><![CDATA[done]]> and then the turn was cut off`;
     const live = `\n\n${block(invoke('board_update', param('item', 'LIVE'), param('status', 'open')))}`;
@@ -729,7 +948,7 @@ describe('the two entry points agree', () => {
     const text = block(
       invoke('board_update', param('item', 'ok'), param('status', 'open')),
       invoke('board_update', param('item', 'X'), `<parameter name="on_behalf_of_name">antra</antra:parameter>`, param('quote', 'q'), param('status', 's')),
-      invoke('board_update', param('item', 'Y'), '<parameter name="on_behalf_of_name">b', '<parameter name="quote">q2</parameter>', param('status', 's')),
+      invoke('board_update', 'Updating Y now:', param('item', 'Y'), param('status', 's')),
     );
     const dispatched = parseToolCalls(text, TOOLS)!;
     const accumulated = parseAccumulatedIntoBlocks(text, TOOLS);
@@ -790,18 +1009,23 @@ describe('the notice envelope', () => {
     }
   });
 
-  it('keeps a recorded warning a warning, with its call', () => {
+  it('keeps a recorded warning a warning, with its call, though the present rules would refuse it', () => {
+    // A round recorded when an absorbed optional parameter only warned: the
+    // envelope says the call was sent, and it was.
     const warned = block(
       invoke('board_update', param('item', 'X'), '<parameter name="on_behalf_of_name">b', '<parameter name="quote">q</parameter>', param('status', 's')),
     );
-    const { calls, notices } = parseToolCalls(warned, TOOLS)!;
-    const results = [{ toolUseId: calls[0]!.id, toolName: 'board_update', content: 'ok' }];
-    const turn = injected(warned, formatToolResults(results, notices));
-    const parsed = parseAccumulatedIntoBlocks(turn.text, { tools: [], harnessEnvelopes: turn.harnessEnvelopes });
+    expect(parseToolCalls(warned, TOOLS)?.notices.map((n) => n.kind)).toEqual(['refused']);
+    const recorded = [
+      { invoke: 0, toolName: 'board_update', kind: 'warning' as const, message: 'the value of on_behalf_of_name contains markup for parameter quote' },
+    ];
+    const results = [{ toolUseId: 'toolu_recorded', toolName: 'board_update', content: 'ok' }];
+    const turn = injected(warned, formatToolResults(results, recorded));
+    const parsed = parseAccumulatedIntoBlocks(turn.text, { ...TOOLS, harnessEnvelopes: turn.harnessEnvelopes });
 
     expect(parsed.toolCalls).toHaveLength(1);
     expect(parsed.blocks.map((b) => b.type)).toEqual(['tool_use', 'tool_result', 'tool_notice']);
-    expect(parsed.notices.map((n) => n.kind)).toEqual(['warning']);
+    expect(parsed.notices.map((n) => [n.kind, n.answered])).toEqual([['warning', true]]);
   });
 
   it('survives a notice quoting its own closing tag and the envelope’s', () => {

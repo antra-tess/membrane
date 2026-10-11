@@ -463,9 +463,12 @@ export class IncrementalXmlParser {
             this.handleMembraneTag(tagText, tag[1] === '/', tag[2]!, sink);
           }
         } else if (this.cantBeMembraneTag(state.tagBuffer)) {
+          // Not a tag. A `<` it ends on may start one, as the complete-text
+          // parse reads `<<parameter …>`: it stays, and the rest is text.
           const text = state.tagBuffer;
-          state.tagBuffer = '';
-          emitText(text);
+          const restart = text.length > 1 && text.endsWith('<');
+          state.tagBuffer = restart ? '<' : '';
+          emitText(restart ? text.slice(0, -1) : text);
         }
         continue;
       }
@@ -554,7 +557,9 @@ export class IncrementalXmlParser {
         emit(this.makeBlockStart(blockType));
       } else {
         emit(this.makeBlockComplete());
-        state[depthKey]--;
+        // A stray closer leaves the depth at zero, as push() reads it: below
+        // zero, the next opener would leave its block unread as structure.
+        state[depthKey] = Math.max(0, state[depthKey] - 1);
         state.currentBlockType = this.getCurrentBlockType();
       }
       return;
@@ -578,7 +583,9 @@ export class IncrementalXmlParser {
     } else if (element === 'parameter') {
       if (isClosing) {
         state.value = 'none';
-      } else if (state.inInvoke && state.value !== 'raw') {
+      } else if (state.inInvoke && state.value !== 'raw' && !/\/\s*>$/.test(tag)) {
+        // A self-closing parameter tag opens no value; the complete-text parse
+        // reads it as no parameter at all.
         state.value = 'leading';
         state.leadingNewline = false;
       }

@@ -14,6 +14,7 @@ export {
   unescapeXml,
   type ToolDefinitionForPrompt,
   type ToolParseOptions,
+  type HarnessEnvelope,
 } from './tool-parser.js';
 
 export { calculateCost } from './cost.js';

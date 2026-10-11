@@ -174,8 +174,9 @@ export interface ToolResultContent {
  * speech. When at least one invoke in a block is a call (dispatched, or
  * eligible for dispatch), the tool_use blocks carry the block's `rawXml`
  * instead and no tool_attempt is needed.
- * Prefill formatters replay `rawXml` verbatim; other formatters render it as
- * the assistant's text.
+ * The XML formatter replays `rawXml` verbatim, and the completions formatter
+ * omits it, as it omits every tool carrier; other formatters render it as the
+ * assistant's text.
  */
 export interface ToolAttemptContent {
   type: 'tool_attempt';
@@ -189,8 +190,9 @@ export interface ToolAttemptContent {
  * the block, after every result.
  *
  * It is the harness speaking — like tool_result, not like the assistant — and
- * it sits after the round's tool_result blocks. Prefill formatters render it
- * back into the same `<function_results>` envelope the live loop wrote; other
+ * it sits after the round's tool_result blocks. The XML formatter renders it
+ * back into the same `<function_results>` envelope the live loop wrote, and
+ * the completions formatter omits it, as it omits every tool carrier; other
  * formatters render it as attributed text on the harness side, after any
  * tool_result blocks. It is never passed to a provider as a block of its own.
  */

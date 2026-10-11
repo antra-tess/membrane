@@ -364,6 +364,13 @@ export interface ToolSchemaReading {
    * reads as undeclared.
    */
   unreadRootUnion: RootUnionKey[];
+  /**
+   * Every name the schema gives a parameter, whether or not it is read: the
+   * properties and `required` lists of the root and of every root combinator's
+   * variants. A tool knows these parameters even where their types can't be
+   * read, or no property declares one.
+   */
+  names: Set<string>;
   /** Set when the schema could not be read at all; every parameter then reads as undeclared. */
   failure?: string;
 }
@@ -403,10 +410,15 @@ function declaredKind(
  */
 export function readToolSchema(inputSchema: unknown): ToolSchemaReading {
   const parameters = new Map<string, ParameterDeclaration>();
-  if (!isPlainObject(inputSchema)) return { parameters, unreadRootUnion: [] };
+  if (!isPlainObject(inputSchema)) return { parameters, unreadRootUnion: [], names: new Set() };
 
   try {
     const union = rootUnionOf(inputSchema);
+    const names = new Set<string>();
+    for (const node of [inputSchema, ...(union?.combinators ?? []).flatMap(({ variants }) => variants)]) {
+      for (const [name] of ownProperties(node)) names.add(name);
+      for (const name of stringMembers(ownField(node, 'required'))) names.add(name);
+    }
     const readCombinators = union?.mergeable ? union.combinators : [];
     const unreadRootUnion = union && !union.mergeable ? union.combinators.map(({ key }) => key) : [];
 
@@ -464,7 +476,7 @@ export function readToolSchema(inputSchema: unknown): ToolSchemaReading {
       });
     }
 
-    return { parameters, unreadRootUnion };
+    return { parameters, unreadRootUnion, names };
   } catch (error) {
     // Unreachable for any schema a producer can reasonably send (the reads
     // above guard every shape); kept so an absurd one — nesting deep enough
@@ -473,6 +485,7 @@ export function readToolSchema(inputSchema: unknown): ToolSchemaReading {
     return {
       parameters: new Map(),
       unreadRootUnion: [],
+      names: new Set(),
       failure: error instanceof Error ? error.message : String(error),
     };
   }

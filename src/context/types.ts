@@ -304,6 +304,11 @@ export function defaultTokenEstimator(message: NormalizedMessage): number {
     } else if (block.type === 'image') {
       // Images: ~1500 tokens regardless of size (Anthropic)
       chars += 6000; // 1500 * 4
+    } else if (block.type === 'tool_attempt') {
+      // The model's own text, replayed as written.
+      chars += block.rawXml.length;
+    } else if (block.type === 'tool_notice') {
+      chars += block.notices.reduce((sum, notice) => sum + notice.message.length, 0);
     }
   }
   return Math.ceil(chars / 4);

@@ -24,9 +24,9 @@
   parameter and the declared type when the text does not parse (the raw text
   is passed through) or parses to another JSON type. The diagnostic never
   includes the argument value: tool inputs routinely carry credentials, tokens
-  and private document text. Integers of 16 or more digits (Discord snowflakes
-  and the like) stay text under every declaration, as on the legacy path; for
-  a declaration other than `number`/`integer` that also warns.
+  and private document text. Unsigned integers of 16 or more digits (Discord
+  snowflakes and the like) stay text under every declaration, as on the legacy
+  path; for a declaration other than `number`/`integer` that also warns.
 - **Which declarations are read.** A parameter's type is what its declaration
   admits: its `type` (a name or an array of names) when present; otherwise its
   `enum`/`const` values, `anyOf`/`oneOf` (any branch), `allOf` (every branch)
@@ -49,15 +49,17 @@
   falls back to a permissive schema, the XML instructions list the root's own
   parameters, and a parameter outside them keeps the legacy guess, with one
   warn. Keywords such as `not` and `if`/`then`/`else` are not consulted. A
-  declaration that admits any value (`{}`, a description alone) and an
-  undeclared parameter keep the legacy guess silently.
+  declaration that admits any value (`{}`, a description alone) and any
+  other undeclared parameter keep the legacy guess silently.
 - **XML tool instructions.** `type`, `nullable="true"` and `required="true"`
   come from the reading above; requiredness follows root-combinator semantics
   (root `required` and every `allOf` branch's, plus keys every
   `oneOf`/`anyOf` alternative requires) through the derivation the native
   `flattenRootSchemaUnion` uses. For tools without a root union whose
-  parameters all carry a direct JSON Schema `type` name, the instructions are
-  byte-identical to before. They change where the old rendering was broken:
+  parameters all carry a direct JSON Schema `type` name, the parameter
+  definitions are byte-identical to before (the instructions still gain the
+  CDATA line the tool-call boundaries entry names). They change where the old
+  rendering was broken:
   `type="undefined"` for a parameter without a direct `type` (now the type
   read, or no attribute), a type array joined with commas
   (`type="integer,null"` is now `type="integer" nullable="true"`;

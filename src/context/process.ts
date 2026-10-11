@@ -321,6 +321,11 @@ export function calculateCharacters(messages: NormalizedMessage[]): number {
           ? block.content
           : JSON.stringify(block.content);
         chars += content.length;
+      } else if (block.type === 'tool_attempt') {
+        // The model's own text, replayed as written.
+        chars += block.rawXml.length;
+      } else if (block.type === 'tool_notice') {
+        chars += block.notices.reduce((sum, notice) => sum + notice.message.length, 0);
       }
       // Images not counted for character limits
     }

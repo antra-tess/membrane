@@ -156,7 +156,10 @@ export interface ToolContext {
  * to send the text as data.
  */
 export interface ToolCallNotice {
-  /** 0-based ordinal of the invoke's opening tag among the block's invoke openers. */
+  /**
+   * 0-based ordinal of the invoke's opening tag among the block's invoke
+   * openers. An opener inside a CDATA payload is data, not one of them.
+   */
   invoke: number;
   /** The invoke's tool name, as written. */
   toolName: string;

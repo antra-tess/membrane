@@ -1,12 +1,12 @@
 /**
- * How the non-XML formatters carry shelf-376's two history blocks.
+ * How the non-XML formatters carry the two history blocks of XML tool calls.
  *
  * `tool_attempt` is the assistant's own words (a tool-call block that
  * dispatched nothing), so it stays the assistant's text. `tool_notice` is the
  * harness speaking, so it goes on the harness side, after any tool results —
  * never as the assistant's outward speech, and never as a block type a
  * provider would see. The completions formatter's history is text-only: it
- * omits every tool carrier, these included (room-221 #41867, #41888).
+ * omits every tool carrier, these included.
  */
 import { describe, expect, it } from 'vitest';
 import { NativeFormatter } from '../../src/formatters/native.js';
