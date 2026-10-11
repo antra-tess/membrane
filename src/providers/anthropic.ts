@@ -274,8 +274,10 @@ export class AnthropicAdapter implements ProviderAdapter {
             wire as unknown as Anthropic.MessageCreateParamsNonStreaming, headers,
           ),
           config.cacheKeepalive ?? {},
-          // Pokes report the SDK's own error in their receipts; the keepalive
-          // reads the stated wait and retryability as the adapter classifies them.
+          // Pokes report the error createMessage throws in their receipts (the
+          // SDK's, or the credential session's recorded failure in its place);
+          // the keepalive reads the stated wait and retryability as the adapter
+          // classifies that error.
           (error) => this.handleError(error),
         );
   }
