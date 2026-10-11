@@ -10,7 +10,7 @@
 
 import type { ContentBlock } from './content.js';
 import type { NormalizedMessage } from './message.js';
-import type { ToolCall, ToolResult, ToolContext } from './tools.js';
+import type { ToolCall, ToolResult, ToolContext, ToolCallNotice } from './tools.js';
 import type { DetailedUsage, NormalizedResponse, StopReason } from './response.js';
 import type { ChunkMeta, BlockEvent } from './streaming.js';
 
@@ -42,6 +42,29 @@ export interface StreamBlockEvent {
 export interface ToolCallsEvent {
   type: 'tool-calls';
   calls: ToolCall[];
+  context: ToolContext;
+}
+
+/**
+ * Tool attempt event — XML mode: the model wrote a `<function_calls>` block
+ * and the parser refused every invoke in it, so there is nothing to execute.
+ * It is not a request: the stream does not pause, and no results are
+ * expected. Membrane has already answered the block in-band with the notices
+ * (a `<function_results>` holding only them), recorded for continuation and
+ * replay, and continues the turn unless `maxToolDepth` or the resumption cap
+ * ends it there; when it continues, the model reads why its call was not sent.
+ *
+ * A consumer persisting rounds keeps the attempt as a `tool_attempt` block in
+ * the round's assistant content (the round's text is in `context`) and the
+ * notices as a `tool_notice` block on the harness side.
+ */
+export interface ToolAttemptEvent {
+  type: 'tool-attempt';
+  /** The `<function_calls>` block as the model wrote it; nothing in it was sent. */
+  rawXml: string;
+  /** Why: one refused notice per invoke, `invoke` indexing the block's invoke openers. */
+  notices: ToolCallNotice[];
+  /** The round's text and position, as a tool-calls event's context gives them. */
   context: ToolContext;
 }
 
@@ -118,6 +141,7 @@ export type StreamEvent =
   | StreamBlockEvent
   | RetryingEvent
   | ToolCallsEvent
+  | ToolAttemptEvent
   | UsageEvent
   | CompleteEvent
   | ErrorEvent
@@ -327,6 +351,10 @@ export function isTokensEvent(event: StreamEvent): event is TokensEvent {
 
 export function isToolCallsEvent(event: StreamEvent): event is ToolCallsEvent {
   return event.type === 'tool-calls';
+}
+
+export function isToolAttemptEvent(event: StreamEvent): event is ToolAttemptEvent {
+  return event.type === 'tool-attempt';
 }
 
 export function isCompleteEvent(event: StreamEvent): event is CompleteEvent {

@@ -17,6 +17,8 @@ export type {
   GeneratedImageContent,
   ToolUseContent,
   ToolResultContent,
+  ToolAttemptContent,
+  ToolNoticeContent,
   ThinkingContent,
   RedactedThinkingContent,
 } from './content.js';
@@ -30,6 +32,8 @@ export {
   isGeneratedImageContent,
   isToolUseContent,
   isToolResultContent,
+  isToolAttemptContent,
+  isToolNoticeContent,
   isThinkingContent,
   isRedactedThinkingContent,
   isMediaContent,
@@ -57,6 +61,8 @@ export type {
   ToolResultContentBlock,
   ToolContext,
   ParsedToolCalls,
+  ToolCallNotice,
+  TurnToolCallNotice,
 } from './tools.js';
 
 // Request
@@ -129,6 +135,7 @@ export type {
   TokensEvent,
   StreamBlockEvent,
   ToolCallsEvent,
+  ToolAttemptEvent,
   UsageEvent,
   CompleteEvent,
   ErrorEvent,
@@ -143,6 +150,7 @@ export type {
 export {
   isTokensEvent,
   isToolCallsEvent,
+  isToolAttemptEvent,
   isCompleteEvent,
   isErrorEvent,
   isAbortedEvent,

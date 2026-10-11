@@ -149,8 +149,9 @@ export class YieldingStreamImpl implements YieldingStream {
     // notification is far worse than delivering it without its tool blocks.
     const injectedMessages = options?.injectedMessages
       ?.map((m) => {
+        // tool_attempt is the assistant's own text, never user-side.
         const clean = m.content.filter(
-          (block) => block.type !== 'tool_use' && block.type !== 'tool_result'
+          (block) => block.type !== 'tool_use' && block.type !== 'tool_result' && block.type !== 'tool_attempt'
         );
         if (clean.length !== m.content.length) {
           console.warn(

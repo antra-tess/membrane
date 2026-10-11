@@ -234,6 +234,7 @@ describe('native yielding: mid-turn injected messages', () => {
             {
               content: [
                 { type: 'tool_result', toolUseId: 'x', content: 'nope' } as any,
+                { type: 'tool_attempt', rawXml: 'not the user’s' },
                 { type: 'text', text: 'legit interjection' },
               ],
             },
@@ -243,12 +244,13 @@ describe('native yielding: mid-turn injected messages', () => {
 
       // Stream completed normally — a throw here would wedge the caller's turn
       expect(events.some((e) => e.type === 'complete')).toBe(true);
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining('stripped 1 tool block'));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('stripped 2 tool block'));
 
       // The text survived; the tool_result did not (exactly one tool_result
       // in round 2 — the real one for tu_1)
       const round2 = adapter.requests[1] as any;
       expect(userTexts(round2).join('\n')).toContain('legit interjection');
+      expect(JSON.stringify(round2.messages)).not.toContain('not the user');
       const toolResultCount = round2.messages
         .flatMap((m: any) => m.content ?? [])
         .filter((b: any) => b.type === 'tool_result').length;
