@@ -320,6 +320,49 @@ describe('keepalive model holds', () => {
     expect(holds()[2]).toBe(5 * MIN);                    // a new run, not the third of the old one
   });
 
+  it("a real call in a lane the keepalive doesn't keep warm ends the model's run too", async () => {
+    let refuse = true;
+    const refusedAt: number[] = [];
+    const send = vi.fn(() => {
+      if (!refuse) return Promise.resolve(hit);
+      refusedAt.push(Date.now());
+      return Promise.reject(new Classified('zz 529', true, undefined));
+    });
+    const { ka, events } = setup(send);                  // lanes: ['stream'], the default
+    ka.record(wire('claude-a'), undefined, 'stream');
+    const holds = () => (events.filter((e) => e.type === 'held') as Array<{ until: number }>).map((e, i) => e.until - refusedAt[i]!);
+    await vi.advanceTimersByTimeAsync(55 * MIN);         // refused at 45 and 50
+    expect(holds()).toEqual([5 * MIN, 10 * MIN]);
+    ka.record(wire('claude-a'), undefined, 'complete');  // an aux call: not kept warm, still a real call
+    expect(refusalsOf(ka).size).toBe(0);
+    expect(ka.getStatus()).toHaveLength(1);               // the stream lineage is untouched, so still due
+    await vi.advanceTimersByTimeAsync(10 * MIN);
+    expect(refusedAt[2]).toBe(START + 60 * MIN);          // once the 10-minute hold passed
+    expect(holds()[2]).toBe(5 * MIN);                     // a new run, not the third of the old one
+  });
+
+  it("a real call whose shape can't be kept warm ends the model's run too", async () => {
+    let refuse = true;
+    const refusedAt: number[] = [];
+    const send = vi.fn(() => {
+      if (!refuse) return Promise.resolve(hit);
+      refusedAt.push(Date.now());
+      return Promise.reject(new Classified('zz 529', true, undefined));
+    });
+    const { ka, events } = setup(send);
+    ka.record(wire('claude-a'), undefined, 'stream');
+    const holds = () => (events.filter((e) => e.type === 'held') as Array<{ until: number }>).map((e, i) => e.until - refusedAt[i]!);
+    await vi.advanceTimersByTimeAsync(55 * MIN);         // refused at 45 and 50
+    expect(holds()).toEqual([5 * MIN, 10 * MIN]);
+    // Another conversation's call to the model, with a thinking budget: ineligible, and its own lineage key.
+    ka.record({ ...wire('claude-a', 'another conversation'), thinking: { type: 'enabled', budget_tokens: 2048 } }, undefined, 'stream');
+    expect(refusalsOf(ka).size).toBe(0);
+    expect(ka.getStatus()).toHaveLength(1);               // only the first conversation's lineage
+    await vi.advanceTimersByTimeAsync(10 * MIN);
+    expect(refusedAt[2]).toBe(START + 60 * MIN);
+    expect(holds()[2]).toBe(5 * MIN);
+  });
+
   it("a retryable refusal's own short wait still waits out the model's backoff", async () => {
     const refusedAt: number[] = [];
     const send = vi.fn(() => {
