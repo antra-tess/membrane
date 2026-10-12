@@ -422,8 +422,10 @@ export class GeminiAdapter implements ProviderAdapter {
   // --------------------------------------------------------------------------
 
   private buildRequest(request: ProviderRequest, options?: ProviderRequestOptions, selection = captureRequestSelection(request)): GeminiRequest {
-    const media = Object.prototype.propertyIsEnumerable.call(selection.extra ?? {}, 'contents') ? false : this.toolImagePolicy.resolve(selection.model, request.messages as any[], options);
-    const contents = this.convertMessages(request.messages as any[], selection.model, media);
+    // One read of the messages, for the tool-image decision and the body alike.
+    const source = request.messages as any[];
+    const media = Object.prototype.propertyIsEnumerable.call(selection.extra ?? {}, 'contents') ? false : this.toolImagePolicy.resolve(selection.model, source, options);
+    const contents = this.convertMessages(source, selection.model, media);
     const maxTokens = request.maxTokens || this.defaultMaxTokens;
 
     const geminiRequest: GeminiRequest = { contents };

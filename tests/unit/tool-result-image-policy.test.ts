@@ -85,6 +85,15 @@ describe.each(providers)('$name capability policy', p => {
       });
     }
   }
+  it.each(['complete', 'stream'])('%s reads the messages once, for the image decision and the body alike', async method => {
+    const { bodies } = stub();
+    let reads = 0;
+    const req = { model: p.model, get messages() { reads++; return messages(reads === 1); } };
+    const adapter = p.make('media');
+    await (method === 'complete' ? adapter.complete(req as any) : adapter.stream(req as any, { onChunk() {} }));
+    expect(reads).toBe(1);
+    expect(bodies.map(hasPixels)).toEqual([true]);
+  });
   it.each([true, false])('pins registry %s per model across complete and stream', async hint => {
     const { bodies, lookup } = stub();
     const adapter = p.make();
@@ -230,17 +239,34 @@ describe('OpenRouter lookup and cancellation', () => {
     const native: any[] = [{ role: 'user', content: 'look' }];
     const req = { model: 'anthropic/claude-sonnet-4.6', messages: messages(false), extra: { messages: native } };
     const adapter = providers[2]!.make();
-    const sent = method === 'complete' ? adapter.complete(req) : adapter.stream(req, { onChunk() {} });
+    const onRequest = vi.fn();
+    const sent = method === 'complete' ? adapter.complete(req, { onRequest }) : adapter.stream(req, { onChunk() {} }, { onRequest });
     native.push({ role: 'assistant', content: 'added after the call' });
     await expect(sent).rejects.toMatchObject({ type: 'unsupported', retryable: false });
+    expect(onRequest).not.toHaveBeenCalled();
     expect(bodies).toHaveLength(0);
   });
-  it('converts the request once, so a warning from conversion prints once when tool images go as media', async () => {
+  it.each(['complete', 'stream'])('%s refuses a passed-through message that turns assistant while the catalogue answers', async method => {
+    let answer!: () => void;
+    const { bodies, lookup } = stub(() => new Promise<Response>(resolve => { answer = () => resolve(catalogue()); }));
+    const last: { role: string; content: string } = { role: 'user', content: 'go on' };
+    const onRequest = vi.fn();
+    const req = { model: 'anthropic/claude-sonnet-4.6', messages: [...messages(), last] };
+    const adapter = providers[2]!.make();
+    const sent = method === 'complete' ? adapter.complete(req, { onRequest }) : adapter.stream(req, { onChunk() {} }, { onRequest });
+    expect(lookup).toHaveBeenCalledTimes(1);
+    last.role = 'assistant';
+    answer();
+    await expect(sent).rejects.toMatchObject({ type: 'unsupported', retryable: false });
+    expect(onRequest).not.toHaveBeenCalled();
+    expect(bodies).toHaveLength(0);
+  });
+  it.each(['complete', 'stream'])('%s converts the request once, so a warning from conversion prints once when tool images go as media', async method => {
     const { bodies } = stub();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const audio = { type: 'audio', source: { type: 'base64', mediaType: 'audio/odd', data: 'AA==' } };
-      await invoke(providers[2]!.make(), 'complete', 'vendor/vision', undefined, [{ role: 'user', content: [audio] }, ...messages()]);
+      await invoke(providers[2]!.make(), method, 'vendor/vision', undefined, [{ role: 'user', content: [audio] }, ...messages()]);
       expect(hasPixels(bodies[0])).toBe(true);
       expect(warn.mock.calls.filter(args => String(args[0]).includes('audio/odd'))).toHaveLength(1);
     } finally {
@@ -571,12 +597,13 @@ describe('resolution edge cases', () => {
     expect(bodies.map(hasPixels)).toEqual([true, false]);
     expect(bodies[0].model).toBe('effective');
   });
-  it.each(providers.slice(0, 3))('$name keys an extra.model that is not a string by the requested model', async p => {
+  it.each(providers.slice(0, 3).flatMap(p => [undefined, 42].map(override => ({ ...p, override }))))('$name keys an extra.model of $override by the requested model, and sends the override as given', async p => {
     const { bodies } = stub();
     const getModelImageInput = vi.fn(() => true);
-    await p.make().complete({ model: p.model, messages: messages(), extra: { model: undefined } }, { getModelImageInput });
+    await p.make().complete({ model: p.model, messages: messages(), extra: { model: p.override } }, { getModelImageInput });
     expect(getModelImageInput.mock.calls).toEqual([[p.model]]);
     expect(bodies.map(hasPixels)).toEqual([true]);
+    expect(bodies[0].model).toBe(p.override);
   });
   it.each(providers.flatMap(p => [
     ['plain', 'data:image/png;base64,'],

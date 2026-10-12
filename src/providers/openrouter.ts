@@ -215,15 +215,19 @@ export class OpenRouterAdapter implements ProviderAdapter {
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
     const selection = captureRequestSelection(request);
-    // Built once, before the tool-image decision, which can wait on the
-    // catalogue; a request the prefill check refuses is refused before any I/O.
-    const { body: openRouterRequest, includeToolImages } = this.buildRequest(request, selection);
+    // The messages are read once. The body is built from them once, before the
+    // tool-image decision, which reads the same messages and can wait on the
+    // catalogue; a request the prefill check refuses is refused before the
+    // catalogue is asked.
+    const source = request.messages as any[];
+    const { body: openRouterRequest, includeToolImages } = this.buildRequest(request, source, selection);
     assertMessagePrefillSupported(openRouterRequest.model, openRouterRequest.messages, options, this.name, openRouterRequest);
     const { signal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
-      if (await this.resolveToolImages(request, selection, options, signal)) includeToolImages();
-      // Checked again as it is sent: it still holds the caller's own objects
-      // (passed-through messages, extra.messages), which can change meanwhile.
+      if (await this.resolveToolImages(source, selection, options, signal)) includeToolImages();
+      // Checked again after the decision, before onRequest: the body still
+      // holds the caller's own objects (passed-through messages,
+      // extra.messages), which can change during the wait.
       assertMessagePrefillSupported(openRouterRequest.model, openRouterRequest.messages, options, this.name, openRouterRequest);
       options?.onRequest?.(openRouterRequest);
       try {
@@ -243,15 +247,16 @@ export class OpenRouterAdapter implements ProviderAdapter {
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
     const selection = captureRequestSelection(request);
-    // Built once and checked twice, as complete() does.
-    const { body: openRouterRequest, includeToolImages } = this.buildRequest(request, selection);
+    // Read once, built once and checked twice, as complete() does.
+    const source = request.messages as any[];
+    const { body: openRouterRequest, includeToolImages } = this.buildRequest(request, source, selection);
     openRouterRequest.stream = true;
     // Request usage data in stream for cache metrics
     openRouterRequest.stream_options = { include_usage: true };
     assertMessagePrefillSupported(openRouterRequest.model, openRouterRequest.messages, options, this.name, openRouterRequest);
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
-      if (await this.resolveToolImages(request, selection, options, combinedSignal)) includeToolImages();
+      if (await this.resolveToolImages(source, selection, options, combinedSignal)) includeToolImages();
       assertMessagePrefillSupported(openRouterRequest.model, openRouterRequest.messages, options, this.name, openRouterRequest);
       options?.onRequest?.(openRouterRequest);
       return await this.makeStreamRequest(openRouterRequest, selection.model, callbacks, combinedSignal);
@@ -435,14 +440,14 @@ export class OpenRouterAdapter implements ProviderAdapter {
     };
   }
 
-  private async resolveToolImages(request: ProviderRequest, selection: RequestModelSelection, options?: ProviderRequestOptions, signal?: AbortSignal): Promise<boolean> {
+  private async resolveToolImages(source: any[], selection: RequestModelSelection, options?: ProviderRequestOptions, signal?: AbortSignal): Promise<boolean> {
     try {
       signal?.throwIfAborted();
       // A whole native payload override is caller-owned. Replaced normalized
       // images cannot trigger a lookup or freeze a model's first-use decision.
       if (Object.prototype.propertyIsEnumerable.call(selection.extra ?? {}, 'messages')) return false;
       const model = effectiveChatModel(selection);
-      return await waitForImageDecision(this.toolImagePolicy.resolve(model, request.messages as any[], options), signal);
+      return await waitForImageDecision(this.toolImagePolicy.resolve(model, source, options), signal);
     } catch (error) {
       throw this.handleError(error);
     }
@@ -503,9 +508,9 @@ export class OpenRouterAdapter implements ProviderAdapter {
   /** The request body, converted once. A tool message that holds images
    * carries them omitted; includeToolImages() gives it the media form
    * converted beside it, so the tool-image decision changes nothing else. */
-  private buildRequest(request: ProviderRequest, selection: RequestModelSelection): { body: any; includeToolImages: () => void } {
+  private buildRequest(request: ProviderRequest, source: any[], selection: RequestModelSelection): { body: any; includeToolImages: () => void } {
     const mediaForms: MediaForm[] = [];
-    const messages = this.convertMessages(request.messages as any[], mediaForms);
+    const messages = this.convertMessages(source, mediaForms);
     
     const params: any = {
       model: selection.model,

@@ -427,8 +427,10 @@ export class OpenAIAdapter implements ProviderAdapter {
 
   private buildRequest(request: ProviderRequest, options?: ProviderRequestOptions, selection = captureRequestSelection(request)): any {
     const effectiveModel = effectiveChatModel(selection);
-    const media = Object.prototype.propertyIsEnumerable.call(selection.extra ?? {}, 'messages') ? false : this.toolImagePolicy.resolve(effectiveModel, request.messages as any[], options);
-    const messages = this.convertMessages(request.messages as any[], media);
+    // One read of the messages, for the tool-image decision and the body alike.
+    const source = request.messages as any[];
+    const media = Object.prototype.propertyIsEnumerable.call(selection.extra ?? {}, 'messages') ? false : this.toolImagePolicy.resolve(effectiveModel, source, options);
+    const messages = this.convertMessages(source, media);
     const model = selection.model;
     const maxTokens = request.maxTokens || this.defaultMaxTokens;
     
