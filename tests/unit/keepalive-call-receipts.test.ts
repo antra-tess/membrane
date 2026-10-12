@@ -116,6 +116,17 @@ describe('keepalive terminal call receipts', () => {
     expect(calls[0]!.error).toBe(error);
   });
 
+  it('describes a sender error it cannot read instead of throwing from its catch', async () => {
+    const hostile = new Error('zz-unread');
+    Object.defineProperty(hostile, 'message', { get() { throw new Error('zz-message getter failed'); } });
+    const { ka, calls, events } = setup(vi.fn().mockRejectedValue(hostile), { maxConsecutiveErrors: 1 });
+    ka.record(wire(), undefined, 'stream');
+    await vi.advanceTimersByTimeAsync(100);
+    expect(events.map(e => e.type)).toEqual(['error', 'disabled']);
+    expect(events[0].error).toBe('[unreadable: Error: zz-message getter failed]');
+    expect(calls[0]!.error).toBe(hostile);
+  });
+
   it('isolates observer mutations from the cached prefix and effectiveness checks', async () => {
     const response = { usage: structuredClone(usage) };
     const original = wire();

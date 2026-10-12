@@ -219,6 +219,17 @@ function isErrorValue(value: unknown): value is Error {
   }
 }
 
+/**
+ * The text of a thrown value: an Error's message, or anything else's String
+ * form. Every read is guarded, so describing a hostile value (a throwing
+ * getter or toString, a Proxy trap) yields `[unreadable: …]` rather than
+ * throwing from the code that is reporting it.
+ */
+export function thrownText(value: unknown): string {
+  const isError = isErrorValue(value);
+  return asText(readGuarded(() => (isError ? (value as Error).message : String(value))));
+}
+
 /** An Error as a plain record, its Error-valued fields likewise; any other value as it is. */
 function serializeErrorFields(error: unknown, open: Set<Error>): unknown {
   let isError: boolean;
@@ -1103,7 +1114,7 @@ export function classifyError(error: unknown): ErrorInfo {
   // Every read of the error is guarded, as serializeError's are: a getter or
   // Proxy trap that throws must not replace the failure being classified.
   const isError = isErrorValue(error);
-  const message = asText(readGuarded(() => (isError ? (error as Error).message : String(error))));
+  const message = thrownText(error);
 
   if (isError) {
     // Abort is decided by type, never by prose: a tool or provider message
