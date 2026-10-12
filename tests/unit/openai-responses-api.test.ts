@@ -182,7 +182,7 @@ describe('OpenAIResponsesAPIAdapter', () => {
       'reasoning.encrypted_content',
     ]);
     expect(body.instructions).toBe('Follow repository instructions.');
-    expect(body.tools).toEqual([{ type: 'function', name: 'patch', description: 'Patch a file', parameters: { type: 'object' } }]);
+    expect(body.tools).toEqual([{ type: 'function', name: 'patch', description: 'Patch a file', parameters: { type: 'object' }, strict: false }]);
     expect(body.reasoning).toEqual({ effort: 'high', context: 'all_turns' });
 
     // The native array is the lossless continuation surface: IDs, phases,
