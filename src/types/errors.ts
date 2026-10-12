@@ -47,14 +47,20 @@ export type MembraneErrorType =
   | 'context_length'
   | 'invalid_request'
   /**
-   * The provider refused a signed thinking block the request sent back.
-   * Either it was minted in another conversation, or what came before it
-   * has changed since (Anthropic's block binding, under its default or
-   * `'error'`), or its signature was altered, which is refused under
-   * `'drop_block'` too. The request as a whole is well formed: the fix is to
-   * leave that block out, or, for the binding, to ask the provider to drop
-   * such blocks (Anthropic's
-   * `thinking.block_binding.prefix_mismatch_behavior: 'drop_block'`). Not
+   * The provider refused a signed thinking block the request sent back
+   * (Anthropic's 400 "Invalid `signature` in `thinking` block"). Either the
+   * block was minted in another conversation, or what came before it has
+   * changed since (Anthropic's block binding: seen live under
+   * `prefix_mismatch_behavior: 'error'`, while under the default one
+   * account saw this 400 and another a silent drop), or its signature was
+   * altered, which was refused live under every behavior, `'drop_block'`
+   * included. A `redacted_thinking` block's refusal is matched by analogy;
+   * it hasn't been seen. The request as a whole is well formed: the fix is
+   * to leave that block out, or, for the binding, to ask the provider to
+   * drop such blocks. A request can ask that today through `providerParams`,
+   * which reach Anthropic as top-level request fields: give the whole
+   * `thinking` object there, with
+   * `block_binding: { prefix_mismatch_behavior: 'drop_block' }`. Not
    * retryable as it stands.
    */
   | 'thinking_binding'
@@ -389,13 +395,16 @@ const CONTEXT_LENGTH_PATTERN =
 
 /**
  * Anthropic's 400 for a signed thinking block it won't accept in this
- * request: "messages.1.content.0: Invalid `signature` in `thinking` block.
- * The block is bound to a different conversation. Remove the block, or set
+ * request. A block bound to another conversation, live under
+ * `prefix_mismatch_behavior: "error"` (2026-10-10): "messages.1.content.0:
+ * Invalid `signature` in `thinking` block. The block is bound to a different
+ * conversation. Remove the block, or set
  * `thinking.block_binding.prefix_mismatch_behavior` to "drop_block". Content
  * before this block differs from when it was created, first at
- * `messages.0.content.0`.", and, for a block whose signature was altered,
- * the first sentence alone, under every behavior (both live, 2026-10-10).
- * Read only under a 400.
+ * `messages.0.content.0`." A block whose signature was altered gets the first
+ * sentence alone, live under every behavior the same day. The
+ * `redacted_thinking` form is matched by analogy, unseen. Read only under a
+ * 400 or 422.
  */
 const THINKING_BINDING_PATTERN = /invalid `signature` in `(?:redacted_)?thinking` block/i;
 
@@ -553,7 +562,9 @@ function classifyByStatus(
   if (status === 404) return { type: 'invalid_request', retryable: false };
   // A refused thinking block isn't a malformed request: a consumer that sheds
   // or rewrites its newest message over invalid_request mustn't act on it.
-  if (status === 400 && THINKING_BINDING_PATTERN.test(message)) return { type: 'thinking_binding', retryable: false };
+  if ((status === 400 || status === 422) && THINKING_BINDING_PATTERN.test(message)) {
+    return { type: 'thinking_binding', retryable: false };
+  }
   // Context-length is a request-shape problem and only ever arrives as a 4xx.
   // Checking the message BEFORE the status would let a transient 5xx whose
   // body happens to say "context" or "too long" become a non-retryable
