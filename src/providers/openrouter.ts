@@ -478,9 +478,9 @@ export class OpenRouterAdapter implements ProviderAdapter {
     const timer = setTimeout(() => controller.abort(new Error('no answer within 5 s')), 5000);
     try {
       const work = (async () => {
-        // The catalogue of the endpoint this adapter sends to, so the decision
-        // describes it and no other host is contacted. It carries the headers
-        // the adapter's requests carry, since a gateway may require the key on
+        // The catalogue beside the endpoint this adapter sends to, so the
+        // decision describes that endpoint. It carries the headers the
+        // adapter's requests carry, since a gateway may require the key on
         // every route.
         const response = await fetch(this.baseURL + '/models', { headers: this.getHeaders(), signal: controller.signal });
         if (!response.ok) throw new Error('HTTP ' + response.status);
