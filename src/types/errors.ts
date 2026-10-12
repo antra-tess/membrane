@@ -56,12 +56,15 @@ export type MembraneErrorType =
    * altered, which was refused live under every behavior, `'drop_block'`
    * included. A `redacted_thinking` block's refusal is matched by analogy;
    * it hasn't been seen. The request as a whole is well formed: the fix is
-   * to leave that block out, or, for the binding, to ask the provider to
-   * drop such blocks. A request can ask that today through `providerParams`,
-   * which reach Anthropic as top-level request fields: give the whole
-   * `thinking` object there, with
-   * `block_binding: { prefix_mismatch_behavior: 'drop_block' }`. Not
-   * retryable as it stands.
+   * to leave that block out, or, for the binding only, to ask the provider
+   * to drop such blocks. On Anthropic's own API and on Bedrock a request can
+   * ask that today: give the whole `thinking` object in `providerParams` (it
+   * replaces the one membrane would send), with
+   * `block_binding: { prefix_mismatch_behavior: 'drop_block' }`, and send the
+   * `thinking-binding-controls-2026-08-01` beta (in the Anthropic client's
+   * `defaultHeaders`, or as Bedrock's `anthropic_beta` in `providerParams`).
+   * An altered signature is refused under `'drop_block'` too, so leaving the
+   * block out is its only remedy. Not retryable as it stands.
    */
   | 'thinking_binding'
   | 'auth'
