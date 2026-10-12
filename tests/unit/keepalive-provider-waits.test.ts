@@ -7,7 +7,6 @@ import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 // honours a "retry after N" for its own calls (agent-framework's provider
 // waits) cannot stop a poke. The keepalive therefore holds every lineage of a
 // model while any call to that model has a stated wait outstanding.
-// (room-225 #46648, #46976, #47170, #47195, #47272.)
 
 const START = Date.parse('2026-10-07T00:00:00Z');
 const MIN = 60_000;
@@ -135,7 +134,7 @@ describe('keepalive model holds', () => {
     expect(send).toHaveBeenCalledTimes(4);
   });
 
-  it('a retryable refusal that states no usable wait (none, negative, NaN) is paced by the backoff, never counted, and never repeated unpaced (#48365)', async () => {
+  it('a retryable refusal that states no usable wait (none, negative, NaN) is paced by the backoff, never counted, and never repeated unpaced', async () => {
     for (const hint of [undefined, -1, Number.NaN]) {
       const sent: number[] = [];
       const send = vi.fn(() => {

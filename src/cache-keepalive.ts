@@ -526,7 +526,7 @@ export class CacheKeepalive {
       // the model's own backoff, which doubles with each refusal in a row from
       // one check interval up to the refresh window. So an overload storm that
       // states no wait backs the keepalive off and it resumes after; it never
-      // repeats a refused poke unpaced either (#48365). A failure that is not
+      // repeats a refused poke unpaced either. A failure that is not
       // retryable, or that nothing classifies, still counts, whatever wait it
       // states, and the breaker is what bounds a run of those; a wait it states
       // still holds the model.
