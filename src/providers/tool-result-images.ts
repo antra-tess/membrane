@@ -135,7 +135,8 @@ export function nativeChatToolContent(content: any[], media: boolean): string | 
   return parts.every(part => part?.type === 'text') ? parts.map(part => part.text).join('\n') : parts;
 }
 
-/** Inline media is validated here because live tools bypass formatter sanitation. */
+/** Inline media is validated here: a direct adapter call bypasses the formatter,
+ * and the formatter passes URL sources, data URLs included, through unchecked. */
 function chatToolImageUrl(source: any): string | undefined {
   if (source?.type === 'url' && typeof source.url === 'string' && !/^data:/i.test(parsedUrlText(source.url))) {
     try {

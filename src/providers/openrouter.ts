@@ -212,11 +212,16 @@ export class OpenRouterAdapter implements ProviderAdapter {
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
     const selection = captureRequestSelection(request);
+    // Refuse before any I/O. The tool-image decision can wait on the catalogue,
+    // and it changes only the content of tool messages, never the model or the
+    // message roles the prefill check reads. So the check reads the body built
+    // without media, which is sent as it is unless media is chosen.
+    const withoutMedia = this.buildRequest(request, false, selection);
+    assertMessagePrefillSupported(withoutMedia.model, withoutMedia.messages, options, this.name, withoutMedia);
     const { signal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
       const media = await this.resolveToolImages(request, selection, options, signal);
-      const openRouterRequest = this.buildRequest(request, media, selection);
-      assertMessagePrefillSupported(openRouterRequest.model, openRouterRequest.messages, options, this.name, openRouterRequest);
+      const openRouterRequest = media ? this.buildRequest(request, true, selection) : withoutMedia;
       options?.onRequest?.(openRouterRequest);
       try {
         const response = await this.makeRequest(openRouterRequest, { ...options, signal, timeoutMs: undefined });
@@ -235,14 +240,20 @@ export class OpenRouterAdapter implements ProviderAdapter {
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
     const selection = captureRequestSelection(request);
+    const build = (media: boolean) => {
+      const body = this.buildRequest(request, media, selection);
+      body.stream = true;
+      // Request usage data in stream for cache metrics
+      body.stream_options = { include_usage: true };
+      return body;
+    };
+    // Refuse before any I/O, on the body without media, as complete() does.
+    const withoutMedia = build(false);
+    assertMessagePrefillSupported(withoutMedia.model, withoutMedia.messages, options, this.name, withoutMedia);
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
       const media = await this.resolveToolImages(request, selection, options, combinedSignal);
-      const openRouterRequest = this.buildRequest(request, media, selection);
-      openRouterRequest.stream = true;
-      // Request usage data in stream for cache metrics
-      openRouterRequest.stream_options = { include_usage: true };
-      assertMessagePrefillSupported(openRouterRequest.model, openRouterRequest.messages, options, this.name, openRouterRequest);
+      const openRouterRequest = media ? build(true) : withoutMedia;
       options?.onRequest?.(openRouterRequest);
       return await this.makeStreamRequest(openRouterRequest, selection.model, callbacks, combinedSignal);
     } finally {
@@ -464,8 +475,10 @@ export class OpenRouterAdapter implements ProviderAdapter {
     try {
       const work = (async () => {
         // The catalogue of the endpoint this adapter sends to, so the decision
-        // describes it and no other host is contacted.
-        const response = await fetch(this.baseURL + '/models', { signal: controller.signal });
+        // describes it and no other host is contacted. It carries the headers
+        // the adapter's requests carry, since a gateway may require the key on
+        // every route.
+        const response = await fetch(this.baseURL + '/models', { headers: this.getHeaders(), signal: controller.signal });
         if (!response.ok) throw new Error('HTTP ' + response.status);
         const catalogue = await response.json() as { data?: unknown };
         if (!Array.isArray(catalogue?.data)) throw new Error('the response has no data array');

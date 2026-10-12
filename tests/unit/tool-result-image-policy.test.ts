@@ -191,6 +191,22 @@ describe('OpenRouter lookup and cancellation', () => {
     expect(vi.mocked(globalThis.fetch).mock.calls.map(call => String(call[0]))).toEqual([endpoint + '/models', endpoint + '/chat/completions']);
     expect(bodies.map(hasPixels)).toEqual([true]);
   });
+  it('asks for the catalogue with the headers its requests carry, key included', async () => {
+    stub();
+    await invoke(providers[2]!.make(), 'complete', 'vendor/vision');
+    const [lookupCall, requestCall] = vi.mocked(globalThis.fetch).mock.calls;
+    expect(String(lookupCall![0])).toMatch(/\/models$/);
+    expect(lookupCall![1]?.headers).toMatchObject({ Authorization: 'Bearer test' });
+    expect(lookupCall![1]?.headers).toEqual(requestCall![1]?.headers);
+  });
+  it.each(['complete', 'stream'])('%s refuses an unsupported prefill before the catalogue lookup, whatever its deadline', async method => {
+    const { bodies, lookup } = stub(() => new Promise(() => {}));
+    const prefilled = [...messages(), { role: 'assistant', content: [text('authored assistant tail')] }];
+    await expect(invoke(providers[2]!.make(), method, 'anthropic/claude-sonnet-4.6', { timeoutMs: 1 }, prefilled))
+      .rejects.toMatchObject({ type: 'unsupported', retryable: false });
+    expect(lookup).not.toHaveBeenCalled();
+    expect(bodies).toHaveLength(0);
+  });
   it('leaves no catalogue timer behind once the lookup answers', async () => {
     vi.useFakeTimers();
     stub();
@@ -514,6 +530,13 @@ describe('resolution edge cases', () => {
     expect(getModelImageInput.mock.calls).toEqual([['effective'], [p.model]]);
     expect(bodies.map(hasPixels)).toEqual([true, false]);
     expect(bodies[0].model).toBe('effective');
+  });
+  it.each(providers.slice(0, 3))('$name keys an extra.model that is not a string by the requested model', async p => {
+    const { bodies } = stub();
+    const getModelImageInput = vi.fn(() => true);
+    await p.make().complete({ model: p.model, messages: messages(), extra: { model: undefined } }, { getModelImageInput });
+    expect(getModelImageInput.mock.calls).toEqual([[p.model]]);
+    expect(bodies.map(hasPixels)).toEqual([true]);
   });
   it.each(providers.flatMap(p => [
     ['plain', 'data:image/png;base64,'],

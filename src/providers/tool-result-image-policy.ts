@@ -24,9 +24,12 @@ export function captureRequestSelection(request: ProviderRequest): RequestModelS
   return { model, extra: extra ? { ...extra } : extra };
 }
 
-/** A captured extra override is the same value used for the eventual wire. */
+/** A captured extra override is the same value used for the eventual wire. An
+ * override that isn't a string names no model: the requested model keys the
+ * decision, and the wire carries the override as given. */
 export function effectiveChatModel(selection: RequestModelSelection): string {
-  return Object.hasOwn(selection.extra ?? {}, 'model') ? selection.extra!.model as string : selection.model;
+  const override = selection.extra?.model;
+  return Object.hasOwn(selection.extra ?? {}, 'model') && typeof override === 'string' ? override : selection.model;
 }
 
 /** Only known tool media needs a capability decision. User images are explicit. */

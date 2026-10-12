@@ -220,10 +220,11 @@ export interface ProviderAdapter {
 
   /**
    * Lowercase MIME types accepted for images nested in native tool results.
-   * NativeFormatter uses this policy before the transport sees complete()
-   * history. Omit to retain its JPEG/PNG/GIF/WebP default. The adapter still
-   * validates direct requests and live tool results at its wire boundary.
-   * Wrappers must forward this capability.
+   * NativeFormatter applies this policy to the requests Membrane builds
+   * through it, complete() history and native tool-loop rounds alike, before
+   * the transport sees them. Omit to retain its JPEG/PNG/GIF/WebP default. The
+   * adapter still validates what reaches its wire boundary, direct calls
+   * included. Wrappers must forward this capability.
    */
   readonly toolResultImageMediaTypes?: ReadonlySet<string>;
 
