@@ -4,7 +4,9 @@
  * Handles OpenAI-compatible API with tool_calls format
  */
 
+import { assertMessagePrefillSupported } from './request-capabilities.js';
 import { captureRequestSelection, effectiveChatModel, ToolResultImagePolicy, type RequestModelSelection, type ToolResultImageMode, type ToolResultImageConversionOptions, waitForImageDecision } from './tool-result-image-policy.js';
+
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -17,12 +19,11 @@ import type {
 } from '../types/index.js';
 import {
   MembraneError,
-  rateLimitError,
-  contextLengthError,
-  authError,
-  serverError,
   abortError,
-  networkError,
+  classifyError,
+  errorFromHttpResponse,
+  isTypedAbortError,
+  withRawRequest,
 } from '../types/index.js';
 import { safeParseJson, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
 import { hasToolResultImages, chatToolResultContent, nativeChatToolContent, validatedChatImagePart } from './tool-result-images.js';
@@ -215,6 +216,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
     try {
       const media = await this.resolveToolImages(request, selection, options, signal);
       const openRouterRequest = this.buildRequest(request, media, selection);
+      assertMessagePrefillSupported(openRouterRequest.model, openRouterRequest.messages, options, this.name, openRouterRequest);
       options?.onRequest?.(openRouterRequest);
       try {
         const response = await this.makeRequest(openRouterRequest, { ...options, signal, timeoutMs: undefined });
@@ -240,6 +242,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
       openRouterRequest.stream = true;
       // Request usage data in stream for cache metrics
       openRouterRequest.stream_options = { include_usage: true };
+      assertMessagePrefillSupported(openRouterRequest.model, openRouterRequest.messages, options, this.name, openRouterRequest);
       options?.onRequest?.(openRouterRequest);
       return await this.makeStreamRequest(openRouterRequest, selection.model, callbacks, combinedSignal);
     } finally {
@@ -262,8 +265,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`OpenRouter error: ${response.status} ${errorText}`);
+        throw errorFromHttpResponse(this.name, response, await response.text(), openRouterRequest);
       }
 
       const reader = response.body?.getReader();
@@ -275,7 +277,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
       const sseParser = new SSELineParser();
       const contentParts: OpenRouterContentBlock[] = [];
       const readImageUrl = createImageUrlReader();
-      let finishReason = 'stop';
+      let finishReason: string | undefined;
       let sawTerminalEvent = false;
       let toolCalls: OpenRouterToolCall[] = [];
       let streamUsage: OpenRouterResponse['usage'] | undefined;
@@ -755,8 +757,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`OpenRouter error: ${response.status} ${errorText}`);
+        throw errorFromHttpResponse(this.name, response, await response.text(), request);
       }
 
       return await response.json() as OpenRouterResponse;
@@ -781,6 +782,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
     return {
       content: this.messageToContent(message),
       stopReason: this.mapFinishReason(choice?.finish_reason),
+      providerStopReason: choice?.finish_reason ?? undefined,
       stopSequence: undefined,
       usage: {
         inputTokens: response.usage?.prompt_tokens ?? 0,
@@ -797,7 +799,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
 
   private parseStreamedResponse(
     message: OpenRouterMessage,
-    finishReason: string,
+    finishReason: string | undefined,
     requestedModel: string,
     streamUsage?: OpenRouterResponse['usage'],
     rawRequest?: unknown
@@ -812,6 +814,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
     return {
       content: this.messageToContent(message),
       stopReason: this.mapFinishReason(finishReason),
+      providerStopReason: finishReason,
       stopSequence: undefined,
       usage: {
         inputTokens: streamUsage?.prompt_tokens ?? 0,
@@ -822,7 +825,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
       },
       model: requestedModel,
       rawRequest,
-      raw: { message, finish_reason: finishReason, usage: streamUsage },
+      raw: { message, finish_reason: finishReason ?? 'stop', usage: streamUsage },
     };
   }
 
@@ -831,6 +834,8 @@ export class OpenRouterAdapter implements ProviderAdapter {
   }
 
   private mapFinishReason(reason: string | undefined): string {
+    // No reason (or a server's null) is a plain end of turn.
+    if (reason == null) return 'end_turn';
     switch (reason) {
       case 'stop':
         return 'end_turn';
@@ -841,54 +846,26 @@ export class OpenRouterAdapter implements ProviderAdapter {
       case 'content_filter':
         return 'refusal';
       default:
-        return 'end_turn';
+        // Unrecognized reasons ('error', a compatible server's own token)
+        // travel as the provider's own token, so membrane's mapper discloses
+        // and logs them instead of reading a clean end_turn.
+        return reason;
     }
   }
 
+  /**
+   * HTTP failures are classified at the fetch boundary, where status,
+   * headers and body are still live; this handles what is left — typed
+   * aborts and non-HTTP throwables — through the shared last-resort table.
+   */
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
-    // A deadline abort is a timeout and stays one. Collapsing it into a bare
-    // abortError() here is what erased the identity before Membrane's
-    // caller-signal > timeout > error ladder could read it.
     if (isDeadlineAbort(error)) return deadlineTimeoutError(error, rawRequest);
-    // Already-classified failures (e.g. the stream-integrity guards) keep
-    // their type and retryability instead of being re-derived from a string.
-    if (error instanceof MembraneError) return error;
+    if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
+    if (isTypedAbortError(error)) return abortError(undefined, rawRequest);
 
-    if (error instanceof Error) {
-      const message = error.message;
-
-      if (message.includes('429') || message.includes('rate')) {
-        return rateLimitError(message, undefined, error, rawRequest);
-      }
-
-      if (message.includes('401') || message.includes('auth')) {
-        return authError(message, error, rawRequest);
-      }
-
-      if (message.includes('context') || message.includes('too long')) {
-        return contextLengthError(message, error, rawRequest);
-      }
-
-      if (message.includes('500') || message.includes('502') || message.includes('503')) {
-        return serverError(message, undefined, error, rawRequest);
-      }
-
-      if (error.name === 'AbortError') {
-        return abortError(undefined, rawRequest);
-      }
-
-      if (message.includes('network') || message.includes('fetch')) {
-        return networkError(message, error, rawRequest);
-      }
-    }
-
-    return new MembraneError({
-      type: 'unknown',
-      message: error instanceof Error ? error.message : String(error),
-      retryable: false,
-      rawError: error,
-      rawRequest,
-    });
+    const info = classifyError(error);
+    info.rawRequest = rawRequest;
+    return new MembraneError(info);
   }
 }
 
@@ -1007,7 +984,7 @@ export function fromOpenRouterMessage(message: OpenRouterMessage): ContentBlock[
     } else if (Array.isArray(message.content)) {
       // cache_control is request-only; text and images are response content.
       for (const block of message.content) {
-        if (block?.type === 'text') {
+        if (block?.type === 'text' && typeof block.text === 'string') {
           result.push({ type: 'text', text: block.text });
         } else if (block?.type === 'image_url') {
           const url = readImageUrl(block);

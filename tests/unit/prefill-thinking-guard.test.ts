@@ -1,16 +1,8 @@
 /**
- * Prefill/thinking guard: the API rejects extended thinking combined with an
- * assistant prefill, so prefill-shaped builds drop the thinking param. The
- * guard used to delete only the TOP-LEVEL field while `extra` (spread from
- * `providerParams`) carried a smuggled copy straight into the adapter's
- * `Object.assign(params, rest)` — the exact bypass the sibling sampling gate
- * was hardened against. `thinkingEnabled` reads both channels, so the guard
- * must strip both.
- *
- * Note the underlying API premise is model-dependent as of 2026-08-25:
- * claude-haiku-4-5 ACCEPTS prefill (with thinking), while sonnet-4-6 /
- * opus-4-8 / sonnet-5 refuse assistant prefill outright. The guard stays: on
- * the models that take a prefill at all, thinking + prefill is still a 400.
+ * XML prefill carries thinking as literal text rather than a second API channel.
+ * Strip both the top-level and extra copies, preserving the caller's input.
+ * The provider's acceptance of thinking plus prefill is model-dependent:
+ * the original and maintainer probes found haiku-4-5 accepts the combination.
  */
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
@@ -23,6 +15,7 @@ function membraneWithXmlPrefill() {
 
 function requestWithSmuggledThinking(): NormalizedRequest {
   return {
+    toolMode: 'xml',
     messages: [{ participant: 'zzOperator', content: [{ type: 'text', text: 'zz hello' }] }],
     system: 'zz system prompt',
     config: { model: 'claude-haiku-4-5-20251001', maxTokens: 4096, thinking: { enabled: true, budgetTokens: 1024 } },

@@ -239,8 +239,13 @@ describe.each(cases)('$name tool-result image transport', c => {
     const body = bodies.at(-1);
     const wire = JSON.stringify(body);
     expect(wire.includes(svg)).toBe(false);
-    expect(wire).toContain('image omitted');
-    expect(wire).toMatch(/before-svg.*image omitted.*between-images.*after-png/);
+    // A live tool round is built through NativeFormatter, as the history it
+    // becomes is, so the formatter's notice replaces the SVG there. A direct
+    // adapter call gets the adapter's own notice.
+    const notice = live ? 'is not accepted by the model API' : 'image omitted';
+    if (live) expect(wire).toContain('its media type \\"image/svg+xml\\" ' + notice);
+    expect(wire).toContain(notice);
+    expect(wire).toMatch(new RegExp('before-svg.*' + notice + '.*between-images.*after-png'));
     const media: any[] = [];
     const walk = (value: any, key = '') => {
       if (typeof value === 'string') {

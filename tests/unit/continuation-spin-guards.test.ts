@@ -62,6 +62,9 @@ class ScriptedAdapter implements ProviderAdapter {
 const REQUEST: NormalizedRequest = {
   messages: [{ participant: 'User', content: [{ type: 'text', text: 'hi' }] }],
   config: { model: 'test', maxTokens: 100 },
+  // Continuation/resumption is an XML-prefill mechanism; native is the
+  // default tool mode now, so the XML path is an explicit opt-in.
+  toolMode: 'xml',
 };
 
 function mockLogger() {

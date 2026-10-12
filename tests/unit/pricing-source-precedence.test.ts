@@ -221,7 +221,7 @@ describe('pricing source precedence, per round', () => {
       }),
     });
     const response = await membrane.stream(
-      { ...ZZ_REQUEST, tools: [zzTool] } as unknown as NormalizedRequest,
+      { ...ZZ_REQUEST, tools: [zzTool], toolMode: 'xml' } as unknown as NormalizedRequest,
       { onToolCalls: async (calls: Array<{ id: string }>): Promise<ToolResult[]> =>
         calls.map((call) => ({ toolUseId: call.id, content: 'zz-result', isError: false })) },
     ) as NormalizedResponse;

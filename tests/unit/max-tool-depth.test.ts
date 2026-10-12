@@ -34,6 +34,9 @@ function makeRequest(): NormalizedRequest {
     ],
     config: { model: 'test-model', maxTokens: 1000 },
     tools: [noopTool],
+    // These tests exercise the XML tool loop specifically; native is the
+    // default tool mode now, so the XML path is an explicit opt-in.
+    toolMode: 'xml',
   };
 }
 

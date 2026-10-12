@@ -14,6 +14,9 @@
 import { describe, it, expect } from 'vitest';
 import {
   normalizeToolPairs,
+  mergeConsecutiveRoles,
+  assertToolPairsValid,
+  MembraneNormalizerError,
   PREFIX_REWRITING_NORMALIZE_EVENT_KINDS,
   type ProviderBlock,
 } from '../../src/formatters/normalize-tool-pairs.js';
@@ -491,97 +494,71 @@ describe('normalizeToolPairs', () => {
     });
   });
 
-  describe('cache-control suppression', () => {
-    it('strips cache_control from blocks at-or-after a synthetic envelope', () => {
-      const cached = (block: ProviderBlock): ProviderBlock => ({
-        ...block,
-        cache_control: { type: 'ephemeral' },
-      });
-      const input: ProviderMessage[] = [
-        user(t('q')),
-        assistant(u('A')),
-        // No matching result for A → will synthesize at envelope index 2.
-        user(cached(t('this would be a cache breakpoint'))),
-        assistant(t('continuing')),
-      ];
-      const { events, onEvent } = collectEvents();
-      const out = normalize(input, { onEvent });
-
-      // The synthetic was inserted in the user envelope at index 2.
-      // After phase 5.5, no block at index >= 2 should carry cache_control.
-      for (let i = 2; i < out.messages.length; i++) {
-        for (const block of out.messages[i]!.content) {
-          expect(block).not.toHaveProperty('cache_control');
-        }
-      }
-      expect(events.some((e) => e.kind === 'cache_suppressed_for_synthetic')).toBe(true);
+  describe('cache markers survive stranded-call synthesis', () => {
+    const cached = (block: ProviderBlock): ProviderBlock => ({
+      ...block,
+      cache_control: { type: 'ephemeral' },
     });
 
-    it('cache_suppressed_for_synthetic.envelopeIndex stays correct after phase-7 prepend', () => {
-      // Regression: when phase 5 synthesizes a [pending] result AND phase 7
-      // prepends a [continuing] envelope (both fire for an assistant-first
-      // input with an unmatched tool_use), the cache-suppression event's
-      // envelopeIndex must refer to the FINAL output array, not the
-      // pre-phase-7 working array.
-      const cached = (block: ProviderBlock): ProviderBlock => ({
-        ...block,
-        cache_control: { type: 'ephemeral' },
-      });
+    it('keeps cache_control at and after a synthetic-bearing envelope', () => {
+      // The strip's premise was that synthetic bytes get rewritten when the
+      // real result lands. Phase 5 only ever synthesizes for an id the caller
+      // did NOT declare pending — i.e. a stranded call — and its `[pending]`
+      // payload is a fixed literal reproduced identically on every later
+      // compile. Nothing invalidates, so nothing needed protecting, and the
+      // strip cost the whole remaining conversation's prompt cache for as
+      // long as the stranded tool_use stayed in the window.
       const input: ProviderMessage[] = [
-        // Assistant-first (triggers phase 7) with an orphan tool_use
-        // (triggers phase 5 synthesis + phase 5.5 cache suppression).
-        assistant(u('A')),
-        user(cached(t('would-be cache breakpoint after the synthetic'))),
+        user(t('go')),
+        assistant(u('ite1')),
+        user(cached(t('this is a cache breakpoint'))),
+        assistant(t('continuing')),
+      ];
+      const out = normalize(input);
+
+      const surviving = out.messages
+        .flatMap((m) => m.content)
+        .filter((b) => 'cache_control' in b);
+      expect(surviving).toHaveLength(1);
+    });
+
+    it('emits no cache-suppression telemetry', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(cached(t('this is a cache breakpoint'))),
         assistant(t('continuing')),
       ];
       const { events, onEvent } = collectEvents();
-      const out = normalize(input, { onEvent });
+      normalize(input, { onEvent });
 
-      // Both events must fire.
-      const leadEv = events.find((e) => e.kind === 'leading_user_synthesized');
-      const cacheEv = events.find((e) => e.kind === 'cache_suppressed_for_synthetic') as
-        | { envelopeIndex: number }
-        | undefined;
-      expect(leadEv).toBeDefined();
-      expect(cacheEv).toBeDefined();
+      expect(events.map((e) => e.kind)).not.toContain('cache_suppressed_for_synthetic');
+      expect(events.some((e) => e.kind === 'synthetic_pending_result')).toBe(true);
+    });
 
-      // The cache-suppressed envelope index must point at an envelope
-      // actually containing a synthetic tool_result in the FINAL output.
-      const idx = cacheEv!.envelopeIndex;
-      expect(idx).toBeGreaterThanOrEqual(0);
-      expect(idx).toBeLessThan(out.messages.length);
-      const targetEnv = out.messages[idx]!;
-      const hasSyntheticPending = targetEnv.content.some(
-        (b) =>
-          b.type === 'tool_result' &&
-          (b as ProviderBlock & { content?: unknown }).content === '[pending]',
-      );
-      expect(hasSyntheticPending).toBe(true);
+    it('the synthetic payload is byte-stable across compiles', () => {
+      // The property the strip was defending against the absence of.
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(cached(t('this is a cache breakpoint'))),
+        assistant(t('continuing')),
+      ];
+      const first = normalize(input);
+      const second = normalize(input);
 
-      // And it must NOT point at the synthesized [continuing] user turn.
-      expect(targetEnv.role).toBe('user');
-      const isContinuing =
-        targetEnv.content.length === 1 &&
-        targetEnv.content[0]!.type === 'text' &&
-        (targetEnv.content[0] as ProviderBlock & { text: string }).text === '[continuing]';
-      expect(isContinuing).toBe(false);
+      expect(JSON.stringify(first.messages)).toBe(JSON.stringify(second.messages));
     });
 
     it('leaves cache_control alone when no synthetic was needed', () => {
-      const cached = (block: ProviderBlock): ProviderBlock => ({
-        ...block,
-        cache_control: { type: 'ephemeral' },
-      });
       const input: ProviderMessage[] = [
         user(cached(t('cache me'))),
         assistant(t('ok')),
       ];
-      const { events, onEvent } = collectEvents();
-      const out = normalize(input, { onEvent });
+      const out = normalize(input);
 
       const firstBlock = out.messages[0]!.content[0]! as ProviderBlock & { cache_control?: unknown };
       expect(firstBlock.cache_control).toBeDefined();
-      expect(events.some((e) => e.kind === 'cache_suppressed_for_synthetic')).toBe(false);
     });
   });
 
@@ -651,6 +628,1019 @@ describe('normalizeToolPairs', () => {
       expect(synth.is_error).toBe(false);
     });
   });
+
+  // --------------------------------------------------------------------------
+  // A synthetic [pending] belongs at its own tool_use's position.
+  // --------------------------------------------------------------------------
+
+  describe('synthetic placement follows call order', () => {
+    it('inserts the synthetic after the real result of an earlier call', () => {
+      // Two calls in one turn; the SECOND is unmatched. Unshifting the
+      // synthetic to position 0 put call #2's [pending] ahead of call #1's
+      // real result — wire-valid, but the model reads results in an order
+      // that does not match the order it made the calls.
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1'), u('ite2')),
+        user(r('ite1', 'zz-first landed')),
+      ];
+      const out = normalize(input);
+
+      const cycle = out.messages[2]!;
+      expect(resultIds(cycle.content)).toEqual(['ite1', 'ite2']);
+    });
+
+    it('still fronts the synthetic when the unmatched call came first', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1'), u('ite2')),
+        user(r('ite2', 'zz-second landed')),
+      ];
+      const out = normalize(input);
+
+      const cycle = out.messages[2]!;
+      expect(resultIds(cycle.content)).toEqual(['ite1', 'ite2']);
+    });
+
+    it('orders three synthetics among two landed results by call order', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1'), u('ite2'), u('ite3'), u('ite4'), u('ite5')),
+        user(r('ite2', 'zz-two landed'), r('ite4', 'zz-four landed')),
+      ];
+      const out = normalize(input);
+
+      const cycle = out.messages[2]!;
+      expect(resultIds(cycle.content)).toEqual(['ite1', 'ite2', 'ite3', 'ite4', 'ite5']);
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // A re-roled thinking block must never be welded into an assistant envelope
+  // that already holds a tool_use. rebuildEnvelopes opened a new envelope
+  // on ROLE change only, so a thinking block under a user message landed in
+  // the PREVIOUS assistant turn — signature and all — after its tool_use.
+  // --------------------------------------------------------------------------
+
+  describe('re-roled thinking is never welded after a tool_use', () => {
+    const signedThinking = (signature: string): ProviderBlock => ({
+      type: 'thinking',
+      thinking: 'zz-reasoning',
+      signature,
+    });
+    const redactedThinking = (data: string): ProviderBlock => ({
+      type: 'redacted_thinking',
+      data,
+    });
+
+    // Both reasoning variants, spelled out. `startsWith('thinking')` — the
+    // shape the guard itself once used — silently excludes
+    // `redacted_thinking`, so a detector written that way cannot see the
+    // very weld this block is here to forbid.
+    const isReasoningType = (type: string): boolean =>
+      type === 'thinking' || type === 'redacted_thinking';
+
+    /** Assistant envelopes holding a reasoning block positioned after a tool_use. */
+    function weldedEnvelopes(messages: ProviderMessage[]): number[] {
+      const welded: number[] = [];
+      for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i]!;
+        if (msg.role !== 'assistant') continue;
+        const types = blockTypes(msg);
+        const firstUse = types.indexOf('tool_use');
+        if (firstUse < 0) continue;
+        if (types.slice(firstUse).some(isReasoningType)) welded.push(i);
+      }
+      return welded;
+    }
+
+    it('opens a fresh envelope rather than appending past the previous turn tool_use', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(signedThinking('zz-sig-1'), u('ite1')),
+        user(signedThinking('zz-sig-2'), r('ite1')),
+      ];
+      const out = normalize(input);
+
+      expect(weldedEnvelopes(out.messages)).toEqual([]);
+
+      // The second signature must not have moved into the first turn.
+      const firstToolTurn = out.messages.find(
+        (m) => m.role === 'assistant' && useIds(m.content).includes('ite1'),
+      )!;
+      const signatures = firstToolTurn.content.map(
+        (b) => (b as ProviderBlock & { signature?: string }).signature,
+      );
+      expect(signatures).not.toContain('zz-sig-2');
+
+      // ...and must not be lost either.
+      const allSignatures = out.messages
+        .flatMap((m) => m.content)
+        .map((b) => (b as ProviderBlock & { signature?: string }).signature)
+        .filter(Boolean);
+      expect(allSignatures).toContain('zz-sig-2');
+    });
+
+    it('opens a fresh envelope for a re-roled redacted_thinking too', () => {
+      // The guard tested above keyed on `block.type.startsWith('thinking')`,
+      // which is false for `redacted_thinking` — the one reasoning variant
+      // whose payload is opaque, so a misattributed one cannot even be read
+      // back out of the transcript. Both strict reasoning variants must
+      // break the envelope.
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(signedThinking('zz-sig-1'), u('ite1')),
+        user(redactedThinking('zz-enc-2'), r('ite1')),
+      ];
+      const out = normalize(input);
+
+      expect(weldedEnvelopes(out.messages)).toEqual([]);
+
+      const firstToolTurn = out.messages.find(
+        (m) => m.role === 'assistant' && useIds(m.content).includes('ite1'),
+      )!;
+      expect(blockTypes(firstToolTurn)).not.toContain('redacted_thinking');
+
+      // Opaque payload preserved, not dropped in the course of moving it.
+      const allData = out.messages
+        .flatMap((m) => m.content)
+        .map((b) => (b as ProviderBlock & { data?: string }).data)
+        .filter(Boolean);
+      expect(allData).toContain('zz-enc-2');
+    });
+
+    it('survives mergeConsecutiveRoles for redacted_thinking as well', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(signedThinking('zz-sig-1'), u('ite1')),
+        user(redactedThinking('zz-enc-2'), r('ite1')),
+      ];
+      const merged = mergeConsecutiveRoles(normalize(input).messages) as ProviderMessage[];
+
+      expect(weldedEnvelopes(merged)).toEqual([]);
+    });
+
+    it.each([
+      { label: 'thinking', block: signedThinking('zz-sig-2') },
+      { label: 'redacted_thinking', block: redactedThinking('zz-enc-2') },
+    ])('opens a fresh envelope for $label in an assistant message after a call message', ({ block }) => {
+      // Two assistant messages in a row (the results between them lost):
+      // the second message's reasoning was appended past the first one's
+      // call with no re-roling at all.
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(signedThinking('zz-sig-1'), u('ite1')),
+        assistant(block, t('the next turn')),
+      ];
+      const out = normalize(input);
+      const merged = mergeConsecutiveRoles(out.messages) as ProviderMessage[];
+
+      expect(weldedEnvelopes(out.messages)).toEqual([]);
+      expect(weldedEnvelopes(merged)).toEqual([]);
+      expect(merged.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant']);
+      expect(blockTypes(merged[3]!)).toEqual([block.type, 'text']);
+    });
+
+    it("leaves a message's own reasoning after its own call where it was put", () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1'), signedThinking('zz-sig-1')),
+        user(r('ite1')),
+      ];
+      const out = normalize(input);
+      expect(out.messages).toEqual(input);
+    });
+
+    it('survives mergeConsecutiveRoles, which every callsite runs next', () => {
+      // A fresh envelope is only a repair if the merge that follows
+      // normalization at every wire boundary does not concatenate it straight
+      // back onto the tool_use turn.
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(signedThinking('zz-sig-1'), u('ite1')),
+        user(signedThinking('zz-sig-2'), r('ite1')),
+      ];
+      const merged = mergeConsecutiveRoles(normalize(input).messages) as ProviderMessage[];
+
+      expect(weldedEnvelopes(merged)).toEqual([]);
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // Orphan textification must not destroy structured content.
+  // --------------------------------------------------------------------------
+
+  describe('orphan textification preserves array-form content', () => {
+    const arrayResult = (id: string): ProviderBlock => ({
+      type: 'tool_result',
+      tool_use_id: id,
+      content: [
+        { type: 'text', text: 'zz-screenshot of the failing chart' },
+        {
+          type: 'image',
+          source: { type: 'base64', media_type: 'image/png', data: 'zzzz'.repeat(512) },
+        },
+      ],
+      is_error: false,
+    });
+
+    function orphanText(out: { messages: ProviderMessage[] }): string {
+      for (const msg of out.messages) {
+        for (const block of msg.content) {
+          const text = (block as ProviderBlock & { text?: string }).text ?? '';
+          if (block.type === 'text' && text.startsWith('[orphan tool_result')) return text;
+        }
+      }
+      throw new Error('no orphan textification found in output');
+    }
+
+    it('flattens text parts and image placeholders instead of emptying the payload', () => {
+      // `ToolResult.content` is `string | ToolResultContentBlock[]` and the
+      // array form is a first-class feature (tool-result-images). The old
+      // recovery was `typeof inner === 'string' ? inner : ''`, so every
+      // array-shaped orphan was replaced by the empty string, silently.
+      const input: ProviderMessage[] = [user(arrayResult('ite1')), assistant(t('ok'))];
+      const out = normalize(input);
+
+      const text = orphanText(out);
+      expect(text).toContain('zz-screenshot of the failing chart');
+      expect(text).toContain('[Image:');
+      expect(text).toContain('image/png');
+    });
+
+    it('reports the recovered length on the event so a drop can never be silent', () => {
+      const input: ProviderMessage[] = [user(arrayResult('ite1')), assistant(t('ok'))];
+      const { events, onEvent } = collectEvents();
+      normalize(input, { onEvent });
+
+      const ev = events.find((e) => e.kind === 'orphan_tool_result_textified') as
+        | { toolUseId: string; recoveredChars: number }
+        | undefined;
+      expect(ev).toBeDefined();
+      expect(ev!.toolUseId).toBe('ite1');
+      expect(ev!.recoveredChars).toBeGreaterThan('zz-screenshot of the failing chart'.length);
+    });
+
+    it('keeps the string-content path intact (control)', () => {
+      const input: ProviderMessage[] = [
+        user(r('ite2', 'zz-plain string payload')),
+        assistant(t('ok')),
+      ];
+      const { events, onEvent } = collectEvents();
+      const out = normalize(input, { onEvent });
+
+      expect(orphanText(out)).toContain('zz-plain string payload');
+      const ev = events.find((e) => e.kind === 'orphan_tool_result_textified') as
+        | { recoveredChars: number }
+        | undefined;
+      expect(ev!.recoveredChars).toBe('zz-plain string payload'.length);
+    });
+  });
+
+  describe('textification keeps what text can carry', () => {
+    const marker = { type: 'ephemeral', ttl: '1h' };
+    const orphanOf = (result: ProviderBlock): ProviderMessage[] => [user(result), assistant(t('ok'))];
+    const duplicateOf = (result: ProviderBlock): ProviderMessage[] => [
+      user(t('go')),
+      assistant(u('ite1')),
+      user(r('ite1', 'first'), result),
+    ];
+    const shapes = [
+      { label: 'an orphan', build: orphanOf, prefix: '[orphan tool_result for ite1' },
+      { label: 'a duplicate', build: duplicateOf, prefix: '[duplicate tool_result for ite1' },
+    ];
+    const resultWith = (fields: Record<string, unknown>): ProviderBlock => ({
+      type: 'tool_result',
+      tool_use_id: 'ite1',
+      is_error: false,
+      ...fields,
+    });
+
+    function textified(messages: ProviderMessage[], prefix: string): ProviderBlock {
+      const found = messages
+        .flatMap((m) => m.content)
+        .find((b) => b.type === 'text' && String((b as { text?: unknown }).text).startsWith(prefix));
+      if (!found) throw new Error(`no ${prefix} block in the output`);
+      return found;
+    }
+
+    describe.each(shapes)('$label', ({ build, prefix }) => {
+      it('keeps the result marker, TTL included', () => {
+        const input = build(resultWith({ content: 'payload', cache_control: marker }));
+        const before = structuredClone(input);
+        const out = normalize(input);
+        expect(textified(out.messages, prefix)).toEqual({
+          type: 'text',
+          text: `${prefix}]: payload`,
+          cache_control: marker,
+        });
+        expect(input).toEqual(before);
+      });
+
+      it('carries a marker from inside the content when the result has none', () => {
+        const input = build(resultWith({
+          content: [
+            { type: 'text', text: 'one', cache_control: { type: 'ephemeral' } },
+            { type: 'text', text: 'two', cache_control: marker },
+          ],
+        }));
+        const block = textified(normalize(input).messages, prefix);
+        expect(block.cache_control).toEqual(marker);
+        expect(block.text).toBe(`${prefix}]: one\ntwo`);
+      });
+
+      it('says when the result was an error', () => {
+        const input = build(resultWith({ content: 'it failed', is_error: true }));
+        expect(textified(normalize(input).messages, prefix).text).toBe(`${prefix}, an error]: it failed`);
+      });
+
+      it.each([
+        {
+          part: 'a url image',
+          content: [{ type: 'image', source: { type: 'url', url: 'https://zz.example/chart.png' } }],
+          expected: JSON.stringify({ type: 'image', source: { type: 'url', url: 'https://zz.example/chart.png' } }),
+        },
+        {
+          part: 'a base64 document',
+          content: [{ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: 'zzzz'.repeat(1024) } }],
+          expected: '[Document: application/pdf, ~3KB]',
+        },
+        {
+          part: 'a text document',
+          content: [{ type: 'document', source: { type: 'text', media_type: 'text/plain', data: 'zz-the text' } }],
+          expected: JSON.stringify({ type: 'document', source: { type: 'text', media_type: 'text/plain', data: 'zz-the text' } }),
+        },
+        {
+          part: 'an MCP-style image',
+          content: [{ type: 'image', data: 'zzzz'.repeat(1024), mimeType: 'image/jpeg' }],
+          expected: '[Image: image/jpeg, ~3KB]',
+        },
+        {
+          part: 'base64 audio',
+          content: [{ type: 'audio', source: { type: 'base64', mediaType: 'audio/mpeg', data: 'zzzz'.repeat(1024) } }],
+          expected: '[Audio: audio/mpeg, ~3KB]',
+        },
+        {
+          part: 'base64 video',
+          content: [{ type: 'video', source: { type: 'base64', mediaType: 'video/mp4', data: 'zzzz'.repeat(1024) } }],
+          expected: '[Video: video/mp4, ~3KB]',
+        },
+        {
+          part: 'a part type the module does not know',
+          content: [{ type: 'search_result', title: 'zz-title', source: 'zz-source' }],
+          expected: JSON.stringify({ type: 'search_result', title: 'zz-title', source: 'zz-source' }),
+        },
+        {
+          part: 'object content',
+          content: { rows: 2, ok: true },
+          expected: JSON.stringify({ rows: 2, ok: true }),
+        },
+        { part: 'numeric content', content: 42, expected: '42' },
+        { part: 'null content', content: null, expected: '' },
+      ])('renders $part without losing its payload', ({ content, expected }) => {
+        const { events, onEvent } = collectEvents();
+        const out = normalize(build(resultWith({ content })), { onEvent });
+        expect(textified(out.messages, prefix).text).toBe(`${prefix}]: ${expected}`);
+        const event = events.find((e) => 'recoveredChars' in e) as { recoveredChars: number };
+        expect(event.recoveredChars).toBe(expected.length);
+      });
+    });
+  });
+
+  describe('a result that names its call as toolUseId', () => {
+    it('leaves the normalizer naming it as tool_use_id, the field the wire pairs by', () => {
+      const camel = { type: 'tool_result', toolUseId: 'ite1', content: 'payload' } as ProviderBlock;
+      const input: ProviderMessage[] = [user(t('go')), assistant(u('ite1')), user(camel)];
+      const before = structuredClone(input);
+      const out = normalize(input);
+
+      expect(out.messages[2]!.content).toEqual([{ type: 'tool_result', tool_use_id: 'ite1', content: 'payload' }]);
+      expect(input).toEqual(before);
+    });
+
+    it('is unanswered as given to the public validator, as on the wire', () => {
+      const camel = { type: 'tool_result', toolUseId: 'ite1', content: 'payload' } as ProviderBlock;
+      expect(() => assertToolPairsValid([user(t('go')), assistant(u('ite1')), user(camel)])).toThrow(
+        /tool_use id='ite1' in message 1 has no matching tool_result/,
+      );
+    });
+  });
+
+  describe('the public validator reads turns as the provider does', () => {
+    it('accepts a call turn and a result turn each split across two messages', () => {
+      const split: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        assistant(u('ite2')),
+        user(r('ite1')),
+        user(r('ite2'), t('both done')),
+      ];
+      expect(() => assertToolPairsValid(split)).not.toThrow();
+    });
+
+    it('blames the history, not the normalizer, and names its messages', () => {
+      const cases: Array<{ input: ProviderMessage[]; pattern: RegExp }> = [
+        { input: [assistant(t('hi'))], pattern: /first message must have role 'user'/ },
+        { input: [user(r('ite1'))], pattern: /tool_result for id='ite1' in message 0 has no matching tool_use/ },
+      ];
+      for (const { input, pattern } of cases) {
+        let caught: unknown;
+        try {
+          assertToolPairsValid(input);
+        } catch (err) {
+          caught = err;
+        }
+        expect((caught as Error).message).toMatch(pattern);
+        expect((caught as Error).message).toContain('The history itself breaks the rule');
+        expect((caught as Error).message).not.toContain('bug in the normalizer');
+      }
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // The pairing invariant runs in BOTH directions. Every tool_result must
+  // have its tool_use in the immediately-preceding assistant envelope — the
+  // converse of the rule phases 3 and 5 already enforce forward.
+  // --------------------------------------------------------------------------
+
+  describe('converse pairing sweep', () => {
+    /** The invariant phases 3/5/validate never checked: result → preceding use. */
+    function converseViolations(messages: ProviderMessage[]): string[] {
+      const violations: string[] = [];
+      for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i]!;
+        if (msg.role !== 'user') continue;
+        for (const id of resultIds(msg.content)) {
+          const prev = messages[i - 1];
+          const paired = prev?.role === 'assistant' && useIds(prev.content).includes(id);
+          if (!paired) violations.push(`msg[${i}] tool_result id=${id} unpaired in msg[${i - 1}]`);
+        }
+      }
+      return violations;
+    }
+
+    it('shape A — out-of-order append: relocates the result to its own cycle', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(r('ite2', 'zz-second payload')),
+        assistant(u('ite2')),
+        user(r('ite1', 'zz-first payload')),
+      ];
+      const { events, onEvent } = collectEvents();
+      const out = normalize(input, { onEvent });
+
+      expect(converseViolations(out.messages)).toEqual([]);
+      // Relocation, not textification: the real payload must survive as a
+      // tool_result, and no fake [pending] should be synthesized for ite2.
+      const allResults = out.messages.flatMap((m) => m.content).filter((b) => b.type === 'tool_result');
+      const contents = allResults.map((b) => (b as ProviderBlock & { content?: unknown }).content);
+      expect(contents).toContain('zz-second payload');
+      expect(contents).toContain('zz-first payload');
+      expect(events.some((e) => e.kind === 'synthetic_pending_result')).toBe(false);
+    });
+
+    it('shape B — leading result: pairs it with its downstream tool_use', () => {
+      const input: ProviderMessage[] = [
+        user(r('ite1', 'zz-leading payload')),
+        assistant(u('ite1')),
+        assistant(t('done')),
+      ];
+      const out = normalize(input);
+
+      expect(converseViolations(out.messages)).toEqual([]);
+      const contents = out.messages
+        .flatMap((m) => m.content)
+        .filter((b) => b.type === 'tool_result')
+        .map((b) => (b as ProviderBlock & { content?: unknown }).content);
+      expect(contents).toContain('zz-leading payload');
+    });
+
+    it('shape C — duplicate result re-appended after a later turn: textified, not dropped', () => {
+      // The module's own doc names cancellations and stream restarts as
+      // normal triggers for this shape.
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(r('ite1', 'zz-real payload')),
+        assistant(t('thinking about it')),
+        user(r('ite1', 'zz-duplicate payload')),
+      ];
+      const { events, onEvent } = collectEvents();
+      const out = normalize(input, { onEvent });
+
+      expect(converseViolations(out.messages)).toEqual([]);
+      // Content preserved as text — never silently discarded.
+      const allText = out.messages
+        .flatMap((m) => m.content)
+        .map((b) => (b as ProviderBlock & { text?: string }).text ?? '')
+        .join('\n');
+      expect(allText).toContain('zz-duplicate payload');
+      const textified = events.find((e) => e.kind === 'stray_tool_result_textified') as {
+        reason: string;
+      };
+      expect(textified).toBeDefined();
+      // The cycle this result belongs to already holds its answer — distinct
+      // from a second copy arriving inside that same cycle envelope.
+      expect(textified.reason).toBe('cycle_closed');
+    });
+
+    it('relocates two strays into the cycle in CALL order, not reversed', () => {
+      // Relocation repeatedly unshifted, so each relocated result landed in
+      // front of the one before it: calls [ite1, ite2] came back as results
+      // [ite2, ite1] — the same read-order defect F18 removed from synthetic
+      // placement, reintroduced by the converse sweep.
+      const input: ProviderMessage[] = [
+        user(t('go'), r('ite1', 'zz-first payload'), r('ite2', 'zz-second payload')),
+        assistant(u('ite1'), u('ite2')),
+        user(t('zz-after')),
+      ];
+      const out = normalize(input);
+
+      expect(converseViolations(out.messages)).toEqual([]);
+      const cycle = out.messages.find((m) => resultIds(m.content).length === 2)!;
+      expect(resultIds(cycle.content)).toEqual(['ite1', 'ite2']);
+    });
+
+    it('orders relocated strays by call position even when they arrive scrambled', () => {
+      // Source order of the strays must not decide the outcome: the call
+      // sequence does. Here ite2 already sits in its cycle and the strays
+      // arrive [ite3, ite1], so a fix that merely appends instead of
+      // unshifting still gets this one wrong.
+      const input: ProviderMessage[] = [
+        user(t('go'), r('ite3', 'zz-third payload'), r('ite1', 'zz-first payload')),
+        assistant(u('ite1'), u('ite2'), u('ite3')),
+        user(r('ite2', 'zz-second payload')),
+      ];
+      const { events, onEvent } = collectEvents();
+      const out = normalize(input, { onEvent });
+
+      expect(converseViolations(out.messages)).toEqual([]);
+      const cycle = out.messages.find((m) => resultIds(m.content).length === 3)!;
+      expect(resultIds(cycle.content)).toEqual(['ite1', 'ite2', 'ite3']);
+      // Real payloads relocated, nothing synthesized over them.
+      expect(events.some((e) => e.kind === 'synthetic_pending_result')).toBe(false);
+    });
+
+    it('reports relocation direction on the event: phase 3 pulls back, the converse sweep pushes down', () => {
+      // Both directions in one transcript. Phase 3 hoists ite1 back from a
+      // downstream envelope into its own cycle (fromEnvelope > toEnvelope);
+      // the converse sweep then pushes ite2 down out of the envelope it was
+      // appended to, into its own later cycle (fromEnvelope < toEnvelope).
+      // The event's index pair is the only thing telemetry can read the
+      // direction off, so it is asserted rather than described.
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(r('ite2', 'zz-second payload')),
+        assistant(u('ite2')),
+        user(r('ite1', 'zz-first payload')),
+      ];
+      const { events, onEvent } = collectEvents();
+      normalize(input, { onEvent });
+
+      const hoists = events.filter((e) => e.kind === 'tool_result_hoisted') as Array<{
+        toolUseId: string;
+        fromEnvelope: number;
+        toEnvelope: number;
+      }>;
+      const pullBack = hoists.find((e) => e.toolUseId === 'ite1')!;
+      const pushDown = hoists.find((e) => e.toolUseId === 'ite2')!;
+
+      expect(pullBack.fromEnvelope).toBeGreaterThan(pullBack.toEnvelope);
+      expect(pushDown.fromEnvelope).toBeLessThan(pushDown.toEnvelope);
+    });
+
+    it('a well-formed transcript passes, with no converse violations', () => {
+      // Guards the repair itself. If a future phase reintroduces an unpaired
+      // tool_result, validate must fail loudly rather than ship a 400.
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(r('ite1')),
+      ];
+      expect(() => normalize(input)).not.toThrow();
+      expect(converseViolations(normalize(input).messages)).toEqual([]);
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // Pairing is ONE-TO-ONE, not membership. Every matching site asked
+  // `.has(id)` and never consumed the id, so an envelope holding two results
+  // for one call passed the converse sweep, the interloper pass AND validation
+  // on its way to the provider, which either rejects the request or picks one
+  // of the two results by rules Membrane does not control.
+  // --------------------------------------------------------------------------
+
+  describe('duplicate results for one call', () => {
+    it('pairs the first result and textifies the second with provenance', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(r('ite1', 'zz-real payload'), r('ite1', 'zz-duplicate payload')),
+      ];
+      const { events, onEvent } = collectEvents();
+      const out = normalize(input, { onEvent });
+
+      const cycle = out.messages[2]!;
+      // Exactly one tool_result survives, and it is the FIRST one — the
+      // duplicate never displaces the result that paired.
+      expect(resultIds(cycle.content)).toEqual(['ite1']);
+      const survivor = cycle.content.find((b) => b.type === 'tool_result') as ProviderBlock & {
+        content?: unknown;
+      };
+      expect(survivor.content).toBe('zz-real payload');
+      // The duplicate's payload survives as text, with provenance naming it.
+      const cycleText = cycle.content
+        .map((b) => (b as ProviderBlock & { text?: string }).text ?? '')
+        .join('\n');
+      expect(cycleText).toContain('[duplicate tool_result for ite1]: zz-duplicate payload');
+      const textified = events.find((e) => e.kind === 'stray_tool_result_textified') as {
+        toolUseId: string;
+        reason: string;
+        recoveredChars: number;
+      };
+      expect(textified.toolUseId).toBe('ite1');
+      expect(textified.reason).toBe('duplicate_in_cycle');
+      expect(textified.recoveredChars).toBe('zz-duplicate payload'.length);
+      // Nothing was synthesized over a result that actually landed.
+      expect(events.some((e) => e.kind === 'synthetic_pending_result')).toBe(false);
+    });
+
+    it('consumes per id: a second envelope-mate for another call is untouched', () => {
+      // Pin. Consumption must key on the id, not on "one result per envelope":
+      // a two-call turn answered by two distinct results is the normal shape.
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1'), u('ite2')),
+        user(r('ite1', 'zz-first payload'), r('ite2', 'zz-second payload')),
+      ];
+      const { events, onEvent } = collectEvents();
+      const out = normalize(input, { onEvent });
+
+      expect(out.messages).toEqual(input);
+      expect(events).toEqual([]);
+    });
+
+    it('textifies every copy after the first when a call is answered three times', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(
+          r('ite1', 'zz-real payload'),
+          r('ite1', 'zz-duplicate payload'),
+          r('ite1', 'zz-third payload'),
+        ),
+      ];
+      const { events, onEvent } = collectEvents();
+      const out = normalize(input, { onEvent });
+
+      const cycle = out.messages[2]!;
+      expect(resultIds(cycle.content)).toEqual(['ite1']);
+      const cycleText = cycle.content
+        .map((b) => (b as ProviderBlock & { text?: string }).text ?? '')
+        .join('\n');
+      expect(cycleText).toContain('zz-duplicate payload');
+      expect(cycleText).toContain('zz-third payload');
+      expect(events.filter((e) => e.kind === 'stray_tool_result_textified')).toHaveLength(2);
+    });
+  });
+
+  describe('validate asserts exactly-one on its own', () => {
+    it('refuses a hand-built duplicate injected past every repair phase', () => {
+      // The sweep's consumption and the validator's assertion must be
+      // independent: if the only reason validation passes is that no phase
+      // produces a duplicate, the validator's contract is a claim about the
+      // sweep. So the duplicate is built by hand, downstream of normalize.
+      const clean = normalize([
+        user(t('go')),
+        assistant(u('ite1')),
+        user(r('ite1', 'zz-real payload')),
+      ]);
+      expect(() => assertToolPairsValid(clean.messages)).not.toThrow();
+
+      const injected: ProviderMessage[] = clean.messages.map((msg, i) =>
+        i === 2 ? { role: 'user', content: [...msg.content, r('ite1', 'zz-injected duplicate')] } : msg,
+      );
+      expect(() => assertToolPairsValid(injected)).toThrow(MembraneNormalizerError);
+      expect(() => assertToolPairsValid(injected)).toThrow(/appears 2 times in message 2/);
+    });
+
+    it('still refuses an unpaired result, and passes a well-formed list', () => {
+      const stray: ProviderMessage[] = [user(t('go')), user(r('ite1', 'zz-unpaired payload'))];
+      expect(() => assertToolPairsValid(stray)).toThrow(MembraneNormalizerError);
+
+      const paired: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1'), u('ite2')),
+        user(r('ite1', 'zz-first payload'), r('ite2', 'zz-second payload')),
+      ];
+      expect(() => assertToolPairsValid(paired)).not.toThrow();
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // Phase 3's hoist had the same front-insertion defect as the converse sweep
+  // above, and predates this branch. Found while reproducing that one.
+  // --------------------------------------------------------------------------
+
+  describe('phase 3 hoist preserves call order', () => {
+    it('hoists a bundled pair into the cycle as [ite1, ite2], not reversed', () => {
+      // Both results live downstream of their cycle, so phase 3 pulls them
+      // back — one unshift each, which reversed the pair.
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1'), u('ite2')),
+        user(t('zz-interlude')),
+        assistant(t('zz-ok')),
+        user(r('ite1', 'zz-first payload'), r('ite2', 'zz-second payload')),
+      ];
+      const out = normalize(input);
+
+      const cycle = out.messages.find((m) => resultIds(m.content).length === 2)!;
+      expect(resultIds(cycle.content)).toEqual(['ite1', 'ite2']);
+    });
+
+    it('threads hoisted results around one that already landed', () => {
+      // ite2's result is already in the cycle; ite1 and ite3 are hoisted in
+      // around it, and must land on either side of it by call position.
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1'), u('ite2'), u('ite3')),
+        user(r('ite2', 'zz-second payload')),
+        assistant(t('zz-ok')),
+        user(r('ite3', 'zz-third payload'), r('ite1', 'zz-first payload')),
+      ];
+      const { events, onEvent } = collectEvents();
+      const out = normalize(input, { onEvent });
+
+      const cycle = out.messages.find((m) => resultIds(m.content).length === 3)!;
+      expect(resultIds(cycle.content)).toEqual(['ite1', 'ite2', 'ite3']);
+      expect(events.some((e) => e.kind === 'synthetic_pending_result')).toBe(false);
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // Entry guards. A producer defect must refuse BEFORE any phase rebuilds
+  // envelopes, so the failure is typed, early, and independent of whether the
+  // input happened to need repair. (Review findings F14, F15a, F16.)
+  // --------------------------------------------------------------------------
+
+  describe('entry guard — pendingToolCallIds must be set-like', () => {
+    it('refuses an array even when the transcript needs no repair', () => {
+      // The sharp part of the original bug: `.has()` is only reached for an
+      // unmatched tool_use, so an array sailed through every well-formed
+      // transcript and threw mid-pipeline, untyped, the first time the net
+      // was actually load-bearing. This input is well-formed on purpose.
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(r('ite1')),
+      ];
+
+      expect(() =>
+        normalizeToolPairs(input, {
+          // Deliberate contract violation: a Set cannot survive a JSON
+          // round-trip, so config-driven callers reach for an array.
+          pendingToolCallIds: ['ite1'] as unknown as ReadonlySet<string>,
+        }),
+      ).toThrow(MembraneNormalizerError);
+    });
+
+    it('names the option and the received shape in the refusal', () => {
+      const input: ProviderMessage[] = [user(t('go'))];
+      let caught: unknown;
+      try {
+        normalizeToolPairs(input, {
+          pendingToolCallIds: ['ite1', 'ite2'] as unknown as ReadonlySet<string>,
+        });
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(MembraneNormalizerError);
+      expect((caught as Error).message).toContain('pendingToolCallIds');
+      expect((caught as Error).message).toContain('Array(2)');
+    });
+
+    it.each([
+      { label: 'a Set of numbers', value: new Set([1]), shape: 'Set holding number' },
+      { label: 'a Map', value: new Map([['ite1', true]]), shape: 'Map holding Array(2)' },
+    ])('refuses $label, whose .has(id) never matches a string id', ({ value, shape }) => {
+      // Accepted, it would answer every .has(id) with false: the in-flight
+      // call would get a fabricated [pending] and ready would stay true.
+      const input: ProviderMessage[] = [user(t('go')), assistant(u('ite1'))];
+      expect(() =>
+        normalizeToolPairs(input, { pendingToolCallIds: value as unknown as ReadonlySet<string> }),
+      ).toThrow(shape);
+    });
+
+    it('reads a null set as none pending, as an absent one', () => {
+      const input: ProviderMessage[] = [user(t('go')), assistant(u('ite1'))];
+      const out = normalize(input, { pendingToolCallIds: null as unknown as ReadonlySet<string> });
+      expect(out.ready).toBe(true);
+      expect(resultIds(out.messages[2]!.content)).toEqual(['ite1']);
+    });
+
+    it('holds back a pending call wherever it sits, not only a trailing one', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(t('meanwhile')),
+        assistant(t('still working')),
+        user(t('any news?')),
+      ];
+      const { events, onEvent } = collectEvents();
+      const out = normalize(input, { pendingToolCallIds: new Set(['ite1']), onEvent });
+
+      expect(out.ready).toBe(false);
+      expect(events).toContainEqual({ kind: 'pending_in_flight', toolUseId: 'ite1' });
+      expect(out.messages.flatMap((m) => resultIds(m.content))).toEqual([]);
+    });
+
+    it('accepts a real Set; a call it names that already has its result leaves the request ready', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(r('ite1')),
+      ];
+      const out = normalize(input, { pendingToolCallIds: new Set(['ite1']) });
+      expect(out.ready).toBe(true);
+    });
+  });
+
+  describe('ids reused across turns pair by position', () => {
+    // The API accepts one id in two turns (each result pairs with the call
+    // right before it) and refuses two calls sharing an id in one turn, so
+    // the normalizer pairs by position and refuses only the latter.
+    function resultText(out: { messages: ProviderMessage[] }, index: number): string[] {
+      return out.messages[index]!.content.map((b) => {
+        const block = b as ProviderBlock & { text?: string; content?: string };
+        return block.type === 'tool_result' ? `result:${block.content}` : `text:${block.text}`;
+      });
+    }
+
+    it('passes a well-formed history that reuses one id across two turns unchanged', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(r('ite1', 'first landed')),
+        assistant(u('ite1')),
+        user(r('ite1', 'second landed')),
+      ];
+      const before = structuredClone(input);
+      const { events, onEvent } = collectEvents();
+      const out = normalize(input, { onEvent });
+
+      expect(out.messages).toEqual(before);
+      expect(events).toEqual([]);
+      expect(() => assertToolPairsValid(input)).not.toThrow();
+    });
+
+    it('gives a stranded earlier call its own [pending], never the later call\'s result', () => {
+      // Phase 3 hoisted the FIRST match downstream, so the later call's real
+      // result answered the earlier call and the later call got [pending].
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(t('meanwhile')),
+        assistant(u('ite1')),
+        user(r('ite1', 'second landed')),
+      ];
+      const out = normalize(input);
+
+      expect(resultText(out, 2)).toEqual(['result:[pending]', 'text:meanwhile']);
+      expect(resultText(out, 4)).toEqual(['result:second landed']);
+    });
+
+    it('never hands a copy of an earlier call\'s result to a later call that reuses the id', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(r('ite1', 'first landed')),
+        assistant(t('next')),
+        user(r('ite1', 'a copy of the first')),
+        assistant(u('ite1')),
+        user(t('waiting')),
+      ];
+      const { events, onEvent } = collectEvents();
+      const out = normalize(input, { onEvent });
+
+      // The copy follows the first call, whose cycle is answered: a duplicate.
+      expect(resultText(out, 4)).toEqual(['text:[duplicate tool_result for ite1]: a copy of the first']);
+      expect(events).toContainEqual(
+        expect.objectContaining({ kind: 'stray_tool_result_textified', reason: 'cycle_closed' }),
+      );
+      // The later call gets [pending], not the copy.
+      expect(resultText(out, 6)).toEqual(['result:[pending]', 'text:waiting']);
+    });
+
+    it('a result written before every call with its id answers the first of them', () => {
+      const input: ProviderMessage[] = [
+        user(t('go'), r('ite1', 'early')),
+        assistant(u('ite1')),
+        user(t('hi')),
+        assistant(u('ite1')),
+        user(r('ite1', 'second landed')),
+      ];
+      const out = normalize(input);
+
+      expect(resultText(out, 2)).toEqual(['result:early', 'text:hi']);
+      expect(resultText(out, 4)).toEqual(['result:second landed']);
+    });
+
+    it('names the id shared by two calls in one turn', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite7'), u('ite7')),
+      ];
+      let caught: unknown;
+      try {
+        normalize(input);
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(MembraneNormalizerError);
+      expect((caught as Error).message).toContain("share the id 'ite7'");
+    });
+
+    it('refuses two consecutive assistant messages that share an id, since they form one turn', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        assistant(u('ite1')),
+        user(r('ite1'), r('ite1')),
+      ];
+      expect(() => normalize(input)).toThrow(/share the id 'ite1'/);
+      expect(() => assertToolPairsValid(input)).toThrow(/turn \(messages 1–2\) share the id 'ite1'/);
+    });
+
+    it('leaves distinct ids alone', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(r('ite1')),
+        assistant(u('ite2')),
+        user(r('ite2')),
+      ];
+      expect(normalize(input).ready).toBe(true);
+    });
+  });
+
+  describe('entry guard — message content shape', () => {
+    it('refuses object-shaped content instead of writing "[object Object]" to the wire', () => {
+      const input = [
+        { role: 'user', content: { zz_not_a_block_array: true } },
+      ] as unknown as ProviderMessage[];
+
+      expect(() => normalize(input)).toThrow(MembraneNormalizerError);
+    });
+
+    it('still accepts plain-string content as a single text block', () => {
+      const input = [
+        { role: 'user', content: 'plain string turn' },
+      ] as unknown as ProviderMessage[];
+
+      const out = normalize(input);
+      expect(out.messages[0]!.content).toEqual([{ type: 'text', text: 'plain string turn' }]);
+    });
+
+    it.each([null, undefined])('treats %s content as an empty block list', (content) => {
+      // The old String(msg.content ?? '') made it empty text, which the
+      // empty-text strip then dropped, so such histories sent.
+      const input = [
+        user(t('go')),
+        { role: 'assistant', content },
+        user(t('more')),
+      ] as unknown as ProviderMessage[];
+      const out = normalize(input);
+      expect(out.messages).toEqual([user(t('go'), t('more'))]);
+      expect(() => assertToolPairsValid(input)).not.toThrow();
+    });
+
+    it.each([
+      { label: 'a null message', message: null, pattern: /Message 1 is null/ },
+      { label: 'a system message', message: { role: 'system', content: 'rules' }, pattern: /Message 1 is a message with role 'system'/ },
+      { label: 'a message without a role', message: { content: 'hi' }, pattern: /Message 1 is a message whose role is undefined/ },
+      { label: 'a null block', message: { role: 'user', content: [null] }, pattern: /Message 1 \(role 'user'\) block 0 is null/ },
+      { label: 'a string block', message: { role: 'user', content: ['hi'] }, pattern: /block 0 is string/ },
+      { label: 'a block without a string type', message: { role: 'user', content: [{ type: 7 }] }, pattern: /block 0 is an object whose type is number/ },
+      { label: 'a tool_use without an id', message: { role: 'assistant', content: [{ type: 'tool_use', name: 'fn', input: {} }] }, pattern: /block 0 is a tool_use whose id is undefined/ },
+      { label: 'a tool_use with a numeric id', message: { role: 'assistant', content: [{ type: 'tool_use', id: 7, name: 'fn', input: {} }] }, pattern: /tool_use whose id is number/ },
+    ])('refuses $label at entry, typed, from both entry points', ({ message, pattern }) => {
+      const input = [user(t('go')), message] as unknown as ProviderMessage[];
+      for (const run of [() => normalize(input), () => assertToolPairsValid(input)]) {
+        let caught: unknown;
+        try {
+          run();
+        } catch (err) {
+          caught = err;
+        }
+        expect(caught).toBeInstanceOf(MembraneNormalizerError);
+        expect(caught).toMatchObject({ type: 'invalid_request', retryable: false });
+        expect((caught as Error).message).toMatch(pattern);
+      }
+    });
+  });
 });
 
 /**
@@ -665,6 +1655,7 @@ describe('PREFIX_REWRITING_NORMALIZE_EVENT_KINDS', () => {
   it('holds exactly the repairs that rewrite prefix bytes', () => {
     expect([...PREFIX_REWRITING_NORMALIZE_EVENT_KINDS].sort()).toEqual([
       'orphan_tool_result_textified',
+      'stray_tool_result_textified',
       'synthetic_pending_result',
     ]);
   });
@@ -675,7 +1666,6 @@ describe('PREFIX_REWRITING_NORMALIZE_EVENT_KINDS', () => {
       'tool_result_hoisted',
       'interloper_deferred',
       'pending_in_flight',
-      'cache_suppressed_for_synthetic',
       'leading_user_synthesized',
     ];
     for (const kind of envelopeOnly) {

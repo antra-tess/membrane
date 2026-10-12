@@ -98,6 +98,7 @@ class NativeToolAdapter implements ProviderAdapter {
 }
 
 const REQUEST: NormalizedRequest = {
+  toolMode: 'xml',
   messages: [{ participant: 'User', content: [{ type: 'text', text: 'zz hello' }] }],
   config: { model: 'zz-model', maxTokens: 100 },
 };

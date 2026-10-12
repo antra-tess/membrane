@@ -5,6 +5,7 @@
 // Export formatter-specific types only (avoid duplicates with types/streaming.js)
 export type {
   PrefillFormatter,
+  ContentParseContext,
   StreamParser,
   FormatterConfig,
   BuildOptions,
@@ -24,6 +25,7 @@ export { CompletionsFormatter, type CompletionsFormatterConfig } from './complet
 
 export {
   normalizeToolPairs,
+  assertToolPairsValid,
   MembraneNormalizerError,
   type NormalizeOptions,
   type NormalizeResult,

@@ -178,12 +178,12 @@ describe('Temperature enforcement for thinking', () => {
   it('drops API thinking param for prefill-style builds (XML formatter)', async () => {
     let capturedRequest: any;
     const adapter = new MockAdapter({ defaultResponse: 'Hello' });
-    // Default AnthropicXmlFormatter — produces an assistant prefill, which the
-    // API rejects in combination with extended thinking. The thinking config
-    // still drives the literal <thinking> text prefix; only the API param is dropped.
+    // Explicit XML produces an assistant prefill. Its thinking configuration
+    // drives the literal <thinking> prefix rather than a second API channel.
     const membrane = new Membrane(adapter);
 
     const request = makeRequest({
+      toolMode: 'xml',
       config: {
         model: 'claude-sonnet-4-5-20250929',
         maxTokens: 4096,

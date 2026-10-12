@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { NativeFormatter } from '../../src/formatters/native.js';
 import { CompletionsFormatter } from '../../src/formatters/completions.js';
 import { Membrane } from '../../src/membrane.js';
@@ -16,7 +18,7 @@ describe('NativeFormatter nameFormat compatibility', () => {
     const fixture = join(directory, 'consumer.mts');
     try {
       writeFileSync(fixture, [
-        'import { NativeFormatter } from ' + JSON.stringify(resolve('src/formatters/native.js')) + ';',
+        'import { NativeFormatter } from ' + JSON.stringify(fileURLToPath(new URL('../../src/formatters/native.js', import.meta.url))) + ';',
         'class CustomFormatter extends NativeFormatter {',
         '  override readonly nameFormat = "[{name}] ";',
         '}',
@@ -24,10 +26,14 @@ describe('NativeFormatter nameFormat compatibility', () => {
         'formatter.buildMessages([], { participantMode: "multiuser", assistantParticipant: "Assistant" });',
       ].join('\n'));
       const compilation = spawnSync(process.execPath, [
-        resolve('node_modules/typescript/bin/tsc'), '--noEmit', '--strict', '--noImplicitOverride',
+        createRequire(import.meta.url).resolve('typescript/bin/tsc'), '--noEmit', '--strict', '--noImplicitOverride',
         '--skipLibCheck', '--target', 'ES2022', '--module', 'NodeNext', '--moduleResolution', 'NodeNext',
         fixture,
-      ], { encoding: 'utf8' });
+      ], {
+        encoding: 'utf8',
+        // tsc also discovers ambient @types from its working directory.
+        cwd: fileURLToPath(new URL('../../', import.meta.url)),
+      });
       expect(compilation.error).toBeUndefined();
       expect(compilation.status, compilation.stdout + compilation.stderr).toBe(0);
     } finally {
