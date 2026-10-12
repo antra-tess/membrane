@@ -88,8 +88,12 @@ export class YieldingStreamImpl implements YieldingStream {
   ) {
     this.abortController = new AbortController();
 
-    // Link external signal if provided
-    if (options.signal) {
+    // Link the caller's signal. One that has already fired never dispatches
+    // 'abort' again, so it cancels here: the consumer gets one aborted event
+    // and no provider call is made.
+    if (options.signal?.aborted) {
+      this.cancel();
+    } else if (options.signal) {
       options.signal.addEventListener('abort', this.onExternalAbort, { once: true });
     }
   }

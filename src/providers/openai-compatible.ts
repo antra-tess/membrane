@@ -641,6 +641,8 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   }
 
   private mapFinishReason(reason: string | undefined): string {
+    // No reason (or a server's null) is a plain end of turn.
+    if (reason == null) return 'end_turn';
     switch (reason) {
       case 'stop':
         return 'end_turn';
@@ -651,7 +653,10 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       case 'content_filter':
         return 'refusal';
       default:
-        return 'end_turn';
+        // Unrecognized reasons ('error', a compatible server's own token)
+        // travel as the provider's own token, so membrane's mapper discloses
+        // and logs them instead of reading a clean end_turn.
+        return reason;
     }
   }
 

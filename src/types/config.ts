@@ -6,7 +6,7 @@ import type { ModelRegistry } from './provider.js';
 import type { ErrorInfo } from './errors.js';
 import type { NormalizedRequest } from './request.js';
 import type { NormalizedResponse } from './response.js';
-import type { PrefillFormatter } from '../formatters/types.js';
+import type { NormalizeEvent, PrefillFormatter } from '../formatters/types.js';
 
 // ============================================================================
 // Retry Config
@@ -142,6 +142,21 @@ export interface MembraneHooks {
     error: ErrorInfo,
     attempt: number
   ) => 'retry' | 'abort' | Promise<'retry' | 'abort'>;
+
+  /**
+   * Called with each repair the formatter's tool-pair normalization makes
+   * while building a request (see `NormalizeEvent`), including a stray or
+   * duplicate tool result turned into text, whose `recoveredChars` says how
+   * much of it the model now reads as text. It runs synchronously inside the
+   * build, once per event of every build: each attempt and each tool-loop
+   * round rebuilds, so a repair the history keeps needing is reported each
+   * time. A hook that throws fails the build, before anything is sent. A
+   * promise it returns isn't awaited, so its rejection is the caller's to
+   * handle. Only NativeFormatter's builds normalize, AnthropicXmlFormatter's
+   * native mode included; the XML, completions and Responses builds report
+   * none.
+   */
+  onNormalize?: (event: NormalizeEvent) => void;
 }
 
 // ============================================================================

@@ -138,6 +138,27 @@ describe('retry-after is read from the response headers', () => {
     expect(error.providerErrorCode).toBe('rate_limit_exceeded');
   });
 
+  it('reads an HTTP-date retry-after as the time until that date', async () => {
+    const at = new Date(Date.now() + 30_000).toUTCString();
+    stubHttpFailure(429, { error: { message: 'zz-rate limit reached', type: 'rate_limit_error' } }, { 'retry-after': at });
+    const error = await captureCompleteError(openai());
+    // toUTCString keeps whole seconds, so the wait is within the last second.
+    expect(error.retryAfterMs).toBeGreaterThan(28_000);
+    expect(error.retryAfterMs).toBeLessThanOrEqual(30_000);
+  });
+
+  it('reads an HTTP-date already past as a wait of 0', async () => {
+    stubHttpFailure(429, { error: { message: 'zz-rate limit reached', type: 'rate_limit_error' } }, { 'retry-after': 'Wed, 21 Oct 2015 07:28:00 GMT' });
+    expect((await captureCompleteError(openai())).retryAfterMs).toBe(0);
+  });
+
+  it("reads a body's retry_after_ms whether it is a number or a digit string", async () => {
+    for (const value of [700, '700']) {
+      stubHttpFailure(429, { error: { message: 'zz-rate limit reached', type: 'rate_limit_error', retry_after_ms: value } });
+      expect((await captureCompleteError(openai())).retryAfterMs).toBe(700);
+    }
+  });
+
   it("reads google's body retryDelay when no header is present", async () => {
     stubHttpFailure(429, {
       error: {
@@ -348,5 +369,19 @@ describe('classifyError stays the last resort for non-HTTP throwables', () => {
 
   it('still classifies a genuine network failure', () => {
     expect(classifyError(new Error('ECONNRESET while reading socket')).type).toBe('network');
+  });
+});
+
+describe('the status-less rate-limit pattern reads whole words', () => {
+  it('does not take "moderate limit" or "generate limit" for a rate limit', () => {
+    for (const message of ['zz the moderate limit for this field was reached', 'zz could not generate limit report']) {
+      expect(classifyError(new Error(message)).type).not.toBe('rate_limit');
+    }
+  });
+
+  it('still reads a rate limit however it is spelled (control)', () => {
+    for (const message of ['zz rate limit reached', 'zz error: user_rate_limit', 'zz x-ratelimit-remaining: 0', 'zz RateLimitError']) {
+      expect(classifyError(new Error(message))).toMatchObject({ type: 'rate_limit', retryable: true });
+    }
   });
 });

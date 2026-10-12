@@ -699,8 +699,11 @@ export class GeminiAdapter implements ProviderAdapter {
     promptFeedback: GeminiResponse['promptFeedback']
   ): string {
     const promptBlockReason = sawCandidateData ? undefined : promptFeedback?.blockReason;
+    // A prompt blocked before generation is a refusal whatever reason Google
+    // gives (SAFETY, OTHER, BLOCKLIST, BLOCK_REASON_UNSPECIFIED, ...): nothing
+    // was generated. providerStopReason keeps the reason itself.
     return promptBlockReason !== undefined
-      ? this.mapFinishReason(promptBlockReason)
+      ? 'refusal'
       : this.mapFinishReason(candidateFinishReason);
   }
 
@@ -726,8 +729,9 @@ export class GeminiAdapter implements ProviderAdapter {
         return 'end_turn';
       // MALFORMED_FUNCTION_CALL, LANGUAGE, OTHER and anything Google adds
       // next have no membrane member; they travel as the provider's own
-      // token, which membrane discloses on details.stop.providerReason and
-      // logs, instead of vanishing into end_turn.
+      // token. Membrane normalizes it to end_turn, since callers switch on a
+      // closed union, and discloses it on details.stop.providerReason and in
+      // a log line, so it doesn't pass for a clean end silently.
       default:
         return reason;
     }

@@ -27,7 +27,7 @@ await membrane.stream({
 
 The native and XML paths intentionally produce different request bytes and cache prefixes. Native response text remains text, including XML-looking examples. XML tool decoding, closing-tag reconstruction, and XML diagnostics require a selected XML-capable formatter in XML mode. Plain CompletionsFormatter output follows its own text parser, including final and aborted stream content. To retain the old textual-tool fallback from native `complete()`, select an XML-capable formatter and `toolMode: 'xml'`. Native mode preserves caller-authored assistant-ended history; it does not append an invented user turn or silently re-role that history to satisfy a provider restriction.
 
-Provider block types keep streamed thinking out of a plain formatter’s text parser. Thinking chunks carry non-visible metadata. Received thinking snapshots, signatures, and redacted blocks remain typed in final and partial content. The plain formatter parses visible text spans between those blocks with whole-response context, so internal spaces and newlines retain their positions. Its `rawAssistantText` contains text rather than native thinking or synthetic XML wrappers. Native aborted responses also expose observed `partialContent`, including completed rounds and the current text/thinking prefix; their raw chunk accumulation is unchanged. Explicit XML retains its tagged parser and continuation behavior.
+Provider block types keep streamed thinking out of a plain formatter’s text parser. Thinking chunks carry non-visible metadata. Received thinking snapshots, signatures, and redacted blocks remain typed in final and partial content. The plain formatter parses visible text spans between those blocks with whole-response context, so internal spaces and newlines retain their positions. Its `rawAssistantText` contains text rather than native thinking or synthetic XML wrappers. Native streams hold the same visible text in `rawAssistantText`, and in a tool round's `preamble` and `accumulated`, while thinking stays in typed content. Native aborted responses also expose observed `partialContent`, including completed rounds and what the current round received: its text and thinking, and each block the provider finished. Explicit XML retains its tagged parser and continuation behavior.
 
 ## Available formatters
 
@@ -159,7 +159,14 @@ Custom response parsers receive `parseContentBlocks(content, tools?, context?)`.
 Implement `PrefillFormatter` and declare both carrier flags as booleans. Missing declarations in JavaScript produce an explicit diagnostic; absence does not silently select XML. `usesPrefill` describes parser seeding, not an exemption from a transport's prefill restriction.
 
 ```typescript
-import type { PrefillFormatter, BuildOptions, BuildResult, ContentParseContext, ToolDefinition } from '@animalabs/membrane';
+import type {
+	BuildOptions, BuildResult, ContentBlock, ContentParseContext, NormalizedMessage,
+	PrefillFormatter, StreamParser, ToolCall, ToolDefinition, ToolResult,
+} from '@animalabs/membrane';
+
+// Your representation's request encoding and incremental parser.
+declare function encode(messages: NormalizedMessage[], options: BuildOptions): BuildResult;
+declare function createParser(): StreamParser;
 
 class CustomFormatter implements PrefillFormatter {
 	readonly name = 'custom';
@@ -167,22 +174,22 @@ class CustomFormatter implements PrefillFormatter {
 	readonly supportsNativeTools = false;
 	readonly supportsXmlTools = true;
 
-	buildMessages(messages, options: BuildOptions): BuildResult {
+	buildMessages(messages: NormalizedMessage[], options: BuildOptions): BuildResult {
 		// Encode the selected carrier, preserving caller fields and ownership.
-		return { messages: [...], assistantPrefill: '...', stopSequences: [...] };
+		return encode(messages, options);
 	}
 
-	createStreamParser() {
-		// Return a parser for this representation.
+	createStreamParser(): StreamParser {
+		return createParser();
 	}
 
-	parseToolCalls(content) { return []; }
-	hasToolUse(content) { return false; }
-	parseContentBlocks(content: string, _tools?: ToolDefinition[], context?: ContentParseContext) {
+	parseToolCalls(_content: string, _tools?: ToolDefinition[]): ToolCall[] { return []; }
+	hasToolUse(_content: string): boolean { return false; }
+	parseContentBlocks(content: string, _tools?: ToolDefinition[], _context?: ContentParseContext): ContentBlock[] {
 		// Literal passthrough preserves span semantics. Prefix-sensitive parsing uses context.
 		return [{ type: 'text', text: content }];
 	}
-	formatToolResults(results) { return JSON.stringify(results); }
+	formatToolResults(results: ToolResult[]): string { return JSON.stringify(results); }
 }
 ```
 
