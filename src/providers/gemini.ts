@@ -30,8 +30,8 @@ import {
   networkError,
 } from '../types/index.js';
 import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
-import { toolOutputParts, omittedToolResultContent, holdsImageBytes } from './tool-result-images.js';
-import { resolveImageMediaType } from '../utils/image-media.js';
+import { toolOutputParts, omittedToolResultContent, holdsImageBytes, inlineImageBytes } from './tool-result-images.js';
+import { imageBytesMediaType } from '../utils/image-media.js';
 
 // ============================================================================
 // Gemini API Types
@@ -551,16 +551,19 @@ export class GeminiAdapter implements ProviderAdapter {
                   result.push(JSON.stringify(part.block));
                   continue;
                 }
-                if (source?.type !== 'base64' || typeof source.data !== 'string' || !source.data) {
+                // A base64 source, or a base64 data URL, is inline data Gemini
+                // takes as is.
+                const inline = inlineImageBytes(source);
+                if (!inline) {
                   result.push('[image omitted: Gemini tool results require inline base64 image data]');
                   continue;
                 }
-                const mimeType = resolveImageMediaType(source.data, source.media_type ?? source.mediaType);
+                const mimeType = imageBytesMediaType(inline.data, inline.declared);
                 if (!mimeType || !this.toolResultImageMediaTypes.has(mimeType)) {
                   result.push('[image omitted: unsupported Gemini image media type]');
                   continue;
                 }
-                const inlineData = { mimeType, data: source.data };
+                const inlineData = { mimeType, data: inline.data };
                 imageIndex++;
                 if (nativeToolImages) {
                   media.push({ inlineData });

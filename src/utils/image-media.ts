@@ -20,15 +20,36 @@ export const API_ACCEPTED_IMAGE_MEDIA_TYPES: ReadonlySet<string> = new Set([
  * Unknown bytes retain the declared type so callers can still reject unsupported
  * formats. Inspect only the header rather than decoding the entire image. */
 export function resolveImageMediaType(data: string | undefined, declared?: string): string | undefined {
+  return signedImageMediaType(data) ?? (typeof declared === 'string' ? declared.toLowerCase() : undefined);
+}
+
+/** The types {@link signedImageMediaType} recognizes. Every image of one of
+ * these types opens with its signature. */
+const SIGNED_IMAGE_MEDIA_TYPES: ReadonlySet<string> = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+/** The type a recognized signature at the start of base64 bytes names. */
+function signedImageMediaType(data: unknown): string | undefined {
   // Malformed blocks can carry non-string fields at runtime; treat them as
-  // unknown bytes / no label rather than throwing out of a request build.
-  const bytes = Buffer.from((typeof data === 'string' ? data : '').slice(0, 24), 'base64');
+  // unknown bytes rather than throwing out of a request build. Leading
+  // whitespace, which the decoder skips, would otherwise use up the window.
+  const bytes = Buffer.from((typeof data === 'string' ? data : '').trimStart().slice(0, 24), 'base64');
   if (bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png';
   if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
   const header = bytes.toString('latin1');
   if (header.startsWith('GIF87a') || header.startsWith('GIF89a')) return 'image/gif';
   if (header.startsWith('RIFF') && header.slice(8, 12) === 'WEBP') return 'image/webp';
-  return typeof declared === 'string' ? declared.toLowerCase() : undefined;
+  return undefined;
+}
+
+/** The type image bytes can be sent as: a recognized signature's, or the
+ * declared type when it is one no signature here covers (HEIC/HEIF, say).
+ * Bytes declared as PNG, JPEG, GIF or WebP without that type's signature are
+ * not that type, so they have none. */
+export function imageBytesMediaType(data: string, declared?: unknown): string | undefined {
+  const signed = signedImageMediaType(data);
+  if (signed) return signed;
+  const label = typeof declared === 'string' ? declared.toLowerCase() : undefined;
+  return label && !SIGNED_IMAGE_MEDIA_TYPES.has(label) ? label : undefined;
 }
 
 export function isAcceptedImageMediaType(mediaType: string | null | undefined): boolean {

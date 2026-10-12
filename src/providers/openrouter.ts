@@ -186,7 +186,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
   private xTitle: string;
   private defaultMaxTokens: number;
   private readonly toolImagePolicy: ToolResultImagePolicy<Promise<boolean>>;
-  private modelImageInputs?: Promise<{ inputs: ReadonlyMap<string, boolean>; failure?: string }>;
+  private modelImageInputs?: Promise<{ inputs: ReadonlyMap<string, boolean | undefined>; failure?: string }>;
 
   constructor(config: OpenRouterAdapterConfig = {}) {
     this.apiKey = config.apiKey ?? process.env.OPENROUTER_API_KEY ?? '';
@@ -447,27 +447,33 @@ export class OpenRouterAdapter implements ProviderAdapter {
       // The decision is pinned, so this warns once per model per adapter.
       console.warn(
         `[membrane:openrouter] tool-result images for ${JSON.stringify(model)} will be omitted for this adapter's lifetime: ` +
-        (failure ? `the model catalogue lookup failed (${failure})` : 'the model is not in the model catalogue') +
+        (failure ? `the model catalogue lookup failed (${failure})`
+          : inputs.has(model) ? 'the model catalogue lists no input modalities for it'
+          : 'the model is not in the model catalogue') +
         '. Set toolResultImages, or media.imageInput in the model registry, to decide explicitly.',
       );
     }
     return known ?? false;
   }
 
-  private async fetchModelImageInputs(): Promise<{ inputs: ReadonlyMap<string, boolean>; failure?: string }> {
+  private async fetchModelImageInputs(): Promise<{ inputs: ReadonlyMap<string, boolean | undefined>; failure?: string }> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error('no answer within 5 s')), 5000);
     try {
       const work = (async () => {
-        const response = await fetch('https://openrouter.ai/api/v1/models', { signal: controller.signal });
+        // The catalogue of the endpoint this adapter sends to, so the decision
+        // describes it and no other host is contacted.
+        const response = await fetch(this.baseURL + '/models', { signal: controller.signal });
         if (!response.ok) throw new Error('HTTP ' + response.status);
         const catalogue = await response.json() as { data?: unknown };
         if (!Array.isArray(catalogue?.data)) throw new Error('the response has no data array');
-        const inputs = new Map<string, boolean>();
+        // A listed model without input modalities says nothing about image
+        // input, so it is undecided, like an unlisted one.
+        const inputs = new Map<string, boolean | undefined>();
         for (const model of catalogue.data) {
           if (typeof model?.id !== 'string') continue;
           const modalities = model.architecture?.input_modalities;
-          inputs.set(model.id, Array.isArray(modalities) && modalities.includes('image'));
+          inputs.set(model.id, Array.isArray(modalities) ? modalities.includes('image') : undefined);
         }
         return { inputs };
       })();

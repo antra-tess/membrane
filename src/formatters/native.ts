@@ -414,8 +414,9 @@ export class NativeFormatter implements PrefillFormatter {
         const src = (item as { source?: { type?: string; data?: string; mediaType?: string; media_type?: string } }).source;
         if (src?.type === 'url') return item;
         const mediaType = resolveImageMediaType(src?.data, src?.mediaType ?? src?.media_type);
-        // Transport policy applies to normalized inline media. Keep legacy
-        // sanitation bytes for source-less image-typed tool data and MCP shapes.
+        // Transport policy applies to normalized inline media in tool results;
+        // top-level image blocks keep the default set. Keep legacy sanitation
+        // bytes for source-less image-typed tool data and MCP shapes.
         const policy = src?.type === 'base64' && typeof src.data === 'string' ? acceptedMediaTypes : undefined;
         if (!(policy?.has(mediaType ?? '') ?? isAcceptedImageMediaType(mediaType))) {
           return strippedImagePlaceholder(mediaType, policy);

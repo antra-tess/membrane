@@ -1,5 +1,5 @@
 import { carriesInlineImageData, textOnlyToolResultContent, TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER } from './utils.js';
-import { isAcceptedImageMediaType, resolveImageMediaType } from '../utils/image-media.js';
+import { imageBytesMediaType, isAcceptedImageMediaType } from '../utils/image-media.js';
 
 /**
  * Request-side image handling for tool outputs. Image-free outputs keep their
@@ -81,26 +81,55 @@ export function omittedToolResultContent(content: unknown): string {
  * a reference, an address or descriptor with no bytes to omit. */
 export function holdsImageBytes(source: any): boolean {
   return typeof source?.data === 'string'
-    || (source?.type === 'url' && typeof source.url === 'string' && /^data:/i.test(source.url));
+    || (source?.type === 'url' && typeof source.url === 'string' && /^data:/i.test(parsedUrlText(source.url)));
+}
+
+/** A URL's text as the URL parser reads it: leading and trailing C0 controls
+ * and spaces stripped, and tabs and newlines removed. */
+function parsedUrlText(url: string): string {
+  return url.replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, '').replace(/[\t\n\r]/g, '');
+}
+
+/** The bytes a source carries as base64, with the type it declares: a base64
+ * source's data, or the payload of a base64 data URL (parameters before
+ * `;base64` allowed). Undefined when there are none a transport could send. */
+export function inlineImageBytes(source: any): { data: string; declared?: unknown } | undefined {
+  if (source?.type === 'base64') {
+    return typeof source.data === 'string' && source.data
+      ? { data: source.data, declared: source.media_type ?? source.mediaType }
+      : undefined;
+  }
+  if (source?.type !== 'url' || typeof source.url !== 'string') return undefined;
+  const dataUrl = /^data:([^,]*),([\s\S]*)$/i.exec(parsedUrlText(source.url));
+  const meta = dataUrl?.[1]!.split(';') ?? [];
+  if (!dataUrl?.[2] || meta.length < 2 || meta.at(-1)!.trim().toLowerCase() !== 'base64') return undefined;
+  return { data: dataUrl[2], declared: meta[0] || undefined };
 }
 
 function holdsBytes(block: any): boolean {
   return isSourceImage(block) && holdsImageBytes(block.source);
 }
 
-/** Validate caller-owned native user media with the same policy as tool media. */
+/** Validate caller-owned native media with the same policy as tool media: a
+ * part Chat can't take as an image becomes a notice when it holds bytes, and
+ * otherwise keeps its own JSON text, address included. */
 export function validatedChatImagePart(part: any): ChatToolOutputPart {
-  const url = chatToolImageUrl({ type: 'url', url: part.image_url?.url });
-  return url
-    ? { ...part, image_url: { ...part.image_url, url } }
-    : { type: 'text', text: '[image omitted: unsupported image source or media type]' };
+  const source = { type: 'url', url: part.image_url?.url };
+  const url = chatToolImageUrl(source);
+  if (url) return { ...part, image_url: { ...part.image_url, url } };
+  return holdsImageBytes(source)
+    ? { type: 'text', text: '[image omitted: unsupported image source or media type]' }
+    : { type: 'text', text: JSON.stringify(part) };
 }
 
-/** Native tool media still has provenance, unlike relocated native user images. */
+/** Native tool media still has provenance, unlike relocated native user images.
+ * Omission removes only bytes: a reference keeps its own JSON text. */
 export function nativeChatToolContent(content: any[], media: boolean): string | any[] {
   const parts = content.map(part => part?.type !== 'image_url' ? part
     : media ? validatedChatImagePart(part)
-    : { type: 'text', text: TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER });
+    : holdsImageBytes({ type: 'url', url: part.image_url?.url })
+      ? { type: 'text', text: TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER }
+      : { type: 'text', text: JSON.stringify(part) });
   // Preserve caller-owned audio/other native parts; only all-text output can
   // collapse to a string without losing a sibling carrier.
   return parts.every(part => part?.type === 'text') ? parts.map(part => part.text).join('\n') : parts;
@@ -108,22 +137,19 @@ export function nativeChatToolContent(content: any[], media: boolean): string | 
 
 /** Inline media is validated here because live tools bypass formatter sanitation. */
 function chatToolImageUrl(source: any): string | undefined {
-  if (source?.type === 'url' && typeof source.url === 'string' && source.url) {
-    if (!/^data:/i.test(source.url)) {
-      try {
-        const url = new URL(source.url);
-        return url.protocol === 'https:' || url.protocol === 'http:' ? source.url : undefined;
-      } catch {
-        return undefined;
-      }
+  if (source?.type === 'url' && typeof source.url === 'string' && !/^data:/i.test(parsedUrlText(source.url))) {
+    try {
+      // Send the URL as the parser read it, without surrounding whitespace,
+      // tabs or newlines.
+      const url = new URL(source.url);
+      return url.protocol === 'https:' || url.protocol === 'http:' ? parsedUrlText(source.url) : undefined;
+    } catch {
+      return undefined;
     }
-    const inline = /^data:([^;,]*);base64,([\s\S]*)$/i.exec(source.url);
-    return inline ? chatToolImageUrl({ type: 'base64', mediaType: inline[1], data: inline[2] }) : undefined;
   }
-  if (source?.type !== 'base64' || typeof source.data !== 'string' || !source.data) return undefined;
-  const mediaType = resolveImageMediaType(source.data, source.media_type ?? source.mediaType);
-  if (!isAcceptedImageMediaType(mediaType)) return undefined;
-  return 'data:' + mediaType + ';base64,' + source.data;
+  const inline = inlineImageBytes(source);
+  const mediaType = inline && imageBytesMediaType(inline.data, inline.declared);
+  return mediaType && isAcceptedImageMediaType(mediaType) ? 'data:' + mediaType + ';base64,' + inline!.data : undefined;
 }
 
 /**

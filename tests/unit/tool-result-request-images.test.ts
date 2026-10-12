@@ -295,7 +295,7 @@ describe.each(cases)('$name tool-result image transport', c => {
     } else expect(wire).toContain('data:image/gif;base64,' + gif);
   });
 
-  it('rejects an unsupported inline Chat data URL while retaining a supported mislabeled one', async () => {
+  it('rejects an unsupported inline data URL while retaining a supported mislabeled one', async () => {
     const { bodies } = stub(c);
     const svg = Buffer.from('<svg/>').toString('base64');
     await c.adapter().complete({ model: c.model, messages: [
@@ -308,7 +308,50 @@ describe.each(cases)('$name tool-result image transport', c => {
     const wire = JSON.stringify(bodies[0]);
     expect(wire.includes(svg)).toBe(false);
     expect(wire).toContain('image omitted');
-    if (!c.gemini) expect(wire.includes('data:image/png;base64,' + data)).toBe(true);
+    expect(wire).toContain(c.gemini ? '"inlineData":{"mimeType":"image/png","data":"' + data + '"}' : 'data:image/png;base64,' + data);
+  });
+
+  it('omits bytes declared as a type whose signature they lack', async () => {
+    const heic = Buffer.from('\0\0\0\x18ftypheic\0\0\0\0mif1heic').toString('base64');
+    const page = Buffer.from('<!doctype html><title>Not found</title>').toString('base64');
+    const { bodies } = stub(c);
+    await c.adapter().complete({ model: c.model, messages: [
+      { role: 'assistant', content: [tool('one', 'snapshot')] },
+      { role: 'user', content: [result('one', [
+        { type: 'image', source: { type: 'base64', data: heic, mediaType: 'image/jpeg' } },
+        { type: 'image', source: { type: 'url', url: 'data:image/png;base64,' + page } },
+      ])] },
+    ] });
+    const wire = JSON.stringify(bodies[0]);
+    expect(wire).not.toContain(heic);
+    expect(wire).not.toContain(page);
+    expect(wire.match(/image omitted/g)).toHaveLength(2);
+  });
+
+  it('reads a signature past leading whitespace in the base64', async () => {
+    const { bodies } = stub(c);
+    await c.adapter().complete({ model: c.model, messages: [
+      { role: 'assistant', content: [tool('one', 'snapshot')] },
+      { role: 'user', content: [result('one', [{ type: 'image', source: { type: 'base64', data: '\n'.repeat(16) + data, mediaType: 'image/png' } }])] },
+    ] });
+    const wire = JSON.stringify(bodies[0]);
+    expect(wire).not.toContain('image omitted');
+    expect(wire).toContain(c.gemini ? '"mimeType":"image/png"' : 'data:image/png;base64,');
+  });
+
+  it('reads a data URL as the URL parser does, parameters included', async () => {
+    const { bodies } = stub(c);
+    await c.adapter().complete({ model: c.model, messages: [
+      { role: 'assistant', content: [tool('one', 'snapshot')] },
+      { role: 'user', content: [result('one', [
+        text('before'),
+        { type: 'image', source: { type: 'url', url: ' \tdata:image/png;base64,' + data } },
+        text('between'),
+        { type: 'image', source: { type: 'url', url: 'data:image/png;name=shot.png;base64,' + secondData } },
+        text('after'),
+      ])] },
+    ] });
+    assertMedia(c, bodies[0], 1, 2);
   });
 
   it('keeps tool data named image with an untyped source as text', async () => {
@@ -587,15 +630,20 @@ describe.each(cases.filter(c => c.gemini))('$name wrapper transport policy', c =
 });
 
 describe.each(cases.filter(c => c.gemini))('$name results the transport cannot carry', c => {
-  it('omits a data URL source even when it carries a media type label', async () => {
+  it('sends a base64 data URL source as inline data, and omits one that is not base64', async () => {
     const { bodies } = stub(c);
+    const raw = 'x'.repeat(16);
     await c.adapter().complete({ model: c.model, messages: [
       { role: 'assistant', content: [tool('one', 'snapshot')] },
-      { role: 'user', content: [result('one', [{ type: 'image', source: { type: 'url', url: 'data:image/png;base64,' + data, mediaType: 'image/png' } }])] },
+      { role: 'user', content: [result('one', [
+        { type: 'image', source: { type: 'url', url: 'data:image/png;base64,' + data, mediaType: 'image/png' } },
+        { type: 'image', source: { type: 'url', url: 'data:image/png,' + raw } },
+      ])] },
     ] });
     const wire = JSON.stringify(bodies[0]);
-    expect(wire).not.toContain('inlineData');
+    expect(wire).toContain('"inlineData":{"mimeType":"image/png","data":"' + data + '"}');
     expect(wire).toContain('Gemini tool results require inline base64 image data');
+    expect(wire).not.toContain(raw);
   });
 
   it('reports an image-bearing error result under response.error', async () => {

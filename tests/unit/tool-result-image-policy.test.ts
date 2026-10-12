@@ -182,6 +182,21 @@ describe('OpenRouter lookup and cancellation', () => {
     await invoke(adapter, 'stream', 'vendor/vision');
     expect(bodies.map(hasPixels)).toEqual([true]);
   });
+  it.each([
+    [undefined, 'https://openrouter.ai/api/v1'],
+    ['https://gateway.example.test/openrouter/v1', 'https://gateway.example.test/openrouter/v1'],
+  ])('looks the catalogue up beside the endpoint it sends to (baseURL %s)', async (baseURL, endpoint) => {
+    const { bodies } = stub();
+    await invoke(new OpenRouterAdapter({ apiKey: 'test', baseURL, toolResultImages: 'auto' }), 'complete', 'vendor/vision');
+    expect(vi.mocked(globalThis.fetch).mock.calls.map(call => String(call[0]))).toEqual([endpoint + '/models', endpoint + '/chat/completions']);
+    expect(bodies.map(hasPixels)).toEqual([true]);
+  });
+  it('leaves no catalogue timer behind once the lookup answers', async () => {
+    vi.useFakeTimers();
+    stub();
+    await invoke(providers[2]!.make(), 'complete', 'vendor/vision');
+    expect(vi.getTimerCount()).toBe(0);
+  });
   it('bounds a hung catalogue even when its fetch ignores abort', async () => {
     vi.useFakeTimers();
     const { bodies, lookup } = stub(() => new Promise(() => {}));
@@ -235,6 +250,15 @@ describe('OpenRouter fallback warnings', () => {
     }
     expect(omissionWarnings(warn)).toEqual([
       expect.stringContaining('"vendor/unknown" will be omitted for this adapter\'s lifetime: the model is not in the model catalogue'),
+    ]);
+  });
+  it('omits and warns for a listed model whose entry gives no input modalities', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { bodies } = stub(() => new Response(JSON.stringify({ data: [{ id: 'vendor/vision' }] })));
+    await invoke(providers[2]!.make(), 'complete', 'vendor/vision');
+    expect(bodies.map(hasPixels)).toEqual([false]);
+    expect(omissionWarnings(warn)).toEqual([
+      expect.stringContaining('"vendor/vision" will be omitted for this adapter\'s lifetime: the model catalogue lists no input modalities for it'),
     ]);
   });
   it('stays quiet when the registry decides', async () => {
@@ -320,12 +344,36 @@ describe('native Chat image boundaries', () => {
       const before = structuredClone(native);
       await invoke(p.make('omit'), 'complete', p.model, undefined, native);
       const wire = JSON.stringify(bodies[0]);
-      expect(wire).not.toContain('file:');
+      // Only bytes are omitted: a reference Chat can't take keeps its own text.
+      expect(bodies[0].messages[0].content.filter((part: any) => part.type === 'text').map((part: any) => part.text)).toEqual([
+        'caption',
+        JSON.stringify({ type: 'image_url', image_url: { url: 'file:///tmp/private.png', detail: 'high' } }),
+        JSON.stringify({ type: 'image_url', image_url: { url: 'https://', detail: 'high' } }),
+        '[image omitted: unsupported image source or media type]',
+      ]);
       expect(wire).not.toContain('PHN2Zy8+');
       expect(wire).toContain('data:image/png;base64,' + data);
       expect(wire).toContain('https://example.test/image.png');
       expect(wire).toContain('"detail":"high"');
       expect(native).toEqual(before);
+    });
+    it(p.name + ' sends a reference as the URL parser reads it', async () => {
+      const { bodies } = stub();
+      const input = messages(false);
+      (input[2]!.content as any) = [result('one', [text('caption'), { type: 'image', source: { type: 'url', url: ' https://example.test/chart.png\n' } }])];
+      await invoke(p.make('media'), 'complete', p.model, undefined, input);
+      expect(JSON.stringify(bodies[0])).toContain('"url":"https://example.test/chart.png"');
+    });
+    it(p.name + ' keeps a native tool reference it cannot show as the part\'s own text', async () => {
+      const { bodies } = stub();
+      const part = (url: string) => ({ type: 'image_url', image_url: { url, detail: 'high' } });
+      const native = (url: string) => [{ role: 'tool', tool_call_id: 'one', content: [text('caption'), part(url)] }];
+      await invoke(p.make('omit'), 'complete', p.model, undefined, native('https://example.test/chart.png'));
+      await invoke(p.make('media'), 'complete', p.model, undefined, native('file:///tmp/chart.png'));
+      expect(bodies.map(body => body.messages[0])).toEqual([
+        { role: 'tool', tool_call_id: 'one', content: 'caption\n' + JSON.stringify(part('https://example.test/chart.png')) },
+        { role: 'tool', tool_call_id: 'one', content: 'caption\n' + JSON.stringify(part('file:///tmp/chart.png')) },
+      ]);
     });
   }
   it.each([toOpenAIMessages, toOpenRouterMessages])('synchronous helper defaults to omission and takes explicit resolved media', convert => {
@@ -467,12 +515,17 @@ describe('resolution edge cases', () => {
     expect(bodies.map(hasPixels)).toEqual([true, false]);
     expect(bodies[0].model).toBe('effective');
   });
-  it.each(providers)('$name omit never serializes normalized data URLs as text', async p => {
+  it.each(providers.flatMap(p => [
+    ['plain', 'data:image/png;base64,'],
+    ['after leading whitespace', ' \tdata:image/png;base64,'],
+    ['with a parameter', 'data:image/png;name=shot.png;base64,'],
+  ].map(([spelling, prefix]) => ({ ...p, spelling, prefix }))))('$name omit never serializes a $spelling normalized data URL as text', async p => {
     const { bodies } = stub();
     const input = messages(false);
-    (input[2]!.content as any) = [result('one', [text('caption'), { type: 'image', source: { type: 'url', url: 'data:image/png;base64,' + data } }])];
+    (input[2]!.content as any) = [result('one', [text('caption'), { type: 'image', source: { type: 'url', url: p.prefix + data } }])];
     await invoke(p.make('omit'), 'complete', p.model, undefined, input);
     expect(hasPixels(bodies[0])).toBe(false);
+    expect(JSON.stringify(bodies[0])).toContain('NOT shown');
   });
   it.each(providers)('$name omit keeps a URL reference in the text main sends', async p => {
     const { bodies } = stub();
