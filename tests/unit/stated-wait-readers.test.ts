@@ -14,7 +14,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { OpenAICompatibleAdapter } from '../../src/providers/openai-compatible.js';
 import { throwOnStreamErrorFrame } from '../../src/providers/utils.js';
-import { MembraneError, statedWaitFromHeaders } from '../../src/types/index.js';
+import { MembraneError, extractProviderErrorFields, statedWaitFromHeaders } from '../../src/types/index.js';
 import type { NormalizedRequest } from '../../src/types/index.js';
 
 const zzRequest: NormalizedRequest = {
@@ -92,6 +92,19 @@ describe('a negative stated wait is over, wherever it is read', () => {
     expect(thrown).toMatchObject({ type: 'rate_limit', retryAfterMs: 0 });
   });
 
+  it('an SSE error frame with a negative retry_after in seconds carries a wait of 0', () => {
+    const thrown = (() => {
+      try {
+        throwOnStreamErrorFrame({ error: { type: 'rate_limit_error', message: 'zz-slow down', retry_after: -5 } }, 'zz-provider');
+      } catch (error) {
+        return error as MembraneError;
+      }
+      return undefined;
+    })();
+    expect(thrown).toBeInstanceOf(MembraneError);
+    expect(thrown).toMatchObject({ type: 'rate_limit', retryAfterMs: 0 });
+  });
+
   it('a negative retry-after header, in seconds or milliseconds, reads as 0', () => {
     expect(statedWaitFromHeaders(new Headers({ 'retry-after': '-5' }))).toBe(0);
     expect(statedWaitFromHeaders(new Headers({ 'retry-after-ms': '-5', 'retry-after': '120' }))).toBe(0);
@@ -122,5 +135,96 @@ describe('retry-after-ms at the shared HTTP boundary', () => {
     expect(error).toMatchObject({ type: 'rate_limit', retryAfterMs: 120_000 });
     expect(sent.calls()).toBe(1);
     expect(waits).toEqual([]);
+  });
+});
+
+/** The wait an SSE error frame carrying these fields states. */
+function frameWait(fields: Record<string, unknown>): number | undefined {
+  try {
+    throwOnStreamErrorFrame({ error: { type: 'rate_limit_error', message: 'zz-slow down', ...fields } }, 'zz-provider');
+  } catch (error) {
+    expect(error).toBeInstanceOf(MembraneError);
+    return (error as MembraneError).retryAfterMs;
+  }
+  throw new Error('expected the frame to throw');
+}
+
+/** The wait an error body carrying these fields states. */
+const bodyWait = (body: Record<string, unknown>) => extractProviderErrorFields(body).retryAfterMs;
+
+describe('a body and a frame read the same forms of a stated wait', () => {
+  it('milliseconds as a number or a numeric string, in snake or camel case', () => {
+    for (const fields of [
+      { retry_after_ms: 1_500 },
+      { retry_after_ms: '1500' },
+      { retryAfterMs: 1_500 },
+      { retryAfterMs: ' 1500 ' },
+      { retry_after_ms: '1499.6' },
+    ]) {
+      expect(bodyWait({ error: { message: 'zz-slow down', ...fields } }), JSON.stringify(fields)).toBe(1_500);
+      expect(bodyWait({ error: { message: 'zz-slow down' }, ...fields }), JSON.stringify(fields)).toBe(1_500);
+      expect(frameWait(fields), JSON.stringify(fields)).toBe(1_500);
+    }
+  });
+
+  it('seconds as a number, a numeric string, or one with an s', () => {
+    for (const fields of [{ retry_after: 2.5 }, { retry_after: '2.5' }, { retryAfter: '2.5s' }]) {
+      expect(bodyWait({ error: { message: 'zz-slow down', ...fields } }), JSON.stringify(fields)).toBe(2_500);
+      expect(frameWait(fields), JSON.stringify(fields)).toBe(2_500);
+    }
+    expect(frameWait({ retryDelay: '2.5s' })).toBe(2_500);
+    expect(bodyWait({ error: { message: 'zz-slow down', details: [{ retryDelay: '2.5s' }] } })).toBe(2_500);
+  });
+
+  it('a negative numeric string is over (0), and no later field is read in its place', () => {
+    for (const fields of [
+      { retry_after_ms: '-1000', retry_after: 120 },
+      { retryAfterMs: '-1000', retry_after: 120 },
+      { retry_after: '-3' },
+      { retryAfter: '-3s' },
+    ]) {
+      expect(bodyWait({ error: { message: 'zz-slow down', ...fields } }), JSON.stringify(fields)).toBe(0);
+      expect(frameWait(fields), JSON.stringify(fields)).toBe(0);
+    }
+    expect(bodyWait({ error: { message: 'zz-slow down', details: [{ retryDelay: '-3s' }] } })).toBe(0);
+  });
+
+  it('a 429 whose body states its wait as a numeric string, or in camel case, waits it out', async () => {
+    for (const body of [{ retry_after_ms: '700' }, { retryAfterMs: 700 }]) {
+      const sent = network([rateLimited(body), completion]);
+      const { membrane, waits } = overCompat();
+      await membrane.complete(zzRequest);
+      expect(sent.calls(), JSON.stringify(body)).toBe(2);
+      expect(waits, JSON.stringify(body)).toEqual([700]);
+    }
+  });
+
+  it('a date in a body or frame field states nothing: a date is a header form', () => {
+    const later = new Date(Date.now() + 60_000).toUTCString();
+    const earlier = new Date(Date.now() - 60_000).toUTCString();
+    for (const date of [later, earlier]) {
+      expect(bodyWait({ error: { message: 'zz-slow down', retry_after: date } }), date).toBeUndefined();
+      expect(frameWait({ retry_after: date }), date).toBeUndefined();
+    }
+    expect(statedWaitFromHeaders(new Headers({ 'retry-after': earlier }))).toBe(0);
+  });
+
+  it('a value that is not a finite number, in any form, states nothing and the next field is read', () => {
+    for (const unusable of ['Infinity', 'NaN', 'zz-soon', `1${'0'.repeat(400)}`]) {
+      expect(bodyWait({ error: { message: 'zz-slow down', retry_after_ms: unusable, retry_after: 2 } }), unusable).toBe(2_000);
+      expect(frameWait({ retry_after_ms: unusable, retry_after: 2 }), unusable).toBe(2_000);
+    }
+  });
+});
+
+describe('a seconds value whose milliseconds overflow states nothing', () => {
+  it('in a header, a body or a frame; a negative one is still over (0)', () => {
+    expect(statedWaitFromHeaders(new Headers({ 'retry-after': '1e306' }))).toBeUndefined();
+    expect(statedWaitFromHeaders(new Headers({ 'retry-after': '-1e306' }))).toBe(0);
+    expect(bodyWait({ error: { message: 'zz-slow down', retry_after: 1e306 } })).toBeUndefined();
+    expect(frameWait({ retry_after: 1e306 })).toBeUndefined();
+    expect(frameWait({ retry_after: -1e306 })).toBe(0);
+    // A finite wait, however long, is still a wait (control).
+    expect(statedWaitFromHeaders(new Headers({ 'retry-after': '1e300' }))).toBe(1e303);
   });
 });

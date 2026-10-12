@@ -122,8 +122,9 @@ export function boundRawError(value: unknown): unknown {
   }
   // Functions, symbols and undefined have no JSON form and take no space in one.
   if (json === undefined) return value;
-  // UTF-16 length bounds UTF-8 bytes from below, so only a near miss pays for
-  // the exact count.
+  // UTF-8 takes at most three bytes per UTF-16 code unit, so a JSON text no
+  // longer than a third of the bound fits without counting; only a near miss
+  // pays for the exact count.
   if (json.length <= MAX_RAW_ERROR_JSON_BYTES / 3 || Buffer.byteLength(json, 'utf8') <= MAX_RAW_ERROR_JSON_BYTES) {
     return rewritten ? JSON.parse(json) : value;
   }
@@ -154,61 +155,121 @@ function unreadable(error: unknown): string {
   return `[unreadable: ${boundErrorText(reason, 200)}]`;
 }
 
+/**
+ * A value a JavaScript caller passed where a string belongs, as text:
+ * undefined as '' (what `new Error(undefined)` gives), anything else as its
+ * String form, or as unreadable when converting it throws.
+ */
+function asText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (value === undefined) return '';
+  try {
+    return String(value);
+  } catch (error) {
+    return unreadable(error);
+  }
+}
+
 // ============================================================================
 // Error Serialization Helper
 // ============================================================================
 
 /**
- * Serialize an error for storage in rawError field.
- * Error objects don't JSON.stringify well (become {}), so we extract key properties.
- * The message and stack are bounded like a MembraneError's own message; the
- * aggregate size of the result is bounded where a MembraneError stores it.
- * Every read is guarded: a field whose getter throws is recorded as
- * unreadable rather than letting the error being described replace the one
- * the caller is reporting.
+ * Serialize an error for a rawError field, a host's record or a hook's
+ * ErrorInfo. Error objects don't JSON.stringify well (they become {}), so an
+ * Error's name, message and stack are copied out with its own enumerable
+ * fields, and an Error held in one of those fields is serialized the same
+ * way, so its text is counted and cut like the rest instead of hiding behind
+ * a JSON {}. The message and stack are bounded like a MembraneError's own
+ * message, the stack is left out in production, and the whole result, for
+ * any value passed, is held to MAX_RAW_ERROR_JSON_BYTES by boundRawError.
+ * Every read is guarded: a field whose getter throws, or a value whose
+ * prototype can't be asked for, is recorded as unreadable, rather than
+ * letting the error being described replace the one the caller is
+ * reporting.
  */
 export function serializeError(error: unknown): unknown {
-  if (error === undefined || error === null) {
-    return error;
+  return boundRawError(serializeErrorFields(error, new Set()));
+}
+
+/** A read that may throw (a getter, a Proxy trap), recorded instead as unreadable. */
+function readGuarded(get: () => unknown): unknown {
+  try {
+    return get();
+  } catch (readError) {
+    return unreadable(readError);
+  }
+}
+
+/** `read()`, or `fallback` when it throws. */
+function guardedOr<T>(read: () => T, fallback: T): T {
+  try {
+    return read();
+  } catch {
+    return fallback;
+  }
+}
+
+/** Whether `value` is an Error; false when asking throws (a Proxy's getPrototypeOf trap). */
+function isErrorValue(value: unknown): value is Error {
+  try {
+    return value instanceof Error;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The text of a thrown value: an Error's message, or anything else's String
+ * form. Every read is guarded, so describing a hostile value (a throwing
+ * getter or toString, a Proxy trap) yields `[unreadable: …]` rather than
+ * throwing from the code that is reporting it.
+ */
+export function thrownText(value: unknown): string {
+  const isError = isErrorValue(value);
+  return asText(readGuarded(() => (isError ? (value as Error).message : String(value))));
+}
+
+/** An Error as a plain record, its Error-valued fields likewise; any other value as it is. */
+function serializeErrorFields(error: unknown, open: Set<Error>): unknown {
+  let isError: boolean;
+  try {
+    isError = error instanceof Error;
+  } catch (askError) {
+    // A Proxy whose getPrototypeOf trap throws is described, not kept, so the
+    // trap can't fire again wherever the record goes.
+    return { truncated: true, unserializable: unreadable(askError) };
+  }
+  if (!isError) return error;
+  const value = error as Error;
+  // An error that holds itself, directly or through an error it holds.
+  if (open.has(value)) return '[Circular]';
+  open.add(value);
+  const name = readGuarded(() => value.name);
+  const message = readGuarded(() => value.message);
+  const serialized: Record<string, unknown> = {
+    name,
+    message: typeof message === 'string' ? boundErrorText(message) : message,
+  };
+
+  // Include stack trace in non-production
+  if (process.env.NODE_ENV !== 'production') {
+    const stack = readGuarded(() => value.stack);
+    if (stack) serialized.stack = typeof stack === 'string' ? boundErrorText(stack) : stack;
   }
 
-  if (error instanceof Error) {
-    const read = (get: () => unknown): unknown => {
-      try {
-        return get();
-      } catch (readError) {
-        return unreadable(readError);
-      }
-    };
-    const name = read(() => error.name);
-    const message = read(() => error.message);
-    const serialized: Record<string, unknown> = {
-      name,
-      message: typeof message === 'string' ? boundErrorText(message) : message,
-    };
-
-    // Include stack trace in non-production
-    if (process.env.NODE_ENV !== 'production') {
-      const stack = read(() => error.stack);
-      if (stack) serialized.stack = typeof stack === 'string' ? boundErrorText(stack) : stack;
-    }
-
-    // Copy any additional enumerable properties (like status, code, etc.).
-    // name, message and stack were read above. An Error can carry them as own
-    // enumerable properties (assigned after a message-less super(), or by
-    // Object.assign), and copying them again would replace the bounded
-    // message and stack, and bring the stack back in production.
-    const keys = read(() => Object.keys(error));
-    for (const key of Array.isArray(keys) ? keys as string[] : []) {
-      if (key === 'name' || key === 'message' || key === 'stack') continue;
-      serialized[key] = read(() => (error as unknown as Record<string, unknown>)[key]);
-    }
-
-    return serialized;
+  // Copy any additional enumerable properties (like status, code, etc.).
+  // name, message and stack were read above. An Error can carry them as own
+  // enumerable properties (assigned after a message-less super(), or by
+  // Object.assign), and copying them again would replace the bounded
+  // message and stack, and bring the stack back in production.
+  const keys = readGuarded(() => Object.keys(value));
+  for (const key of Array.isArray(keys) ? keys as string[] : []) {
+    if (key === 'name' || key === 'message' || key === 'stack') continue;
+    serialized[key] = serializeErrorFields(readGuarded(() => (value as unknown as Record<string, unknown>)[key]), open);
   }
-
-  // For non-Error objects, return as-is (they should serialize fine)
-  return error;
+  open.delete(value);
+  return serialized;
 }
 
 // ============================================================================
@@ -274,19 +335,25 @@ export class MembraneError extends Error {
   constructor(info: ErrorInfo) {
     // Bounded here, the one place every adapter, stream-frame classifier, SDK
     // error and membrane rethrow passes through. The classification fields are
-    // decided before construction and are never derived from the bounded text.
-    super(boundErrorText(info.message));
+    // decided before construction and are never derived from the bounded text;
+    // only isOverloadedError reads a status-less error's message afterwards.
+    // A JavaScript caller can pass a message or code that isn't a string;
+    // its text is bounded rather than the conversion failing the error.
+    super(boundErrorText(asText(info.message)));
     this.name = 'MembraneError';
     this.type = info.type;
     this.retryable = info.retryable;
     this.retryAfterMs = info.retryAfterMs;
     this.httpStatus = info.httpStatus;
-    this.providerErrorCode = boundProviderErrorCode(info.providerErrorCode);
-    // Serialize error objects so they don't become {} when JSON.stringify'd.
-    // Neither step may replace the failure being constructed.
+    this.providerErrorCode = boundProviderErrorCode(
+      info.providerErrorCode == null ? undefined : asText(info.providerErrorCode),
+    );
+    // serializeError turns error objects into records (they'd be {} in JSON)
+    // and holds the whole value to its bound. It may not replace the failure
+    // being constructed.
     let rawError: unknown;
     try {
-      rawError = boundRawError(serializeError(info.rawError));
+      rawError = serializeError(info.rawError);
     } catch (error) {
       rawError = { truncated: true, unserializable: unreadable(error) };
     }
@@ -558,11 +625,16 @@ const NON_RETRYABLE_RATE_LIMIT_CODES = new Set([
 const CONTEXT_LENGTH_PATTERN =
   /context[ _-]?(?:length|limit|window)|maximum context|too many tokens|token limit|prompt is too long|too long|exceeds? the maximum number of (?:input )?tokens|input token count/i;
 
-const RATE_LIMIT_PATTERN = /\b429\b|rate[ _-]?limit|too many requests/i;
+// "rate limit" only where no letter precedes it, so "moderate limit" and
+// "generate limit" aren't rate limits, while "user_rate_limit" still is.
+const RATE_LIMIT_PATTERN = /\b429\b|(?<![a-z])rate[ _-]?limit|too many requests/i;
 
 const SERVER_STATUS_PATTERN = /\b(500|502|503|504|529)\b/;
 
 const OVERLOADED_PATTERN = /\b529\b|overloaded_error/i;
+
+/** The marker boundErrorText puts where it cut, counts and all. */
+const OMISSION_MARKER = / …\[\d+ of \d+ characters omitted\]… /g;
 
 /**
  * Structured evidence that a 400 is a credential failure, not a malformed
@@ -600,9 +672,10 @@ function firstString(...candidates: unknown[]): string | undefined {
  * `@anthropic-ai/sdk` reads them: `retry-after-ms` (milliseconds), then
  * `retry-after` (delta-seconds, or an HTTP-date per RFC 9110). Every adapter
  * reads it here, so a wait stated only in milliseconds is honored on all of
- * them. A wait below zero, or a date already past, is over: 0. A value that
- * is neither a finite number nor a date states nothing, and the next header
- * is read.
+ * them. A wait of zero is a stated wait of zero, in either header, and a wait
+ * below zero, or a date already past, is over: 0. A value that is neither a
+ * finite number nor a date states nothing, and the next header is read; so
+ * does a seconds value too large to state in milliseconds.
  */
 export function statedWaitFromHeaders(
   headers: { get(name: string): string | null } | undefined,
@@ -615,22 +688,59 @@ export function statedWaitFromHeaders(
   const header = headers?.get?.('retry-after')?.trim();
   if (!header) return undefined;
   const seconds = Number(header);
-  if (Number.isFinite(seconds)) return Math.max(0, Math.round(seconds * 1000));
+  if (Number.isFinite(seconds)) return millisOfSeconds(seconds);
   const at = Date.parse(header);
   if (!Number.isNaN(at)) return Math.max(0, at - Date.now());
   return undefined;
 }
 
-/**
- * Body-carried retry hints: google's `retryDelay: '21s'`, or bare seconds. A
- * negative wait is over (0), as it is in a header: the in-call rule that ends
- * a call over an unusable wait should never see one from a reader.
- */
-function parseRetryDelayValue(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value)) return Math.max(0, Math.round(value * 1000));
+/** Seconds as milliseconds: below zero, 0; undefined when the product overflows. */
+function millisOfSeconds(seconds: number): number | undefined {
+  const millis = Math.round(seconds * 1000);
+  return millis === Infinity ? undefined : Math.max(0, millis);
+}
+
+/** A finite number, or a string holding one in decimal ("1500", "-3", "2.5"). */
+function statedNumber(value: unknown): number | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
   if (typeof value !== 'string') return undefined;
-  const seconds = value.trim().match(/^(\d+(?:\.\d+)?)s?$/);
-  return seconds?.[1] ? Math.round(parseFloat(seconds[1]) * 1000) : undefined;
+  const text = value.trim();
+  if (!/^[+-]?\d+(?:\.\d+)?$/.test(text)) return undefined;
+  const parsed = Number(text);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/**
+ * A stated wait in milliseconds from JSON fields (`retry_after_ms`,
+ * `retryAfterMs`) of an error body or an SSE error frame: a number or a
+ * numeric string, the first candidate that states one. A wait below zero is
+ * over (0), as it is in a header: the in-call rule that ends a call over an
+ * unusable wait should never see one from a reader. A value that is not a
+ * finite number states nothing, and the next candidate is read.
+ */
+export function statedWaitMillis(...candidates: unknown[]): number | undefined {
+  for (const candidate of candidates) {
+    const millis = statedNumber(candidate);
+    if (millis !== undefined) return Math.max(0, Math.round(millis));
+  }
+  return undefined;
+}
+
+/**
+ * A stated wait in seconds from JSON fields (`retry_after`, Google's
+ * `retryDelay: '21s'`), in milliseconds: a number, or a numeric string with
+ * or without an `s`, the first candidate that states one. Below zero it is
+ * over (0), and a value that is not a finite number, or whose milliseconds
+ * overflow, states nothing. An HTTP-date is a header form (RFC 9110's
+ * `retry-after`), so only statedWaitFromHeaders reads one.
+ */
+export function statedWaitSeconds(...candidates: unknown[]): number | undefined {
+  for (const candidate of candidates) {
+    const seconds = statedNumber(typeof candidate === 'string' ? candidate.trim().replace(/s$/, '') : candidate);
+    const millis = seconds === undefined ? undefined : millisOfSeconds(seconds);
+    if (millis !== undefined) return millis;
+  }
+  return undefined;
 }
 
 function retryAfterFromBody(root: Record<string, unknown>, errorNode: Record<string, unknown>): number | undefined {
@@ -638,14 +748,13 @@ function retryAfterFromBody(root: Record<string, unknown>, errorNode: Record<str
   if (Array.isArray(details)) {
     for (const detail of details) {
       if (detail && typeof detail === 'object') {
-        const delay = parseRetryDelayValue((detail as Record<string, unknown>).retryDelay);
+        const delay = statedWaitSeconds((detail as Record<string, unknown>).retryDelay);
         if (delay !== undefined) return delay;
       }
     }
   }
-  const millis = errorNode.retry_after_ms ?? root.retry_after_ms;
-  if (typeof millis === 'number' && Number.isFinite(millis)) return Math.max(0, Math.round(millis));
-  return parseRetryDelayValue(errorNode.retry_after ?? root.retry_after ?? errorNode.retryAfter ?? root.retryAfter);
+  return statedWaitMillis(errorNode.retry_after_ms, root.retry_after_ms, errorNode.retryAfterMs, root.retryAfterMs)
+    ?? statedWaitSeconds(errorNode.retry_after, root.retry_after, errorNode.retryAfter, root.retryAfter);
 }
 
 /**
@@ -793,9 +902,16 @@ export function errorFromProviderStatus(params: {
       : classifyMessage(fields.upstreamMessage ? `${message}\n${fields.upstreamMessage}` : message);
   // A wait read from prose is believed only for an error that asks to be
   // retried: a stated wait is a hold for anyone who honours it, and a 400
-  // whose text happens to say "retry after" asks for none.
+  // whose text happens to say "retry after" asks for none. It is read only
+  // from the provider's own message: the body's, or the caller's when there
+  // is no body. A rendered body, or a caller's message built from one, can
+  // echo the request, and a wait the request mentions is not one the
+  // provider stated.
+  const proseSource = params.body === undefined || params.body === null ? params.message : fields.message;
   const retryAfterMs = params.retryAfterMs ?? fields.retryAfterMs
-    ?? (classification.type === 'rate_limit' || classification.type === 'server' ? retryAfterFromProse(detail) : undefined);
+    ?? ((classification.type === 'rate_limit' || classification.type === 'server') && proseSource !== undefined
+      ? retryAfterFromProse(proseSource)
+      : undefined);
 
   return new MembraneError({
     type: classification.type,
@@ -868,10 +984,10 @@ export function isTypedAbortError(error: unknown): boolean {
   if (typeof DOMException !== 'undefined' && error instanceof DOMException) {
     return error.name === 'AbortError';
   }
-  if (error instanceof Error) {
-    // APIUserAbortError: the Anthropic SDK's own typed abort.
-    return error.name === 'AbortError' || error.name === 'APIUserAbortError';
-  }
+  // The Anthropic SDK's APIUserAbortError is named 'Error' (measured on
+  // @anthropic-ai/sdk 0.52), so no name arm can match it: the Anthropic
+  // adapter recognises it by class.
+  if (error instanceof Error) return error.name === 'AbortError';
   return false;
 }
 
@@ -908,11 +1024,16 @@ function renderBody(body: unknown): string {
  * `overloaded_error`): a bare 'overloaded' in prose ("worker pool overloaded")
  * or digits inside another number ("timeout after 5290 ms", "req-98529abc")
  * must not put an unrelated error onto the ~10-minute schedule.
+ *
+ * A MembraneError's message is the bounded one, so a token that sat only in
+ * its omitted middle is not seen, and that error takes the base schedule.
+ * The omission marker's own counts are not the provider's words: an omitted
+ * count of exactly 529 is no overload.
  */
 export function isOverloadedError(info: ErrorInfo): boolean {
   if (!info.retryable) return false;
   if (info.httpStatus !== undefined) return info.httpStatus === 529;
-  return OVERLOADED_PATTERN.test(info.message);
+  return typeof info.message === 'string' && OVERLOADED_PATTERN.test(info.message.replace(OMISSION_MARKER, ' '));
 }
 
 /**
@@ -984,30 +1105,34 @@ function classifySocketCode(error: Error): { type: MembraneErrorType; retryable:
 }
 
 export function classifyError(error: unknown): ErrorInfo {
-  if (error instanceof MembraneError) {
-    return error.toErrorInfo();
+  if (guardedOr(() => error instanceof MembraneError, false)) {
+    return (error as MembraneError).toErrorInfo();
   }
 
   // Serialize the error once for use in all return paths
   const serializedError = serializeError(error);
+  // Every read of the error is guarded, as serializeError's are: a getter or
+  // Proxy trap that throws must not replace the failure being classified.
+  const isError = isErrorValue(error);
+  const message = thrownText(error);
 
-  if (error instanceof Error) {
+  if (isError) {
     // Abort is decided by type, never by prose: a tool or provider message
     // that merely contains "abort" is not a user cancellation.
-    if (error.name === 'AbortError') {
+    if (guardedOr(() => (error as Error).name === 'AbortError', false)) {
       return {
         type: 'abort',
-        message: error.message,
+        message,
         retryable: false,
         rawError: serializedError,
       };
     }
 
-    const classification = classifySocketCode(error) ?? classifyMessage(error.message);
+    const classification = guardedOr(() => classifySocketCode(error as Error), undefined) ?? classifyMessage(message);
     if (classification.type !== 'unknown') {
       return {
         type: classification.type,
-        message: error.message,
+        message,
         retryable: classification.retryable,
         httpStatus: classification.httpStatus,
         rawError: serializedError,
@@ -1018,7 +1143,7 @@ export function classifyError(error: unknown): ErrorInfo {
   // Unknown
   return {
     type: 'unknown',
-    message: error instanceof Error ? error.message : String(error),
+    message,
     retryable: false,
     rawError: serializedError,
   };

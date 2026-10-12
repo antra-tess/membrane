@@ -19,6 +19,16 @@ import type { NormalizedRequest } from '../../src/types/index.js';
 import type { ProviderRequest, ProviderRequestOptions, ProviderResponse } from '../../src/types/provider.js';
 import type { StreamCallbacks } from '../../src/types/streaming.js';
 
+class ThrowingCompleteAdapter extends MockAdapter {
+  constructor(private makeError: () => unknown) {
+    super();
+  }
+
+  override async complete(_request: ProviderRequest, _options?: ProviderRequestOptions): Promise<ProviderResponse> {
+    throw this.makeError();
+  }
+}
+
 class ThrowingStreamAdapter extends MockAdapter {
   constructor(private makeError: () => unknown) {
     super();
@@ -56,6 +66,8 @@ describe('stream() abort detection is typed', () => {
       .stream(zzRequest, { onChunk: () => {} })
       .then(value => value, error => error);
     expect(result).toBeInstanceOf(MembraneError);
+    expect((result as MembraneError).type).not.toBe('abort');
+    expect((result as MembraneError).message).toContain('zz-upstream will abort idle connections');
   });
 
   it('still reports a real DOMException AbortError as a user abort', async () => {
@@ -82,5 +94,32 @@ describe('stream() abort detection is typed', () => {
     );
     const result = await membrane.stream(zzRequest, { onChunk: () => {} });
     expect(isAbortedResponse(result)).toBe(true);
+  });
+});
+
+describe('complete() abort detection is typed', () => {
+  // complete() shares stream()'s typed helpers; a message-reading arm on its
+  // path would turn these failures into cancellations.
+  for (const message of ['zz-tool policy aborted the run', 'zz-upstream will abort idle connections']) {
+    it(`rejects "${message}" with its classification, not as an abort`, async () => {
+      const error = await new Membrane(new ThrowingCompleteAdapter(() => new Error(message)))
+        .complete(zzRequest)
+        .then(() => undefined, (e: unknown) => e);
+      expect(error).toBeInstanceOf(MembraneError);
+      expect((error as MembraneError).type).not.toBe('abort');
+      expect((error as MembraneError).message).toContain(message);
+    });
+  }
+
+  it('still rejects an Error named AbortError as an abort', async () => {
+    const error = await new Membrane(new ThrowingCompleteAdapter(() => {
+      const abort = new Error('zz-signal fired');
+      abort.name = 'AbortError';
+      return abort;
+    }))
+      .complete(zzRequest)
+      .then(() => undefined, (e: unknown) => e);
+    expect(error).toBeInstanceOf(MembraneError);
+    expect((error as MembraneError).type).toBe('abort');
   });
 });

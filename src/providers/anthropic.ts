@@ -237,7 +237,10 @@ export class AnthropicAdapter implements ProviderAdapter {
       // own backoff of about a second, slept through shorter waits beyond
       // Membrane's maxRetryDelayMs, retried what Membrane's default policy
       // leaves to the caller, and multiplied the attempt counts Membrane
-      // documents by up to three.
+      // documents by up to three. One resend remains below it: with a
+      // credential resolver, the refresh after an HTTP 401 resends the request
+      // inside the same SDK operation (fetchWithCredentials), outside
+      // Membrane's attempt count.
       maxRetries: 0,
     };
     this.defaultBeta = extractBetaHeader(config.defaultHeaders);
@@ -937,11 +940,15 @@ export class AnthropicAdapter implements ProviderAdapter {
       // aggregate errors whose body carries gateway routing metadata. The
       // SAME request frequently succeeds on retry once a live provider is
       // picked, so such an aggregate stays a retryable server error whatever
-      // other status it reports. This exception belongs to this adapter alone.
-      // Statuses that describe the caller's own request or account — 400, 401
-      // and 429 (terminal quota included), sent or implied by the provider
-      // code — still classify normally, and a 5xx is retryable either way. The
-      // exception keeps the provider code, retry hint and raw evidence.
+      // other status it reports. This exception belongs to this adapter alone
+      // and keeps main's precedence: the statuses main typed before this rule
+      // (400, 401 and 429, terminal quota included), sent or implied by the
+      // provider code, still classify normally, and a 5xx is retryable either
+      // way. Any other status (a 402, 403 or 404 from one route) stays
+      // retryable, since another route may serve the request, and an
+      // aggregate whose message says overloaded takes 529, the overloaded
+      // schedule, as main's overloaded safety net gave it. The exception
+      // keeps the provider code, retry hint and raw evidence.
       const status = error.status ?? statusForProviderCode(classified.providerErrorCode);
       const gatewayAggregate = gw.includes("providermetadata") || gw.includes("fallbacksavailable") ||
         gw.includes("modelattempts") || gw.includes("temporarily unavailable") ||
@@ -981,8 +988,10 @@ export class AnthropicAdapter implements ProviderAdapter {
    * reads them in. With the SDK's own retries off (`maxRetries: 0`), this is
    * the only header reader, so a wait stated only in milliseconds would
    * otherwise be lost. Zero is a stated wait of zero, and so is a negative
-   * wait: it is already over. An error that carries no headers (a mid-stream
-   * SSE rethrow) states no wait here; errorFromProviderStatus then reads its
+   * wait: it is already over. A mid-stream SSE error carries the headers of
+   * the stream's own 200 response (the SDK throws it with them), so a wait
+   * read here for one comes from those. An error whose headers state no wait
+   * states none here; errorFromProviderStatus then reads the body's own
    * message through the guarded prose reader.
    */
   private parseRetryAfter(error: { headers?: Headers }): number | undefined {

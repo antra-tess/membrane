@@ -23,8 +23,13 @@
 - Tool-pair normalizer: orphan textification no longer destroys array-form
   `tool_result` content. `ToolResult.content` may be a block array (image
   results ride it), and recovery read only the string branch, replacing every
-  array payload with the empty string. Text parts are now joined and images
-  become `[Image: <media-type>, ~<n>KB]` placeholders.
+  array payload with the empty string. Both textifications (orphan and
+  duplicate) now join text parts, turn inline image, document, audio and
+  video data into `[Image: <media-type>, ~<n>KB]`, `[Document: …]`,
+  `[Audio: …]` and `[Video: …]` placeholders, and keep every other part (url
+  or file sources, text-source documents, other part types) and non-array
+  content as JSON. A result that was an error says so
+  in its provenance line.
 - `NormalizeEvent`: `orphan_tool_result_textified` carries `recoveredChars`
   so a payload drop can never be silent, and a new
   `stray_tool_result_textified` event reports duplicate results converted to
@@ -33,6 +38,7 @@
   that answered its call). `tool_result_hoisted` now also fires for a result
   pushed DOWN into its own later cycle (`fromEnvelope < toEnvelope`) — the mirror of phase 3's
   existing pull-back from downstream (`fromEnvelope > toEnvelope`).
-- Export `assertToolPairsValid` from the package root and enforce known strict-role placement, including user-role tool calls and assistant-role tool results, before checking one-to-one adjacency. The assertion also enforces the normalizer's reasoning-block role policy. It is not a complete provider-schema or cache-budget validator; explicitly pending calls may remain unmatched.
-- Preserve a duplicate tool result's `cache_control` marker when recovering its content as text, including the marker's TTL. This keeps an explicit message breakpoint from disappearing after the formatter has suppressed its system fallback; the builder's existing marker-budget policy still applies.
+- Export `assertToolPairsValid` from the package root and enforce known strict-role placement, including user-role tool calls and assistant-role tool results, before checking one-to-one adjacency. The assertion also enforces the normalizer's reasoning-block role policy. It reads a history as the provider does, with consecutive messages of one role as one turn, names the messages at fault, and says the history broke the rule (after `normalizeToolPairs`'s own repair, a violation is still reported as the normalizer's bug). It is not a complete provider-schema or cache-budget validator; explicitly pending calls may remain unmatched.
+- Preserve a recovered tool result's `cache_control` marker when recovering its content as text, orphan or duplicate, including the marker's TTL (an orphan's was dropped); a result with no marker of its own keeps the last one inside its content. This keeps an explicit message breakpoint from disappearing after the formatter has suppressed its system fallback; the builder's existing marker-budget policy still applies.
+- A `tool_result` that names its call as `toolUseId`, Membrane's own spelling, leaves the normalizer naming it as `tool_use_id`, the only field the wire pairs by. It used to pair here and reach the provider unanswered.
 - Enforce results-first ordering after orphan/duplicate recovery and synthesis. Tool results form a complete prefix before text, images, and other blocks, including when non-results originally appeared between two results. The stable ordering repair preserves relative order within both groups, their payloads, and existing marker attachments. `assertToolPairsValid` now rejects results after non-result content independently of the repair pass. Requests needing this repair change block order and cache-prefix bytes to the required results-first shape.

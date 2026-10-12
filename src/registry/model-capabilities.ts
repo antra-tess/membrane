@@ -53,6 +53,11 @@ const NO_ASSISTANT_PREFILL_MODELS = [
  * `bedrock:claude-sonnet-4-6`, `anthropic/claude-sonnet-4.6`, and
  * `us.anthropic.claude-sonnet-4-6-v1:0` share the same capability lookup.
  * Dotted version components are canonicalized by the predicate below.
+ *
+ * Only an id that carries the Claude model name can be recognized. A Bedrock
+ * application inference profile's ARN ends in an opaque profile id, so it
+ * matches nothing, is treated as capable, and an assistant-ended body sent to
+ * a refusing model fails with the provider's own 400.
  */
 function stripRoutingPrefix(model: string): string {
   const afterSlash = model.slice(model.lastIndexOf('/') + 1).replace(/^bedrock:/, '');

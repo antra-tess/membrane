@@ -11,6 +11,7 @@ import { OpenAIAdapter } from '../../src/providers/openai.js';
 import { OpenRouterAdapter } from '../../src/providers/openrouter.js';
 import { OpenAICompatibleAdapter } from '../../src/providers/openai-compatible.js';
 import { OpenAICompletionsAdapter } from '../../src/providers/openai-completions.js';
+import { OpenAIResponsesAPIAdapter } from '../../src/providers/openai-responses-api.js';
 import { supportsAssistantPrefill } from '../../src/registry/model-capabilities.js';
 import { sseResponse } from '../helpers/sse-fixtures.js';
 
@@ -512,7 +513,8 @@ describe('complete response decoding follows the selected protocol', () => {
       expect(response.toolCalls).toHaveLength(xml && script.name !== 'partial' ? 1 : 0);
       expect(response.rawAssistantText).toBe(script.value + (xml && script.stopSequence ? script.stopSequence : ''));
       expect(response.details.stop.unclosedToolBlock).toBe(xml && script.name === 'partial');
-      if (!xml) expect(warnings.some(message => /unclosed tool block|zero tool calls/.test(message))).toBe(false);
+      // Only XML's partial script leaves a tool block open, and nothing else warns.
+      expect(warnings.some(message => /unclosed tool block|zero tool calls/.test(message))).toBe(xml && script.name === 'partial');
     });
   }
   for (const carrier of ['native', 'plain-completions']) {
@@ -582,4 +584,93 @@ describe('plain/native partial and stop responses', () => {
     expect(response.content.filter((block: any) => block.type === 'thinking')).toEqual([{ type: 'thinking', thinking: 'thought' }]);
     expect(response.content.filter((block: any) => block.type === 'text')).toEqual([text('visible')]);
   });
+});
+
+describe('the explicit XML and plain stop scans', () => {
+  for (const carrier of ['xml', 'plain']) {
+    it.each(['stream', 'yielding'])(carrier + ' %s ends at the stop that ends first, not the first listed', async path => {
+      // The whole text arrives in one chunk, so both stops are there to find.
+      const adapter = new MockAdapter({ defaultResponse: 'a STOP b END c', completeDelayMs: 0, streamChunkDelayMs: 0, streamChunkSize: 100 });
+      const formatter = carrier === 'xml' ? new AnthropicXmlFormatter() : new CompletionsFormatter();
+      const response = await run(path, new Membrane(adapter, { formatter }), {
+        ...req(false, 'claude-sonnet-4-5'), stopSequences: ['END', 'STOP'], ...(carrier === 'xml' ? { toolMode: 'xml' } : {}),
+      });
+      expect(response.stopReason).toBe('stop_sequence');
+      expect(response.details.stop.triggeredSequence).toBe('STOP');
+      expect(response.rawAssistantText).toBe('a ');
+    });
+  }
+
+  it.each(['stream', 'yielding'])('an aborted XML %s reads text after the prefill\'s open thinking block as thinking, then text', async path => {
+    // With thinking on, the XML prefill ends inside `<thinking>`, so what
+    // streams first is thinking until the model closes it. The transport then
+    // fails with an abort, as a cancelled request's does.
+    const adapter: any = {
+      name: 'aborts-after-chunks', supportsModel: () => true,
+      async stream(request: any, callbacks: any, options: any) {
+        options?.onRequest?.(request);
+        for (const chunk of ['pondering ', 'here</thinking>', 'The ans']) callbacks.onChunk(chunk);
+        throw new DOMException('aborted by fixture', 'AbortError');
+      },
+    };
+    const request = { ...req(false, 'claude-sonnet-4-5'), toolMode: 'xml', config: { model: 'claude-sonnet-4-5', maxTokens: 64, thinking: { enabled: true, budgetTokens: 1024 } } };
+    const membrane = new Membrane(adapter);
+    let aborted: any;
+    if (path === 'stream') aborted = await membrane.stream(request);
+    else {
+      for await (const event of membrane.streamYielding(request)) {
+        if (event.type === 'aborted') aborted = event;
+        if (event.type === 'error') throw event.error;
+      }
+    }
+    expect(aborted.partialContent).toEqual([{ type: 'thinking', thinking: 'pondering here' }, text('The ans')]);
+  });
+});
+
+describe('normalize events reach hooks.onNormalize', () => {
+  const duplicated = (): any => ({
+    ...req(true), messages: [
+      { participant: 'User', content: [text('hello')] },
+      { participant: 'Agent', content: [{ type: 'tool_use', id: 't1', name: 'lookup', input: {} }] },
+      { participant: 'User', content: [
+        { type: 'tool_result', toolUseId: 't1', content: 'first' },
+        { type: 'tool_result', toolUseId: 't1', content: 'again' },
+      ] },
+    ],
+  });
+  it.each(['complete', 'stream', 'yielding'])('a duplicate result turned into text is reported via %s', async path => {
+    const events: any[] = [];
+    const membrane = new Membrane(mock(), { formatter: new NativeFormatter(), hooks: { onNormalize: event => events.push(event) } });
+    await run(path, membrane, duplicated());
+    expect(events).toContainEqual(expect.objectContaining({
+      kind: 'stray_tool_result_textified', toolUseId: 't1', reason: 'duplicate_in_cycle', recoveredChars: 'again'.length,
+    }));
+  });
+});
+
+describe('the Responses API adapter refuses an assistant prefill a Claude model would refuse', () => {
+  const input = (last: 'user' | 'assistant') => [
+    { role: 'user', content: 'hello' },
+    ...(last === 'assistant' ? [{ role: 'assistant', content: 'Sure, ' }] : []),
+  ];
+  for (const call of ['complete', 'stream'] as const) {
+    it(call + ' refuses before HTTP, through a gateway naming a Claude model', async () => {
+      const fetch = vi.fn(async () => { throw new Error('reached HTTP'); });
+      vi.stubGlobal('fetch', fetch);
+      const adapter = new OpenAIResponsesAPIAdapter({ apiKey: 'test', baseURL: 'https://gateway.test/v1' });
+      const request: any = { model: 'anthropic/claude-sonnet-4.6', messages: input('assistant'), maxTokens: 16 };
+      const sent = call === 'complete' ? adapter.complete(request) : adapter.stream(request, { onChunk: () => {} });
+      await expect(sent).rejects.toMatchObject({ type: 'unsupported', retryable: false });
+      expect(fetch).not.toHaveBeenCalled();
+    });
+    it(call + ' sends a user-ended input to the same model (control)', async () => {
+      const fetch = vi.fn(async () => { throw new Error('reached HTTP'); });
+      vi.stubGlobal('fetch', fetch);
+      const adapter = new OpenAIResponsesAPIAdapter({ apiKey: 'test', baseURL: 'https://gateway.test/v1' });
+      const request: any = { model: 'anthropic/claude-sonnet-4.6', messages: input('user'), maxTokens: 16 };
+      const sent = call === 'complete' ? adapter.complete(request) : adapter.stream(request, { onChunk: () => {} });
+      await expect(sent).rejects.toThrow();
+      expect(fetch).toHaveBeenCalled();
+    });
+  }
 });

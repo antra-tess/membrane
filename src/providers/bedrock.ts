@@ -724,8 +724,9 @@ export class BedrockAdapter implements ProviderAdapter {
               // Use exception type as message
             }
             throw new BedrockError(
-              exceptionType.toLowerCase().includes('throttl') ? 429 : 500,
-              `Bedrock stream error (${exceptionType}): ${errorMessage}`
+              BEDROCK_STREAM_EXCEPTION_STATUS.get(exceptionType.toLowerCase()) ?? 500,
+              `Bedrock stream error (${exceptionType}): ${errorMessage}`,
+              exceptionType
             );
           }
 
@@ -745,9 +746,15 @@ export class BedrockAdapter implements ProviderAdapter {
 
                 // Check for error events within the stream
                 if (eventData.type === 'error') {
+                  // Anthropic's own error event: its error.type
+                  // (overloaded_error, rate_limit_error, ...) is the code
+                  // the shared table reads a status from; one it doesn't
+                  // know stays a 500.
+                  const streamError = (eventData as any).error;
                   throw new BedrockError(
-                    500,
-                    `Bedrock stream error: ${(eventData as any).error?.message || JSON.stringify(eventData)}`
+                    undefined,
+                    `Bedrock stream error: ${streamError?.message || JSON.stringify(eventData)}`,
+                    typeof streamError?.type === 'string' ? streamError.type : undefined
                   );
                 }
 
@@ -958,8 +965,8 @@ export class BedrockAdapter implements ProviderAdapter {
   /**
    * HTTP failures are classified at the fetch boundary. What reaches here is
    * a synthesized stream-event failure (BedrockError, which carries the
-   * status its exception type implies), a typed abort, or a non-HTTP
-   * throwable.
+   * status its exception type implies, and the type itself as the provider
+   * code), a typed abort, or a non-HTTP throwable.
    */
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
     if (isDeadlineAbort(error)) return deadlineTimeoutError(error, rawRequest);
@@ -970,6 +977,8 @@ export class BedrockAdapter implements ProviderAdapter {
       return errorFromProviderStatus({
         provider: this.name,
         status: error.status,
+        fallbackStatus: 500,
+        code: error.code,
         body: error.message,
         message: error.message,
         rawError: error,
@@ -989,10 +998,29 @@ export class BedrockAdapter implements ProviderAdapter {
 
 class BedrockError extends Error {
   constructor(
-    public status: number,
-    message: string
+    /** Undefined when the code decides it (a 500 if the table doesn't know the code). */
+    public status: number | undefined,
+    message: string,
+    /** The exception's own type, or an in-band error event's error.type. */
+    public code?: string
   ) {
     super(message);
     this.name = 'BedrockError';
   }
 }
+
+/**
+ * The status each exception Bedrock sends inside a response stream implies:
+ * the HTTP status AWS documents for the same exception. AWS documents
+ * modelStreamErrorException as a 424 and asks for a retry, and a 424 would
+ * read here as a bad request, so it stays a retryable 500. A type not listed
+ * is a 500 too, as every non-throttling exception was.
+ */
+const BEDROCK_STREAM_EXCEPTION_STATUS = new Map<string, number>([
+  ['validationexception', 400],
+  ['modeltimeoutexception', 408],
+  ['throttlingexception', 429],
+  ['internalserverexception', 500],
+  ['modelstreamerrorexception', 500],
+  ['serviceunavailableexception', 503],
+]);

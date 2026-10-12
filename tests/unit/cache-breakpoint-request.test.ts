@@ -151,13 +151,30 @@ describe('block-level cache_control passthrough (native path)', () => {
         messageBlockCount += msg.content.filter((b: any) => b.cache_control).length;
       }
     }
-    const systemCount = Array.isArray(built.system)
-      ? (built.system as any[]).filter((b: any) => b.cache_control).length
+    // BuildResult names it systemContent; `built.system` was always undefined,
+    // so this count read 0 whatever the fallback did.
+    const systemCount = Array.isArray(built.systemContent)
+      ? (built.systemContent as any[]).filter((b: any) => b.cache_control).length
       : 0;
 
     // Passthroughs are preserved verbatim — membrane never strips them.
     expect(messageBlockCount).toBe(2);
     // ...and they count, so membrane adds no redundant system/tools breakpoint.
     expect(systemCount).toBe(0);
+  });
+
+  it('counts a marker the caller put on its own system content, adding no fallback beside it', () => {
+    const callerCache = { type: 'ephemeral', ttl: '1h' };
+    const built = new NativeFormatter().buildMessages(
+      [createMessage('User', 'hello'), createMessage('Claude', 'reply'), createMessage('User', 'again')],
+      {
+        assistantParticipant: 'Claude',
+        participantMode: 'multiuser',
+        // The marker is on the first block: a fallback would mark the last.
+        systemPrompt: [{ type: 'text', text: 'policy', cache_control: callerCache }, { type: 'text', text: 'details' }],
+        promptCaching: true,
+      } as any,
+    );
+    expect(built.systemContent).toEqual([{ type: 'text', text: 'policy', cache_control: callerCache }, { type: 'text', text: 'details' }]);
   });
 });

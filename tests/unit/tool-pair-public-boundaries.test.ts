@@ -265,6 +265,79 @@ describe('cache markers on duplicate textification', () => {
   });
 });
 
+describe('a cache marker on an orphan result', () => {
+  it.each(['complete', 'stream', 'yielding'])('keeps its breakpoint through %s', async entry => {
+    const { adapter, requests } = recordingAdapter();
+    const membrane = new Membrane(adapter, { formatter: new NativeFormatter() });
+    const req: NormalizedRequest = {
+      ...request(), promptCaching: true, cacheTtl: '1h', system: 'rules', toolMode: 'native',
+      messages: [
+        { participant: 'User', content: [{ type: 'text', text: 'go' }] },
+        { participant: 'Tool', cacheBreakpoint: true, content: [
+          { type: 'tool_result', toolUseId: 'zz-gone', content: 'orphan payload' },
+        ] },
+      ],
+    };
+    const before = structuredClone(req);
+    if (entry === 'complete') await membrane.complete(req);
+    else if (entry === 'stream') await membrane.stream(req);
+    else for await (const event of membrane.streamYielding(req)) {
+      if (event.type === 'error') throw event.error;
+    }
+    expect(requests).toHaveLength(1);
+    const wire = requests[0];
+    expect(blocks(wire.messages as ProviderMessage[]).find(block => String(block.text).startsWith('[orphan tool_result'))).toEqual({
+      type: 'text', text: '[orphan tool_result for zz-gone]: orphan payload', cache_control: marker,
+    });
+    expect(countWireCacheMarkers(wire)).toBe(1);
+    expect(wire.system).toBe('rules'); // The kept marker still stands in for the system fallback.
+    expect(req).toEqual(before);
+  });
+});
+
+describe('a normalizer refusal on the public paths', () => {
+  // Two calls sharing an id in one turn are refused before anything is sent.
+  // The id also holds words the transport classifier matches by substring
+  // ('rate', '503', '529'); the refusal is still never retried.
+  const sharedId = 'toolu_rate_503_529';
+  function refused(): NormalizedRequest {
+    return {
+      ...request(), toolMode: 'native',
+      messages: [
+        { participant: 'User', content: [{ type: 'text', text: 'go' }] },
+        { participant: 'Claude', content: [
+          { type: 'tool_use', id: sharedId, name: 'noop', input: {} },
+          { type: 'tool_use', id: sharedId, name: 'noop', input: {} },
+        ] },
+      ],
+    };
+  }
+
+  it.each(['complete', 'stream', 'yielding'])('reaches the caller of %s as itself, unretried', async entry => {
+    const { adapter, requests } = recordingAdapter();
+    const formatter = new NativeFormatter();
+    const build = vi.spyOn(formatter, 'buildMessages');
+    const onError = vi.fn(() => 'retry' as const);
+    const membrane = new Membrane(adapter, { formatter, retry: { maxRetries: 3 }, hooks: { onError } });
+    let caught: unknown;
+    try {
+      if (entry === 'complete') await membrane.complete(refused());
+      else if (entry === 'stream') await membrane.stream(refused());
+      else for await (const event of membrane.streamYielding(refused())) {
+        if (event.type === 'error') caught = event.error;
+      }
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(MembraneNormalizerError);
+    expect(caught).toMatchObject({ type: 'invalid_request', retryable: false });
+    expect((caught as Error).message).toContain(`share the id '${sharedId}'`);
+    expect(onError).not.toHaveBeenCalled();
+    expect(requests).toEqual([]);
+    if (entry === 'complete') expect(build).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('current excess-marker policy after synthetic results', () => {
   function overBudget(): NormalizedRequest {
     return {

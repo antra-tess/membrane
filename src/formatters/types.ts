@@ -105,9 +105,10 @@ export interface BuildOptions {
   /**
    * IDs of tool_use blocks the caller knows are currently in-flight
    * (e.g. a yielding stream that has emitted the tool_use but is still
-   * waiting on the result). If a trailing unmatched tool_use's id is in
-   * this set, the normalizer signals `ready: false` instead of injecting
-   * a synthetic `[pending]` result. Default: empty (always synthesize).
+   * waiting on the result). If an unmatched tool_use's id is in this set,
+   * wherever it sits, the normalizer leaves it unmatched and signals
+   * `ready: false` instead of injecting a synthetic `[pending]` result.
+   * Default: empty (always synthesize). Membrane's own requests pass none.
    */
   pendingToolCallIds?: ReadonlySet<string>;
 
@@ -233,11 +234,12 @@ export interface BuildResult {
   accumulatedBaseOffset?: number;
 
   /**
-   * `false` only when the tool-pair normalizer detected a trailing
-   * unmatched tool_use whose id is in `pendingToolCallIds` — i.e. the
-   * caller (yielding stream) is mid-cycle and the request should not be
-   * shipped yet. Callers that don't pass `pendingToolCallIds` will never
-   * see `false` here.
+   * `false` only when the tool-pair normalizer left an unmatched tool_use
+   * because its id is in `pendingToolCallIds`, wherever it sits — i.e. the
+   * caller is mid-cycle and the request should not be shipped yet. Callers
+   * that don't pass `pendingToolCallIds` will never see `false` from the
+   * built-in formatters. Membrane refuses a build reporting `false` with
+   * `MembraneNotReadyError`.
    */
   ready?: boolean;
 }
@@ -332,7 +334,13 @@ export interface PrefillFormatter {
   /** Formatter name for identification */
   readonly name: string;
 
-  /** Whether this formatter uses prefill (vs native pass-through) */
+  /**
+   * Whether this formatter builds prefill transcripts (vs native pass-through):
+   * a fact about the formatter, not about one build. AnthropicXmlFormatter
+   * says true and still builds a native conversation in native mode; whether
+   * a given build ends in a prefill is its `BuildResult.assistantPrefill`.
+   * Membrane doesn't read this flag.
+   */
   readonly usesPrefill: boolean;
 
   /**
