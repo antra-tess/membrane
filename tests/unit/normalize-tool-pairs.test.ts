@@ -494,7 +494,7 @@ describe('normalizeToolPairs', () => {
     });
   });
 
-  describe('cache markers survive stranded-call synthesis (F17)', () => {
+  describe('cache markers survive stranded-call synthesis', () => {
     const cached = (block: ProviderBlock): ProviderBlock => ({
       ...block,
       cache_control: { type: 'ephemeral' },
@@ -630,10 +630,10 @@ describe('normalizeToolPairs', () => {
   });
 
   // --------------------------------------------------------------------------
-  // A synthetic [pending] belongs at its own tool_use's position (F18).
+  // A synthetic [pending] belongs at its own tool_use's position.
   // --------------------------------------------------------------------------
 
-  describe('synthetic placement follows call order (F18)', () => {
+  describe('synthetic placement follows call order', () => {
     it('inserts the synthetic after the real result of an earlier call', () => {
       // Two calls in one turn; the SECOND is unmatched. Unshifting the
       // synthetic to position 0 put call #2's [pending] ahead of call #1's
@@ -677,12 +677,12 @@ describe('normalizeToolPairs', () => {
 
   // --------------------------------------------------------------------------
   // A re-roled thinking block must never be welded into an assistant envelope
-  // that already holds a tool_use (F7). rebuildEnvelopes opened a new envelope
+  // that already holds a tool_use. rebuildEnvelopes opened a new envelope
   // on ROLE change only, so a thinking block under a user message landed in
   // the PREVIOUS assistant turn — signature and all — after its tool_use.
   // --------------------------------------------------------------------------
 
-  describe('re-roled thinking is never welded after a tool_use (F7)', () => {
+  describe('re-roled thinking is never welded after a tool_use', () => {
     const signedThinking = (signature: string): ProviderBlock => ({
       type: 'thinking',
       thinking: 'zz-reasoning',
@@ -780,6 +780,37 @@ describe('normalizeToolPairs', () => {
       expect(weldedEnvelopes(merged)).toEqual([]);
     });
 
+    it.each([
+      { label: 'thinking', block: signedThinking('zz-sig-2') },
+      { label: 'redacted_thinking', block: redactedThinking('zz-enc-2') },
+    ])('opens a fresh envelope for $label in an assistant message after a call message', ({ block }) => {
+      // Two assistant messages in a row (the results between them lost):
+      // the second message's reasoning was appended past the first one's
+      // call with no re-roling at all.
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(signedThinking('zz-sig-1'), u('ite1')),
+        assistant(block, t('the next turn')),
+      ];
+      const out = normalize(input);
+      const merged = mergeConsecutiveRoles(out.messages) as ProviderMessage[];
+
+      expect(weldedEnvelopes(out.messages)).toEqual([]);
+      expect(weldedEnvelopes(merged)).toEqual([]);
+      expect(merged.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant']);
+      expect(blockTypes(merged[3]!)).toEqual([block.type, 'text']);
+    });
+
+    it("leaves a message's own reasoning after its own call where it was put", () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1'), signedThinking('zz-sig-1')),
+        user(r('ite1')),
+      ];
+      const out = normalize(input);
+      expect(out.messages).toEqual(input);
+    });
+
     it('survives mergeConsecutiveRoles, which every callsite runs next', () => {
       // A fresh envelope is only a repair if the merge that follows
       // normalization at every wire boundary does not concatenate it straight
@@ -796,10 +827,10 @@ describe('normalizeToolPairs', () => {
   });
 
   // --------------------------------------------------------------------------
-  // Orphan textification must not destroy structured content (F1).
+  // Orphan textification must not destroy structured content.
   // --------------------------------------------------------------------------
 
-  describe('orphan textification preserves array-form content (F1)', () => {
+  describe('orphan textification preserves array-form content', () => {
     const arrayResult = (id: string): ProviderBlock => ({
       type: 'tool_result',
       tool_use_id: id,
@@ -866,13 +897,173 @@ describe('normalizeToolPairs', () => {
     });
   });
 
+  describe('textification keeps what text can carry', () => {
+    const marker = { type: 'ephemeral', ttl: '1h' };
+    const orphanOf = (result: ProviderBlock): ProviderMessage[] => [user(result), assistant(t('ok'))];
+    const duplicateOf = (result: ProviderBlock): ProviderMessage[] => [
+      user(t('go')),
+      assistant(u('ite1')),
+      user(r('ite1', 'first'), result),
+    ];
+    const shapes = [
+      { label: 'an orphan', build: orphanOf, prefix: '[orphan tool_result for ite1' },
+      { label: 'a duplicate', build: duplicateOf, prefix: '[duplicate tool_result for ite1' },
+    ];
+    const resultWith = (fields: Record<string, unknown>): ProviderBlock => ({
+      type: 'tool_result',
+      tool_use_id: 'ite1',
+      is_error: false,
+      ...fields,
+    });
+
+    function textified(messages: ProviderMessage[], prefix: string): ProviderBlock {
+      const found = messages
+        .flatMap((m) => m.content)
+        .find((b) => b.type === 'text' && String((b as { text?: unknown }).text).startsWith(prefix));
+      if (!found) throw new Error(`no ${prefix} block in the output`);
+      return found;
+    }
+
+    describe.each(shapes)('$label', ({ build, prefix }) => {
+      it('keeps the result marker, TTL included', () => {
+        const input = build(resultWith({ content: 'payload', cache_control: marker }));
+        const before = structuredClone(input);
+        const out = normalize(input);
+        expect(textified(out.messages, prefix)).toEqual({
+          type: 'text',
+          text: `${prefix}]: payload`,
+          cache_control: marker,
+        });
+        expect(input).toEqual(before);
+      });
+
+      it('carries a marker from inside the content when the result has none', () => {
+        const input = build(resultWith({
+          content: [
+            { type: 'text', text: 'one', cache_control: { type: 'ephemeral' } },
+            { type: 'text', text: 'two', cache_control: marker },
+          ],
+        }));
+        const block = textified(normalize(input).messages, prefix);
+        expect(block.cache_control).toEqual(marker);
+        expect(block.text).toBe(`${prefix}]: one\ntwo`);
+      });
+
+      it('says when the result was an error', () => {
+        const input = build(resultWith({ content: 'it failed', is_error: true }));
+        expect(textified(normalize(input).messages, prefix).text).toBe(`${prefix}, an error]: it failed`);
+      });
+
+      it.each([
+        {
+          part: 'a url image',
+          content: [{ type: 'image', source: { type: 'url', url: 'https://zz.example/chart.png' } }],
+          expected: JSON.stringify({ type: 'image', source: { type: 'url', url: 'https://zz.example/chart.png' } }),
+        },
+        {
+          part: 'a base64 document',
+          content: [{ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: 'zzzz'.repeat(1024) } }],
+          expected: '[Document: application/pdf, ~3KB]',
+        },
+        {
+          part: 'a text document',
+          content: [{ type: 'document', source: { type: 'text', media_type: 'text/plain', data: 'zz-the text' } }],
+          expected: JSON.stringify({ type: 'document', source: { type: 'text', media_type: 'text/plain', data: 'zz-the text' } }),
+        },
+        {
+          part: 'an MCP-style image',
+          content: [{ type: 'image', data: 'zzzz'.repeat(1024), mimeType: 'image/jpeg' }],
+          expected: '[Image: image/jpeg, ~3KB]',
+        },
+        {
+          part: 'base64 audio',
+          content: [{ type: 'audio', source: { type: 'base64', mediaType: 'audio/mpeg', data: 'zzzz'.repeat(1024) } }],
+          expected: '[Audio: audio/mpeg, ~3KB]',
+        },
+        {
+          part: 'base64 video',
+          content: [{ type: 'video', source: { type: 'base64', mediaType: 'video/mp4', data: 'zzzz'.repeat(1024) } }],
+          expected: '[Video: video/mp4, ~3KB]',
+        },
+        {
+          part: 'a part type the module does not know',
+          content: [{ type: 'search_result', title: 'zz-title', source: 'zz-source' }],
+          expected: JSON.stringify({ type: 'search_result', title: 'zz-title', source: 'zz-source' }),
+        },
+        {
+          part: 'object content',
+          content: { rows: 2, ok: true },
+          expected: JSON.stringify({ rows: 2, ok: true }),
+        },
+        { part: 'numeric content', content: 42, expected: '42' },
+        { part: 'null content', content: null, expected: '' },
+      ])('renders $part without losing its payload', ({ content, expected }) => {
+        const { events, onEvent } = collectEvents();
+        const out = normalize(build(resultWith({ content })), { onEvent });
+        expect(textified(out.messages, prefix).text).toBe(`${prefix}]: ${expected}`);
+        const event = events.find((e) => 'recoveredChars' in e) as { recoveredChars: number };
+        expect(event.recoveredChars).toBe(expected.length);
+      });
+    });
+  });
+
+  describe('a result that names its call as toolUseId', () => {
+    it('leaves the normalizer naming it as tool_use_id, the field the wire pairs by', () => {
+      const camel = { type: 'tool_result', toolUseId: 'ite1', content: 'payload' } as ProviderBlock;
+      const input: ProviderMessage[] = [user(t('go')), assistant(u('ite1')), user(camel)];
+      const before = structuredClone(input);
+      const out = normalize(input);
+
+      expect(out.messages[2]!.content).toEqual([{ type: 'tool_result', tool_use_id: 'ite1', content: 'payload' }]);
+      expect(input).toEqual(before);
+    });
+
+    it('is unanswered as given to the public validator, as on the wire', () => {
+      const camel = { type: 'tool_result', toolUseId: 'ite1', content: 'payload' } as ProviderBlock;
+      expect(() => assertToolPairsValid([user(t('go')), assistant(u('ite1')), user(camel)])).toThrow(
+        /tool_use id='ite1' in message 1 has no matching tool_result/,
+      );
+    });
+  });
+
+  describe('the public validator reads turns as the provider does', () => {
+    it('accepts a call turn and a result turn each split across two messages', () => {
+      const split: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        assistant(u('ite2')),
+        user(r('ite1')),
+        user(r('ite2'), t('both done')),
+      ];
+      expect(() => assertToolPairsValid(split)).not.toThrow();
+    });
+
+    it('blames the history, not the normalizer, and names its messages', () => {
+      const cases: Array<{ input: ProviderMessage[]; pattern: RegExp }> = [
+        { input: [assistant(t('hi'))], pattern: /first message must have role 'user'/ },
+        { input: [user(r('ite1'))], pattern: /tool_result for id='ite1' in message 0 has no matching tool_use/ },
+      ];
+      for (const { input, pattern } of cases) {
+        let caught: unknown;
+        try {
+          assertToolPairsValid(input);
+        } catch (err) {
+          caught = err;
+        }
+        expect((caught as Error).message).toMatch(pattern);
+        expect((caught as Error).message).toContain('The history itself breaks the rule');
+        expect((caught as Error).message).not.toContain('bug in the normalizer');
+      }
+    });
+  });
+
   // --------------------------------------------------------------------------
-  // The pairing invariant runs in BOTH directions (F2). Every tool_result must
+  // The pairing invariant runs in BOTH directions. Every tool_result must
   // have its tool_use in the immediately-preceding assistant envelope — the
   // converse of the rule phases 3 and 5 already enforce forward.
   // --------------------------------------------------------------------------
 
-  describe('converse pairing sweep (F2)', () => {
+  describe('converse pairing sweep', () => {
     /** The invariant phases 3/5/validate never checked: result → preceding use. */
     function converseViolations(messages: ProviderMessage[]): string[] {
       const violations: string[] = [];
@@ -950,7 +1141,7 @@ describe('normalizeToolPairs', () => {
       };
       expect(textified).toBeDefined();
       // The cycle this result belongs to already holds its answer — distinct
-      // from a second copy arriving inside that same cycle envelope (F19).
+      // from a second copy arriving inside that same cycle envelope.
       expect(textified.reason).toBe('cycle_closed');
     });
 
@@ -1020,7 +1211,7 @@ describe('normalizeToolPairs', () => {
       expect(pushDown.fromEnvelope).toBeLessThan(pushDown.toEnvelope);
     });
 
-    it('validate mirrors the assertion: a stray that survived every phase throws', () => {
+    it('a well-formed transcript passes, with no converse violations', () => {
       // Guards the repair itself. If a future phase reintroduces an unpaired
       // tool_result, validate must fail loudly rather than ship a 400.
       const input: ProviderMessage[] = [
@@ -1034,14 +1225,14 @@ describe('normalizeToolPairs', () => {
   });
 
   // --------------------------------------------------------------------------
-  // Pairing is ONE-TO-ONE, not membership (F19). Every matching site asked
+  // Pairing is ONE-TO-ONE, not membership. Every matching site asked
   // `.has(id)` and never consumed the id, so an envelope holding two results
   // for one call passed the converse sweep, the interloper pass AND validation
   // on its way to the provider, which either rejects the request or picks one
   // of the two results by rules Membrane does not control.
   // --------------------------------------------------------------------------
 
-  describe('duplicate results for one call (F19)', () => {
+  describe('duplicate results for one call', () => {
     it('pairs the first result and textifies the second with provenance', () => {
       const input: ProviderMessage[] = [
         user(t('go')),
@@ -1115,7 +1306,7 @@ describe('normalizeToolPairs', () => {
     });
   });
 
-  describe('validate asserts exactly-one on its own (F19)', () => {
+  describe('validate asserts exactly-one on its own', () => {
     it('refuses a hand-built duplicate injected past every repair phase', () => {
       // The sweep's consumption and the validator's assertion must be
       // independent: if the only reason validation passes is that no phase
@@ -1132,7 +1323,7 @@ describe('normalizeToolPairs', () => {
         i === 2 ? { role: 'user', content: [...msg.content, r('ite1', 'zz-injected duplicate')] } : msg,
       );
       expect(() => assertToolPairsValid(injected)).toThrow(MembraneNormalizerError);
-      expect(() => assertToolPairsValid(injected)).toThrow(/appears 2 times in envelope 2/);
+      expect(() => assertToolPairsValid(injected)).toThrow(/appears 2 times in message 2/);
     });
 
     it('still refuses an unpaired result, and passes a well-formed list', () => {
@@ -1195,7 +1386,7 @@ describe('normalizeToolPairs', () => {
   // input happened to need repair. (Review findings F14, F15a, F16.)
   // --------------------------------------------------------------------------
 
-  describe('entry guard — pendingToolCallIds must be set-like (F16)', () => {
+  describe('entry guard — pendingToolCallIds must be set-like', () => {
     it('refuses an array even when the transcript needs no repair', () => {
       // The sharp part of the original bug: `.has()` is only reached for an
       // unmatched tool_use, so an array sailed through every well-formed
@@ -1231,7 +1422,42 @@ describe('normalizeToolPairs', () => {
       expect((caught as Error).message).toContain('Array(2)');
     });
 
-    it('accepts a real Set and still refuses no repair-free transcript', () => {
+    it.each([
+      { label: 'a Set of numbers', value: new Set([1]), shape: 'Set holding number' },
+      { label: 'a Map', value: new Map([['ite1', true]]), shape: 'Map holding Array(2)' },
+    ])('refuses $label, whose .has(id) never matches a string id', ({ value, shape }) => {
+      // Accepted, it would answer every .has(id) with false: the in-flight
+      // call would get a fabricated [pending] and ready would stay true.
+      const input: ProviderMessage[] = [user(t('go')), assistant(u('ite1'))];
+      expect(() =>
+        normalizeToolPairs(input, { pendingToolCallIds: value as unknown as ReadonlySet<string> }),
+      ).toThrow(shape);
+    });
+
+    it('reads a null set as none pending, as an absent one', () => {
+      const input: ProviderMessage[] = [user(t('go')), assistant(u('ite1'))];
+      const out = normalize(input, { pendingToolCallIds: null as unknown as ReadonlySet<string> });
+      expect(out.ready).toBe(true);
+      expect(resultIds(out.messages[2]!.content)).toEqual(['ite1']);
+    });
+
+    it('holds back a pending call wherever it sits, not only a trailing one', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(t('meanwhile')),
+        assistant(t('still working')),
+        user(t('any news?')),
+      ];
+      const { events, onEvent } = collectEvents();
+      const out = normalize(input, { pendingToolCallIds: new Set(['ite1']), onEvent });
+
+      expect(out.ready).toBe(false);
+      expect(events).toContainEqual({ kind: 'pending_in_flight', toolUseId: 'ite1' });
+      expect(out.messages.flatMap((m) => resultIds(m.content))).toEqual([]);
+    });
+
+    it('accepts a real Set; a call it names that already has its result leaves the request ready', () => {
       const input: ProviderMessage[] = [
         user(t('go')),
         assistant(u('ite1')),
@@ -1242,12 +1468,18 @@ describe('normalizeToolPairs', () => {
     });
   });
 
-  describe('entry guard — duplicate tool_use ids (F14)', () => {
-    it('refuses a transcript that reuses one tool_use id across two cycles', () => {
-      // Hoisting takes the FIRST id match with no notion of which cycle it
-      // belongs to, so the real result of cycle 2 gets reattributed to the
-      // tool_use of cycle 1 and cycle 2 gets a [pending]. Wire-valid,
-      // silently wrong: always a producer defect.
+  describe('ids reused across turns pair by position', () => {
+    // The API accepts one id in two turns (each result pairs with the call
+    // right before it) and refuses two calls sharing an id in one turn, so
+    // the normalizer pairs by position and refuses only the latter.
+    function resultText(out: { messages: ProviderMessage[] }, index: number): string[] {
+      return out.messages[index]!.content.map((b) => {
+        const block = b as ProviderBlock & { text?: string; content?: string };
+        return block.type === 'tool_result' ? `result:${block.content}` : `text:${block.text}`;
+      });
+    }
+
+    it('passes a well-formed history that reuses one id across two turns unchanged', () => {
       const input: ProviderMessage[] = [
         user(t('go')),
         assistant(u('ite1')),
@@ -1255,11 +1487,68 @@ describe('normalizeToolPairs', () => {
         assistant(u('ite1')),
         user(r('ite1', 'second landed')),
       ];
+      const before = structuredClone(input);
+      const { events, onEvent } = collectEvents();
+      const out = normalize(input, { onEvent });
 
-      expect(() => normalize(input)).toThrow(MembraneNormalizerError);
+      expect(out.messages).toEqual(before);
+      expect(events).toEqual([]);
+      expect(() => assertToolPairsValid(input)).not.toThrow();
     });
 
-    it('names the duplicated id in the refusal', () => {
+    it('gives a stranded earlier call its own [pending], never the later call\'s result', () => {
+      // Phase 3 hoisted the FIRST match downstream, so the later call's real
+      // result answered the earlier call and the later call got [pending].
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(t('meanwhile')),
+        assistant(u('ite1')),
+        user(r('ite1', 'second landed')),
+      ];
+      const out = normalize(input);
+
+      expect(resultText(out, 2)).toEqual(['result:[pending]', 'text:meanwhile']);
+      expect(resultText(out, 4)).toEqual(['result:second landed']);
+    });
+
+    it('never hands a copy of an earlier call\'s result to a later call that reuses the id', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        user(r('ite1', 'first landed')),
+        assistant(t('next')),
+        user(r('ite1', 'a copy of the first')),
+        assistant(u('ite1')),
+        user(t('waiting')),
+      ];
+      const { events, onEvent } = collectEvents();
+      const out = normalize(input, { onEvent });
+
+      // The copy follows the first call, whose cycle is answered: a duplicate.
+      expect(resultText(out, 4)).toEqual(['text:[duplicate tool_result for ite1]: a copy of the first']);
+      expect(events).toContainEqual(
+        expect.objectContaining({ kind: 'stray_tool_result_textified', reason: 'cycle_closed' }),
+      );
+      // The later call gets [pending], not the copy.
+      expect(resultText(out, 6)).toEqual(['result:[pending]', 'text:waiting']);
+    });
+
+    it('a result written before every call with its id answers the first of them', () => {
+      const input: ProviderMessage[] = [
+        user(t('go'), r('ite1', 'early')),
+        assistant(u('ite1')),
+        user(t('hi')),
+        assistant(u('ite1')),
+        user(r('ite1', 'second landed')),
+      ];
+      const out = normalize(input);
+
+      expect(resultText(out, 2)).toEqual(['result:early', 'text:hi']);
+      expect(resultText(out, 4)).toEqual(['result:second landed']);
+    });
+
+    it('names the id shared by two calls in one turn', () => {
       const input: ProviderMessage[] = [
         user(t('go')),
         assistant(u('ite7'), u('ite7')),
@@ -1271,7 +1560,18 @@ describe('normalizeToolPairs', () => {
         caught = err;
       }
       expect(caught).toBeInstanceOf(MembraneNormalizerError);
-      expect((caught as Error).message).toContain('ite7');
+      expect((caught as Error).message).toContain("share the id 'ite7'");
+    });
+
+    it('refuses two consecutive assistant messages that share an id, since they form one turn', () => {
+      const input: ProviderMessage[] = [
+        user(t('go')),
+        assistant(u('ite1')),
+        assistant(u('ite1')),
+        user(r('ite1'), r('ite1')),
+      ];
+      expect(() => normalize(input)).toThrow(/share the id 'ite1'/);
+      expect(() => assertToolPairsValid(input)).toThrow(/turn \(messages 1–2\) share the id 'ite1'/);
     });
 
     it('leaves distinct ids alone', () => {
@@ -1286,7 +1586,7 @@ describe('normalizeToolPairs', () => {
     });
   });
 
-  describe('entry guard — message content shape (F15a)', () => {
+  describe('entry guard — message content shape', () => {
     it('refuses object-shaped content instead of writing "[object Object]" to the wire', () => {
       const input = [
         { role: 'user', content: { zz_not_a_block_array: true } },
@@ -1302,6 +1602,43 @@ describe('normalizeToolPairs', () => {
 
       const out = normalize(input);
       expect(out.messages[0]!.content).toEqual([{ type: 'text', text: 'plain string turn' }]);
+    });
+
+    it.each([null, undefined])('treats %s content as an empty block list', (content) => {
+      // The old String(msg.content ?? '') made it empty text, which the
+      // empty-text strip then dropped, so such histories sent.
+      const input = [
+        user(t('go')),
+        { role: 'assistant', content },
+        user(t('more')),
+      ] as unknown as ProviderMessage[];
+      const out = normalize(input);
+      expect(out.messages).toEqual([user(t('go'), t('more'))]);
+      expect(() => assertToolPairsValid(input)).not.toThrow();
+    });
+
+    it.each([
+      { label: 'a null message', message: null, pattern: /Message 1 is null/ },
+      { label: 'a system message', message: { role: 'system', content: 'rules' }, pattern: /Message 1 is a message with role 'system'/ },
+      { label: 'a message without a role', message: { content: 'hi' }, pattern: /Message 1 is a message whose role is undefined/ },
+      { label: 'a null block', message: { role: 'user', content: [null] }, pattern: /Message 1 \(role 'user'\) block 0 is null/ },
+      { label: 'a string block', message: { role: 'user', content: ['hi'] }, pattern: /block 0 is string/ },
+      { label: 'a block without a string type', message: { role: 'user', content: [{ type: 7 }] }, pattern: /block 0 is an object whose type is number/ },
+      { label: 'a tool_use without an id', message: { role: 'assistant', content: [{ type: 'tool_use', name: 'fn', input: {} }] }, pattern: /block 0 is a tool_use whose id is undefined/ },
+      { label: 'a tool_use with a numeric id', message: { role: 'assistant', content: [{ type: 'tool_use', id: 7, name: 'fn', input: {} }] }, pattern: /tool_use whose id is number/ },
+    ])('refuses $label at entry, typed, from both entry points', ({ message, pattern }) => {
+      const input = [user(t('go')), message] as unknown as ProviderMessage[];
+      for (const run of [() => normalize(input), () => assertToolPairsValid(input)]) {
+        let caught: unknown;
+        try {
+          run();
+        } catch (err) {
+          caught = err;
+        }
+        expect(caught).toBeInstanceOf(MembraneNormalizerError);
+        expect(caught).toMatchObject({ type: 'invalid_request', retryable: false });
+        expect((caught as Error).message).toMatch(pattern);
+      }
     });
   });
 });

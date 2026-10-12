@@ -11,11 +11,11 @@
  * documented option.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { MockAdapter } from '../../src/providers/mock.js';
 import { NativeFormatter } from '../../src/formatters/native.js';
-import { MembraneError } from '../../src/types/errors.js';
+import { MembraneError, MembraneNotReadyError } from '../../src/types/errors.js';
 import type { NormalizedRequest, NormalizedMessage } from '../../src/types/index.js';
 import type { BuildOptions, BuildResult } from '../../src/formatters/types.js';
 
@@ -50,14 +50,24 @@ describe('BuildResult.ready gates the send', () => {
     ).rejects.toThrow(/not ready/i);
   });
 
-  it('never reaches the adapter', async () => {
+  it('never reaches the adapter, or the beforeRequest hook', async () => {
     const adapter = new MockAdapter({ streamChunkDelayMs: 0, completeDelayMs: 0 });
-    const membrane = new Membrane(adapter);
+    const beforeRequest = vi.fn();
+    const membrane = new Membrane(adapter, { hooks: { beforeRequest } });
+    const formatter = new ZzNotReadyFormatter();
+    const build = vi.spyOn(formatter, 'buildMessages');
 
-    await membrane
-      .complete(createRequest(), { formatter: new ZzNotReadyFormatter() })
-      .catch(() => undefined);
+    let caught: unknown;
+    try {
+      await membrane.complete(createRequest(), { formatter });
+    } catch (err) {
+      caught = err;
+    }
 
+    // The readiness gate refused it, not some other early failure.
+    expect(caught).toBeInstanceOf(MembraneNotReadyError);
+    expect(build).toHaveBeenCalledTimes(1);
+    expect(beforeRequest).not.toHaveBeenCalled();
     expect(adapter.getRequestLog()).toHaveLength(0);
   });
 
@@ -89,5 +99,53 @@ describe('BuildResult.ready gates the send', () => {
 
     expect(response.content.length).toBeGreaterThan(0);
     expect(adapter.getRequestLog()).toHaveLength(1);
+  });
+});
+
+describe('an in-flight set given to NativeFormatter', () => {
+  const trailingCall: NormalizedMessage[] = [
+    { participant: 'User', content: [{ type: 'text', text: 'zz-prompt' }] },
+    { participant: 'Claude', content: [{ type: 'tool_use', id: 'zz-call', name: 'noop', input: {} }] },
+  ];
+  const options: BuildOptions = {
+    participantMode: 'multiuser',
+    assistantParticipant: 'Claude',
+    toolMode: 'native',
+  };
+  const results = (build: BuildResult) =>
+    (build.messages as Array<{ content: Array<Record<string, unknown>> }>)
+      .flatMap((message) => message.content)
+      .filter((block) => block.type === 'tool_result');
+
+  it('leaves the call unanswered and reports the build not ready', () => {
+    const build = new NativeFormatter().buildMessages(trailingCall, {
+      ...options,
+      pendingToolCallIds: new Set(['zz-call']),
+    });
+    expect(build.ready).toBe(false);
+    expect(results(build)).toEqual([]);
+  });
+
+  it('synthesizes [pending] without one (control)', () => {
+    const build = new NativeFormatter().buildMessages(trailingCall, options);
+    expect(build.ready).toBe(true);
+    expect(results(build)).toEqual([
+      { type: 'tool_result', tool_use_id: 'zz-call', content: '[pending]', is_error: false },
+    ]);
+  });
+
+  it('is refused through Membrane before the adapter, from a subclass passing its own set', async () => {
+    class InFlightFormatter extends NativeFormatter {
+      buildMessages(messages: NormalizedMessage[], buildOptions: BuildOptions): BuildResult {
+        return super.buildMessages(messages, { ...buildOptions, pendingToolCallIds: new Set(['zz-call']) });
+      }
+    }
+    const adapter = new MockAdapter({ streamChunkDelayMs: 0, completeDelayMs: 0 });
+    const membrane = new Membrane(adapter);
+
+    await expect(
+      membrane.complete({ ...createRequest(), messages: trailingCall }, { formatter: new InFlightFormatter() }),
+    ).rejects.toBeInstanceOf(MembraneNotReadyError);
+    expect(adapter.getRequestLog()).toHaveLength(0);
   });
 });

@@ -38,7 +38,7 @@ function setup(provider: string, mode: string, finish: string, signatureOnly = f
     const source = wire ?? events(signatureOnly, mode === 'xml');
     const abortAt = finish === 'thinking-abort'
       ? source.findIndex(event => event.delta?.type === 'thinking_delta')
-      // After the signature, the thinking block's last delta, and before its stop.
+      // After the signature (the thinking block's last delta) and before its stop.
       : finish === 'signed-abort' ? source.findIndex(event => event.delta?.type === 'signature_delta')
       : finish === 'text-abort' ? source.findIndex(event => event.delta?.type === 'text_delta' && event.delta.text === abortChunk) : -1;
     const frames = (abortAt >= 0 ? source.slice(0, abortAt + 1) : source).map(event => provider === 'anthropic'
@@ -114,6 +114,9 @@ for (const provider of ['anthropic', 'bedrock']) {
           const thinkingChunk = chunks.find(item => item.chunk === thought);
           expect(thinkingChunk?.meta).toMatchObject({ type: 'thinking', visible: false });
           expect(chunks.filter(item => item.meta?.visible).map(item => item.chunk).join('')).not.toContain(thought);
+          // The text fields hold visible text on native paths as on plain ones
+          // (stream()'s abort leaves out an empty rawAssistantText).
+          expect(response.rawAssistantText ?? '').toBe(inThinking ? '' : visible);
         });
       }
     });

@@ -94,6 +94,17 @@ describe('calculateRetryDelay honors retry-after (MAJOR-2)', () => {
     expect(elapsedMs).toBeLessThan(2_000);
   });
 
+  it('waits the backoff when the stated wait is shorter (0)', async () => {
+    const adapter = new FailingAdapter(1, () => rateLimit(0));
+    adapter.queueResponse('zz-recovered');
+    const membrane = new Membrane(adapter, { retry: { maxRetries: 2, retryDelayMs: 200, maxRetryDelayMs: 30_000 } });
+
+    const startedAt = Date.now();
+    await membrane.complete(zzRequest);
+    expect(adapter.completeCalls).toBe(2);
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(150);
+  });
+
   it('keeps the plain backoff when no retry-after was sent', async () => {
     const adapter = new FailingAdapter(1, () => rateLimit(undefined));
     adapter.queueResponse('zz-recovered');

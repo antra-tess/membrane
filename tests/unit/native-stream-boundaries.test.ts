@@ -215,6 +215,75 @@ describe('a request stop on a native stream the provider did not stop', () => {
     expect(s.blocks.some(event => event.block.type === 'tool_call')).toBe(false);
   });
 
+  it.each(['stream', 'yielding'])('returns but does not run a tool call finished before the stop, as a provider-side stop would (%s)', async path => {
+    const bodies = script(
+      () => anthropicResponse([
+        messageStart, ...textBlock(0, 'Checking. '), ...toolBlock(1, 'toolu_1', 'lookup', '{"q":1}'), ...textBlock(2, 'then END more'), ...messageEnd('tool_use'),
+      ]),
+      () => anthropicResponse([messageStart, ...textBlock(0, 'next round'), ...messageEnd()]),
+    );
+    const s = sink();
+    const response = await run(path, claude(), ask({ stopSequences: ['END'], tools: [lookup] }), s);
+    expect(s.toolCalls).toEqual([]);
+    expect(bodies).toHaveLength(1);
+    expect(response.content).toEqual([
+      text('Checking. '), { type: 'tool_use', id: 'toolu_1', name: 'lookup', input: { q: 1 } }, text('then '),
+    ]);
+    expect(response.stopReason).toBe('stop_sequence');
+  });
+
+  it.each(['stream', 'yielding'])('ends at the stop that ends first, whatever order the request lists them in (%s)', async path => {
+    script(() => anthropicResponse([messageStart, ...textBlock(0, 'a STOP b END c'), ...messageEnd()]));
+    const s = sink();
+    const response = await run(path, claude(), ask({ stopSequences: ['END', 'STOP'] }), s);
+    expect(visibleText(s)).toBe('a ');
+    expect(response.content).toEqual([text('a ')]);
+    expect(response.details.stop).toMatchObject({ reason: 'stop_sequence', triggeredSequence: 'STOP' });
+  });
+
+  it.each(['stream', 'yielding'])('at stops that end together, cuts at the one that starts first (%s)', async path => {
+    script(() => anthropicResponse([messageStart, ...textBlock(0, 'x\nHuman: y'), ...messageEnd()]));
+    const s = sink();
+    const response = await run(path, claude(), ask({ stopSequences: ['Human:', '\nHuman:'] }), s);
+    expect(visibleText(s)).toBe('x');
+    expect(response.content).toEqual([text('x')]);
+    expect(response.details.stop.triggeredSequence).toBe('\nHuman:');
+  });
+
+  it.each(['stream', 'yielding'])('keeps streamed thinking out of the text fields and the tool context (%s)', async path => {
+    script(
+      () => anthropicResponse([
+        messageStart, ...thinkingBlock(0, 'PRIVATE'), ...textBlock(1, 'Looking. '), ...toolBlock(2, 'toolu_1', 'lookup', '{}'), ...messageEnd('tool_use'),
+      ]),
+      () => anthropicResponse([messageStart, ...textBlock(0, 'Done.'), ...messageEnd()]),
+    );
+    const request = ask({ tools: [lookup], config: { model: MODEL, maxTokens: 2048, thinking: { enabled: true, budgetTokens: 1024 } } });
+    const contexts: any[] = [];
+    let response: any;
+    if (path === 'stream') {
+      response = await claude().stream(request as any, {
+        onToolCalls: async (calls, context) => {
+          contexts.push(context);
+          return calls.map(call => ({ toolUseId: call.id, content: 'result' }));
+        },
+      });
+    } else {
+      const stream = claude().streamYielding(request as any);
+      for await (const event of stream) {
+        if (event.type === 'tool-calls') {
+          contexts.push(event.context);
+          stream.provideToolResults(event.calls.map(call => ({ toolUseId: call.id, content: 'result' })));
+        }
+        if (event.type === 'complete') response = event.response;
+        if (event.type === 'error') throw event.error;
+      }
+    }
+    expect(contexts).toHaveLength(1);
+    expect(contexts[0]).toMatchObject({ preamble: 'Looking. ', accumulated: 'Looking. ' });
+    expect(response.rawAssistantText).toBe('Looking. Done.');
+    expect(response.content[0]).toMatchObject({ type: 'thinking', thinking: 'PRIVATE' });
+  });
+
   it.each(['stream', 'yielding'])('leaves explicit XML streams to their own parser-aware stop handling (%s)', async path => {
     // The XML loops read raw chunks: a stop spelled inside a payload is
     // theirs to judge. Were the native hold-back active here, `a E` would be
@@ -299,9 +368,27 @@ describe('a request stop where the returned text is not the streamed text', () =
       expect(response.rawAssistantText).toBe(row.chunks);
       expect(response.content).toEqual([text(row.content)]);
       expect(response.stopReason).toBe(row.reason);
-      if (row.stop) expect(response.details.stop).toMatchObject({ reason: 'stop_sequence', triggeredSequence: row.stop });
+      // Every row: a row that stops names its stop, and one that doesn't names none.
+      expect(response.details.stop.reason).toBe(row.reason);
+      expect(response.details.stop.triggeredSequence).toBe(row.stop);
     });
   }
+
+  it.each(['stream', 'yielding'])('cuts at a fifth stop the adapter could not send (%s)', async path => {
+    // Chat Completions takes at most four stops, so the compatible adapter
+    // sends four. The fifth still ends the accepted output.
+    const bodies = script(() => compatibleResponse(['one two ', 'five FIVE more']));
+    const s = sink();
+    const response = await run(path, compatible(), {
+      config: { model: 'm', maxTokens: 64 },
+      messages: [{ participant: 'User', content: [text('Question')] }],
+      stopSequences: ['S1', 'S2', 'S3', 'S4', 'FIVE'],
+    }, s);
+    expect(bodies[0].stop).toEqual(['S1', 'S2', 'S3', 'S4']);
+    expect(visibleText(s)).toBe('one two five ');
+    expect(response.content).toEqual([text('one two five ')]);
+    expect(response.details.stop).toMatchObject({ reason: 'stop_sequence', triggeredSequence: 'FIVE' });
+  });
 });
 
 // ---------------------------------------------------------------------------

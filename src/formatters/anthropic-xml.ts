@@ -497,6 +497,11 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
   // ==========================================================================
   // RESPONSE PARSING
   // ==========================================================================
+  //
+  // These decode the XML tool protocol whatever mode this formatter builds
+  // in: called directly, they read `<function_calls>` in any text they're
+  // given. Membrane calls them only when a request's resolved protocol is XML;
+  // a native-mode response takes its tool calls from the provider's blocks.
 
   createStreamParser(): StreamParser {
     return new IncrementalXmlParser();

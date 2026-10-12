@@ -905,11 +905,15 @@ export class AnthropicAdapter implements ProviderAdapter {
       // aggregate errors whose body carries gateway routing metadata. The
       // SAME request frequently succeeds on retry once a live provider is
       // picked, so such an aggregate stays a retryable server error whatever
-      // other status it reports. This exception belongs to this adapter alone.
-      // Statuses that describe the caller's own request or account — 400, 401
-      // and 429 (terminal quota included), sent or implied by the provider
-      // code — still classify normally, and a 5xx is retryable either way. The
-      // exception keeps the provider code, retry hint and raw evidence.
+      // other status it reports. This exception belongs to this adapter alone
+      // and keeps main's precedence: the statuses main typed before this rule
+      // (400, 401 and 429, terminal quota included), sent or implied by the
+      // provider code, still classify normally, and a 5xx is retryable either
+      // way. Any other status (a 402, 403 or 404 from one route) stays
+      // retryable, since another route may serve the request, and an
+      // aggregate whose message says overloaded takes 529, the overloaded
+      // schedule, as main's overloaded safety net gave it. The exception
+      // keeps the provider code, retry hint and raw evidence.
       const status = error.status ?? statusForProviderCode(classified.providerErrorCode);
       const gatewayAggregate = gw.includes("providermetadata") || gw.includes("fallbacksavailable") ||
         gw.includes("modelattempts") || gw.includes("temporarily unavailable") ||

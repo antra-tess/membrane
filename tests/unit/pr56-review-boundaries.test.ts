@@ -172,6 +172,24 @@ function bedrockFrame(event: unknown): Uint8Array {
   headers.copy(frame, 12); payload.copy(frame, 12 + headers.length);
   return frame;
 }
+/** A Bedrock event-stream exception frame, as the stream sends a mid-response failure. */
+function bedrockExceptionFrame(exceptionType: string, message: string): Uint8Array {
+  const header = (name: string, value: string) => {
+    const n = Buffer.from(name), v = Buffer.from(value);
+    const out = Buffer.alloc(1 + n.length + 1 + 2 + v.length);
+    out[0] = n.length; n.copy(out, 1);
+    out[1 + n.length] = 7;
+    out.writeUInt16BE(v.length, 2 + n.length);
+    v.copy(out, 4 + n.length);
+    return out;
+  };
+  const headers = Buffer.concat([header(':exception-type', exceptionType), header(':message-type', 'exception')]);
+  const payload = Buffer.from(JSON.stringify({ message }));
+  const frame = Buffer.alloc(16 + headers.length + payload.length);
+  frame.writeUInt32BE(frame.length, 0); frame.writeUInt32BE(headers.length, 4);
+  headers.copy(frame, 12); payload.copy(frame, 12 + headers.length);
+  return frame;
+}
 function anthropicEvents(reason?: string) {
   return [
     { type: 'message_start', message: { id: 'zz', type: 'message', role: 'assistant', model: 'zz-model', content: [], usage: { input_tokens: 2, output_tokens: 0 } } },
@@ -306,5 +324,34 @@ describe('public error propagation retains classified identity', () => {
     const adapter: ProviderAdapter = { name: 'custom', supportsModel: () => true, complete: async () => { throw error; }, stream: async () => { throw error; } };
     const membrane = new Membrane(adapter, { formatter: new NativeFormatter(), hooks: { onError: () => 'abort' } });
     await expect(membrane.complete(request)).rejects.toBe(error);
+  });
+});
+
+describe('a Bedrock in-stream failure is typed by what it is', () => {
+  const create = () => new BedrockAdapter({ accessKeyId: 'zz-access', secretAccessKey: 'zz-secret', region: 'us-east-1' });
+  const start = anthropicEvents().slice(0, 3);
+  it.each([
+    ['validationException', { type: 'invalid_request', retryable: false, httpStatus: 400 }],
+    ['throttlingException', { type: 'rate_limit', retryable: true, httpStatus: 429 }],
+    ['modelTimeoutException', { type: 'timeout', retryable: true, httpStatus: 408 }],
+    ['serviceUnavailableException', { type: 'server', retryable: true, httpStatus: 503 }],
+    ['internalServerException', { type: 'server', retryable: true, httpStatus: 500 }],
+    ['modelStreamErrorException', { type: 'server', retryable: true, httpStatus: 500 }],
+    ['zzUnlistedException', { type: 'server', retryable: true, httpStatus: 500 }],
+  ] as const)('%s', async (exceptionType, expected) => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(Buffer.concat([
+      ...start.map(bedrockFrame), bedrockExceptionFrame(exceptionType, 'zz mid-stream failure'),
+    ]))));
+    await expect(invokeAdapter(create(), 'stream')).rejects.toMatchObject({ ...expected, providerErrorCode: exceptionType });
+  });
+  it.each([
+    ['overloaded_error', { type: 'server', retryable: true, httpStatus: 529 }],
+    ['invalid_request_error', { type: 'invalid_request', retryable: false, httpStatus: 400 }],
+    ['zz_unlisted_error', { type: 'server', retryable: true, httpStatus: 500 }],
+  ] as const)('an Anthropic error event (%s) is typed by its error.type', async (errorType, expected) => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(Buffer.concat([
+      ...start.map(bedrockFrame), bedrockFrame({ type: 'error', error: { type: errorType, message: 'zz mid-stream failure' } }),
+    ]))));
+    await expect(invokeAdapter(create(), 'stream')).rejects.toMatchObject({ ...expected, providerErrorCode: errorType });
   });
 });

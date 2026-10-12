@@ -6,7 +6,7 @@
 
 import { restoreToolName } from './utils/tool-names.js';
 import { StreamedThinking } from './utils/streamed-thinking.js';
-import { LocalStopSequences, membraneBlockType } from './utils/local-stop-sequences.js';
+import { LocalStopSequences, firstStop, membraneBlockType } from './utils/local-stop-sequences.js';
 
 import type {
   NormalizedRequest,
@@ -85,6 +85,7 @@ import { AnthropicXmlFormatter } from './formatters/anthropic-xml.js';
 import {
   normalizeToolPairs,
   mergeConsecutiveRoles,
+  MembraneNormalizerError,
   PREFIX_REWRITING_NORMALIZE_EVENT_KINDS,
 } from './formatters/normalize-tool-pairs.js';
 import { YieldingStreamImpl } from './yielding-stream.js';
@@ -288,6 +289,27 @@ class NativeBlockTracker {
   }
 }
 
+/**
+ * An error raised while building a request: the formatter reported it not
+ * ready, or the tool-pair normalizer refused the history. Nothing reached the
+ * provider, the refusal is deterministic, and its own type tells the caller
+ * what to do, so Membrane passes it through instead of classifying and
+ * wrapping it like a transport error.
+ */
+function isBuildRefusal(error: unknown): error is MembraneError {
+  return error instanceof MembraneNotReadyError || error instanceof MembraneNormalizerError;
+}
+
+/**
+ * Stop reasons membrane has already logged as unmapped (see mapStopReason).
+ * A server can send a fresh token on every response (one carrying an id, say),
+ * so the set stops growing at MAX_LOGGED_STOP_REASONS.
+ */
+const warnedStopReasons = new Set<string>();
+const MAX_LOGGED_STOP_REASONS = 64;
+/** Longest stop-reason token printed whole; real tokens are short. */
+const MAX_LOGGED_STOP_REASON_CHARS = 128;
+
 export class Membrane {
   private adapter: ProviderAdapter;
   private registry?: ModelRegistry;
@@ -442,12 +464,10 @@ export class Membrane {
         return response;
 
       } catch (error) {
-        // A not-ready build never reached the provider. Preserve its public
-        // wait-and-rebuild subtype instead of wrapping it as a transport error.
-        if (error instanceof MembraneNotReadyError) throw error;
         // The caller's signal fired: a cancellation, whatever the in-flight
         // error is named (AbortSignal.timeout() rejects with a TimeoutError),
-        // and never retried. The error stays on it as evidence.
+        // a refused build included, and never retried. The error stays on it
+        // as evidence. stream()'s paths judge the signal first too.
         if (options.signal?.aborted) {
           if (isTypedAbortError(error)) throw this.attachRawRequest(error, rawRequest);
           throw new MembraneError({
@@ -458,6 +478,10 @@ export class Membrane {
             rawRequest,
           });
         }
+        // A refused build never reached the provider, and its own type is
+        // the answer. Rethrow it as it is instead of wrapping it as a
+        // transport error.
+        if (isBuildRefusal(error)) throw error;
         const classifiedError = this.attachRawRequest(error, rawRequest);
         const errorInfo = classifyError(classifiedError);
 
@@ -550,7 +574,26 @@ export class Membrane {
           'with complete() per round).'
         );
       }
-      const response = await this.complete(request, options);
+      let response: NormalizedResponse;
+      try {
+        response = await this.complete(request, options);
+      } catch (error) {
+        // A cancellation is an AbortedResponse on every stream() path, this
+        // one included: the caller's signal (complete() then rejects with an
+        // abort MembraneError) or an adapter's own deadline. Nothing was
+        // streamed, so nothing partial is reported.
+        if (this.isCancellation(error, options.signal)) {
+          return this.buildAbortedResponse(
+            '',
+            { inputTokens: 0, outputTokens: 0 },
+            [],
+            [],
+            this.abortReason(error, options.signal),
+            []
+          );
+        }
+        throw error;
+      }
       // Synthesize onChunk callbacks so callers that depend on them still work
       if (options.onChunk && 'content' in response) {
         for (let i = 0; i < response.content.length; i++) {
@@ -946,27 +989,27 @@ export class Membrane {
               const accumulated = parser.getAccumulated();
               const newContent = accumulated.slice(checkFromIndex);
 
-              for (const stopSeq of prefillResult.stopSequences) {
-                const idx = newContent.indexOf(stopSeq);
-                if (idx !== -1) {
-                  // Found stop sequence - mark it and truncate
-                  const absoluteIdx = checkFromIndex + idx;
-                  detectedStopSequence = stopSeq;
-                  truncatedAccumulated = accumulated.slice(0, absoluteIdx);
+              // The stop that ends first, where a provider applying the
+              // request's stops would end, whatever order they're listed in.
+              const found = firstStop(newContent, prefillResult.stopSequences);
+              if (found) {
+                // Found stop sequence - mark it and truncate
+                const absoluteIdx = checkFromIndex + found.at;
+                detectedStopSequence = found.stop;
+                truncatedAccumulated = accumulated.slice(0, absoluteIdx);
 
-                  // Emit only the portion up to stop sequence with metadata
-                  const alreadyEmitted = accumulated.length - chunk.length;
-                  if (absoluteIdx > alreadyEmitted) {
-                    const truncatedChunk = accumulated.slice(alreadyEmitted, absoluteIdx);
-                    const meta: ChunkMeta = {
-                      type: parser.getCurrentBlockType(),
-                      visible: parser.getCurrentBlockType() === 'text',
-                      blockIndex: 0, // Approximate
-                    };
-                    onChunk?.(truncatedChunk, meta);
-                  }
-                  return;
+                // Emit only the portion up to stop sequence with metadata
+                const alreadyEmitted = accumulated.length - chunk.length;
+                if (absoluteIdx > alreadyEmitted) {
+                  const truncatedChunk = accumulated.slice(alreadyEmitted, absoluteIdx);
+                  const meta: ChunkMeta = {
+                    type: parser.getCurrentBlockType(),
+                    visible: parser.getCurrentBlockType() === 'text',
+                    blockIndex: 0, // Approximate
+                  };
+                  onChunk?.(truncatedChunk, meta);
                 }
+                return;
               }
 
               // Emit in correct interleaved order using emissions array
@@ -1478,12 +1521,17 @@ export class Membrane {
           providerRequest,
           {
             onChunk: (chunk) => {
-              textAccumulated += chunk;
-              allTextAccumulated += chunk;
               tracker.onChunk(chunk);
+              const visible = tracker.currentType === 'text';
+              // The text accumulators hold visible text only: a provider's
+              // thinking deltas arrive here too, and they stay typed.
+              if (visible) {
+                textAccumulated += chunk;
+                allTextAccumulated += chunk;
+              }
               const meta: ChunkMeta = {
                 type: tracker.currentType,
-                visible: tracker.currentType === 'text',
+                visible,
                 blockIndex: tracker.blockIndex,
               };
               onChunk?.(chunk, meta);
@@ -1776,10 +1824,13 @@ export class Membrane {
     // would orphan the previous round's cache entry behind an unmarked
     // boundary.
     //
-    // Skipped when the normalizer synthesized a [pending] tool_result:
-    // those bytes are rewritten when the real result lands, and caching
-    // past them poisons the prefix — the same rationale as the
-    // normalizer's phase 5.5 cache suppression.
+    // Skipped after any repair that rewrites prefix bytes (the kinds in
+    // PREFIX_REWRITING_NORMALIZE_EVENT_KINDS: a synthesized [pending]
+    // result, a textified orphan or duplicate result): those bytes are
+    // rewritten when the real pairing lands, so caching at or past one
+    // poisons the prefix. A repair that only moves blocks (a hoist, a
+    // relocation, results-first) is a fixed function of the history, so the
+    // prefix it leaves is as stable as the history.
     // ------------------------------------------------------------------
     const floatingEnabled =
       request.floatingCacheMarker ?? this.config.defaultFloatingCacheMarker ?? true;
@@ -2187,6 +2238,9 @@ export class Membrane {
     const buildResult = activeFormatter.buildMessages(messages, {
       onNormalize: event => {
         if (PREFIX_REWRITING_NORMALIZE_EVENT_KINDS.has(event.kind)) prefixRewritten = true;
+        // The caller's view of every repair, textifications included: without
+        // it a result turned into text would reach the model unannounced.
+        this.config.hooks?.onNormalize?.(event);
       },
       deferCacheBudgetCheck: true,
       participantMode: 'multiuser',
@@ -2209,9 +2263,11 @@ export class Membrane {
 
     // Honor readiness at the shared formatter-build boundary used by
     // complete(), stream(), and streamYielding(), including native loops.
-    // NativeFormatter derives it from pendingToolCallIds supplied by a custom
-    // build. Ordinary loops await tool results before rebuilding; a custom
-    // build declaring an in-flight gap must wait and rebuild before sending.
+    // Membrane passes no in-flight set (pendingToolCallIds), so the built-in
+    // formatters always report ready here; a formatter that reports not
+    // ready (a custom one, or a subclass that passes its own in-flight set)
+    // is refused, and its caller waits for those results and rebuilds.
+    // Ordinary loops await tool results before rebuilding.
     if (buildResult.ready === false) {
       throw new MembraneNotReadyError(activeFormatter.name);
     }
@@ -2908,8 +2964,8 @@ export class Membrane {
     return estimatedCost ? { ...discarded, estimatedCost } : discarded;
   }
 
-  private mapStopReason(providerReason: string): StopReason {
-    switch (providerReason) {
+  private mapStopReason(adapterReason: string): StopReason {
+    switch (adapterReason) {
       case 'end_turn':
         return 'end_turn';
       case 'max_tokens':
@@ -2930,13 +2986,31 @@ export class Membrane {
       default:
         // Unknown reasons still normalize to end_turn — callers switch on a
         // closed union — but never silently: the raw token is disclosed as
-        // details.stop.providerReason and the mapping is logged. Provider
-        // enums grow, and the last time this default swallowed a member it
-        // hid safety refusals in production.
-        console.warn(
-          `[membrane] Unmapped adapter stop reason '${providerReason}' normalized to end_turn ` +
-            '(details.stop.providerReason is present when the adapter supplies the raw provider token)'
-        );
+        // details.stop.providerReason and the mapping is logged, once per
+        // token per process (a compatible server may send its own token on
+        // every response). Provider enums grow, and the last time this
+        // default swallowed a member it hid safety refusals in production.
+        if (!warnedStopReasons.has(adapterReason) && warnedStopReasons.size < MAX_LOGGED_STOP_REASONS) {
+          warnedStopReasons.add(adapterReason);
+          // The token is the server's own text: printed as a JSON string, so
+          // a newline can't forge a log line, and cut to a token's length.
+          const shown = JSON.stringify(
+            adapterReason.length > MAX_LOGGED_STOP_REASON_CHARS
+              ? `${adapterReason.slice(0, MAX_LOGGED_STOP_REASON_CHARS)}…`
+              : adapterReason
+          );
+          console.warn(
+            `[membrane] Unmapped adapter stop reason ${shown} normalized to end_turn ` +
+              '(details.stop.providerReason is present when the adapter supplies the raw provider token; ' +
+              'logged once per reason)'
+          );
+          if (warnedStopReasons.size === MAX_LOGGED_STOP_REASONS) {
+            console.warn(
+              `[membrane] ${MAX_LOGGED_STOP_REASONS} distinct unmapped stop reasons logged; further ones are not ` +
+                '(details.stop.providerReason still carries each)'
+            );
+          }
+        }
         return 'end_turn';
     }
   }
@@ -3004,8 +3078,10 @@ export class Membrane {
    * The server's own `retry-after` outranks our backoff when it is longer:
    * retrying inside a window the provider has already told us to wait out
    * burns the whole attempt budget on guaranteed failures. maxRetryDelayMs
-   * still caps the wait, so a hostile or absurd retry-after cannot park a
-   * turn indefinitely.
+   * still caps Membrane's own sleep, so a hostile or absurd retry-after
+   * cannot park the call. The error a caller receives carries the provider's
+   * stated wait as stated (retryAfterMs): pacing across calls is the
+   * caller's.
    */
   private calculateRetryDelay(attempt: number, overloaded = false, errorInfo?: ErrorInfo): number {
     const { retryDelayMs, backoffMultiplier, maxRetryDelayMs } = overloaded
@@ -3052,8 +3128,11 @@ export class Membrane {
   }
 
   private attachRawRequest(error: unknown, rawRequest: unknown): MembraneError {
-    // Native streaming can refuse a shared formatter build before sending.
-    if (error instanceof MembraneNotReadyError) return error;
+    // A build refusal (the formatter reported not ready, or the normalizer
+    // refused the history; native streaming builds through the shared
+    // formatter build every round) carries no request of its own: pass it
+    // through as it is.
+    if (isBuildRefusal(error)) return error;
     if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
     const errorInfo = classifyError(error);
     errorInfo.rawRequest = rawRequest;
@@ -3066,11 +3145,17 @@ export class Membrane {
         reject(signal.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
         return;
       }
-      const timer = setTimeout(resolve, ms);
-      signal?.addEventListener('abort', () => {
+      const onAbort = () => {
         clearTimeout(timer);
-        reject(signal.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
-      }, { once: true });
+        reject(signal?.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
+      };
+      // The listener goes when the timer fires: a long-lived caller signal
+      // would otherwise keep one per retry sleep until it aborts.
+      const timer = setTimeout(() => {
+        signal?.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+      signal?.addEventListener('abort', onAbort, { once: true });
     });
   }
 
@@ -3338,22 +3423,10 @@ export class Membrane {
     try {
       // Tool execution loop
       while (toolDepth <= maxToolDepth) {
-        // Check for cancellation
-        if (stream.isCancelled) {
-          const fullAccumulated = parser.getAccumulated();
-          const newContent = fullAccumulated.slice(initialPrefillLength);
-          stream.emit({
-            type: 'aborted',
-            reason: 'user',
-            partialContent: xmlToolProtocol
-              ? parseAccumulatedIntoBlocks(newContent, { tools: request.tools }).blocks
-              : streamedThinking.content(newContent, (value, context) => formatter.parseContentBlocks(value, request.tools, context)),
-            rawAssistantText: newContent,
-            toolCalls: executedToolCalls,
-            toolResults: executedToolResults,
-          });
-          return;
-        }
+        // A cancelled stream stops here. cancel() is the only way to cancel
+        // it, and it has already emitted the terminal aborted event, so
+        // reporting again would deliver a second one.
+        if (stream.isCancelled) return;
 
         // Track if we manually detected a stop sequence
         let detectedStopSequence: string | null = null;
@@ -3407,26 +3480,25 @@ export class Membrane {
               const accumulated = parser.getAccumulated();
               const newContent = accumulated.slice(checkFromIndex);
 
-              for (const stopSeq of prefillResult.stopSequences) {
-                const idx = newContent.indexOf(stopSeq);
-                if (idx !== -1) {
-                  const absoluteIdx = checkFromIndex + idx;
-                  detectedStopSequence = stopSeq;
-                  truncatedAccumulated = accumulated.slice(0, absoluteIdx);
+              // The stop that ends first (see streamWithXmlTools).
+              const found = firstStop(newContent, prefillResult.stopSequences);
+              if (found) {
+                const absoluteIdx = checkFromIndex + found.at;
+                detectedStopSequence = found.stop;
+                truncatedAccumulated = accumulated.slice(0, absoluteIdx);
 
-                  // Emit only the portion up to stop sequence
-                  const alreadyEmitted = accumulated.length - chunk.length;
-                  if (emitTokens && absoluteIdx > alreadyEmitted) {
-                    const truncatedChunk = accumulated.slice(alreadyEmitted, absoluteIdx);
-                    const meta: ChunkMeta = {
-                      type: parser.getCurrentBlockType(),
-                      visible: parser.getCurrentBlockType() === 'text',
-                      blockIndex: 0,
-                    };
-                    stream.emit({ type: 'tokens', content: truncatedChunk, meta });
-                  }
-                  return;
+                // Emit only the portion up to stop sequence
+                const alreadyEmitted = accumulated.length - chunk.length;
+                if (emitTokens && absoluteIdx > alreadyEmitted) {
+                  const truncatedChunk = accumulated.slice(alreadyEmitted, absoluteIdx);
+                  const meta: ChunkMeta = {
+                    type: parser.getCurrentBlockType(),
+                    visible: parser.getCurrentBlockType() === 'text',
+                    blockIndex: 0,
+                  };
+                  stream.emit({ type: 'tokens', content: truncatedChunk, meta });
                 }
+                return;
               }
 
               // Emit in correct interleaved order
@@ -3853,7 +3925,7 @@ export class Membrane {
           type: 'aborted',
           reason: this.abortReason(error, stream.signal),
           partialContent: xmlToolProtocol
-              ? parseAccumulatedIntoBlocks(newContent, { tools: request.tools }).blocks
+              ? parseAccumulatedIntoBlocks(newContent, { tools: request.tools, ...(initialBlockType ? { startInsideBlock: initialBlockType } : {}) }).blocks
               : streamedThinking.content(newContent, (value, context) => formatter.parseContentBlocks(value, request.tools, context)),
           rawAssistantText: newContent,
           toolCalls: executedToolCalls,
@@ -3926,18 +3998,10 @@ export class Membrane {
     try {
       // Tool execution loop
       while (toolDepth <= maxToolDepth) {
-        // Check for cancellation
-        if (stream.isCancelled) {
-          stream.emit({
-            type: 'aborted',
-            reason: 'user',
-            partialContent: [...allContentBlocks, ...(roundReceived?.() ?? [])],
-            rawAssistantText: allTextAccumulated,
-            toolCalls: executedToolCalls,
-            toolResults: executedToolResults,
-          });
-          return;
-        }
+        // A cancelled stream stops here. cancel() is the only way to cancel
+        // it, and it has already emitted the terminal aborted event, so
+        // reporting again would deliver a second one.
+        if (stream.isCancelled) return;
 
         // Build provider request with native tools
         const providerRequest = this.buildNativeToolRequest(request, messages, toolDepth > 0, activeFormatter);
@@ -3961,14 +4025,18 @@ export class Membrane {
             onChunk: (chunk) => {
               if (stream.isCancelled) return;
 
-              textAccumulated += chunk;
-              allTextAccumulated += chunk;
               tracker.onChunk(chunk);
+              const visible = tracker.currentType === 'text';
+              // Visible text only, as in streamWithNativeTools.
+              if (visible) {
+                textAccumulated += chunk;
+                allTextAccumulated += chunk;
+              }
 
               if (emitTokens) {
                 const meta: ChunkMeta = {
                   type: tracker.currentType,
-                  visible: tracker.currentType === 'text',
+                  visible,
                   blockIndex: tracker.blockIndex,
                 };
                 stream.emit({ type: 'tokens', content: chunk, meta });

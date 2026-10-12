@@ -19,11 +19,6 @@ export class StreamedThinking {
     this.roundOffset = offset;
   }
 
-  reset(): void {
-    this.spans = [];
-    this.beginRound();
-  }
-
   onBlock(index: number, value: unknown, offset: number): void {
     const block = value as ContentBlock | undefined;
     if (!block) return;

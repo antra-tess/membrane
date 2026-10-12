@@ -129,6 +129,19 @@ describe('a context overflow in each provider\'s own words is context_length', (
 });
 
 describe('a credential failure sent as a 400 is auth', () => {
+  it.each(['API_KEY_EXPIRED', 'ACCESS_TOKEN_EXPIRED'])('gemini: INVALID_ARGUMENT with ErrorInfo reason %s', async reason => {
+    stubHttpFailure(400, {
+      error: {
+        code: 400,
+        message: 'zz credential no longer valid',
+        status: 'INVALID_ARGUMENT',
+        details: [{ '@type': 'type.googleapis.com/google.rpc.ErrorInfo', reason, domain: 'googleapis.com' }],
+      },
+    });
+    const error = await failure(new GeminiAdapter({ apiKey: 'zz-key-gemini' }));
+    expect(error).toMatchObject({ type: 'auth', retryable: false, httpStatus: 400 });
+  });
+
   it('gemini: INVALID_ARGUMENT with ErrorInfo reason API_KEY_INVALID', async () => {
     stubHttpFailure(400, {
       error: {

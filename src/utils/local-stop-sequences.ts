@@ -54,6 +54,9 @@ interface ReleasedTextBlock {
  *   stopSequence, its content cut at the stop. A message item shared by
  *   the cut text loses its replayable rawItem on every block that kept it, so
  *   the next request replays the accepted text rather than the whole item.
+ * - A tool call finished before the stop stays in the content and the round
+ *   still ends with 'stop_sequence', so the native loops don't run it: the
+ *   outcome a provider gives when it applies the stop itself.
  *
  * Thinking is never scanned, and a non-text block ends a stretch of visible
  * text: a stop does not span one. The provider's stream still runs to its end,
@@ -320,8 +323,12 @@ function lastIndexWhere<T>(items: readonly T[], predicate: (item: T) => boolean)
   return -1;
 }
 
-/** The stop whose first occurrence in `text` ends first; at equal ends, the one starting first. */
-function firstStop(text: string, stops: readonly string[]): { stop: string; at: number } | undefined {
+/**
+ * The stop whose first occurrence in `text` ends first; at equal ends, the one
+ * starting first. That's where a provider checking token by token stops,
+ * whatever order the request lists its stops in.
+ */
+export function firstStop(text: string, stops: readonly string[]): { stop: string; at: number } | undefined {
   let best: { stop: string; at: number; end: number } | undefined;
   for (const stop of stops) {
     const at = text.indexOf(stop);

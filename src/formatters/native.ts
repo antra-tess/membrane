@@ -204,15 +204,6 @@ export class NativeFormatter implements PrefillFormatter {
       ? { type: 'ephemeral', ...(cacheTtl ? { ttl: cacheTtl } : {}) }
       : undefined;
 
-    // The system block is cached only as a FALLBACK. When the context strategy
-    // marks any message breakpoint, that breakpoint already caches a prefix
-    // beginning at the front of the request — tools + system included — so a
-    // separate system breakpoint is redundant. Placing it anyway both wastes one
-    // of Anthropic's 4 cache_control slots and can push a 4-marker turn to 5,
-    // which the API hard-rejects. So we only cache the system block when the
-    // caller/strategy marked no breakpoints of its own.
-    let markedBreakpoints = 0;
-
     const providerMessages: ProviderMessage[] = [];
 
     // Add context prefix as first assistant message (for simulacrum seeding)
@@ -220,7 +211,6 @@ export class NativeFormatter implements PrefillFormatter {
       const prefixBlock: Record<string, unknown> = { type: 'text', text: contextPrefix };
       if (promptCaching && cacheControl && cacheMarkers === 'membrane-system') {
         prefixBlock.cache_control = cacheControl;
-        markedBreakpoints++;
       }
       providerMessages.push({
         role: 'assistant',
@@ -275,7 +265,6 @@ export class NativeFormatter implements PrefillFormatter {
         const prevIdx = lastCacheableBlockIndex(prevContent);
         if (prevIdx >= 0) {
           prevContent[prevIdx]!.cache_control = cacheControl;
-          markedBreakpoints++;
         }
       }
 
@@ -286,20 +275,7 @@ export class NativeFormatter implements PrefillFormatter {
         const bpIdx = lastCacheableBlockIndex(content as Record<string, unknown>[]);
         if (bpIdx >= 0) {
           (content[bpIdx] as Record<string, unknown>).cache_control = cacheControl;
-          markedBreakpoints++;
         }
-      }
-    }
-
-    // Block-level cache_control can also arrive via convertContent passthrough
-    // (stale request-time markers on imported/stored blocks — Arc exports carry
-    // them). Recount ALL message-level cache_control blocks — deliberate marks
-    // and passthroughs alike — so the system fallback below can't stack on top.
-    markedBreakpoints = 0;
-    for (const msg of providerMessages) {
-      if (!Array.isArray(msg.content)) continue;
-      for (const b of msg.content as Record<string, unknown>[]) {
-        if (b.cache_control) markedBreakpoints++;
       }
     }
 
@@ -319,12 +295,18 @@ export class NativeFormatter implements PrefillFormatter {
     // Merge consecutive same-role messages (API requires alternating)
     const mergedMessages = mergeConsecutiveRoles(normalized.messages);
 
-    // Build system content. Cache the system block only as a fallback — when no
-    // message breakpoint was marked (see note above; otherwise a message
-    // breakpoint already caches tools+system as part of its prefix).
-    // The complete request budget is enforced after hooks in Membrane. This
-    // formatter's message-only count cannot include later system/tool additions.
-    markedBreakpoints = countWireCacheMarkers({ messages: mergedMessages, system: systemPrompt });
+    // Build system content. The system block is cached only as a FALLBACK: a
+    // message breakpoint already caches a prefix that begins at the front of
+    // the request, tools and system included, so a separate system marker
+    // would waste one of Anthropic's 4 slots and can push a 4-marker turn to 5,
+    // which the API rejects. The count is of the markers this request already
+    // carries: on the merged messages (this build's own, a contextPrefix's,
+    // and stale ones passed through on stored blocks) and on the caller's
+    // system content, so a caller who marked their own system block gets no
+    // fallback either. The budget check below covers the whole built request;
+    // Membrane defers it (deferCacheBudgetCheck) to after its hooks, which
+    // can still add markers.
+    const markedBreakpoints = countWireCacheMarkers({ messages: mergedMessages, system: systemPrompt });
     const cacheSystem =
       cacheMarkers === 'membrane-system' && cacheControl && markedBreakpoints === 0
         ? cacheControl

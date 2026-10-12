@@ -399,7 +399,9 @@ const CONTEXT_LENGTH_PATTERN =
  */
 const THINKING_BINDING_PATTERN = /invalid `signature` in `(?:redacted_)?thinking` block/i;
 
-const RATE_LIMIT_PATTERN = /\b429\b|rate[ _-]?limit|too many requests/i;
+// "rate limit" only where no letter precedes it, so "moderate limit" and
+// "generate limit" aren't rate limits, while "user_rate_limit" still is.
+const RATE_LIMIT_PATTERN = /\b429\b|(?<![a-z])rate[ _-]?limit|too many requests/i;
 
 const SERVER_STATUS_PATTERN = /\b(500|502|503|504|529)\b/;
 
@@ -466,6 +468,8 @@ function retryAfterFromBody(root: Record<string, unknown>, errorNode: Record<str
   }
   const millis = errorNode.retry_after_ms ?? root.retry_after_ms;
   if (typeof millis === 'number' && Number.isFinite(millis)) return Math.round(millis);
+  // A digit string, as the SSE frame reader also accepts for this field.
+  if (typeof millis === 'string' && /^\d+$/.test(millis.trim())) return Number(millis.trim());
   return parseRetryDelayValue(errorNode.retry_after ?? root.retry_after ?? errorNode.retryAfter ?? root.retryAfter);
 }
 
@@ -692,10 +696,10 @@ export function isTypedAbortError(error: unknown): boolean {
   if (typeof DOMException !== 'undefined' && error instanceof DOMException) {
     return error.name === 'AbortError';
   }
-  if (error instanceof Error) {
-    // APIUserAbortError: the Anthropic SDK's own typed abort.
-    return error.name === 'AbortError' || error.name === 'APIUserAbortError';
-  }
+  // The Anthropic SDK's APIUserAbortError is named 'Error' (measured on
+  // @anthropic-ai/sdk 0.52), so no name arm can match it: the Anthropic
+  // adapter recognises it by class.
+  if (error instanceof Error) return error.name === 'AbortError';
   return false;
 }
 
