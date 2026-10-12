@@ -140,6 +140,12 @@ describe('a refused thinking block is thinking_binding', () => {
     )));
     const error = await rejection(new OpenRouterAdapter({ apiKey: 'zz-key-openrouter' }).stream(request, { onChunk() {} }));
     expect(error).toMatchObject({ type: 'thinking_binding', retryable: false, httpStatus: 400 });
+    expect(error.providerErrorCode).toBeUndefined();
+  });
+
+  it("anthropic through a gateway: an aggregate carrying the refusal stays thinking_binding, not a retryable server error", () => {
+    const body = { ...anthropicBody(BINDING), providerMetadata: { gateway: { routing: { attempts: 1 } } } };
+    expect(anthropicHandled(422, body)).toMatchObject({ type: 'thinking_binding', retryable: false });
   });
 
   it("bedrock: the HTTP 400, named by its x-amzn-ErrorType", async () => {
@@ -186,6 +192,11 @@ describe('only that', () => {
     const error = errorFromProviderStatus({ provider: 'anthropic', status: 500, body: anthropicBody(`upstream said: ${BINDING}`) });
     expect(error.type).toBe('server');
     expect(error.retryable).toBe(true);
+  });
+
+  it('a refusal whose text also reads as an overflow is thinking_binding', () => {
+    const error = errorFromProviderStatus({ provider: 'zz-gateway', status: 400, body: anthropicBody(`${ALTERED}. prompt is too long: 250000 tokens > 200000 maximum`) });
+    expect(error).toMatchObject({ type: 'thinking_binding', retryable: false });
   });
 
   it('a context overflow is still context_length', () => {

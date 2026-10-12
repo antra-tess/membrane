@@ -912,13 +912,17 @@ export class AnthropicAdapter implements ProviderAdapter {
       // way. Any other status (a 402, 403 or 404 from one route) stays
       // retryable, since another route may serve the request, and an
       // aggregate whose message says overloaded takes 529, the overloaded
-      // schedule, as main's overloaded safety net gave it. The exception
-      // keeps the provider code, retry hint and raw evidence.
+      // schedule, as main's overloaded safety net gave it. A refused thinking
+      // block stays thinking_binding: retrying doesn't repair the block's
+      // signature or binding, so the consumer gets the typed refusal and
+      // leaves the block out. The exception keeps the provider code, retry
+      // hint and raw evidence.
       const status = error.status ?? statusForProviderCode(classified.providerErrorCode);
       const gatewayAggregate = gw.includes("providermetadata") || gw.includes("fallbacksavailable") ||
         gw.includes("modelattempts") || gw.includes("temporarily unavailable") ||
         gw.includes("no_providers_available");
-      if (gatewayAggregate && status !== 400 && status !== 401 && status !== 429 && !(status !== undefined && status >= 500)) {
+      if (gatewayAggregate && classified.type !== 'thinking_binding'
+        && status !== 400 && status !== 401 && status !== 429 && !(status !== undefined && status >= 500)) {
         return new MembraneError({
           type: 'server',
           message,

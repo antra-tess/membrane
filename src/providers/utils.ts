@@ -100,8 +100,9 @@ function frameTokensMatch(tokens: string[], needles: string[]): boolean {
  * aliases supply a fallback after the status and recognized provider code.
  * The provider message, raw frame, retry hint and request remain attached,
  * including for an unclassified payload. An explicit 400 frame is typed by
- * its status, rather than left a bare Error: invalid_request, unless its text
- * is a refused thinking block (thinking_binding).
+ * its status, rather than left a bare Error, as classifyByStatus reads a 400:
+ * auth or context_length where its reason, code or text says so, a refused
+ * thinking block as thinking_binding, and invalid_request otherwise.
  *
  * `errorNoun` names what carried the payload. It defaults to the SSE case, and
  * exists because the same `{ error: { code, message } }` object also arrives on
