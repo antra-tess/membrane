@@ -3095,13 +3095,15 @@ export class Membrane {
    * Retrying earlier would add traffic with no evidence it can succeed;
    * sleeping longer than the configured budget would park the call.
    *
-   * A negative wait is already over, so it fits: the backoff paces the retry
-   * (see calculateRetryDelay). The readers clamp one to 0 before it gets
-   * here; this keeps the same meaning for a wait a custom adapter states.
+   * A negative wait is already over, so it fits, -Infinity included: the
+   * backoff paces the retry (see calculateRetryDelay). The readers clamp one
+   * to 0 before it gets here, and they ignore a value that is not a finite
+   * number (it states nothing), so the non-finite rule, like this one, is
+   * for a wait a custom adapter states.
    */
   private providerWaitFitsRetryWindow(overloaded: boolean, errorInfo: ErrorInfo): boolean {
     const retryAfterMs = errorInfo.retryAfterMs;
-    if (retryAfterMs === undefined) return true;
+    if (retryAfterMs === undefined || retryAfterMs < 0) return true;
     const { maxRetryDelayMs } = overloaded ? this.retryConfig.overloaded : this.retryConfig;
     return Number.isFinite(retryAfterMs) && retryAfterMs <= maxRetryDelayMs;
   }
@@ -3125,13 +3127,15 @@ export class Membrane {
     // stampede it's backing off from. [delay/2, delay) keeps the wait long.
     const backoffMs = overloaded ? Math.floor(delay / 2 + Math.random() * (delay / 2)) : delay;
 
-    // A stated wait can only lengthen the backoff, and the ceiling still caps
-    // it. So a zero or negative wait (a 429 with retry_after_ms: -1000) loses
-    // to the backoff and can't make the loop spin. Keep the max(): never trust
-    // a stated wait alone to pace retries.
+    // A stated wait can only lengthen the backoff, so a zero or negative
+    // wait (a 429 with retry_after_ms: -1000) loses to the backoff and can't
+    // make the loop spin. Keep the max(): never trust a stated wait alone to
+    // pace retries. It needs no cap: only a wait within maxRetryDelayMs
+    // reaches here (providerWaitFitsRetryWindow), and the backoff is capped
+    // above, so a stated wait is taken whole.
     const retryAfterMs = errorInfo?.retryAfterMs;
     if (retryAfterMs === undefined) return backoffMs;
-    return Math.min(maxRetryDelayMs, Math.max(backoffMs, retryAfterMs));
+    return Math.max(backoffMs, retryAfterMs);
   }
 
   /**

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CacheKeepalive, lineageKey, type CacheKeepaliveConfig, type KeepaliveCall } from '../../src/cache-keepalive.js';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
+import { MAX_ERROR_MESSAGE_CHARS } from '../../src/types/errors.js';
 
 const START = Date.parse('2026-10-02T00:00:00Z');
 const usage = {
@@ -97,6 +98,22 @@ describe('keepalive terminal call receipts', () => {
     }
     expect(events.map(e => e.type)).toEqual(['error', 'error', 'disabled']);
     expect(ka.getStatus()).toEqual([]);
+  });
+
+  it('bounds the error text it emits for a refused poke, and keeps the thrown error on the receipt', async () => {
+    // The sender's error never passed through MembraneError's bound, and the
+    // SDK builds a refused request's message from the whole provider body.
+    const error = new Error(`400 ${'zz-echo '.repeat(125_000)}`);
+    const { ka, calls, events } = setup(vi.fn().mockRejectedValue(error), { maxConsecutiveErrors: 1 });
+    ka.record(wire(), undefined, 'stream');
+    await vi.advanceTimersByTimeAsync(100);
+    expect(events.map(e => e.type)).toEqual(['error', 'disabled']);
+    expect(events[0].error.startsWith('400 zz-echo')).toBe(true);
+    expect(events[0].error).toMatch(/characters omitted\]…/);
+    expect(events[0].error.length).toBeLessThanOrEqual(MAX_ERROR_MESSAGE_CHARS);
+    expect(events[1].reason).toBe(`1 consecutive keepalive failures; last: ${events[0].error}`);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.error).toBe(error);
   });
 
   it('isolates observer mutations from the cached prefix and effectiveness checks', async () => {

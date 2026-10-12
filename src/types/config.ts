@@ -135,8 +135,11 @@ export interface MembraneHooks {
   ) => NormalizedResponse | Promise<NormalizedResponse>;
   
   /**
-   * Called on error, before retry decision
-   * Return 'retry' to retry, 'abort' to stop
+   * Called before each retry Membrane is about to make, with the error that
+   * caused it and the attempt number. Return 'abort' to stop there (the error
+   * is thrown), or 'retry' to let the retry go ahead. An error Membrane won't
+   * retry (not retryable, out of attempts, or stating a wait beyond the
+   * schedule's maxRetryDelayMs) is thrown without reaching this hook.
    */
   onError?: (
     error: ErrorInfo,

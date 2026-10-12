@@ -115,12 +115,30 @@ describe('complete(): the provider wait is a lower bound', () => {
 
   it('treats a negative stated wait as already over: the retry goes out on the backoff', async () => {
     // A custom adapter's negative wait; the built-in readers clamp one to 0 first.
-    const adapter = new FailingAdapter(1, limited(-1_000));
-    adapter.queueResponse('zz-recovered');
-    const { membrane, waits } = recording(adapter, { maxRetries: 3, retryDelayMs: 1_000, maxRetryDelayMs: 30_000 });
-    await membrane.complete(zzRequest);
-    expect(adapter.calls).toBe(2);
-    expect(waits).toEqual([1_000]);
+    for (const negative of [-1_000, Number.NEGATIVE_INFINITY]) {
+      const adapter = new FailingAdapter(1, limited(negative));
+      adapter.queueResponse('zz-recovered');
+      const { membrane, waits } = recording(adapter, { maxRetries: 3, retryDelayMs: 1_000, maxRetryDelayMs: 30_000 });
+      await membrane.complete(zzRequest);
+      expect(adapter.calls, String(negative)).toBe(2);
+      expect(waits, String(negative)).toEqual([1_000]);
+    }
+  });
+
+  it('waits out a stated wait equal to the budget, on the base and overload schedules', async () => {
+    const base = new FailingAdapter(1, limited(30_000));
+    base.queueResponse('zz-recovered');
+    const first = recording(base, { maxRetries: 3, retryDelayMs: 1_000, maxRetryDelayMs: 30_000 });
+    await first.membrane.complete(zzRequest);
+    expect(base.calls).toBe(2);
+    expect(first.waits).toEqual([30_000]);
+
+    const overloaded = new FailingAdapter(1, limited(300_000, 529));
+    overloaded.queueResponse('zz-recovered');
+    const second = recording(overloaded, { overloaded: { maxRetries: 7, retryDelayMs: 10_000, backoffMultiplier: 2, maxRetryDelayMs: 300_000 } });
+    await second.membrane.complete(zzRequest);
+    expect(overloaded.calls).toBe(2);
+    expect(second.waits).toEqual([300_000]);
   });
 
   it('applies the overload schedule budget to a 529 retry-after', async () => {
@@ -194,8 +212,12 @@ describe('sleep() past the timer limit', () => {
     const controller = new AbortController();
     const pending = sleep(5_000_000_000, controller.signal);
     await vi.advanceTimersByTimeAsync(3_000_000_000);
+    expect(vi.getTimerCount()).toBe(1);
     controller.abort();
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    // The step's timer goes with the abort; a live one would hold the event
+    // loop open until the rest of the wait.
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('resolves at once for a zero or negative wait', async () => {
@@ -433,7 +455,7 @@ describe('through the real Anthropic adapter: a wait stated in retry-after-ms', 
     expect(sent).toEqual([0, 1_000]);
   });
 
-  it('a negative retry-after-ms is a wait already over, as in @anthropic-ai/sdk, not a reason to read retry-after', async () => {
+  it('a negative retry-after-ms is a wait already over, not a reason to read retry-after', async () => {
     const sent = network([refused(429, { 'retry-after-ms': '-5', 'retry-after': '120' }), completed]);
     const { value } = await settle(overClaude().complete(claudeRequest));
     expect(value?.content[0]).toMatchObject({ type: 'text', text: 'zz-recovered' });

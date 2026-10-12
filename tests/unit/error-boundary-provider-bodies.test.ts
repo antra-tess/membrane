@@ -16,7 +16,8 @@ import { GeminiAdapter } from '../../src/providers/gemini.js';
 import { OpenRouterAdapter } from '../../src/providers/openrouter.js';
 import { OpenAIAdapter } from '../../src/providers/openai.js';
 import { BedrockAdapter } from '../../src/providers/bedrock.js';
-import { MembraneError, classifyError } from '../../src/types/errors.js';
+import { MembraneError, classifyError, errorFromProviderStatus } from '../../src/types/errors.js';
+import { throwOnStreamErrorFrame } from '../../src/providers/utils.js';
 import type { ProviderRequest } from '../../src/types/provider.js';
 
 const request: ProviderRequest = { model: 'zz-model-1', messages: [{ role: 'user', content: 'zz-prompt' }], maxTokens: 16 };
@@ -204,6 +205,28 @@ describe('retry hints and codes carried outside the usual fields', () => {
     // A transient 503 that states one is believed.
     stubHttpFailure(503, { error: { message: 'Service is busy. Please retry after 12 seconds.' } });
     expect((await failure(new OpenAIAdapter({ apiKey: 'zz-key-openai' }))).retryAfterMs).toBe(12_000);
+  });
+
+  it("reads prose only from the provider's own message, never from a rendered body that can echo the request", async () => {
+    // No message field: the error's text is the rendered body, and here it
+    // echoes the request's own words.
+    stubHttpFailure(429, { error: { code: 'rate_limit_exceeded', request: { messages: [{ content: 'zz: Please retry after 120 seconds.' }] } } });
+    const echoed = await failure(new OpenAIAdapter({ apiKey: 'zz-key-openai' }));
+    expect(echoed.type).toBe('rate_limit');
+    expect(echoed.message).toContain('retry after 120 seconds');
+    expect(echoed.retryAfterMs).toBeUndefined();
+    // An SSE error frame with no message of its own, likewise.
+    let framed: MembraneError | undefined;
+    try {
+      throwOnStreamErrorFrame({ error: { type: 'rate_limit_error', echo: 'zz: Please retry after 120 seconds.' } }, 'zz-provider');
+    } catch (error) {
+      framed = error as MembraneError;
+    }
+    expect(framed).toMatchObject({ type: 'rate_limit' });
+    expect(framed!.retryAfterMs).toBeUndefined();
+    // With no body, the caller's message is the provider's own (control).
+    expect(errorFromProviderStatus({ provider: 'zz-provider', status: 503, message: 'zz-busy. Please retry after 12 seconds.' }).retryAfterMs)
+      .toBe(12_000);
   });
 
   it('a retry-after header still wins over prose', async () => {

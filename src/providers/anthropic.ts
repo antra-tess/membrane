@@ -237,7 +237,10 @@ export class AnthropicAdapter implements ProviderAdapter {
       // own backoff of about a second, slept through shorter waits beyond
       // Membrane's maxRetryDelayMs, retried what Membrane's default policy
       // leaves to the caller, and multiplied the attempt counts Membrane
-      // documents by up to three.
+      // documents by up to three. One resend remains below it: with a
+      // credential resolver, the refresh after an HTTP 401 resends the request
+      // inside the same SDK operation (fetchWithCredentials), outside
+      // Membrane's attempt count.
       maxRetries: 0,
     };
     this.defaultBeta = extractBetaHeader(config.defaultHeaders);
@@ -969,8 +972,10 @@ export class AnthropicAdapter implements ProviderAdapter {
    * reads them in. With the SDK's own retries off (`maxRetries: 0`), this is
    * the only header reader, so a wait stated only in milliseconds would
    * otherwise be lost. Zero is a stated wait of zero, and so is a negative
-   * wait: it is already over. An error that carries no headers (a mid-stream
-   * SSE rethrow) states no wait here; errorFromProviderStatus then reads its
+   * wait: it is already over. A mid-stream SSE error carries the headers of
+   * the stream's own 200 response (the SDK throws it with them), so a wait
+   * read here for one comes from those. An error whose headers state no wait
+   * states none here; errorFromProviderStatus then reads the body's own
    * message through the guarded prose reader.
    */
   private parseRetryAfter(error: { headers?: Headers }): number | undefined {

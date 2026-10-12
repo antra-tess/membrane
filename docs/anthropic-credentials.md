@@ -31,9 +31,12 @@ seam at its HTTP boundary. It resolves for
 each network attempt, including cache-keepalive replay, refreshes once after an
 HTTP 401, and never replays an accepted stream in response to an in-stream auth
 error. The refresh bound is per SDK fetch attempt, and each SDK operation makes
-one attempt: the adapter disables the SDK's own retries, so an exhausted HTTP 401
-surfaces as an auth error instead of causing another SDK attempt and another
-bounded refresh, and any retry belongs to Membrane's retry policy. Resolver
+one attempt: the adapter disables the SDK's own retries. The refresh after a 401
+resends the request inside that one SDK operation, so a refused credential costs
+two HTTP requests, the second outside Membrane's attempt count and retry
+settings. A 401 on the resend surfaces as an auth error instead of causing
+another SDK attempt and another refresh; any other retry belongs to Membrane's
+retry policy. Resolver
 failures are separate: they abort that SDK operation and surface the original
 MembraneError (or an auth error for an untyped failure).
 Empty/non-string tokens fail the same way, before HTTP. The SDK request signal also
