@@ -85,6 +85,9 @@ interface OpenRouterMessage {
   images?: Array<{ image_url: { url: string } }>;
 }
 
+/** A converted tool message, and its content with images included. */
+type MediaForm = [message: OpenRouterMessage, content: OpenRouterMessage['content']];
+
 interface OpenRouterToolCall {
   id: string;
   type: 'function';
@@ -212,16 +215,16 @@ export class OpenRouterAdapter implements ProviderAdapter {
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
     const selection = captureRequestSelection(request);
-    // Refuse before any I/O. The tool-image decision can wait on the catalogue,
-    // and it changes only the content of tool messages, never the model or the
-    // message roles the prefill check reads. So the check reads the body built
-    // without media, which is sent as it is unless media is chosen.
-    const withoutMedia = this.buildRequest(request, false, selection);
-    assertMessagePrefillSupported(withoutMedia.model, withoutMedia.messages, options, this.name, withoutMedia);
+    // Built once, before the tool-image decision, which can wait on the
+    // catalogue; a request the prefill check refuses is refused before any I/O.
+    const { body: openRouterRequest, includeToolImages } = this.buildRequest(request, selection);
+    assertMessagePrefillSupported(openRouterRequest.model, openRouterRequest.messages, options, this.name, openRouterRequest);
     const { signal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
-      const media = await this.resolveToolImages(request, selection, options, signal);
-      const openRouterRequest = media ? this.buildRequest(request, true, selection) : withoutMedia;
+      if (await this.resolveToolImages(request, selection, options, signal)) includeToolImages();
+      // Checked again as it is sent: it still holds the caller's own objects
+      // (passed-through messages, extra.messages), which can change meanwhile.
+      assertMessagePrefillSupported(openRouterRequest.model, openRouterRequest.messages, options, this.name, openRouterRequest);
       options?.onRequest?.(openRouterRequest);
       try {
         const response = await this.makeRequest(openRouterRequest, { ...options, signal, timeoutMs: undefined });
@@ -240,20 +243,16 @@ export class OpenRouterAdapter implements ProviderAdapter {
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
     const selection = captureRequestSelection(request);
-    const build = (media: boolean) => {
-      const body = this.buildRequest(request, media, selection);
-      body.stream = true;
-      // Request usage data in stream for cache metrics
-      body.stream_options = { include_usage: true };
-      return body;
-    };
-    // Refuse before any I/O, on the body without media, as complete() does.
-    const withoutMedia = build(false);
-    assertMessagePrefillSupported(withoutMedia.model, withoutMedia.messages, options, this.name, withoutMedia);
+    // Built once and checked twice, as complete() does.
+    const { body: openRouterRequest, includeToolImages } = this.buildRequest(request, selection);
+    openRouterRequest.stream = true;
+    // Request usage data in stream for cache metrics
+    openRouterRequest.stream_options = { include_usage: true };
+    assertMessagePrefillSupported(openRouterRequest.model, openRouterRequest.messages, options, this.name, openRouterRequest);
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
-      const media = await this.resolveToolImages(request, selection, options, combinedSignal);
-      const openRouterRequest = media ? build(true) : withoutMedia;
+      if (await this.resolveToolImages(request, selection, options, combinedSignal)) includeToolImages();
+      assertMessagePrefillSupported(openRouterRequest.model, openRouterRequest.messages, options, this.name, openRouterRequest);
       options?.onRequest?.(openRouterRequest);
       return await this.makeStreamRequest(openRouterRequest, selection.model, callbacks, combinedSignal);
     } finally {
@@ -501,8 +500,12 @@ export class OpenRouterAdapter implements ProviderAdapter {
     }
   }
 
-  private buildRequest(request: ProviderRequest, media = false, selection = captureRequestSelection(request)): any {
-    const messages = this.convertMessages(request.messages as any[], media);
+  /** The request body, converted once. A tool message that holds images
+   * carries them omitted; includeToolImages() gives it the media form
+   * converted beside it, so the tool-image decision changes nothing else. */
+  private buildRequest(request: ProviderRequest, selection: RequestModelSelection): { body: any; includeToolImages: () => void } {
+    const mediaForms: MediaForm[] = [];
+    const messages = this.convertMessages(request.messages as any[], mediaForms);
     
     const params: any = {
       model: selection.model,
@@ -586,16 +589,23 @@ export class OpenRouterAdapter implements ProviderAdapter {
       Object.assign(params, rest);
     }
     
-    return params;
+    return {
+      body: params,
+      includeToolImages: () => { for (const [message, content] of mediaForms) message.content = content; },
+    };
   }
 
-  private convertMessages(messages: any[], media = false): OpenRouterMessage[] {
+  private convertMessages(messages: any[], mediaForms: MediaForm[]): OpenRouterMessage[] {
     // Use flatMap to handle one-to-many expansion (multiple tool_results → multiple messages)
     return messages.flatMap(msg => {
       // If it's already in OpenRouter format, pass through
       const nativeToolImages = msg.role === 'tool' && msg.tool_call_id && Array.isArray(msg.content)
         && msg.content.some((p: any) => p.type === 'image_url');
-      if (nativeToolImages) return [{ ...msg, content: nativeChatToolContent(msg.content, media) }];
+      if (nativeToolImages) {
+        const message = { ...msg, content: nativeChatToolContent(msg.content, false) };
+        mediaForms.push([message, nativeChatToolContent(msg.content, true)]);
+        return [message];
+      }
       if (msg.role && (typeof msg.content === 'string' || msg.content === null || msg.tool_calls)) {
         return [msg as OpenRouterMessage];
       }
@@ -692,11 +702,14 @@ export class OpenRouterAdapter implements ProviderAdapter {
             });
           } else if (block.type === 'tool_result') {
             // Collect ALL tool results - each becomes a separate message
-            toolResults.push({
+            const message: OpenRouterMessage = {
               role: 'tool' as const,
               tool_call_id: block.tool_use_id || block.toolUseId,
-              content: chatToolResultContent(block, media),
-            });
+              content: chatToolResultContent(block, false),
+            };
+            // Without images the two forms are the same.
+            if (hasToolResultImages(block.content)) mediaForms.push([message, chatToolResultContent(block, true)]);
+            toolResults.push(message);
           }
         }
 

@@ -207,6 +207,46 @@ describe('OpenRouter lookup and cancellation', () => {
     expect(lookup).not.toHaveBeenCalled();
     expect(bodies).toHaveLength(0);
   });
+  it.each(['complete', 'stream'])('%s sends the request as it stood at the call, whatever the caller adds while the catalogue answers', async method => {
+    let answer!: () => void;
+    const { bodies, lookup } = stub(() => new Promise<Response>(resolve => {
+      answer = () => resolve(new Response(JSON.stringify({ data: [
+        { id: 'anthropic/claude-sonnet-4.6', architecture: { input_modalities: ['text', 'image'] } },
+      ] })));
+    }));
+    const input = messages();
+    const sent = invoke(providers[2]!.make(), method, 'anthropic/claude-sonnet-4.6', undefined, input);
+    expect(lookup).toHaveBeenCalledTimes(1);
+    input.push({ role: 'assistant', content: [text('added while the catalogue answers')] });
+    answer();
+    await sent;
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].messages.at(-1).role).toBe('tool');
+    expect(hasPixels(bodies[0])).toBe(true);
+    expect(JSON.stringify(bodies[0])).not.toContain('added while the catalogue answers');
+  });
+  it.each(['complete', 'stream'])('%s checks the prefill again on the body as it is sent', async method => {
+    const { bodies } = stub();
+    const native: any[] = [{ role: 'user', content: 'look' }];
+    const req = { model: 'anthropic/claude-sonnet-4.6', messages: messages(false), extra: { messages: native } };
+    const adapter = providers[2]!.make();
+    const sent = method === 'complete' ? adapter.complete(req) : adapter.stream(req, { onChunk() {} });
+    native.push({ role: 'assistant', content: 'added after the call' });
+    await expect(sent).rejects.toMatchObject({ type: 'unsupported', retryable: false });
+    expect(bodies).toHaveLength(0);
+  });
+  it('converts the request once, so a warning from conversion prints once when tool images go as media', async () => {
+    const { bodies } = stub();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const audio = { type: 'audio', source: { type: 'base64', mediaType: 'audio/odd', data: 'AA==' } };
+      await invoke(providers[2]!.make(), 'complete', 'vendor/vision', undefined, [{ role: 'user', content: [audio] }, ...messages()]);
+      expect(hasPixels(bodies[0])).toBe(true);
+      expect(warn.mock.calls.filter(args => String(args[0]).includes('audio/odd'))).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
   it('leaves no catalogue timer behind once the lookup answers', async () => {
     vi.useFakeTimers();
     stub();
