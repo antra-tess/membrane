@@ -299,67 +299,58 @@ describe('keepalive model holds', () => {
     expect(events.some((e) => e.type === 'refreshed')).toBe(true);
   });
 
-  it('a real call to the model ends its run of refusals: the next refusal backs off one check interval again', async () => {
-    let refuse = true;
+  it("a real call mid-storm doesn't end the run: the model's idle lineage keeps backing off", async () => {
     const refusedAt: number[] = [];
     const send = vi.fn(() => {
-      if (!refuse) return Promise.resolve(hit);
+      refusedAt.push(Date.now());
+      return Promise.reject(new Classified('zz 529', true, undefined));
+    });
+    const { ka, events } = setup(send);
+    ka.record(wire('claude-a', 'idle'), undefined, 'stream');
+    const holds = () => (events.filter((e) => e.type === 'held') as Array<{ until: number }>).map((e, i) => e.until - refusedAt[i]!);
+    // The model's other conversation stays active: a real call every 3 minutes, so it's never due itself.
+    for (let minute = 3; minute <= 120; minute += 3) {
+      await vi.advanceTimersByTimeAsync(3 * MIN);
+      ka.record(wire('claude-a', 'active'), undefined, 'stream');
+    }
+    expect(refusedAt.map((at) => (at - START) / MIN)).toEqual([45, 50, 60, 80, 120]);
+    expect(holds()).toEqual([5 * MIN, 10 * MIN, 20 * MIN, 40 * MIN, 45 * MIN]); // doubling, up to refreshAfterMs
+  });
+
+  it("a refusal more than two check intervals after the run's last hold ends starts a new run", async () => {
+    const refusedAt: number[] = [];
+    const send = vi.fn(() => {
       refusedAt.push(Date.now());
       return Promise.reject(new Classified('zz 529', true, undefined));
     });
     const { ka, events } = setup(send);
     ka.record(wire('claude-a'), undefined, 'stream');
     const holds = () => (events.filter((e) => e.type === 'held') as Array<{ until: number }>).map((e, i) => e.until - refusedAt[i]!);
-    await vi.advanceTimersByTimeAsync(55 * MIN);         // refused at 45 and 50
+    await vi.advanceTimersByTimeAsync(55 * MIN);         // refused at 45 and 50; the run's hold ends at 60
     expect(holds()).toEqual([5 * MIN, 10 * MIN]);
-    ka.record(wire('claude-a'), undefined, 'stream');   // a real call at 55, refused or not
-    expect(refusalsOf(ka).size).toBe(0);
-    await vi.advanceTimersByTimeAsync(50 * MIN);         // due again at 100, and refused
+    ka.record(wire('claude-a'), undefined, 'stream');   // a real call at 55: the lineage is fresh until 100
+    expect(refusalsOf(ka).get('claude-a')?.run).toBe(2);
+    await vi.advanceTimersByTimeAsync(50 * MIN);         // due again at 100, past 60 + two intervals, and refused
     expect(refusedAt[2]).toBe(START + 100 * MIN);
     expect(holds()[2]).toBe(5 * MIN);                    // a new run, not the third of the old one
   });
 
-  it("a real call in a lane the keepalive doesn't keep warm ends the model's run too", async () => {
-    let refuse = true;
+  it("a run carries on through a stated wait longer than the cap, and a refusal late in the next interval", async () => {
     const refusedAt: number[] = [];
-    const send = vi.fn(() => {
-      if (!refuse) return Promise.resolve(hit);
+    let call = 0;
+    const send = vi.fn(async () => {
+      call += 1;
+      // The second poke takes four minutes to be refused, as a slow round trip or a busy tick would.
+      if (call === 2) await new Promise((resolve) => setTimeout(resolve, 4 * MIN));
       refusedAt.push(Date.now());
-      return Promise.reject(new Classified('zz 529', true, undefined));
-    });
-    const { ka, events } = setup(send);                  // lanes: ['stream'], the default
-    ka.record(wire('claude-a'), undefined, 'stream');
-    const holds = () => (events.filter((e) => e.type === 'held') as Array<{ until: number }>).map((e, i) => e.until - refusedAt[i]!);
-    await vi.advanceTimersByTimeAsync(55 * MIN);         // refused at 45 and 50
-    expect(holds()).toEqual([5 * MIN, 10 * MIN]);
-    ka.record(wire('claude-a'), undefined, 'complete');  // an aux call: not kept warm, still a real call
-    expect(refusalsOf(ka).size).toBe(0);
-    expect(ka.getStatus()).toHaveLength(1);               // the stream lineage is untouched, so still due
-    await vi.advanceTimersByTimeAsync(10 * MIN);
-    expect(refusedAt[2]).toBe(START + 60 * MIN);          // once the 10-minute hold passed
-    expect(holds()[2]).toBe(5 * MIN);                     // a new run, not the third of the old one
-  });
-
-  it("a real call whose shape can't be kept warm ends the model's run too", async () => {
-    let refuse = true;
-    const refusedAt: number[] = [];
-    const send = vi.fn(() => {
-      if (!refuse) return Promise.resolve(hit);
-      refusedAt.push(Date.now());
-      return Promise.reject(new Classified('zz 529', true, undefined));
+      throw new Classified('zz 529', true, call === 1 ? 60 * MIN : undefined);
     });
     const { ka, events } = setup(send);
     ka.record(wire('claude-a'), undefined, 'stream');
     const holds = () => (events.filter((e) => e.type === 'held') as Array<{ until: number }>).map((e, i) => e.until - refusedAt[i]!);
-    await vi.advanceTimersByTimeAsync(55 * MIN);         // refused at 45 and 50
-    expect(holds()).toEqual([5 * MIN, 10 * MIN]);
-    // Another conversation's call to the model, with a thinking budget: ineligible, and its own lineage key.
-    ka.record({ ...wire('claude-a', 'another conversation'), thinking: { type: 'enabled', budget_tokens: 2048 } }, undefined, 'stream');
-    expect(refusalsOf(ka).size).toBe(0);
-    expect(ka.getStatus()).toHaveLength(1);               // only the first conversation's lineage
-    await vi.advanceTimersByTimeAsync(10 * MIN);
-    expect(refusedAt[2]).toBe(START + 60 * MIN);
-    expect(holds()[2]).toBe(5 * MIN);
+    await vi.advanceTimersByTimeAsync(115 * MIN);        // refused at 45 with a stated 60 minutes, so held to 105
+    expect(refusedAt.map((at) => (at - START) / MIN)).toEqual([45, 109]);
+    expect(holds()).toEqual([60 * MIN, 10 * MIN]);       // the run's second refusal, 4 minutes into the tick after the hold
   });
 
   it("a retryable refusal's own short wait still waits out the model's backoff", async () => {
@@ -436,7 +427,7 @@ describe('keepalive model holds', () => {
 
 /** The keepalive's private hold map, read only to check what it retains. */
 const holdsOf = (ka: CacheKeepalive) => (ka as unknown as { holds: Map<string, number> }).holds;
-const refusalsOf = (ka: CacheKeepalive) => (ka as unknown as { refusals: Map<string, number> }).refusals;
+const refusalsOf = (ka: CacheKeepalive) => (ka as unknown as { refusals: Map<string, { run: number; heldUntil: number }> }).refusals;
 
 describe('keepalive holds are kept only while their wait is outstanding', () => {
   it('passed holds are dropped before a new hold is set, with no lineage and no timer (foreground-only traffic)', async () => {

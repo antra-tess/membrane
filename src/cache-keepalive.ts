@@ -289,20 +289,22 @@ export class CacheKeepalive {
    */
   private holds = new Map<string, number>();
   /**
-   * Per model, how many pokes the provider has refused as retryable since the
-   * model's last accepted poke or real call. Each such refusal holds the
+   * Per model, its run of pokes the provider has refused as retryable, and
+   * when the hold the last of them set ends. Each such refusal holds the
    * model on a doubling schedule, so a capacity storm that states no wait (a
    * 529 overloaded_error usually doesn't) paces the keepalive instead of
    * latching its breaker. A poke the provider accepts ends its model's run,
-   * whether it read or wrote, and so does a real call to the model (record).
-   * A real call is recorded when it's sent, not when it's answered, so one
-   * refused in a storm ends the run too. That's sound because pokes and real
-   * traffic never overlap: record() resets the lineage's age, so the next
-   * poke comes refreshAfterMs later at the earliest, and if the storm still
-   * holds then, its run starts again from one check interval. A refusal that
-   * isn't retryable doesn't end a run: the provider still isn't accepting.
+   * whether it read or wrote. A run also ends by age: a refusal that comes
+   * more than two check intervals after the end of the run's last hold starts
+   * a new one, so a run from a past storm can't stretch a later, isolated
+   * refusal's hold. In a storm, refusals come one hold plus about one tick
+   * apart, so the run carries on, through a stated wait longer than the cap
+   * too. A real call doesn't end a run: it says nothing about whether a poke
+   * of another lineage would be accepted, and membrane retries a real call
+   * where a poke gets one attempt. A refusal that isn't retryable doesn't end
+   * a run either: the provider still isn't accepting.
    */
-  private refusals = new Map<string, number>();
+  private refusals = new Map<string, { run: number; heldUntil: number }>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false;
   private consecutiveErrors = 0;
@@ -369,9 +371,6 @@ export class CacheKeepalive {
     lane: KeepaliveLane,
   ): void {
     if (this.stopped) return;
-    // A real call to the model ends its run of refused pokes, whatever lane
-    // it took and whether or not it can be kept warm (see refusals).
-    this.refusals.delete(String(wire.model ?? ''));
     if (!this.cfg.lanes.includes(lane)) return;
 
     const reason = ineligibleReason(wire);
@@ -535,16 +534,20 @@ export class CacheKeepalive {
       const model = String(lin.wire.model ?? '');
       const paced = classified?.retryable === true;
       if (paced) {
-        const run = (this.refusals.get(model) ?? 0) + 1;
-        // A stop() during the poke dropped every run; this one stays dropped.
-        if (!this.stopped) this.refusals.set(model, run);
+        const refusedAt = Date.now();
+        const previous = this.refusals.get(model);
+        const run = previous !== undefined && refusedAt <= previous.heldUntil + 2 * this.cfg.checkIntervalMs
+          ? previous.run + 1
+          : 1;
         const backoffMs = Math.min(
           this.cfg.refreshAfterMs,
           this.cfg.checkIntervalMs * 2 ** Math.min(run - 1, 30),
         );
-        const statedUntil = holdDeadline(classified!.retryAfterMs, Date.now());
+        const statedUntil = holdDeadline(classified!.retryAfterMs, refusedAt);
         const stated = statedUntil === undefined ? undefined : classified!.retryAfterMs as number;
         this.holdModel(model, stated === undefined ? backoffMs : Math.max(stated, backoffMs), message);
+        // A stop() during the poke dropped every run; this one stays dropped.
+        if (!this.stopped) this.refusals.set(model, { run, heldUntil: this.holds.get(model) ?? refusedAt });
       } else {
         this.holdModel(model, classified?.retryAfterMs, message);
         this.consecutiveErrors += 1;
