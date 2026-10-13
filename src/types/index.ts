@@ -179,6 +179,7 @@ export {
   errorFromHttpResponse,
   errorFromProviderStatus,
   extractProviderErrorFields,
+  statedWaitFromHeaders,
   withRawRequest,
 } from './errors.js';
 

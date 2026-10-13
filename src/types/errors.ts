@@ -2,40 +2,287 @@
  * Error types for membrane
  */
 
+import { createHash } from 'node:crypto';
+
+// ============================================================================
+// Bounding provider-derived text
+// ============================================================================
+
+/**
+ * Longest message a MembraneError carries, in UTF-16 code units.
+ *
+ * A provider's error body is arbitrary remote text, and some providers echo
+ * the entire rejected request in it: one OpenAI-compatible 400 returned a
+ * ~1.7 MB body. Whatever the boundary puts in `message` then travels
+ * everywhere the error does: the stack trace, `onError` hooks, stderr, call
+ * logs, and the failure notice a framework stores in an agent's own context.
+ * The head keeps what every boundary writes first (provider, status, code,
+ * the provider's own explanation); the tail keeps a provider's closing detail.
+ */
+export const MAX_ERROR_MESSAGE_CHARS = 2_000;
+
+/**
+ * Aggregate bound on a MembraneError's `rawError`, in UTF-8 bytes of its JSON
+ * serialization: nested bodies, headers and any other enumerable properties
+ * all count toward it. A value within the bound is kept exactly as it is.
+ */
+export const MAX_RAW_ERROR_JSON_BYTES = 16 * 1024;
+
+/** Longest provider error code kept verbatim; real codes are short tokens. */
+export const MAX_PROVIDER_ERROR_CODE_CHARS = 128;
+
+/** Characters of serialized JSON kept as `head` when a rawError is summarized. */
+const RAW_ERROR_SUMMARY_HEAD_CHARS = 2_048;
+
+const isLowSurrogate = (text: string, index: number): boolean => {
+  const code = text.charCodeAt(index);
+  return code >= 0xdc00 && code <= 0xdfff;
+};
+
+/** End a head before a pair whose low half would start the cut: the head only shrinks. */
+function headCut(text: string, index: number): number {
+  return index > 0 && isLowSurrogate(text, index) ? index - 1 : index;
+}
+
+/** Start a tail after the low half of a pair the cut would split: the tail only shrinks. */
+function tailCut(text: string, index: number): number {
+  return index < text.length && isLowSurrogate(text, index) ? index + 1 : index;
+}
+
+/**
+ * `text` when it fits within `max` characters; otherwise its head and tail
+ * around a marker that states how much was omitted from how much, the whole
+ * no longer than `max`. The marker makes the excerpt self-describing wherever
+ * it ends up: a reader of a log line or a failure notice can see that the
+ * provider said more than this. Bounding bounded text returns it unchanged.
+ */
+export function boundErrorText(text: string, max: number = MAX_ERROR_MESSAGE_CHARS): string {
+  if (text.length <= max) return text;
+  // The omitted count has at most as many digits as the total length.
+  const markerLength = ` …[${text.length} of ${text.length} characters omitted]… `.length;
+  const budget = Math.max(0, max - markerLength);
+  const tailLength = Math.floor(budget / 4);
+  // Each cut moves only toward omission, so the result stays within max and
+  // never holds half of a surrogate pair.
+  const headEnd = headCut(text, budget - tailLength);
+  const tailStart = tailCut(text, text.length - tailLength);
+  const omitted = tailStart - headEnd;
+  return `${text.slice(0, headEnd)} …[${omitted} of ${text.length} characters omitted]… ${text.slice(tailStart)}`;
+}
+
+/** A provider error code, verbatim when it is token-sized; otherwise its head and length. */
+function boundProviderErrorCode(code: string | undefined): string | undefined {
+  if (code === undefined || code.length <= MAX_PROVIDER_ERROR_CODE_CHARS) return code;
+  return `${code.slice(0, headCut(code, 64))}…[${code.length} characters]`;
+}
+
+/**
+ * JSON.stringify that survives cycles and BigInt: a value already open on the
+ * path to the current one is written as "[Circular]", and a BigInt as its
+ * decimal string. Repeated non-cyclic references serialize normally.
+ */
+function stringifyAcyclic(value: unknown): string | undefined {
+  const ancestors: unknown[] = [];
+  return JSON.stringify(value, function (this: unknown, _key: string, current: unknown) {
+    if (typeof current === 'bigint') return current.toString();
+    if (typeof current !== 'object' || current === null) return current;
+    while (ancestors.length > 0 && ancestors[ancestors.length - 1] !== this) ancestors.pop();
+    if (ancestors.includes(current)) return '[Circular]';
+    ancestors.push(current);
+    return current;
+  });
+}
+
+/**
+ * Enforce `MAX_RAW_ERROR_JSON_BYTES` on a rawError, measured in UTF-8 bytes of
+ * its JSON serialization. Within the bound, the value is returned unchanged.
+ * Beyond it, a summary replaces it: the size and sha256 of what was received
+ * (so identical bodies are recognizable without being kept) and its first
+ * `RAW_ERROR_SUMMARY_HEAD_CHARS` characters. A string body (the usual raw
+ * HTTP body) is summarized as received text, `bytes`; anything else as its
+ * JSON, `jsonBytes`. A cyclic value is replaced by its acyclic JSON form
+ * (bounded the same way), and a value that cannot be serialized at all by a
+ * short description, so a pathological error object can never break the
+ * error path.
+ */
+export function boundRawError(value: unknown): unknown {
+  if (value === undefined || value === null) return value;
+  let json: string | undefined;
+  let rewritten = false;
+  try {
+    json = JSON.stringify(value);
+  } catch {
+    rewritten = true;
+    try {
+      json = stringifyAcyclic(value);
+    } catch (error) {
+      // Read guarded: a throwing name or message getter must not make the
+      // bound throw in place of the failure it describes.
+      let reason: string;
+      try {
+        reason = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+      } catch {
+        reason = 'unknown';
+      }
+      return { truncated: true, unserializable: boundErrorText(reason, 200), valueType: typeof value };
+    }
+  }
+  // Functions, symbols and undefined have no JSON form and take no space in one.
+  if (json === undefined) return value;
+  // UTF-8 takes at most three bytes per UTF-16 code unit, so a JSON text no
+  // longer than a third of the bound fits without counting; only a near miss
+  // pays for the exact count.
+  if (json.length <= MAX_RAW_ERROR_JSON_BYTES / 3 || Buffer.byteLength(json, 'utf8') <= MAX_RAW_ERROR_JSON_BYTES) {
+    return rewritten ? JSON.parse(json) : value;
+  }
+  if (typeof value === 'string') {
+    return {
+      truncated: true,
+      bytes: Buffer.byteLength(value, 'utf8'),
+      sha256: createHash('sha256').update(value).digest('hex'),
+      head: value.slice(0, headCut(value, RAW_ERROR_SUMMARY_HEAD_CHARS)),
+    };
+  }
+  return {
+    truncated: true,
+    jsonBytes: Buffer.byteLength(json, 'utf8'),
+    sha256: createHash('sha256').update(json).digest('hex'),
+    head: json.slice(0, headCut(json, RAW_ERROR_SUMMARY_HEAD_CHARS)),
+  };
+}
+
+/** One line describing why a value could not be read, bounded. */
+function unreadable(error: unknown): string {
+  let reason: string;
+  try {
+    reason = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  } catch {
+    reason = 'unknown';
+  }
+  return `[unreadable: ${boundErrorText(reason, 200)}]`;
+}
+
+/**
+ * A value a JavaScript caller passed where a string belongs, as text:
+ * undefined as '' (what `new Error(undefined)` gives), anything else as its
+ * String form, or as unreadable when converting it throws.
+ */
+function asText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (value === undefined) return '';
+  try {
+    return String(value);
+  } catch (error) {
+    return unreadable(error);
+  }
+}
+
 // ============================================================================
 // Error Serialization Helper
 // ============================================================================
 
 /**
- * Serialize an error for storage in rawError field.
- * Error objects don't JSON.stringify well (become {}), so we extract key properties.
+ * Serialize an error for a rawError field, a host's record or a hook's
+ * ErrorInfo. Error objects don't JSON.stringify well (they become {}), so an
+ * Error's name, message and stack are copied out with its own enumerable
+ * fields, and an Error held in one of those fields is serialized the same
+ * way, so its text is counted and cut like the rest instead of hiding behind
+ * a JSON {}. The message and stack are bounded like a MembraneError's own
+ * message, the stack is left out in production, and the whole result, for
+ * any value passed, is held to MAX_RAW_ERROR_JSON_BYTES by boundRawError.
+ * Every read is guarded: a field whose getter throws, or a value whose
+ * prototype can't be asked for, is recorded as unreadable, rather than
+ * letting the error being described replace the one the caller is
+ * reporting.
  */
 export function serializeError(error: unknown): unknown {
-  if (error === undefined || error === null) {
-    return error;
+  return boundRawError(serializeErrorFields(error, new Set(), 0));
+}
+
+/** A read that may throw (a getter, a Proxy trap), recorded instead as unreadable. */
+function readGuarded(get: () => unknown): unknown {
+  try {
+    return get();
+  } catch (readError) {
+    return unreadable(readError);
+  }
+}
+
+/** `read()`, or `fallback` when it throws. */
+function guardedOr<T>(read: () => T, fallback: T): T {
+  try {
+    return read();
+  } catch {
+    return fallback;
+  }
+}
+
+/** Whether `value` is an Error; false when asking throws (a Proxy's getPrototypeOf trap). */
+function isErrorValue(value: unknown): value is Error {
+  try {
+    return value instanceof Error;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The text of a thrown value: an Error's message, or anything else's String
+ * form. Every read is guarded, so describing a hostile value (a throwing
+ * getter or toString, a Proxy trap) yields `[unreadable: …]` rather than
+ * throwing from the code that is reporting it.
+ */
+export function thrownText(value: unknown): string {
+  const isError = isErrorValue(value);
+  return asText(readGuarded(() => (isError ? (value as Error).message : String(value))));
+}
+
+/** An Error as a plain record, its Error-valued fields likewise; any other value as it is. */
+/** How deep serializeErrorFields follows errors held by errors. */
+const MAX_SERIALIZED_ERROR_DEPTH = 8;
+
+function serializeErrorFields(error: unknown, open: Set<Error>, depth: number): unknown {
+  let isError: boolean;
+  try {
+    isError = error instanceof Error;
+  } catch (askError) {
+    // A Proxy whose getPrototypeOf trap throws is described, not kept, so the
+    // trap can't fire again wherever the record goes.
+    return { truncated: true, unserializable: unreadable(askError) };
+  }
+  if (!isError) return error;
+  const value = error as Error;
+  // An error that holds itself, directly or through an error it holds.
+  if (open.has(value)) return '[Circular]';
+  // A chain of errors holding errors deeper than any real cause chain is cut,
+  // so recursion can't exhaust the stack while a failure is being described.
+  if (depth >= MAX_SERIALIZED_ERROR_DEPTH) return '[Depth]';
+  open.add(value);
+  const name = readGuarded(() => value.name);
+  const message = readGuarded(() => value.message);
+  const serialized: Record<string, unknown> = {
+    name,
+    message: typeof message === 'string' ? boundErrorText(message) : message,
+  };
+
+  // Include stack trace in non-production
+  if (process.env.NODE_ENV !== 'production') {
+    const stack = readGuarded(() => value.stack);
+    if (stack) serialized.stack = typeof stack === 'string' ? boundErrorText(stack) : stack;
   }
 
-  if (error instanceof Error) {
-    const serialized: Record<string, unknown> = {
-      name: error.name,
-      message: error.message,
-    };
-
-    // Include stack trace in non-production
-    if (process.env.NODE_ENV !== 'production' && error.stack) {
-      serialized.stack = error.stack;
-    }
-
-    // Copy any additional enumerable properties (like status, code, etc.)
-    for (const key of Object.keys(error)) {
-      serialized[key] = (error as unknown as Record<string, unknown>)[key];
-    }
-
-    return serialized;
+  // Copy any additional enumerable properties (like status, code, etc.).
+  // name, message and stack were read above. An Error can carry them as own
+  // enumerable properties (assigned after a message-less super(), or by
+  // Object.assign), and copying them again would replace the bounded
+  // message and stack, and bring the stack back in production.
+  const keys = readGuarded(() => Object.keys(value));
+  for (const key of Array.isArray(keys) ? keys as string[] : []) {
+    if (key === 'name' || key === 'message' || key === 'stack') continue;
+    serialized[key] = serializeErrorFields(readGuarded(() => (value as unknown as Record<string, unknown>)[key]), open, depth + 1);
   }
-
-  // For non-Error objects, return as-is (they should serialize fine)
-  return error;
+  open.delete(value);
+  return serialized;
 }
 
 // ============================================================================
@@ -99,15 +346,31 @@ export class MembraneError extends Error {
   readonly rawRequest?: unknown;
 
   constructor(info: ErrorInfo) {
-    super(info.message);
+    // Bounded here, the one place every adapter, stream-frame classifier, SDK
+    // error and membrane rethrow passes through. The classification fields are
+    // decided before construction and are never derived from the bounded text;
+    // only isOverloadedError reads a status-less error's message afterwards.
+    // A JavaScript caller can pass a message or code that isn't a string;
+    // its text is bounded rather than the conversion failing the error.
+    super(boundErrorText(asText(info.message)));
     this.name = 'MembraneError';
     this.type = info.type;
     this.retryable = info.retryable;
     this.retryAfterMs = info.retryAfterMs;
     this.httpStatus = info.httpStatus;
-    this.providerErrorCode = info.providerErrorCode;
-    // Serialize error objects so they don't become {} when JSON.stringify'd
-    this.rawError = serializeError(info.rawError);
+    this.providerErrorCode = boundProviderErrorCode(
+      info.providerErrorCode == null ? undefined : asText(info.providerErrorCode),
+    );
+    // serializeError turns error objects into records (they'd be {} in JSON)
+    // and holds the whole value to its bound. It may not replace the failure
+    // being constructed.
+    let rawError: unknown;
+    try {
+      rawError = serializeError(info.rawError);
+    } catch (error) {
+      rawError = { truncated: true, unserializable: unreadable(error) };
+    }
+    this.rawError = rawError;
     this.rawRequest = info.rawRequest;
   }
 
@@ -393,6 +656,9 @@ const SERVER_STATUS_PATTERN = /\b(500|502|503|504|529)\b/;
 
 const OVERLOADED_PATTERN = /\b529\b|overloaded_error/i;
 
+/** The marker boundErrorText puts where it cut, counts and all. */
+const OMISSION_MARKER = / …\[\d+ of \d+ characters omitted\]… /g;
+
 /**
  * Structured evidence that a 400 is a credential failure, not a malformed
  * request: Google answers a bad key with HTTP 400 INVALID_ARGUMENT whose
@@ -442,22 +708,107 @@ function firstString(...candidates: unknown[]): string | undefined {
   return undefined;
 }
 
-/** `retry-after` is either delta-seconds or an HTTP-date (RFC 9110). */
-function parseRetryAfterHeader(value: string | null | undefined): number | undefined {
-  if (!value) return undefined;
-  const trimmed = value.trim();
-  if (/^\d+(\.\d+)?$/.test(trimmed)) return Math.round(parseFloat(trimmed) * 1000);
-  const parsedDate = Date.parse(trimmed);
-  if (!Number.isNaN(parsedDate)) return Math.max(0, parsedDate - Date.now());
+/**
+ * A provider's stated wait off response headers, in the order
+ * `@anthropic-ai/sdk` reads them: `retry-after-ms` (milliseconds), then
+ * `retry-after` (delta-seconds, or an HTTP-date per RFC 9110). Every adapter
+ * reads it here, so a wait stated only in milliseconds is honored on all of
+ * them. A wait of zero is a stated wait of zero, in either header, and a wait
+ * below zero, or a date already past, is over: 0. A value is read as a body's
+ * or frame's is, in decimal (statedNumber), or as an HTTP-date. A
+ * `retry-after-ms` that states nothing leaves `retry-after` to be read, and a
+ * `retry-after` that states nothing, a seconds value too large to state in
+ * milliseconds included, leaves no wait.
+ */
+export function statedWaitFromHeaders(
+  headers: { get(name: string): string | null } | undefined,
+): number | undefined {
+  const millis = headers?.get?.('retry-after-ms')?.trim();
+  if (millis) {
+    const ms = statedNumber(millis);
+    if (ms !== undefined) return Math.max(0, Math.round(ms));
+  }
+  const header = headers?.get?.('retry-after')?.trim();
+  if (!header) return undefined;
+  const seconds = statedNumber(header);
+  if (seconds !== undefined) return millisOfSeconds(seconds);
+  const at = httpDate(header);
+  if (at !== undefined) return Math.max(0, at - Date.now());
   return undefined;
 }
 
-/** Body-carried retry hints: google's `retryDelay: '21s'`, or bare seconds. */
-function parseRetryDelayValue(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value)) return Math.round(value * 1000);
+const DAY = '(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)';
+const LONG_DAY = '(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)';
+const MONTH = '(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)';
+const TIME = '\\d{2}:\\d{2}:\\d{2}';
+/** RFC 9110's preferred form, `Sun, 06 Nov 1994 08:49:37 GMT`. */
+const IMF_FIXDATE = new RegExp(`^${DAY}, \\d{2} ${MONTH} \\d{4} ${TIME} GMT$`);
+/** Its obsolete forms, which a recipient still accepts: RFC 850's and asctime's. */
+const RFC850_DATE = new RegExp(`^${LONG_DAY}, \\d{2}-${MONTH}-\\d{2} ${TIME} GMT$`);
+const ASCTIME_DATE = new RegExp(`^${DAY} ${MONTH} [ \\d]\\d ${TIME} \\d{4}$`);
+
+/**
+ * An HTTP-date (RFC 9110 section 5.6.7) as epoch milliseconds, or undefined
+ * for anything else. Date.parse alone takes far more ('.5', an ISO date), so
+ * a value is parsed only in one of the three forms; asctime's carries no
+ * zone and is GMT by definition.
+ */
+function httpDate(text: string): number | undefined {
+  const form = IMF_FIXDATE.test(text) || RFC850_DATE.test(text) ? text
+    : ASCTIME_DATE.test(text) ? `${text} GMT`
+    : undefined;
+  if (form === undefined) return undefined;
+  const at = Date.parse(form);
+  return Number.isNaN(at) ? undefined : at;
+}
+
+/** Seconds as milliseconds: below zero, 0; undefined when the product overflows. */
+function millisOfSeconds(seconds: number): number | undefined {
+  const millis = Math.round(seconds * 1000);
+  return millis === Infinity ? undefined : Math.max(0, millis);
+}
+
+/** A finite number, or a string holding one in decimal ("1500", "-3", "2.5"). */
+function statedNumber(value: unknown): number | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
   if (typeof value !== 'string') return undefined;
-  const seconds = value.trim().match(/^(\d+(?:\.\d+)?)s?$/);
-  return seconds?.[1] ? Math.round(parseFloat(seconds[1]) * 1000) : undefined;
+  const text = value.trim();
+  if (!/^[+-]?\d+(?:\.\d+)?$/.test(text)) return undefined;
+  const parsed = Number(text);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/**
+ * A stated wait in milliseconds from JSON fields (`retry_after_ms`,
+ * `retryAfterMs`) of an error body or an SSE error frame: a number or a
+ * numeric string, the first candidate that states one. A wait below zero is
+ * over (0), as it is in a header: the in-call rule that ends a call over an
+ * unusable wait should never see one from a reader. A value that is not a
+ * finite number states nothing, and the next candidate is read.
+ */
+export function statedWaitMillis(...candidates: unknown[]): number | undefined {
+  for (const candidate of candidates) {
+    const millis = statedNumber(candidate);
+    if (millis !== undefined) return Math.max(0, Math.round(millis));
+  }
+  return undefined;
+}
+
+/**
+ * A stated wait in seconds from JSON fields (`retry_after`, Google's
+ * `retryDelay: '21s'`), in milliseconds: a number, or a numeric string with
+ * or without an `s`, the first candidate that states one. Below zero it is
+ * over (0), and a value that is not a finite number, or whose milliseconds
+ * overflow, states nothing. An HTTP-date is a header form (RFC 9110's
+ * `retry-after`), so only statedWaitFromHeaders reads one.
+ */
+export function statedWaitSeconds(...candidates: unknown[]): number | undefined {
+  for (const candidate of candidates) {
+    const seconds = statedNumber(typeof candidate === 'string' ? candidate.trim().replace(/s$/, '') : candidate);
+    const millis = seconds === undefined ? undefined : millisOfSeconds(seconds);
+    if (millis !== undefined) return millis;
+  }
+  return undefined;
 }
 
 function retryAfterFromBody(root: Record<string, unknown>, errorNode: Record<string, unknown>): number | undefined {
@@ -465,16 +816,13 @@ function retryAfterFromBody(root: Record<string, unknown>, errorNode: Record<str
   if (Array.isArray(details)) {
     for (const detail of details) {
       if (detail && typeof detail === 'object') {
-        const delay = parseRetryDelayValue((detail as Record<string, unknown>).retryDelay);
+        const delay = statedWaitSeconds((detail as Record<string, unknown>).retryDelay);
         if (delay !== undefined) return delay;
       }
     }
   }
-  const millis = errorNode.retry_after_ms ?? root.retry_after_ms;
-  if (typeof millis === 'number' && Number.isFinite(millis)) return Math.round(millis);
-  // A digit string, as the SSE frame reader also accepts for this field.
-  if (typeof millis === 'string' && /^\d+$/.test(millis.trim())) return Number(millis.trim());
-  return parseRetryDelayValue(errorNode.retry_after ?? root.retry_after ?? errorNode.retryAfter ?? root.retryAfter);
+  return statedWaitMillis(errorNode.retry_after_ms, root.retry_after_ms, errorNode.retryAfterMs, root.retryAfterMs)
+    ?? statedWaitSeconds(errorNode.retry_after, root.retry_after, errorNode.retryAfter, root.retryAfter);
 }
 
 /**
@@ -683,9 +1031,16 @@ export function errorFromProviderStatus(params: {
   // retried: a stated wait is a hold for anyone who honours it, and a 400
   // whose text happens to say "retry after", or a 429 no retry can outlast,
   // asks for none. A body's own RetryInfo or header is reported either way.
+  // Prose is read only from the provider's own message: the body's, or the
+  // caller's when there is no body. A rendered body, or a caller's message
+  // built from one, can echo the request, and a wait the request mentions is
+  // not one the provider stated.
+  const proseSource = params.body === undefined || params.body === null ? params.message : fields.message;
   const retryAfterMs = params.retryAfterMs ?? fields.retryAfterMs
     ?? (classification.retryable && (classification.type === 'rate_limit' || classification.type === 'server')
-      ? retryAfterFromProse(detail) : undefined);
+      && proseSource !== undefined
+      ? retryAfterFromProse(proseSource)
+      : undefined);
 
   return new MembraneError({
     type: classification.type,
@@ -714,7 +1069,7 @@ export function errorFromHttpResponse(
     provider,
     status: response.status,
     body: parsedBody,
-    retryAfterMs: parseRetryAfterHeader(response.headers?.get('retry-after')),
+    retryAfterMs: statedWaitFromHeaders(response.headers),
     code: amznErrorType(response.headers?.get('x-amzn-errortype')),
     rawRequest,
   });
@@ -729,7 +1084,8 @@ function amznErrorType(value: string | null | undefined): string | undefined {
 /** A retry hint stated only in the message, when neither header nor body carries one. */
 function retryAfterFromProse(message: string): number | undefined {
   const seconds = message.match(RETRY_AFTER_PROSE)?.[1];
-  return seconds ? Math.round(parseFloat(seconds) * 1000) : undefined;
+  // Read as the other readers read a value: an overflowing one states nothing.
+  return seconds ? millisOfSeconds(parseFloat(seconds)) : undefined;
 }
 
 /**
@@ -798,11 +1154,16 @@ function renderBody(body: unknown): string {
  * `overloaded_error`): a bare 'overloaded' in prose ("worker pool overloaded")
  * or digits inside another number ("timeout after 5290 ms", "req-98529abc")
  * must not put an unrelated error onto the ~10-minute schedule.
+ *
+ * A MembraneError's message is the bounded one, so a token that sat only in
+ * its omitted middle is not seen, and that error takes the base schedule.
+ * The omission marker's own counts are not the provider's words: an omitted
+ * count of exactly 529 is no overload.
  */
 export function isOverloadedError(info: ErrorInfo): boolean {
   if (!info.retryable) return false;
   if (info.httpStatus !== undefined) return info.httpStatus === 529;
-  return OVERLOADED_PATTERN.test(info.message);
+  return typeof info.message === 'string' && OVERLOADED_PATTERN.test(info.message.replace(OMISSION_MARKER, ' '));
 }
 
 /**
@@ -882,30 +1243,38 @@ function classifySocketCode(error: Error): { type: MembraneErrorType; retryable:
 }
 
 export function classifyError(error: unknown): ErrorInfo {
-  if (error instanceof MembraneError) {
-    return error.toErrorInfo();
+  if (guardedOr(() => error instanceof MembraneError, false)) {
+    return (error as MembraneError).toErrorInfo();
   }
 
   // Serialize the error once for use in all return paths
   const serializedError = serializeError(error);
+  // Every read of the error is guarded, as serializeError's are: a getter or
+  // Proxy trap that throws must not replace the failure being classified.
+  const isError = isErrorValue(error);
+  // The whole text decides the classification. What's returned is bounded,
+  // as a MembraneError's message is, since stream() hands this to onError
+  // before any MembraneError exists.
+  const text = thrownText(error);
+  const message = boundErrorText(text);
 
-  if (error instanceof Error) {
+  if (isError) {
     // Abort is decided by type, never by prose: a tool or provider message
     // that merely contains "abort" is not a user cancellation.
-    if (error.name === 'AbortError') {
+    if (guardedOr(() => (error as Error).name === 'AbortError', false)) {
       return {
         type: 'abort',
-        message: error.message,
+        message,
         retryable: false,
         rawError: serializedError,
       };
     }
 
-    const classification = classifySocketCode(error) ?? classifyMessage(error.message);
+    const classification = guardedOr(() => classifySocketCode(error as Error), undefined) ?? classifyMessage(text);
     if (classification.type !== 'unknown') {
       return {
         type: classification.type,
-        message: error.message,
+        message,
         retryable: classification.retryable,
         httpStatus: classification.httpStatus,
         rawError: serializedError,
@@ -916,7 +1285,7 @@ export function classifyError(error: unknown): ErrorInfo {
   // Unknown
   return {
     type: 'unknown',
-    message: error instanceof Error ? error.message : String(error),
+    message,
     retryable: false,
     rawError: serializedError,
   };

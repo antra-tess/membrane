@@ -21,6 +21,7 @@ import {
   authError,
   classifyError,
   errorFromProviderStatus,
+  statedWaitFromHeaders,
   isTypedAbortError,
   networkError,
   serverError,
@@ -229,6 +230,18 @@ export class AnthropicAdapter implements ProviderAdapter {
     const clientOptions: ClientOptions = {
       baseURL: config.baseURL,
       defaultHeaders: config.defaultHeaders,
+      // Membrane's retry policy is the only retry policy inside a call, as it
+      // is for every fetch-based adapter. Left at its default (two retries of
+      // 408/409/429/5xx and connection failures before Membrane saw the
+      // error), the SDK replaced a stated retry-after of 60 s or more with its
+      // own backoff of about a second, slept through shorter waits beyond
+      // Membrane's maxRetryDelayMs, retried what Membrane's default policy
+      // leaves to the caller, and multiplied the attempt counts Membrane
+      // documents by up to three. One resend remains below it: with a
+      // credential resolver, the refresh after an HTTP 401 resends the request
+      // inside the same SDK operation (fetchWithCredentials), outside
+      // Membrane's attempt count.
+      maxRetries: 0,
     };
     this.defaultBeta = extractBetaHeader(config.defaultHeaders);
     this.dynamicHeaders = config.dynamicHeaders;
@@ -291,9 +304,11 @@ export class AnthropicAdapter implements ProviderAdapter {
             failure = error instanceof MembraneError ? error : authError(
               `Credential resolution failed: ${error instanceof Error ? error.message : String(error)}`, error,
             );
-            // SDK 0.52 retries thrown fetch errors as connection failures.
-            // Abort this operation to bypass that loop, then restore the
-            // original error at the complete/stream/keepalive boundary.
+            // SDK 0.52 treats a thrown fetch error as a connection failure,
+            // which it retries whenever its own retries are enabled (this
+            // client disables them). Abort this operation so it ends here
+            // either way, then restore the original error at the
+            // complete/stream/keepalive boundary.
             abort.abort(failure);
             throw failure;
           }
@@ -870,9 +885,13 @@ export class AnthropicAdapter implements ProviderAdapter {
       return abortError(undefined, rawRequest);
     }
 
-    // The SDK's transport failures carry no status ("Connection error.",
-    // `cause: TypeError: fetch failed`), so the status path below can't type
-    // them. They are the SDK's own types: the timeout subclass first.
+    // A connection failure is a type too. The SDK wraps a fetch that threw
+    // (reset, refused, DNS) as APIConnectionError, whose fixed message
+    // "Connection error." carries no status, body or network word, and its
+    // own request timeout as the APIConnectionTimeoutError subclass. Classify
+    // them as the fetch adapters classify a failed fetch, so a caller's retry
+    // policy sees a retryable failure. The SDK's own retries used to absorb
+    // most of these before they reached here.
     if (error instanceof Anthropic.APIConnectionTimeoutError) {
       return timeoutError(error.message, error, rawRequest);
     }
@@ -946,19 +965,22 @@ export class AnthropicAdapter implements ProviderAdapter {
   }
 
   /**
-   * `retry-after` off the response headers: the authoritative source, and the
-   * one nobody was reading. An error that carries no headers (a mid-stream SSE
-   * rethrow) states no wait here; errorFromProviderStatus then reads its
+   * The stated wait off the response headers: the authoritative source, and
+   * the one nobody was reading. They are read by the shared
+   * `statedWaitFromHeaders`, the same reader every adapter's HTTP boundary
+   * uses: `retry-after-ms` before `retry-after`, the order `@anthropic-ai/sdk`
+   * reads them in. With the SDK's own retries off (`maxRetries: 0`), this is
+   * the only header reader, so a wait stated only in milliseconds would
+   * otherwise be lost. Zero is a stated wait of zero, and so is a negative
+   * wait: it is already over. A mid-stream SSE error carries the headers of
+   * the stream's own 200 response (the SDK throws it with them), so a wait
+   * read here for one comes from those. An error whose headers state no wait
+   * states none here; errorFromProviderStatus then reads the body's own
    * message through the guarded prose reader.
    */
   private parseRetryAfter(error: { headers?: Headers }): number | undefined {
-    const header = error.headers?.get?.('retry-after');
-    if (header) {
-      const seconds = Number(header.trim());
-      if (Number.isFinite(seconds)) return Math.round(seconds * 1000);
-      const at = Date.parse(header.trim());
-      if (!Number.isNaN(at)) return Math.max(0, at - Date.now());
-    }
+    const stated = statedWaitFromHeaders(error.headers);
+    if (stated !== undefined) return stated;
     // No prose fallback here: a wait read from a message belongs to the
     // shared, guarded reader (errorFromProviderStatus), which believes one only
     // as stated seconds on a retryable error. A loose /retry after (\d+)/ over

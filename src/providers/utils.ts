@@ -1,4 +1,10 @@
-import { TimeoutAbortError, errorFromProviderStatus, networkError } from '../types/errors.js';
+import {
+  TimeoutAbortError,
+  errorFromProviderStatus,
+  networkError,
+  statedWaitMillis,
+  statedWaitSeconds,
+} from '../types/errors.js';
 
 interface StreamErrorFrameFields {
   code?: unknown;
@@ -33,23 +39,14 @@ function readNumericField(...candidates: unknown[]): number | undefined {
   return undefined;
 }
 
-function readDurationSeconds(...candidates: unknown[]): number | undefined {
-  for (const candidate of candidates) {
-    if (typeof candidate === 'number' && Number.isFinite(candidate)) return candidate;
-    if (typeof candidate === 'string') {
-      const duration = candidate.trim().match(/^(\d+(?:\.\d+)?)s?$/);
-      if (duration?.[1]) return Number(duration[1]);
-    }
-  }
-  return undefined;
-}
-
+/**
+ * A frame's stated wait, read by the same value readers as an error body's:
+ * milliseconds before seconds, a number or a numeric string, and below zero
+ * it is over (0), as in a header or a body.
+ */
 function readFrameRetryAfterMs(fields: StreamErrorFrameFields): number | undefined {
-  const explicitMilliseconds = readNumericField(fields.retry_after_ms, fields.retryAfterMs);
-  if (explicitMilliseconds !== undefined) return explicitMilliseconds;
-
-  const seconds = readDurationSeconds(fields.retry_after, fields.retryAfter, fields.retryDelay, fields.retry_delay);
-  return seconds === undefined ? undefined : Math.round(seconds * 1000);
+  return statedWaitMillis(fields.retry_after_ms, fields.retryAfterMs)
+    ?? statedWaitSeconds(fields.retry_after, fields.retryAfter, fields.retryDelay, fields.retry_delay);
 }
 
 /**

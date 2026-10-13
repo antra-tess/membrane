@@ -39,6 +39,7 @@
 // than "fixed up" — see `ineligibleReason()`.
 
 import { createHash } from 'node:crypto';
+import { boundErrorText, thrownText } from './types/errors.js';
 
 /** Vendor usage fields used by keepalive checks and spend observers. */
 export interface KeepaliveUsage {
@@ -379,7 +380,13 @@ export class CacheKeepalive {
       lin.lastTouchAt = Date.now();
       this.emit({ type: 'refreshed', key, lane: lin.lane, readTokens: read, idleMs });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      // The sender is the SDK's or the host's, so its error has not passed
+      // through MembraneError's bound, and a refused poke's message can carry
+      // a whole provider body. The text this keepalive emits is bounded here,
+      // and read guarded: a throw from this catch would reject the background
+      // tick. The receipt keeps the error as thrown, for the host to record
+      // (serializeError bounds it).
+      const message = boundErrorText(thrownText(err));
       if (payload) {
         this.reportCall({
           key, lane: lin.lane, startedAt, durationMs: Date.now() - startedAt,
