@@ -219,12 +219,37 @@ describe('a body and a frame read the same forms of a stated wait', () => {
 
 describe('a seconds value whose milliseconds overflow states nothing', () => {
   it('in a header, a body or a frame; a negative one is still over (0)', () => {
-    expect(statedWaitFromHeaders(new Headers({ 'retry-after': '1e306' }))).toBeUndefined();
-    expect(statedWaitFromHeaders(new Headers({ 'retry-after': '-1e306' }))).toBe(0);
+    expect(statedWaitFromHeaders(new Headers({ 'retry-after': `1${'0'.repeat(306)}` }))).toBeUndefined();
+    expect(statedWaitFromHeaders(new Headers({ 'retry-after': `-1${'0'.repeat(306)}` }))).toBe(0);
     expect(bodyWait({ error: { message: 'zz-slow down', retry_after: 1e306 } })).toBeUndefined();
     expect(frameWait({ retry_after: 1e306 })).toBeUndefined();
     expect(frameWait({ retry_after: -1e306 })).toBe(0);
     // A finite wait, however long, is still a wait (control).
-    expect(statedWaitFromHeaders(new Headers({ 'retry-after': '1e300' }))).toBe(1e303);
+    expect(statedWaitFromHeaders(new Headers({ 'retry-after': `1${'0'.repeat(300)}` }))).toBe(1e303);
+  });
+});
+
+describe('a header value is read in the grammar a body or frame field is', () => {
+  it('decimal digits, with a sign and a fraction; hex and exponent forms state nothing, as a numeric string does in a body', () => {
+    expect(statedWaitFromHeaders(new Headers({ 'retry-after': '2.5' }))).toBe(2500);
+    expect(statedWaitFromHeaders(new Headers({ 'retry-after-ms': '1500' }))).toBe(1500);
+    expect(statedWaitFromHeaders(new Headers({ 'retry-after': '0x3C' }))).toBeUndefined();
+    expect(statedWaitFromHeaders(new Headers({ 'retry-after-ms': '1e3' }))).toBeUndefined();
+    expect(bodyWait({ error: { message: 'zz-slow down', retry_after_ms: '1e3' } })).toBeUndefined();
+  });
+
+  it('a date is read only in an HTTP-date form, so a rejected number or an ISO date states nothing', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse('2026-11-01T00:00:00Z'));
+    try {
+      for (const value of ['1.', '.5', '+1.', '2026-11-08', '2026-11-08T00:00:00Z']) {
+        expect(statedWaitFromHeaders(new Headers({ 'retry-after': value }))).toBeUndefined();
+      }
+      expect(statedWaitFromHeaders(new Headers({ 'retry-after': 'Sun, 01 Nov 2026 00:01:00 GMT' }))).toBe(60_000);
+      expect(statedWaitFromHeaders(new Headers({ 'retry-after': 'Sunday, 01-Nov-26 00:01:00 GMT' }))).toBe(60_000);
+      expect(statedWaitFromHeaders(new Headers({ 'retry-after': 'Sun Nov  1 00:01:00 2026' }))).toBe(60_000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

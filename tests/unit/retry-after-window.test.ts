@@ -13,6 +13,7 @@
  * configured cap above that is taken in steps, still abort-aware.
  */
 
+import { getEventListeners } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
@@ -184,11 +185,29 @@ describe('stream(): the pre-emission retry follows the same bound', () => {
     expect(adapter.calls).toBe(2);
     expect(waits).toEqual([20_000]);
   });
+
+  it('a 529 instead of a stream is bounded by the overload schedule, as in complete()', async () => {
+    const adapter = new FailingAdapter(1, limited(200_000, 529));
+    adapter.queueResponse('zz-recovered');
+    const { membrane, waits } = recording(adapter, {
+      maxRetries: 3, retryDelayMs: 1_000, maxRetryDelayMs: 30_000,
+      overloaded: { maxRetries: 7, retryDelayMs: 10_000, backoffMultiplier: 2, maxRetryDelayMs: 300_000 },
+    });
+    await membrane.stream(zzRequest, { onChunk: () => {} });
+    expect(adapter.calls).toBe(2);
+    expect(waits).toEqual([200_000]);
+  });
 });
 
 describe('sleep() past the timer limit', () => {
   const sleepOf = (membrane: Membrane) =>
     (membrane as unknown as { sleep(ms: number, signal?: AbortSignal): Promise<void> }).sleep.bind(membrane);
+
+  it('leaves no abort listener on the caller signal once the wait is over', async () => {
+    const controller = new AbortController();
+    await sleepOf(new Membrane(new MockAdapter()))(1, controller.signal);
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+  });
 
   it('steps through a wait longer than one timer can hold, never asking for more', async () => {
     vi.useFakeTimers();

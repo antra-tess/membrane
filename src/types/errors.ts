@@ -116,7 +116,14 @@ export function boundRawError(value: unknown): unknown {
     try {
       json = stringifyAcyclic(value);
     } catch (error) {
-      const reason = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+      // Read guarded: a throwing name or message getter must not make the
+      // bound throw in place of the failure it describes.
+      let reason: string;
+      try {
+        reason = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+      } catch {
+        reason = 'unknown';
+      }
       return { truncated: true, unserializable: boundErrorText(reason, 200), valueType: typeof value };
     }
   }
@@ -189,7 +196,7 @@ function asText(value: unknown): string {
  * reporting.
  */
 export function serializeError(error: unknown): unknown {
-  return boundRawError(serializeErrorFields(error, new Set()));
+  return boundRawError(serializeErrorFields(error, new Set(), 0));
 }
 
 /** A read that may throw (a getter, a Proxy trap), recorded instead as unreadable. */
@@ -231,7 +238,10 @@ export function thrownText(value: unknown): string {
 }
 
 /** An Error as a plain record, its Error-valued fields likewise; any other value as it is. */
-function serializeErrorFields(error: unknown, open: Set<Error>): unknown {
+/** How deep serializeErrorFields follows errors held by errors. */
+const MAX_SERIALIZED_ERROR_DEPTH = 8;
+
+function serializeErrorFields(error: unknown, open: Set<Error>, depth: number): unknown {
   let isError: boolean;
   try {
     isError = error instanceof Error;
@@ -244,6 +254,9 @@ function serializeErrorFields(error: unknown, open: Set<Error>): unknown {
   const value = error as Error;
   // An error that holds itself, directly or through an error it holds.
   if (open.has(value)) return '[Circular]';
+  // A chain of errors holding errors deeper than any real cause chain is cut,
+  // so recursion can't exhaust the stack while a failure is being described.
+  if (depth >= MAX_SERIALIZED_ERROR_DEPTH) return '[Depth]';
   open.add(value);
   const name = readGuarded(() => value.name);
   const message = readGuarded(() => value.message);
@@ -266,7 +279,7 @@ function serializeErrorFields(error: unknown, open: Set<Error>): unknown {
   const keys = readGuarded(() => Object.keys(value));
   for (const key of Array.isArray(keys) ? keys as string[] : []) {
     if (key === 'name' || key === 'message' || key === 'stack') continue;
-    serialized[key] = serializeErrorFields(readGuarded(() => (value as unknown as Record<string, unknown>)[key]), open);
+    serialized[key] = serializeErrorFields(readGuarded(() => (value as unknown as Record<string, unknown>)[key]), open, depth + 1);
   }
   open.delete(value);
   return serialized;
@@ -673,25 +686,52 @@ function firstString(...candidates: unknown[]): string | undefined {
  * `retry-after` (delta-seconds, or an HTTP-date per RFC 9110). Every adapter
  * reads it here, so a wait stated only in milliseconds is honored on all of
  * them. A wait of zero is a stated wait of zero, in either header, and a wait
- * below zero, or a date already past, is over: 0. A value that is neither a
- * finite number nor a date states nothing, and the next header is read; so
- * does a seconds value too large to state in milliseconds.
+ * below zero, or a date already past, is over: 0. A value is read as a body's
+ * or frame's is, in decimal (statedNumber), or as an HTTP-date. A
+ * `retry-after-ms` that states nothing leaves `retry-after` to be read, and a
+ * `retry-after` that states nothing, a seconds value too large to state in
+ * milliseconds included, leaves no wait.
  */
 export function statedWaitFromHeaders(
   headers: { get(name: string): string | null } | undefined,
 ): number | undefined {
   const millis = headers?.get?.('retry-after-ms')?.trim();
   if (millis) {
-    const ms = Number(millis);
-    if (Number.isFinite(ms)) return Math.max(0, Math.round(ms));
+    const ms = statedNumber(millis);
+    if (ms !== undefined) return Math.max(0, Math.round(ms));
   }
   const header = headers?.get?.('retry-after')?.trim();
   if (!header) return undefined;
-  const seconds = Number(header);
-  if (Number.isFinite(seconds)) return millisOfSeconds(seconds);
-  const at = Date.parse(header);
-  if (!Number.isNaN(at)) return Math.max(0, at - Date.now());
+  const seconds = statedNumber(header);
+  if (seconds !== undefined) return millisOfSeconds(seconds);
+  const at = httpDate(header);
+  if (at !== undefined) return Math.max(0, at - Date.now());
   return undefined;
+}
+
+const DAY = '(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)';
+const LONG_DAY = '(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)';
+const MONTH = '(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)';
+const TIME = '\\d{2}:\\d{2}:\\d{2}';
+/** RFC 9110's preferred form, `Sun, 06 Nov 1994 08:49:37 GMT`. */
+const IMF_FIXDATE = new RegExp(`^${DAY}, \\d{2} ${MONTH} \\d{4} ${TIME} GMT$`);
+/** Its obsolete forms, which a recipient still accepts: RFC 850's and asctime's. */
+const RFC850_DATE = new RegExp(`^${LONG_DAY}, \\d{2}-${MONTH}-\\d{2} ${TIME} GMT$`);
+const ASCTIME_DATE = new RegExp(`^${DAY} ${MONTH} [ \\d]\\d ${TIME} \\d{4}$`);
+
+/**
+ * An HTTP-date (RFC 9110 section 5.6.7) as epoch milliseconds, or undefined
+ * for anything else. Date.parse alone takes far more ('.5', an ISO date), so
+ * a value is parsed only in one of the three forms; asctime's carries no
+ * zone and is GMT by definition.
+ */
+function httpDate(text: string): number | undefined {
+  const form = IMF_FIXDATE.test(text) || RFC850_DATE.test(text) ? text
+    : ASCTIME_DATE.test(text) ? `${text} GMT`
+    : undefined;
+  if (form === undefined) return undefined;
+  const at = Date.parse(form);
+  return Number.isNaN(at) ? undefined : at;
 }
 
 /** Seconds as milliseconds: below zero, 0; undefined when the product overflows. */
@@ -955,7 +995,8 @@ function amznErrorType(value: string | null | undefined): string | undefined {
 /** A retry hint stated only in the message, when neither header nor body carries one. */
 function retryAfterFromProse(message: string): number | undefined {
   const seconds = message.match(RETRY_AFTER_PROSE)?.[1];
-  return seconds ? Math.round(parseFloat(seconds) * 1000) : undefined;
+  // Read as the other readers read a value: an overflowing one states nothing.
+  return seconds ? millisOfSeconds(parseFloat(seconds)) : undefined;
 }
 
 /**
@@ -1114,7 +1155,11 @@ export function classifyError(error: unknown): ErrorInfo {
   // Every read of the error is guarded, as serializeError's are: a getter or
   // Proxy trap that throws must not replace the failure being classified.
   const isError = isErrorValue(error);
-  const message = thrownText(error);
+  // The whole text decides the classification. What's returned is bounded,
+  // as a MembraneError's message is, since stream() hands this to onError
+  // before any MembraneError exists.
+  const text = thrownText(error);
+  const message = boundErrorText(text);
 
   if (isError) {
     // Abort is decided by type, never by prose: a tool or provider message
@@ -1128,7 +1173,7 @@ export function classifyError(error: unknown): ErrorInfo {
       };
     }
 
-    const classification = guardedOr(() => classifySocketCode(error as Error), undefined) ?? classifyMessage(message);
+    const classification = guardedOr(() => classifySocketCode(error as Error), undefined) ?? classifyMessage(text);
     if (classification.type !== 'unknown') {
       return {
         type: classification.type,

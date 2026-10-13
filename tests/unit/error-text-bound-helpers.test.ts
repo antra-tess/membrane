@@ -14,6 +14,7 @@ import {
   boundErrorText,
   boundRawError,
   classifyError,
+  errorFromProviderStatus,
   isOverloadedError,
   serializeError,
 } from '../../src/types/errors.js';
@@ -454,5 +455,44 @@ describe('the overload fallback reads none of the omission marker', () => {
     expect(plain.message).toContain(' …[529 of ');
     expect(isOverloadedError(plain)).toBe(false);
     expect(isOverloadedError(statusLess(`overloaded_error ${'x'.repeat(length! - 17)}`))).toBe(true);
+  });
+});
+
+describe('the round after sw-mb102r', () => {
+  it('classifyError returns a bounded message for any thrown value, as a MembraneError has', () => {
+    const info = classifyError(new Error(`zz-head ${'x'.repeat(10_000)} zz-tail`));
+    expect(info.message.length).toBeLessThanOrEqual(MAX_ERROR_MESSAGE_CHARS);
+    expect(info.message.startsWith('zz-head')).toBe(true);
+    expect(info.message.endsWith('zz-tail')).toBe(true);
+  });
+
+  it('a prose wait too large to state in milliseconds states nothing, as a header or body value does', () => {
+    const error = errorFromProviderStatus({ provider: 'zz', status: 429, body: { error: { message: `slow down, retry after ${'9'.repeat(320)} seconds` } } });
+    expect(error.retryAfterMs).toBeUndefined();
+  });
+
+  it('serializes a chain of errors deeper than any cause chain without exhausting the stack', () => {
+    const stackless = (message: string): Error => {
+      const made = new Error(message);
+      delete (made as { stack?: string }).stack;
+      return made;
+    };
+    let error: Error = stackless('zz-bottom');
+    for (let i = 0; i < 100_000; i++) {
+      const outer = stackless(`zz-${i}`);
+      (outer as unknown as { inner: Error }).inner = error;
+      error = outer;
+    }
+    expect(() => serializeError(error)).not.toThrow();
+    expect(JSON.stringify(serializeError(error))).toContain('[Depth]');
+  });
+
+  it('describes a value whose serialization throws an error it cannot read', () => {
+    const unreadableError = new Error('zz');
+    Object.defineProperty(unreadableError, 'message', { get() { throw new Error('zz-getter'); } });
+    const value = { toJSON() { throw unreadableError; } };
+    const bounded = boundRawError(value) as { truncated?: boolean; unserializable?: string };
+    expect(bounded.truncated).toBe(true);
+    expect(bounded.unserializable).toBe('unknown');
   });
 });
