@@ -39,6 +39,7 @@
 // than "fixed up" — see `ineligibleReason()`.
 
 import { createHash } from 'node:crypto';
+import { boundErrorText, thrownText } from './types/errors.js';
 
 /** Vendor usage fields used by keepalive checks and spend observers. */
 export interface KeepaliveUsage {
@@ -89,7 +90,33 @@ export type KeepaliveEvent =
   | { type: 'skipped'; key: string; reason: string }
   | { type: 'error'; key: string; error: string; consecutive: number }
   | { type: 'disabled'; reason: string }
-  | { type: 'expired'; key: string; idleMs: number };
+  | { type: 'expired'; key: string; idleMs: number }
+  /** No lineage of `model` is poked before `until` (epoch ms; null holds until
+   * the keepalive stops): a provider stated a wait, or a poke was refused as
+   * retryable and the model's backoff holds it (see refresh). */
+  | { type: 'held'; model: string; until: number | null; reason: string };
+
+/** What the keepalive needs from a classified failure: the provider's stated
+ * wait, and whether the provider says the request may be retried. */
+export interface KeepaliveFailureClassification {
+  retryAfterMs?: number;
+  retryable?: boolean;
+}
+
+/** The last instant a JavaScript Date can represent (ECMA-262 time value range). */
+const MAX_DATE_MS = 8.64e15;
+
+/**
+ * The instant a stated wait holds until, from `now`: Infinity when it cannot
+ * be held as an instant (not finite, or past the last Date instant), and
+ * undefined when the value holds nothing: not a positive number. A wait of 0
+ * (a `retry-after: 0`, or a past date read as 0) is already over.
+ */
+function holdDeadline(retryAfterMs: unknown, now: number): number | undefined {
+  if (typeof retryAfterMs !== 'number' || Number.isNaN(retryAfterMs) || retryAfterMs <= 0) return undefined;
+  const instant = now + retryAfterMs;
+  return Number.isFinite(instant) && instant <= MAX_DATE_MS ? instant : Number.POSITIVE_INFINITY;
+}
 
 export interface CacheKeepaliveConfig {
   /** Master switch. Default true. */
@@ -119,7 +146,9 @@ export interface CacheKeepaliveConfig {
   /** LRU cap on tracked lineages, to bound memory. Each holds a full wire
    *  request (~1.5MB for a 500k-token resident). Default 4. */
   maxLineages?: number;
-  /** Consecutive send failures before the whole keepalive disables itself. */
+  /** Consecutive failed pokes that count before the whole keepalive disables
+   *  itself. A failure the adapter classifies as retryable doesn't count: it
+   *  is paced instead (see refresh). An accepted poke resets the count. */
   maxConsecutiveErrors?: number;
   /**
    * How many times a lineage may come back as a WRITE instead of a read before
@@ -245,6 +274,37 @@ export function lineageKey(wire: Record<string, unknown>): string {
 
 export class CacheKeepalive {
   private lineages = new Map<string, Lineage>();
+  /**
+   * Per model, the instant before which no lineage of that model is poked:
+   * the maximum outstanding hold, from a wait any call to the model stated
+   * through this keepalive's adapter, foreground or keepalive, or from the
+   * model's backoff after a poke refused as retryable (Infinity when a stated
+   * wait cannot be held as an instant: held until stop()). While the keepalive runs, a wait passing is
+   * the only thing that ends one; another caller's release of its own
+   * admission does not. An outstanding hold is kept whether or not its model
+   * has a lineage, since one can be recorded inside the wait. Passed holds are
+   * dropped at each tick and before each new hold, so calls that never start
+   * the timer (foreground-only or ineligible traffic) cannot accumulate them;
+   * stop() drops every hold.
+   */
+  private holds = new Map<string, number>();
+  /**
+   * Per model, its run of pokes the provider has refused as retryable, and
+   * when the hold the last of them set ends. Each such refusal holds the
+   * model on a doubling schedule, so a capacity storm that states no wait (a
+   * 529 overloaded_error usually doesn't) paces the keepalive instead of
+   * latching its breaker. A poke the provider accepts ends its model's run,
+   * whether it read or wrote. A run also ends by age: a refusal that comes
+   * more than two check intervals after the end of the run's last hold starts
+   * a new one, so a run from a past storm can't stretch a later, isolated
+   * refusal's hold. In a storm, refusals come one hold plus about one tick
+   * apart, so the run carries on, through a stated wait longer than the cap
+   * too. A real call doesn't end a run: it says nothing about whether a poke
+   * of another lineage would be accepted, and membrane retries a real call
+   * where a poke gets one attempt. A refusal that isn't retryable doesn't end
+   * a run either: the provider still isn't accepting.
+   */
+  private refusals = new Map<string, { run: number; heldUntil: number }>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false;
   private consecutiveErrors = 0;
@@ -252,9 +312,56 @@ export class CacheKeepalive {
   private readonly cfg: Required<Omit<CacheKeepaliveConfig, 'onEvent' | 'onCall'>> &
     Pick<CacheKeepaliveConfig, 'onEvent' | 'onCall'>;
 
-  constructor(private readonly send: KeepaliveSend, config: CacheKeepaliveConfig = {}) {
-    this.cfg = { ...DEFAULTS, ...config };
+  /**
+   * `classify` reads a failed poke as the adapter classifies it (stated wait,
+   * retryability); without it, a failed poke holds nothing and always counts
+   * toward the breaker.
+   */
+  constructor(
+    private readonly send: KeepaliveSend,
+    config: CacheKeepaliveConfig = {},
+    private readonly classify?: (error: unknown) => KeepaliveFailureClassification | undefined,
+  ) {
+    // An option given as undefined takes its default, as one left out does:
+    // `enabled: undefined` is enabled, as the Anthropic adapter reads it, and
+    // an undefined refreshAfterMs or checkIntervalMs can't make the timer or
+    // the backoff NaN.
+    const given = Object.fromEntries(Object.entries(config).filter(([, value]) => value !== undefined));
+    this.cfg = { ...DEFAULTS, ...given } as typeof this.cfg;
     if (!this.cfg.enabled) this.stopped = true;
+  }
+
+  /**
+   * A provider's stated wait for `model`, from any call to it: every lineage
+   * of that model is skipped until the wait passes. Holds reduce by maximum
+   * (a later, shorter wait never shortens one), and a wait that cannot be
+   * held as an instant (not finite, or past the last Date instant) holds
+   * until stop(). A value that is not a positive number holds nothing, and
+   * announces nothing.
+   */
+  holdModel(model: string, retryAfterMs: unknown, reason: string): void {
+    if (this.stopped) return;
+    const now = Date.now();
+    const until = holdDeadline(retryAfterMs, now);
+    if (until === undefined) return;
+    this.dropPassedHolds(now);
+    const current = this.holds.get(model);
+    if (current !== undefined && current >= until) return;
+    this.holds.set(model, until);
+    this.emit({ type: 'held', model, until: Number.isFinite(until) ? until : null, reason });
+  }
+
+  /** Whether a stated wait still holds `model` at `now`. */
+  private isHeld(model: string, now: number): boolean {
+    const until = this.holds.get(model);
+    return until !== undefined && now < until;
+  }
+
+  /** Forget every hold whose wait has passed by `now`; outstanding ones stay. */
+  private dropPassedHolds(now: number): void {
+    for (const [model, until] of this.holds) {
+      if (now >= until) this.holds.delete(model);
+    }
   }
 
   /** Record a real outbound request. Cheap; called on every LLM call. */
@@ -308,8 +415,14 @@ export class CacheKeepalive {
     this.ticking = true;
     try {
       const now = Date.now();
+      // Apart from the lineages below: a held model may have none left.
+      this.dropPassedHolds(now);
       for (const [key, lin] of [...this.lineages]) {
         if (this.stopped) break;
+        // An earlier poke of this tick took a round trip, and a real call may
+        // have replaced this key's lineage meanwhile (fresh, so not due) or an
+        // ineligible shape dropped it: act only on the one still recorded.
+        if (this.lineages.get(key) !== lin) continue;
         // The keepalive window is measured from the last REAL request, so pokes
         // can never extend their own mandate.
         if (now - lin.lastRealAt >= this.cfg.maxIdleMs) {
@@ -321,6 +434,11 @@ export class CacheKeepalive {
         // inside the window, it refreshed the TTL for free and we do nothing.
         // This is what keeps a busy agent's keepalive cost at ~zero.
         if (now - lin.lastTouchAt < this.cfg.refreshAfterMs) continue;
+        // A hold on this lineage's model, including one a poke of another
+        // lineage of the same model received earlier in this tick. Read
+        // against the clock now, not the tick's start: the pokes before this
+        // one took time, and a hold that passed meanwhile holds nothing.
+        if (this.isHeld(String(lin.wire.model ?? ''), Date.now())) continue;
         await this.refresh(key, lin);
       }
     } finally {
@@ -351,6 +469,10 @@ export class CacheKeepalive {
         request: payload, outcome: 'success', response: { ...res },
       });
       this.consecutiveErrors = 0;
+      // Any accepted poke ends its model's run of refusals, including one that
+      // wrote instead of reading: after a storm that is the likeliest first
+      // success, since the cache expired meanwhile.
+      this.refusals.delete(String(lin.wire.model ?? ''));
 
       const read = res.usage?.cache_read_input_tokens ?? 0;
       const wrote = res.usage?.cache_creation_input_tokens ?? 0;
@@ -368,7 +490,9 @@ export class CacheKeepalive {
           writeTokens: wrote,
         });
         if (lin.ineffective >= this.cfg.maxIneffective) {
-          this.lineages.delete(key);
+          // Only this lineage: a real call during the poke may have recorded a
+          // fresh one under the same key, which keeps its keepalive.
+          if (this.lineages.get(key) === lin) this.lineages.delete(key);
         } else {
           lin.lastTouchAt = Date.now();
         }
@@ -379,24 +503,70 @@ export class CacheKeepalive {
       lin.lastTouchAt = Date.now();
       this.emit({ type: 'refreshed', key, lane: lin.lane, readTokens: read, idleMs });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      // The sender is the SDK's or the host's, so its error has not passed
+      // through MembraneError's bound, and a refused poke's message can carry
+      // a whole provider body. The text this keepalive emits is bounded here,
+      // and read guarded: a throw from this catch would reject the background
+      // tick. The receipt keeps the error as thrown, for the host to record
+      // (serializeError bounds it).
+      const message = boundErrorText(thrownText(err));
       if (payload) {
         this.reportCall({
           key, lane: lin.lane, startedAt, durationMs: Date.now() - startedAt,
           request: payload, outcome: 'error', error: err,
         });
       }
-      this.consecutiveErrors += 1;
+      // A failure the adapter classifies as retryable (a rate limit, an
+      // overload, any 5xx, a timeout or a connection failure) is paced, never
+      // counted toward the breaker (the count stays where it was; it is not
+      // reset):
+      // every lineage of the model is held until the later of the provider's
+      // stated wait, if it gave one a hold accepts (holdModel's own test), and
+      // the model's own backoff, which doubles with each refusal in a row from
+      // one check interval up to the refresh window. So an overload storm that
+      // states no wait backs the keepalive off and it resumes after; it never
+      // repeats a refused poke unpaced either. A failure that is not
+      // retryable, or that nothing classifies, still counts, whatever wait it
+      // states, and the breaker is what bounds a run of those; a wait it states
+      // still holds the model.
+      let classified: KeepaliveFailureClassification | undefined;
+      try { classified = this.classify?.(err); } catch { classified = undefined; }
+      const model = String(lin.wire.model ?? '');
+      const paced = classified?.retryable === true;
+      if (paced) {
+        const refusedAt = Date.now();
+        const previous = this.refusals.get(model);
+        const run = previous !== undefined && refusedAt <= previous.heldUntil + 2 * this.cfg.checkIntervalMs
+          ? previous.run + 1
+          : 1;
+        const backoffMs = Math.min(
+          this.cfg.refreshAfterMs,
+          this.cfg.checkIntervalMs * 2 ** Math.min(run - 1, 30),
+        );
+        const statedUntil = holdDeadline(classified!.retryAfterMs, refusedAt);
+        const stated = statedUntil === undefined ? undefined : classified!.retryAfterMs as number;
+        this.holdModel(model, stated === undefined ? backoffMs : Math.max(stated, backoffMs), message);
+        // A stop() during the poke dropped every run; this one stays dropped.
+        if (!this.stopped) this.refusals.set(model, { run, heldUntil: this.holds.get(model) ?? refusedAt });
+      } else {
+        this.holdModel(model, classified?.retryAfterMs, message);
+        this.consecutiveErrors += 1;
+      }
       this.emit({ type: 'error', key, error: message, consecutive: this.consecutiveErrors });
 
-      // Back this lineage off immediately rather than retrying on the next tick.
-      lin.lastTouchAt = Date.now();
+      // Back a counted failure's lineage off immediately rather than retrying
+      // on the next tick. A paced refusal touched no cache entry and its hold
+      // (at least one check interval) already keeps the next tick off the
+      // model, so its lineage keeps its age: once the hold passes it's due
+      // again while its entry may still be warm, where moving it would push
+      // the next poke a whole refresh window on, past the entry's TTL.
+      if (!paced) lin.lastTouchAt = Date.now();
 
       // Hard breaker. A background loop that keeps firing failing requests is
       // how fable-cm produced 1033 `400 invalid_request_error` rows in 3h on
       // 2026-08-21 — the exact error class that also trips the agent's
       // poison-history breaker. A keepalive must never be that loop.
-      if (this.consecutiveErrors >= this.cfg.maxConsecutiveErrors) {
+      if (!paced && this.consecutiveErrors >= this.cfg.maxConsecutiveErrors) {
         this.stop();
         this.emit({
           type: 'disabled',
@@ -448,5 +618,7 @@ export class CacheKeepalive {
       this.timer = null;
     }
     this.lineages.clear();
+    this.holds.clear();
+    this.refusals.clear();
   }
 }
