@@ -1,13 +1,7 @@
 /**
- * Images inside tool results on text-only tool-result wires.
- *
- * Chat Completions `role: 'tool'` messages (OpenAI, OpenRouter, OpenAI-
- * compatible servers) and Gemini `functionResponse.response` carry text only,
- * so these adapters JSON-stringify non-string tool_result content. Before this
- * fix an image block went through that stringify whole: its base64 payload
- * reached the model as prompt TEXT (a 300KB screenshot = ~400KB of input on
- * every request while it stayed in history). Image blocks are now replaced by a
- * constant placeholder first; everything else serializes exactly as before.
+ * The omission safeguard from #84 stays intact for non-normalized image
+ * payloads, with a per-image notice. Normalized sources use native/adjacent media;
+ * tool-result-request-images.test.ts covers those transport paths.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
@@ -117,12 +111,12 @@ describe.each(adapters)('%s adapter: Membrane.complete with tool-result image hi
     return fetchMock.mock.calls[0]![1].body as string;
   }
 
-  it('sends a placeholder instead of the base64 payload as text', async () => {
-    const body = await sentBody([{ type: 'text', text: 'Screenshot taken' }, imageBlock()]);
+  it('keeps the omission fallback for a generated_image payload', async () => {
+    const body = await sentBody([{ type: 'text', text: 'Screenshot taken' }, { type: 'generated_image', data: BIG_PNG, mimeType: 'image/png' } as ContentBlock]);
     expect(body).not.toContain(PAYLOAD_PROBE);
     expect(body).toContain('Screenshot taken');
     // The placeholder sits inside a JSON string that is itself JSON-encoded.
-    expect(body).toContain('tool results reach this model as text only');
+    expect(body).toContain('this image in the tool result was NOT shown to you');
     expect(body.length).toBeLessThan(5_000);
   });
 
@@ -137,13 +131,13 @@ describe('exported ChatCompletions converters', () => {
   it.each([
     ['toOpenRouterMessages', toOpenRouterMessages],
     ['toOpenAIMessages', toOpenAIMessages],
-  ] as const)('%s replaces tool-result images with the placeholder', (_name, convert) => {
+  ] as const)('%s keeps non-normalized generated-image omission', (_name, convert) => {
     const out = convert([{ role: 'user', content: [
-      { type: 'tool_result', toolUseId: 'shot_1', content: [{ type: 'text', text: 'Screenshot' }, imageBlock()] },
+      { type: 'tool_result', toolUseId: 'shot_1', content: [{ type: 'text', text: 'Screenshot' }, { type: 'generated_image', data: BIG_PNG, mimeType: 'image/png' }] },
     ] as ContentBlock[] }]);
     const serialized = JSON.stringify(out);
     expect(serialized).not.toContain(PAYLOAD_PROBE);
-    expect(serialized).toContain('tool results reach this model as text only');
+    expect(serialized).toContain('this image in the tool result was NOT shown to you');
     expect(serialized).toContain('Screenshot');
   });
 });

@@ -328,7 +328,7 @@ describe('ChatCompletions-shaped convertMessages: tool_result envelope interlope
 
   const converters: Array<[string, (messages: any[]) => any[]]> = [
     ['OpenAIAdapter', (m) => (new OpenAIAdapter({ apiKey: 'test' }) as any).convertMessages(m)],
-    ['OpenRouterAdapter', (m) => (new OpenRouterAdapter({ apiKey: 'test' }) as any).convertMessages(m)],
+    ['OpenRouterAdapter', (m) => (new OpenRouterAdapter({ apiKey: 'test' }) as any).convertMessages(m, [])],
     ['OpenAICompatibleAdapter', (m) =>
       (new OpenAICompatibleAdapter({ apiKey: 'test', baseURL: 'http://localhost' }) as any).convertMessages(m)],
   ];

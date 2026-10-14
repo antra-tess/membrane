@@ -13,6 +13,7 @@
  */
 
 import { assertMessagePrefillSupported } from './request-capabilities.js';
+import { captureRequestSelection, effectiveChatModel, ToolResultImagePolicy, type ToolResultImageMode, type ToolResultImageConversionOptions } from './tool-result-image-policy.js';
 
 import type {
   ProviderAdapter,
@@ -31,7 +32,8 @@ import {
   isTypedAbortError,
   withRawRequest,
 } from '../types/index.js';
-import { safeParseJson, textOnlyToolResultContent, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
+import { safeParseJson, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
+import { hasToolResultImages, chatToolResultContent, relocateToolImages, nativeChatToolContent, validatedChatImagePart } from './tool-result-images.js';
 
 // ============================================================================
 // Types
@@ -125,6 +127,10 @@ interface OpenAIResponse {
 // ============================================================================
 
 export interface OpenAICompatibleAdapterConfig {
+  /** Tool-result image policy (default: auto). Explicit media/omit wins over
+   * registry knowledge; auto is pinned per model on first tool-image use. */
+  toolResultImages?: ToolResultImageMode;
+
   /** Base URL for the API (required, e.g., 'http://localhost:11434/v1') */
   baseURL: string;
   
@@ -158,6 +164,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   private baseURL: string;
   private apiKey: string;
   private defaultMaxTokens: number;
+  private readonly toolImagePolicy: ToolResultImagePolicy;
   private extraHeaders: Record<string, string>;
 
   constructor(config: OpenAICompatibleAdapterConfig) {
@@ -169,6 +176,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     this.baseURL = config.baseURL.replace(/\/$/, ''); // Remove trailing slash
     this.apiKey = config.apiKey ?? '';
     this.defaultMaxTokens = config.defaultMaxTokens ?? 4096;
+    this.toolImagePolicy = new ToolResultImagePolicy(config.toolResultImages, () => false);
     this.extraHeaders = config.extraHeaders ?? {};
   }
 
@@ -182,13 +190,14 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     request: ProviderRequest,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const openAIRequest = this.buildRequest(request);
+    const selection = captureRequestSelection(request);
+    const openAIRequest = this.buildRequest(request, options, selection);
     assertMessagePrefillSupported(openAIRequest.model, openAIRequest.messages, options, this.name, openAIRequest);
     options?.onRequest?.(openAIRequest);
 
     try {
       const response = await this.makeRequest(openAIRequest, options);
-      return this.parseResponse(response, request.model, openAIRequest);
+      return this.parseResponse(response, selection.model, openAIRequest);
     } catch (error) {
       throw this.handleError(error, openAIRequest);
     }
@@ -199,7 +208,8 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     callbacks: StreamCallbacks,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    const openAIRequest = this.buildRequest(request);
+    const selection = captureRequestSelection(request);
+    const openAIRequest = this.buildRequest(request, options, selection);
     openAIRequest.stream = true;
     // Ask for usage in the stream — without this the endpoint sends no usage
     // frame at all and every streamed call reports 0/0 tokens.
@@ -333,7 +343,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         message.tool_calls = toolCalls;
       }
 
-      return this.parseStreamedResponse(message, finishReason, request.model, streamUsage, openAIRequest);
+      return this.parseStreamedResponse(message, finishReason, selection.model, streamUsage, openAIRequest);
 
     } catch (error) {
       throw this.handleError(error, openAIRequest);
@@ -356,8 +366,12 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     return headers;
   }
 
-  private buildRequest(request: ProviderRequest): any {
-    const messages = this.convertMessages(request.messages as any[]);
+  private buildRequest(request: ProviderRequest, options?: ProviderRequestOptions, selection = captureRequestSelection(request)): any {
+    const model = effectiveChatModel(selection);
+    // One read of the messages, for the tool-image decision and the body alike.
+    const source = request.messages as any[];
+    const media = Object.prototype.propertyIsEnumerable.call(selection.extra ?? {}, 'messages') ? false : this.toolImagePolicy.resolve(model, source, options);
+    const messages = this.convertMessages(source, media);
     
     // Handle system prompt (same as openrouter.ts)
     if (request.system) {
@@ -375,7 +389,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     }
     
     const params: any = {
-      model: request.model,
+      model: selection.model,
       messages,
       max_tokens: request.maxTokens || this.defaultMaxTokens,
     };
@@ -410,18 +424,21 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     }
     
     // Apply extra params (filter out internal membrane fields)
-    if (request.extra) {
-      const { normalizedMessages, prompt, ...rest } = request.extra as Record<string, unknown>;
+    if (selection.extra) {
+      const { normalizedMessages, prompt, ...rest } = selection.extra as Record<string, unknown>;
       Object.assign(params, rest);
     }
     
     return params;
   }
 
-  private convertMessages(messages: any[]): OpenAIMessage[] {
+  private convertMessages(messages: any[], media = false): OpenAIMessage[] {
     // Use flatMap to handle one-to-many expansion (multiple tool_results → multiple messages)
-    return messages.flatMap(msg => {
+    return relocateToolImages(messages.flatMap(msg => {
       // If it's already in OpenAI format, pass through
+      const nativeToolImages = msg.role === 'tool' && msg.tool_call_id && Array.isArray(msg.content)
+        && msg.content.some((p: any) => p.type === 'image_url');
+      if (nativeToolImages) return [{ ...msg, content: nativeChatToolContent(msg.content, media) }];
       if (msg.role && (typeof msg.content === 'string' || msg.content === null || msg.tool_calls)) {
         return [msg as OpenAIMessage];
       }
@@ -443,6 +460,8 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
             if (typeof block.thinking === 'string') {
               reasoningText += (reasoningText ? '\n' : '') + block.thinking;
             }
+          } else if (block.type === 'image_url') {
+            contentParts.push(validatedChatImagePart(block));
           } else if (block.type === 'image') {
             // Convert Anthropic-style image to OpenAI image_url with data URI
             if (block.source?.type === 'base64') {
@@ -471,7 +490,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
             toolResults.push({
               role: 'tool' as const,
               tool_call_id: block.tool_use_id || block.toolUseId,
-              content: textOnlyToolResultContent(block.content),
+              content: chatToolResultContent(block, media),
             });
           }
         }
@@ -527,7 +546,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         role: msg.role,
         content: msg.content,
       }];
-    });
+    }));
   }
 
   private convertTools(tools: any[]): OpenAITool[] {
@@ -681,17 +700,20 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
 // ============================================================================
 
 /**
- * Convert normalized content blocks to OpenAI message format
+ * Convert normalized content blocks to OpenAI message format.
+ * Defaults to tool-image omission. Explicit media is a caller-owned native-media
+ * choice; relocated user images cannot later be identified as tool output.
  */
 export function toOpenAIMessages(
-  messages: { role: string; content: ContentBlock[] }[]
+  messages: { role: string; content: ContentBlock[] }[],
+  options: ToolResultImageConversionOptions = {}
 ): OpenAIMessage[] {
   const result: OpenAIMessage[] = [];
   
   for (const msg of messages) {
     const textParts: string[] = [];
     const toolCalls: OpenAIToolCall[] = [];
-    const toolResults: { id: string; content: string }[] = [];
+    const toolResults: { id: string; content: ReturnType<typeof chatToolResultContent> }[] = [];
     let reasoningText = '';
 
     for (const block of msg.content) {
@@ -713,11 +735,27 @@ export function toOpenAIMessages(
       } else if (block.type === 'tool_result') {
         toolResults.push({
           id: block.toolUseId,
-          content: textOnlyToolResultContent(block.content),
+          content: chatToolResultContent(block, options.toolResultImages === 'media'),
         });
       }
     }
     
+    // In a user envelope, image-bearing results precede sibling user text; an
+    // assistant turn keeps its calls first. Image-free envelopes keep their
+    // legacy ordering.
+    const appendToolResults = () => {
+      for (const tr of toolResults) {
+        result.push({
+          role: 'tool',
+          tool_call_id: tr.id,
+          content: tr.content,
+        });
+      }
+    };
+    const hasImages = msg.content.some(block => block.type === 'tool_result' && hasToolResultImages(block.content));
+    const resultsFirst = hasImages && msg.role === 'user';
+    if (resultsFirst) appendToolResults();
+
     // Add main message
     if (textParts.length > 0 || toolCalls.length > 0 || reasoningText) {
       const message: OpenAIMessage = {
@@ -732,18 +770,10 @@ export function toOpenAIMessages(
       }
       result.push(message);
     }
-    
-    // Add tool results as separate messages
-    for (const tr of toolResults) {
-      result.push({
-        role: 'tool',
-        tool_call_id: tr.id,
-        content: tr.content,
-      });
-    }
+    if (!resultsFirst) appendToolResults();
   }
   
-  return result;
+  return relocateToolImages(result);
 }
 
 /**

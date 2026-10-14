@@ -218,6 +218,16 @@ export interface ProviderAdapter {
    * reported through onRequest. Decorators must forward this capability. */
   readonly cacheReceiptBasis?: 'provider-request' | 'wire-request';
 
+  /**
+   * Lowercase MIME types accepted for images nested in native tool results.
+   * NativeFormatter applies this policy to the requests Membrane builds
+   * through it, complete() history and native tool-loop rounds alike, before
+   * the transport sees them. Omit to retain its JPEG/PNG/GIF/WebP default. The
+   * adapter still validates what reaches its wire boundary, direct calls
+   * included. Wrappers must forward this capability.
+   */
+  readonly toolResultImageMediaTypes?: ReadonlySet<string>;
+
   /** Check if this adapter handles a model */
   supportsModel(modelId: string): boolean;
   
@@ -300,6 +310,10 @@ export interface ProviderRequestOptions {
    * serialized by semantic receipts. Explicit extra.prompt/normalizedMessages
    * retain precedence in OpenAICompletionsAdapter. */
   promptMessages?: import('./message.js').NormalizedMessage[];
+  /** Caller registry knowledge for the adapter's effective wire model. Undefined
+   * means unknown. Tool-image auto mode consults this on first image use only;
+   * its answer is pinned per adapter/model. Decorators forward this option. */
+  getModelImageInput?: (model: string) => boolean | undefined;
   signal?: AbortSignal;
   timeoutMs?: number;
   /** Abort if no SSE event arrives within this many ms (default: 120000) */

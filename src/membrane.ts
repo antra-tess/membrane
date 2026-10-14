@@ -393,6 +393,7 @@ export class Membrane {
             toolsDeclared: Boolean(request.tools?.length),
             requiresAssistantPrefill: false,
           },
+          getModelImageInput: model => this.registry?.getCapabilities(model)?.media?.imageInput,
           signal: receiptGuard ? receiptGuard.signal : options.signal,
           timeoutMs: options.timeoutMs,
           onRequest: (req) => {
@@ -2250,6 +2251,9 @@ export class Membrane {
       // formatter's constructor-time mode alone, so request.toolMode was a
       // second, disconnected source of truth on this path.
       toolMode,
+      ...(this.adapter.toolResultImageMediaTypes
+        ? { toolResultImageMediaTypes: this.adapter.toolResultImageMediaTypes }
+        : {}),
       thinking: request.config.thinking,
       systemPrompt: request.system,
       promptCaching: request.promptCaching ?? this.config.defaultPromptCaching ?? true, // Default true for backward compat
@@ -2400,6 +2404,7 @@ export class Membrane {
         toolsDeclared: Boolean(normalizedRequest.tools?.length),
         requiresAssistantPrefill,
       },
+      getModelImageInput: (model: string) => this.registry?.getCapabilities(model)?.media?.imageInput,
       ...(receiptGuard ? { signal: receiptGuard.signal } : {}),
       onRequest: (wireRequest: unknown) => {
         if (useWireReceipt) {
