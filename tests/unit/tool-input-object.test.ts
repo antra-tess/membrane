@@ -252,6 +252,7 @@ describe('Anthropic stream', () => {
   it('marks a call whose accumulated arguments parse to null, keeping content_block_start\'s {}', async () => {
     const adapter = new AnthropicAdapter({ apiKey: 'zz-key' });
     (adapter as any).client = {
+      withOptions() { return this; },
       messages: {
         stream: async () => fakeAnthropicStream([
           { type: 'message_start', message: { model: 'claude-zz-1', usage: { input_tokens: 10 } } },

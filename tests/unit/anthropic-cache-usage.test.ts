@@ -21,6 +21,7 @@ describe('AnthropicAdapter streaming usage metadata', () => {
   it('preserves authoritative cache-write TTL buckets for downstream billing', async () => {
     const adapter = new AnthropicAdapter({ apiKey: 'sk-test' });
     (adapter as any).client = {
+      withOptions() { return this; },
       messages: {
         stream: async () => fakeStream([
           {

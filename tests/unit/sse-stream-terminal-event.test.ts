@@ -153,7 +153,7 @@ function fakeAnthropicStream(events: unknown[]) {
 
 function anthropicAdapterWithEvents(events: unknown[]): AnthropicAdapter {
   const adapter = new AnthropicAdapter({ apiKey: 'zz-key' });
-  (adapter as any).client = { messages: { stream: async () => fakeAnthropicStream(events) } };
+  (adapter as any).client = { messages: { stream: async () => fakeAnthropicStream(events) }, withOptions() { return this; } };
   return adapter;
 }
 

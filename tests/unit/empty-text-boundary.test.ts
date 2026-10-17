@@ -119,7 +119,7 @@ describe.each(['Anthropic', 'Bedrock'])('%s empty text at the wire boundary', ki
       usage: { input_tokens: 1, output_tokens: 1 },
     };
     if (kind === 'Anthropic') {
-      adapter.client = { messages: {
+      adapter.client = { withOptions() { return this; }, messages: {
         create: async (request: any) => { sent.push(request); return raw; },
         stream: async (request: any) => {
           sent.push(request);

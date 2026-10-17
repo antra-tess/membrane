@@ -324,7 +324,10 @@ export interface ProviderRequestOptions {
   promptMessages?: import('./message.js').NormalizedMessage[];
   signal?: AbortSignal;
   timeoutMs?: number;
-  /** Abort if no SSE event arrives within this many ms (default: 120000) */
+  /** Anthropic idle deadline after the first SDK event (default: 600000 ms).
+   * Nonempty Web response-body bytes, including SSE keepalives, refresh it;
+   * other SDK-supported bodies refresh it on SDK events. This does not bound
+   * total duration or generation progress. */
   idleTimeoutMs?: number;
   /**
    * Deadline for the FIRST stream event (TTFT). Large contexts on a cache

@@ -19,7 +19,7 @@ function capture() {
     model: base.config.model, content: [text('ok')], stop_reason: 'end_turn',
     usage: { input_tokens: 1, output_tokens: 1 },
   };
-  (adapter as any).client = { messages: {
+  (adapter as any).client = { withOptions() { return this; }, messages: {
     create: async (req: any) => { calls.push(req); return raw; },
     stream: async (req: any) => {
       // The real SDK stream() helper adds stream:true to its HTTP body.

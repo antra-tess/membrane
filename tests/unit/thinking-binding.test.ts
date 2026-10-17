@@ -179,7 +179,7 @@ describe('the request asks for the controls', () => {
   it('Anthropic, streamed: the stream\'s headers carry the beta when the body carries the controls', async () => {
     const seen: Array<Record<string, string> | undefined> = [];
     const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
-    (adapter as any).client = { messages: { stream: async (_body: unknown, opts: { headers?: Record<string, string> }) => {
+    (adapter as any).client = { withOptions() { return this; }, messages: { stream: async (_body: unknown, opts: { headers?: Record<string, string> }) => {
       seen.push(opts.headers);
       return fakeStream(streamed([]));
     } } };
@@ -242,7 +242,7 @@ describe('the adapters carry the provider\'s report', () => {
 
   it('Anthropic, streamed: from message_start, each entry with the request\'s own block, and in the raw response', async () => {
     const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
-    (adapter as any).client = { messages: { stream: async () => fakeStream(streamed(dropped)) } };
+    (adapter as any).client = { withOptions() { return this; }, messages: { stream: async () => fakeStream(streamed(dropped)) } };
     const response = await adapter.stream(wire() as any, { onChunk: () => {} });
     expect(response.inputTransformations).toEqual([{ ...dropped[0], block: sentThinking }]);
     expect(response.inputTransformations![0]!.block).toBe(sentThinking);
@@ -252,16 +252,16 @@ describe('the adapters carry the provider\'s report', () => {
   it('Anthropic, streamed: a message_delta\'s report replaces message_start\'s (a server-side fallback)', async () => {
     const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
     const served = [{ type: 'thinking_mismatch_allowed', reason: 'prefix_binding_mismatch', path: 'messages.1.content.0' }];
-    (adapter as any).client = { messages: { stream: async () => fakeStream(streamed(dropped, { input_transformations: served })) } };
+    (adapter as any).client = { withOptions() { return this; }, messages: { stream: async () => fakeStream(streamed(dropped, { input_transformations: served })) } };
     const response = await adapter.stream(wire() as any, { onChunk: () => {} });
     expect(response.inputTransformations!.map((e) => e.type)).toEqual(['thinking_mismatch_allowed']);
   });
 
   it('Anthropic: an empty report is an empty list, and no report is none', async () => {
     const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
-    (adapter as any).client = { messages: { stream: async () => fakeStream(streamed([])) } };
+    (adapter as any).client = { withOptions() { return this; }, messages: { stream: async () => fakeStream(streamed([])) } };
     expect((await adapter.stream(wire() as any, { onChunk: () => {} })).inputTransformations).toEqual([]);
-    (adapter as any).client = { messages: { stream: async () => fakeStream(streamed(undefined)) } };
+    (adapter as any).client = { withOptions() { return this; }, messages: { stream: async () => fakeStream(streamed(undefined)) } };
     const none = await adapter.stream(wire() as any, { onChunk: () => {} });
     expect(none.inputTransformations).toBeUndefined();
     expect('input_transformations' in (none.raw as object)).toBe(false);
