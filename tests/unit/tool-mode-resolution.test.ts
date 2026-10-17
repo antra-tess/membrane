@@ -338,6 +338,7 @@ describe('the active formatter drives the loop, the build, and the mode together
         name: 'zz_dial_tool',
         description: zzDialTool.description,
         parameters: zzDialTool.inputSchema,
+        strict: false,
       },
     ]);
   });
