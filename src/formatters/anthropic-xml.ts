@@ -308,9 +308,11 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     let systemContent: unknown;
     if (systemBlocks) {
       // The caller's own markers are authoritative: adding one beside them
-      // spends a slot the caller already allocated.
+      // spends a slot the caller already allocated. Under `cm-owned` the
+      // caller owns every slot, so the formatter adds none, as for a system
+      // string and in the native formatter.
       const callerMarkedAny = systemBlocks.some((b) => b.cache_control);
-      if (promptCaching && !callerMarkedAny) {
+      if (promptCaching && cacheMarkers === 'membrane-system' && !callerMarkedAny) {
         const bpIdx = lastCacheableBlockIndex(systemBlocks);
         if (bpIdx >= 0) systemBlocks[bpIdx]!.cache_control = cacheControl;
       }
@@ -570,13 +572,18 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
       ? this.convertToNativeTools(tools)
       : undefined;
 
-    // Budget. Five sites above attach cache_control (system, contextPrefix,
-    // hasCacheMarker flush, cacheBreakpoint flush, CLI-simulation system) and
-    // multiple cacheBreakpoints are documented input, so a prefill turn with
-    // three marked messages reaches five markers — one over Anthropic's hard
-    // limit, which rejects the request outright. Clamping here, once, on the
-    // finished artifacts is the only count that can see all five sites; the
-    // reported tally is that same recount, so it can never drift from the wire.
+    // Budget. Under membrane-system five sites above can attach cache_control
+    // (system, contextPrefix, hasCacheMarker flush, cacheBreakpoint flush,
+    // CLI-simulation system) and multiple cacheBreakpoints are documented
+    // input, so a prefill turn with three marked messages reaches five
+    // markers — one over Anthropic's hard limit, which rejects the request
+    // outright. Clamping here, once, on the finished artifacts is the only
+    // count that can see all five sites; the reported tally is that same
+    // recount, so it can never drift from the wire. Under cm-owned the
+    // formatter adds no marker of its own, so every marker here is one the
+    // caller asked for (its breakpoints, its hasCacheMarker boundaries, the
+    // markers on its own system blocks), and the build asserts they fit
+    // rather than dropping any.
     const cacheSurfaces = { messages: providerMessages, system: systemContent, tools: nativeTools };
     const budget = cacheMarkers === 'cm-owned'
       ? { total: assertCacheMarkersWithinLimit(cacheSurfaces, 'anthropic-xml') }
