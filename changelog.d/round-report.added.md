@@ -60,6 +60,6 @@
   built-in adapter that can lack a count names it (the mock always reports
   both). A round report's `usage` (`RoundUsage`) carries token counts only,
   never accounting's `estimatedCost`, in membrane's one convention:
-  `inputTokens` excludes cache reads, restated for a cache-inclusive
-  provider. An adapter whose cache convention is `'unknown'` passes its
-  counts through as the provider gave them.
+  `inputTokens` excludes the cached span, reads and writes, restated for a
+  cache-inclusive provider. An adapter whose cache convention is `'unknown'`
+  passes its counts through as the provider gave them.

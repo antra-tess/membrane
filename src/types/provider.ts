@@ -90,10 +90,15 @@ export interface ProviderCapabilities {
  * OpenAI (`cache-inclusive`): `prompt_tokens` stayed at 1732 across a cache hit
  * that reported `cached_tokens: 1664`, so cached is a SUBSET of the prompt.
  *
+ * `cache-inclusive` describes the input count as a whole: every cached token,
+ * read or written, is inside it, and membrane subtracts both to restate it.
+ * `cache-excluded` counts are disjoint already: fresh input, cache writes and
+ * cache reads are three parts of the prompt.
+ *
  * `unknown` is a real epistemic state, not a default to lean on: it means no
  * one has established this adapter's convention, and membrane will pass the
- * counts through unchanged and warn the first time a cache read makes the
- * ambiguity bite.
+ * counts through unchanged and warn the first time a cache read or write makes
+ * the ambiguity bite.
  */
 export type UsageCacheConvention = 'cache-excluded' | 'cache-inclusive' | 'unknown';
 

@@ -152,16 +152,20 @@ export interface OpenRouterAdapterConfig {
 /**
  * Which convention the tokens OpenRouter just handed back are in. OpenRouter
  * passes the routed provider's usage payload through, so an Anthropic-routed
- * call reports `cache_read_input_tokens` (disjoint from prompt_tokens) while an
- * OpenAI-routed one reports `prompt_tokens_details.cached_tokens` (a subset of
- * it). The field that carried the number therefore identifies the convention.
+ * call reports `cache_read_input_tokens` and `cache_creation_input_tokens`
+ * (disjoint from prompt_tokens) while an OpenAI-routed one reports
+ * `prompt_tokens_details.cached_tokens` (a subset of it). The field that
+ * carried a number therefore identifies the convention: an Anthropic-shaped
+ * field, read or write, makes the response cache-excluded, so Anthropic's
+ * writes are never subtracted from prompt_tokens as an inclusive count's are.
  */
 function resolveRoutedCacheConvention(
   anthropicShapedCacheRead: number | undefined,
+  anthropicShapedCacheWrite: number | undefined,
   resolvedCacheRead: number | undefined,
 ): UsageCacheConvention | undefined {
-  if (resolvedCacheRead == null) return undefined;
-  return anthropicShapedCacheRead != null ? 'cache-excluded' : 'cache-inclusive';
+  if (anthropicShapedCacheRead != null || anthropicShapedCacheWrite != null) return 'cache-excluded';
+  return resolvedCacheRead != null ? 'cache-inclusive' : undefined;
 }
 
 export class OpenRouterAdapter implements ProviderAdapter {
@@ -169,11 +173,12 @@ export class OpenRouterAdapter implements ProviderAdapter {
 
   /**
    * OpenRouter fronts BOTH conventions: it passes through Anthropic's
-   * `cache_read_input_tokens` (cache-excluded) or OpenAI's
-   * `prompt_tokens_details.cached_tokens` (cache-inclusive) depending on which
-   * provider it routed to. The convention is therefore a per-response fact —
-   * each parse sets `usage.cacheConvention` from the field it actually read,
-   * and this adapter-level value is only the no-cache-tokens fallback.
+   * `cache_read_input_tokens` and `cache_creation_input_tokens`
+   * (cache-excluded) or OpenAI's `prompt_tokens_details.cached_tokens`
+   * (cache-inclusive) depending on which provider it routed to. The
+   * convention is therefore a per-response fact — each parse sets
+   * `usage.cacheConvention` from the fields it actually read, and this
+   * adapter-level value is only the no-cache-tokens fallback.
    */
   readonly usageCacheConvention = 'unknown' as const;
   private apiKey: string;
@@ -688,7 +693,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
     const anthropicShapedCacheRead = response.usage?.cache_read_input_tokens;
     const cacheReadTokens = anthropicShapedCacheRead
       ?? response.usage?.prompt_tokens_details?.cached_tokens;
-    const cacheConvention = resolveRoutedCacheConvention(anthropicShapedCacheRead, cacheReadTokens);
+    const cacheConvention = resolveRoutedCacheConvention(anthropicShapedCacheRead, cacheCreationTokens, cacheReadTokens);
 
     return {
       content: this.messageToContent(message),
@@ -721,7 +726,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
     const anthropicShapedCacheRead = streamUsage?.cache_read_input_tokens;
     const cacheReadTokens = anthropicShapedCacheRead
       ?? streamUsage?.prompt_tokens_details?.cached_tokens;
-    const cacheConvention = resolveRoutedCacheConvention(anthropicShapedCacheRead, cacheReadTokens);
+    const cacheConvention = resolveRoutedCacheConvention(anthropicShapedCacheRead, cacheCreationTokens, cacheReadTokens);
 
     return {
       content: this.messageToContent(message),
