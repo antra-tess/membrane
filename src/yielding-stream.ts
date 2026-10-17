@@ -6,6 +6,7 @@
  */
 
 import type {
+  AbortedEvent,
   StreamEvent,
   YieldingStream,
   YieldingStreamOptions,
@@ -14,6 +15,9 @@ import type {
   ProvideToolResultsOptions,
 } from './types/yielding-stream.js';
 import type { ToolResult } from './types/tools.js';
+
+/** What an aborted event carries besides its type and reason. */
+type AbortedSnapshot = Omit<AbortedEvent, 'type' | 'reason'>;
 
 /**
  * Payload handed from provideToolResults() to the inference loop awaiting
@@ -124,6 +128,11 @@ export class YieldingStreamImpl implements YieldingStream {
     this.cancel();
   };
 
+  // The running loop's builder for what an aborted event carries
+  // (setAbortSnapshot): what the loop has recorded, built as the loop's own
+  // catch builds it for a provider or deadline abort.
+  private abortSnapshot: (() => AbortedSnapshot) | undefined;
+
   constructor(
     private readonly options: YieldingStreamOptions,
     private readonly runInference: (stream: YieldingStreamImpl) => Promise<void>
@@ -208,6 +217,16 @@ export class YieldingStreamImpl implements YieldingStream {
       return; // Already terminated
     }
 
+    // What the loop had when the cancel came, unless the consumer has left
+    // and nothing will read it. A builder that throws costs the event all
+    // four fields, not the cancel: the event goes out bare, as before.
+    let partial: AbortedSnapshot = {};
+    try {
+      if (!this.consumerDeparted) partial = this.abortSnapshot?.() ?? {};
+    } catch {
+      // the bare aborted event
+    }
+
     this.abortController.abort();
 
     // If waiting for tools, reject the pending promise
@@ -217,7 +236,7 @@ export class YieldingStreamImpl implements YieldingStream {
     }
 
     // Emit aborted event and wake the iterator so it can deliver it
-    this.emit({ type: 'aborted', reason: 'user' });
+    this.emit({ type: 'aborted', reason: 'user', ...partial });
     this.producerDone = true;
     this.state = { status: 'done' };
     this.releaseExternalSignal();
@@ -317,10 +336,22 @@ export class YieldingStreamImpl implements YieldingStream {
   }
 
   /**
+   * Give the stream the loop's builder for what an aborted event carries:
+   * cancel() calls it for the aborted event it emits, as the loop's own catch
+   * does for a provider or deadline abort.
+   */
+  setAbortSnapshot(build: () => AbortedSnapshot): void {
+    this.abortSnapshot = build;
+  }
+
+  /**
    * Mark the producer as done (inference loop finished).
    */
   markDone(): void {
     this.producerDone = true;
+    // The loop has finished, so let go of its builder: held here, it would
+    // keep the loop's whole state reachable for as long as the stream is.
+    this.abortSnapshot = undefined;
     this.releaseExternalSignal();
     this.notifyEventWaiter();
   }

@@ -242,7 +242,11 @@ export interface RetryingEvent {
 }
 
 /**
- * Aborted event - stream was cancelled.
+ * Aborted event: the stream ended before the turn finished. It carries what
+ * the turn had recorded by then: the text so far (`rawAssistantText`, and as
+ * blocks in `partialContent`) and the tool rounds run (`toolCalls`,
+ * `toolResults`). A round whose tools were still running shows its calls with
+ * no results.
  */
 export interface AbortedEvent {
   type: 'aborted';
@@ -360,7 +364,10 @@ export interface YieldingStream extends AsyncIterable<StreamEvent> {
 
   /**
    * Cancel the stream. Any in-flight requests will be aborted.
-   * The iterator will yield an 'aborted' event and then complete.
+   * The iterator will yield an 'aborted' event and then complete. The event
+   * carries what the turn had recorded when cancel() was called (see
+   * AbortedEvent). Results passed to provideToolResults() just before it
+   * aren't recorded yet, so their calls show no results.
    */
   cancel(): void;
 
