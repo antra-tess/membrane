@@ -437,7 +437,7 @@ export class NativeFormatter implements PrefillFormatter {
         const mediaType = resolveImageMediaType(src?.data, src?.mediaType ?? src?.media_type);
         if (!isAcceptedImageMediaType(mediaType)) {
           onAltered?.();
-          return strippedImagePlaceholder(mediaType);
+          return strippedImagePlaceholder(mediaType, item);
         }
         const { mediaType: _declared, ...source } = src ?? {};
         return { ...item, source: { ...source, media_type: mediaType } };
@@ -481,12 +481,12 @@ export class NativeFormatter implements PrefillFormatter {
         }
         result.push(textBlock);
       } else if (block.type === 'image') {
-        if (block.source.type === 'base64') {
+        if (block.source?.type === 'base64') {
           const mediaType = resolveImageMediaType(block.source.data, block.source.mediaType);
           if (!isAcceptedImageMediaType(mediaType)) {
             // Unacceptable media type (e.g. image/svg): degrade to a text
             // placeholder instead of poisoning the whole request.
-            result.push(strippedImagePlaceholder(mediaType));
+            result.push(strippedImagePlaceholder(mediaType, block));
             altered();
           } else {
             const imageBlock: Record<string, unknown> = {
@@ -504,13 +504,16 @@ export class NativeFormatter implements PrefillFormatter {
             result.push(imageBlock);
           }
         } else {
-          altered(); // a non-base64 image source has no branch here
+          // A source that isn't base64 has no branch here, and nor does no
+          // source object at all (media in MCP's form that didn't convert,
+          // utils/mcp-media.ts).
+          altered();
         }
       } else if (block.type === 'audio') {
         // Pass audio through in the same shape as images — the provider
         // adapters convert it (Gemini → inlineData, OpenRouter → input_audio).
         // Whether a given model accepts audio is the provider/model's concern.
-        if (block.source.type === 'base64') {
+        if (block.source?.type === 'base64') {
           result.push({
             type: 'audio',
             source: {
@@ -520,7 +523,7 @@ export class NativeFormatter implements PrefillFormatter {
             },
           });
         } else {
-          altered();
+          altered(); // as for an image
         }
       } else if (block.type === 'tool_use') {
         result.push({

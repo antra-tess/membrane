@@ -417,6 +417,34 @@ describe('the XML replay of a split image round', () => {
     expect(rounds.map((r) => [r.altered.messages, r.fidelity])).toEqual([[[], 'established']]);
   });
 
+  it("sends a marked result's images as the live split chose them: media in MCP's form converted, and none it couldn't send", async () => {
+    // Beside its text, the tool returns an image in MCP's form, which converts
+    // and is sent; one in MCP's form with no mimeType, which can't convert; a
+    // base64 source with no data, and one whose data is empty; a URL image;
+    // and a URL source that also carries data, which isn't base64 data either.
+    // The response keeps them as returned.
+    const { adapter, response } = await runTurn(
+      [{ text: `zz preamble one\n${CALL_XML}`, ...CALL }, { text: 'zz final answer', stopReason: 'end_turn' }],
+      (_round, ids) => [{ toolUseId: ids[0]!, toolName: 'zz_shot', content: [
+        { type: 'text', text: 'zz shot ok' },
+        { type: 'image', data: ZZ_RED, mimeType: 'image/png' },
+        { type: 'image', data: ZZ_BLUE },
+        { type: 'image', source: { type: 'base64', mediaType: 'image/png' } },
+        { type: 'image', source: { type: 'base64', data: '', mediaType: 'image/png' } },
+        { type: 'image', source: { type: 'url', url: 'https://example.com/zz.png' } },
+        { type: 'image', source: { type: 'url', url: 'https://example.com/zz.png', data: ZZ_BLUE } },
+      ] as unknown as ToolResultContentBlock[] }],
+    );
+    const sent = (request: ProviderRequest) => (request.messages as Array<{ content: unknown }>)
+      .flatMap((m) => (Array.isArray(m.content) ? m.content : []) as Array<{ type?: string; source?: { data?: unknown } }>)
+      .filter((b) => b.type === 'image')
+      .map((b) => b.source?.data);
+    expect(sent(adapter.requests[1]!)).toEqual([ZZ_RED]);
+    const { request } = await replay(response.content);
+    expect(census(request)).toEqual(['user:text', 'assistant:text', 'user:[image]', 'assistant:text']);
+    expect(sent(request)).toEqual([ZZ_RED]);
+  });
+
   it('replays two image rounds of one turn, each split where it was sent', async () => {
     const { response } = await runTurn(
       [{ text: `zz preamble one\n${CALL_XML}`, ...CALL }, { text: `zz preamble two\n${CALL_XML}`, ...CALL }, { text: 'zz final answer', stopReason: 'end_turn' }],

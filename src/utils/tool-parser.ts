@@ -21,6 +21,7 @@ import type {
 } from '../types/index.js';
 import { createHash } from 'node:crypto';
 import { resolveImageMediaType, isAcceptedImageMediaType, strippedImagePlaceholder } from './image-media.js';
+import { convertMcpMedia } from './mcp-media.js';
 import { readToolSchema, type ParameterDeclaration, type ToolSchemaReading } from './tool-schema.js';
 
 // ============================================================================
@@ -604,6 +605,8 @@ function renderResultContentString(result: ToolResult): string {
   for (const block of result.content) {
     if (block.type === 'text') {
       parts.push(block.text);
+    } else if (block.type === 'image' && hasNoDataToShow(block)) {
+      parts.push(strippedImagePlaceholder(undefined, block).text);
     } else if (block.type === 'image') {
       // For XML mode, we can't embed images directly. The note says the
       // model isn't seeing it, so the size isn't read as its contents.
@@ -612,6 +615,21 @@ function renderResultContentString(result: ToolResult): string {
     }
   }
   return parts.join('\n');
+}
+
+/**
+ * An image a result renderer has no data to show or measure: media in MCP's
+ * form that didn't convert (utils/mcp-media.ts), a source that isn't base64,
+ * such as a URL, or a base64 source without its data. It gets the
+ * stripped-image note, as an image the split can't send does, rather than a
+ * TypeError reading its data. The XML replay of a split round
+ * (AnthropicXmlFormatter) leaves out the same images, so it sends what the
+ * split sent.
+ */
+export function hasNoDataToShow(block: { source?: unknown }): boolean {
+  const source = block.source as { type?: unknown; data?: unknown } | null | undefined;
+  return typeof source !== 'object' || source === null || source.type !== 'base64'
+    || typeof source.data !== 'string' || source.data === '';
 }
 
 /**
@@ -631,11 +649,14 @@ function renderResultContentString(result: ToolResult): string {
  * tool_use_id attributes on the wire (a Messages-API concept — the
  * store keeps the linkage on the blocks); content rides raw unless it
  * contains structural tags (then escaped, see STRUCTURAL_TAG_RE).
+ *
+ * Media in MCP's form becomes membrane's here, where the document takes
+ * results (utils/mcp-media.ts); `results` stay as they were handed in.
  */
 export function formatToolResults(results: ToolResult[]): string {
   const parts: string[] = ['<function_results>'];
 
-  for (const result of results) {
+  for (const result of convertMcpMedia(results)) {
     if (result.isError) {
       parts.push('<error>');
       parts.push(guardResultContent(renderResultContentString(result)));
@@ -1371,8 +1392,12 @@ export interface SplitTurnContent {
  * Assistant (prefill): </result>
  *            </function_results>
  * ```
+ *
+ * Media in MCP's form becomes membrane's here, as in formatToolResults;
+ * `handed` stays as it was.
  */
-export function formatToolResultsForSplitTurn(results: ToolResult[]): SplitTurnContent {
+export function formatToolResultsForSplitTurn(handed: ToolResult[]): SplitTurnContent {
+  const results = convertMcpMedia(handed);
   const images: ProviderImageBlock[] = [];
   let beforeImageXml = '<function_results>\n';
   let afterImageXml = '';
@@ -1392,10 +1417,14 @@ export function formatToolResultsForSplitTurn(results: ToolResult[]): SplitTurnC
       for (const block of result.content) {
         if (block.type === 'text') {
           textParts.push(guardResultContent(block.text));
+        } else if (block.type === 'image' && hasNoDataToShow(block)) {
+          // A note carries the caller's text (a link, a declared media type), so it
+          // passes the guard the result's own text does.
+          textParts.push(guardResultContent(strippedImagePlaceholder(undefined, block).text));
         } else if (block.type === 'image') {
           const mediaType = resolveImageMediaType(block.source.data, block.source.mediaType);
           if (!isAcceptedImageMediaType(mediaType)) {
-            textParts.push(strippedImagePlaceholder(mediaType).text);
+            textParts.push(guardResultContent(strippedImagePlaceholder(mediaType, block).text));
           } else {
             resultHasImages = true;
             resultImages.push({
@@ -1476,10 +1505,13 @@ function formatSingleResultXml(result: ToolResult): string {
     for (const block of result.content) {
       if (block.type === 'text') {
         xml += guardResultContent(block.text);
+      } else if (block.type === 'image' && hasNoDataToShow(block)) {
+        // Notes carry the caller's text, as the split's do.
+        xml += guardResultContent(strippedImagePlaceholder(undefined, block).text);
       } else if (block.type === 'image') {
         // For remaining results after split, images become text placeholders
         const sizeKb = Math.round((block.source.data.length * 0.75) / 1024);
-        xml += `[Image: ${block.source.mediaType}, ~${sizeKb}KB, not shown to you]`;
+        xml += guardResultContent(`[Image: ${block.source.mediaType}, ~${sizeKb}KB, not shown to you]`);
       }
     }
   }

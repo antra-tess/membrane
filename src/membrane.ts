@@ -112,6 +112,7 @@ import {
   strippedImagePlaceholder,
   shedImagesToFitByteBudget, assertWithinByteBudget,
 } from './utils/image-media.js';
+import { convertMcpMedia } from './utils/mcp-media.js';
 import { getDefaultPricing } from './registry/default-pricing.js';
 import { FidelityNotes, requestFingerprint, type MessageOrigin } from './utils/fidelity.js';
 
@@ -2296,7 +2297,12 @@ export class Membrane {
     // A formatter that does not report its alterations leaves the round's
     // fidelity unknown: an empty alteration list from it would prove nothing.
     if (fidelity && !activeFormatter.reportsAlterations) fidelity.uninstrumented = true;
-    const messages = nativeLoopMessages ?? request.messages;
+    // Every path's messages enter the build here, the native loop's each
+    // round: media in MCP's form becomes membrane's, so the formatters and
+    // the adapters after them read one form. A copy where anything converts:
+    // the caller's messages stay as they were, and the indices the build
+    // records alterations by are theirs.
+    const messages = convertMcpMedia(nativeLoopMessages ?? request.messages);
     // Extract user-provided stop sequences
     const additionalStopSequences = Array.isArray(request.stopSequences)
       ? request.stopSequences

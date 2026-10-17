@@ -205,7 +205,7 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
           type: isAssistant ? 'output_text' : 'input_text',
           text: block.text,
         });
-      } else if (block.type === 'image' && !isAssistant) {
+      } else if (block.type === 'image' && !isAssistant && typeof block.source === 'object' && block.source !== null) {
         const source = block.source;
         messageParts.push(source.type === 'url'
           ? { type: 'input_image', image_url: source.url }
@@ -237,8 +237,10 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
         flushMessage();
         out.push({ type: 'reasoning', encrypted_content: block.data, summary: [] });
       } else {
-        // An assistant image, a thinking block without its provider item, and
-        // any other block type have no input form here: left out.
+        // An assistant image, an image with no source object (media in MCP's
+        // form that didn't convert, utils/mcp-media.ts), a thinking block
+        // without its provider item, and any other block type have no input
+        // form here: left out.
         onAltered?.();
       }
     }

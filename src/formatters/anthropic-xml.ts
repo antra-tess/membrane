@@ -33,6 +33,7 @@ import {
   parseAccumulatedIntoBlocks,
   formatToolDefinitions,
   toolDefinitionForPrompt,
+  hasNoDataToShow,
 } from '../utils/tool-parser.js';
 import { IncrementalXmlParser } from '../utils/stream-parser.js';
 import { assertCacheMarkersWithinLimit, clampCacheMarkers } from '../utils/cache-marker-budget.js';
@@ -98,7 +99,7 @@ function toToolResult(block: ToolResultContent): ToolResult {
     for (const sub of block.content) {
       if (sub.type === 'text') {
         content.push({ type: 'text', text: sub.text });
-      } else if (sub.type === 'image' && sub.source.type === 'base64') {
+      } else if (sub.type === 'image' && sub.source?.type === 'base64') {
         content.push({
           type: 'image',
           source: { type: 'base64', data: sub.source.data, mediaType: sub.source.mediaType },
@@ -127,18 +128,20 @@ interface SentSplit {
  * where the live split's second part began with a result's closing text.
  * The stored offset has to fall where a result or error closes, as this
  * version renders the close, and the images are decided again: a base64
- * image whose media type resolves to one the API accepts. The live split
- * (formatToolResultsForSplitTurn) takes an image whose media type resolves to
- * an accepted one, which a url source never does, so the two pick the same
- * images; the replay checks the source as well. Null when no result in the
- * group is marked, the mark doesn't fall where a result or error closes, or
- * no image it holds can be sent; the block then goes out as its raw text
- * whole, and when the marked result holds an image, its round report says the
- * message was altered. A split leaves out the images this rule refuses, with
- * no note and no warning: under the same rule the turn refused them too, and
- * wrote their notes into the raw text. Only a rule that changed between
- * versions can leave out an image the turn sent, and that goes unreported,
- * since `content` doesn't say which of its images the turn sent.
+ * image with data to show whose media type resolves to one the API accepts.
+ * The live split (formatToolResultsForSplitTurn) takes an image with data to
+ * show (hasNoDataToShow) whose media type resolves to an accepted one, so the
+ * two pick the same images; the replay checks the source as well, and media
+ * with no source object, in MCP's form that didn't convert, is left out like
+ * a URL image. Null when no result in the group is marked, the mark doesn't
+ * fall where a result or error closes, or no image it holds can be sent; the
+ * block then goes out as its raw text whole, and when the marked result holds
+ * an image, its round report says the message was altered. A split leaves out
+ * the images this rule refuses, with no note and no warning: under the same
+ * rule the turn refused them too, and wrote their notes into the raw text.
+ * Only a rule that changed between versions can leave out an image the turn
+ * sent, and that goes unreported, since `content` doesn't say which of its
+ * images the turn sent.
  */
 function sentSplit(group: readonly ToolResultContent[]): SentSplit | null {
   const rawXml = group[0]!.rawXml!;
@@ -150,7 +153,7 @@ function sentSplit(group: readonly ToolResultContent[]): SentSplit | null {
   if (!after.startsWith('\n</stdout>') && !after.startsWith('\n</error>')) return null;
   const images: unknown[] = [];
   for (const sub of Array.isArray(marked!.content) ? marked!.content : []) {
-    if (sub.type !== 'image' || sub.source.type !== 'base64') continue;
+    if (sub.type !== 'image' || hasNoDataToShow(sub) || sub.source.type !== 'base64') continue;
     const mediaType = resolveImageMediaType(sub.source.data, sub.source.mediaType);
     if (!isAcceptedImageMediaType(mediaType)) continue;
     images.push({ type: 'image', source: { type: 'base64', media_type: mediaType, data: sub.source.data } });
@@ -654,10 +657,10 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         // A zero-width carrier's item is its content; the transcript can't carry it.
         if (isRawItemCarrier(block)) onAltered?.();
       } else if (block.type === 'image') {
-        if (block.source.type === 'base64') {
+        if (block.source?.type === 'base64') {
           const mediaType = resolveImageMediaType(block.source.data, block.source.mediaType);
           if (!isAcceptedImageMediaType(mediaType)) {
-            parts.push(strippedImagePlaceholder(mediaType).text);
+            parts.push(strippedImagePlaceholder(mediaType, block).text);
             onAltered?.();
           } else {
             images.push({
@@ -670,7 +673,10 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
             });
           }
         } else {
-          onAltered?.(); // a non-base64 image source has no branch here
+          // A source that isn't base64 has no branch here, and nor does no
+          // source object at all (media in MCP's form that didn't convert,
+          // utils/mcp-media.ts).
+          onAltered?.();
         }
       } else if (block.type === 'tool_use') {
         // Collect the run of consecutive tool_use blocks so calls parsed

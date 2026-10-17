@@ -150,8 +150,31 @@ export function shedImagesToFitByteBudget(
 
 /** Loud agent-facing stand-in for an image the API would reject. The agent
  *  must be clearly aware an image was stripped — silence here reads as
- *  "there was no image". Also warns on stderr for ops visibility. */
-export function strippedImagePlaceholder(mediaType: unknown): { type: 'text'; text: string } {
+ *  "there was no image". Also warns on stderr for ops visibility.
+ *
+ *  `image` is the block being stripped. One that came as a link, or without
+ *  its data, gets a note that says so: its media type isn't why it isn't
+ *  shown, and no other format would help. */
+export function strippedImagePlaceholder(mediaType: unknown, image: unknown): { type: 'text'; text: string } {
+  if (cameAsLink(image)) {
+    console.warn("[membrane] image block stripped: a URL source, which the XML tool path can't carry");
+    const link = notedLink(image);
+    return {
+      type: 'text',
+      text:
+        `[system: an image that belongs here was NOT shown to you — it came as a link${link ? ` (${link})` : ''}, ` +
+        "which tool results here can't carry. You are not seeing this image.]",
+    };
+  }
+  if (cameWithoutData(image)) {
+    console.warn('[membrane] image block stripped: no data');
+    return {
+      type: 'text',
+      text:
+        '[system: an image that belongs here was NOT shown to you — it came without its data. ' +
+        'You are not seeing this image.]',
+    };
+  }
   console.warn(
     `[membrane] image block stripped: unsupported media type "${String(mediaType)}"`,
   );
@@ -162,4 +185,43 @@ export function strippedImagePlaceholder(mediaType: unknown): { type: 'text'; te
       `"${String(mediaType)}" is not accepted by the model API (only jpeg/png/gif/webp are). ` +
       `You are not seeing this image. If it matters, ask for it in a supported format.]`,
   };
+}
+
+/** An image block whose source is a URL. The xml tool path's results carry
+ *  no links, so such an image reaches the note there. */
+function cameAsLink(image: unknown): boolean {
+  const source = typeof image === 'object' && image !== null ? (image as { source?: unknown }).source : undefined;
+  return typeof source === 'object' && source !== null && (source as { type?: unknown }).type === 'url';
+}
+
+/** The longest link a note repeats: room for a signed URL, not for a page of
+ *  text. */
+const MAX_NOTED_LINK_CHARS = 2048;
+
+/** Half of a UTF-16 surrogate pair, which a request's JSON can't carry. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+/** A link image's URL for its note, so an agent with a fetch or browser tool
+ *  can open it: an http or https URL, cut to `MAX_NOTED_LINK_CHARS` between
+ *  code points. Any other URL, such as a data URL's payload, isn't repeated,
+ *  and nor is one holding half a surrogate pair, since the API refuses the
+ *  request's JSON then. */
+function notedLink(image: unknown): string | undefined {
+  const url = ((image as { source?: { url?: unknown } }).source)?.url;
+  if (typeof url !== 'string' || !/^https?:\/\//i.test(url) || LONE_SURROGATE.test(url)) return undefined;
+  if (url.length <= MAX_NOTED_LINK_CHARS) return url;
+  const end = /[\uD800-\uDBFF]/.test(url.charAt(MAX_NOTED_LINK_CHARS - 1)) ? MAX_NOTED_LINK_CHARS - 1 : MAX_NOTED_LINK_CHARS;
+  return `${url.slice(0, end)}…`;
+}
+
+/** An image block with no base64 data, in its source or, with no source
+ *  object, on the block (MCP's form). Asked after `cameAsLink`. */
+function cameWithoutData(image: unknown): boolean {
+  if (typeof image !== 'object' || image === null) return true;
+  const block = image as { source?: unknown; data?: unknown };
+  const source = typeof block.source === 'object' && block.source !== null
+    ? (block.source as { data?: unknown })
+    : undefined;
+  const data = source ? source.data : block.data;
+  return typeof data !== 'string' || data === '';
 }
