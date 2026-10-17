@@ -4,8 +4,8 @@
  * sums fresh input, cache reads and cache writes as one convention counts a
  * hit once. The basis is Google's UsageMetadata definition ("this is still
  * the total effective prompt size meaning this includes the number of tokens
- * in the cached content"), which it states for explicit cached content; for
- * an implicit hit it is inferred, and no hit has been measured (see
+ * in the cached content"), which it states for explicit cached content, and
+ * one published chat fits it for implicit hits too (see
  * GeminiAdapter.usageCacheConvention). A response the inclusive reading
  * can't explain, with more cached tokens than prompt tokens, is read as
  * cache-excluded. The usage below is constructed, not a captured hit.
@@ -156,6 +156,75 @@ describe('a response the inclusive reading cannot explain', () => {
     expect(streamed.details.usage.cacheReadTokens).toBe(8_000);
     // Once per process, though two responses exceeded.
     expect(warn.mock.calls).toEqual([[warning]]);
+  });
+
+  it('a total that includes the cached span, the total membrane counts, reconciles too, so three such responses warn only once', async () => {
+    resetPromptExcludesCacheWarning();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // prompt + cached + candidates = 2,000 + 8,000 + 5 = 10,005.
+    stubComplete({ promptTokenCount: 2_000, cachedContentTokenCount: 8_000, candidatesTokenCount: 5, totalTokenCount: 10_005 });
+    const membrane = new Membrane(new GeminiAdapter({ apiKey: 'zz-key-not-used' }));
+    for (let call = 0; call < 3; call++) {
+      const response = await membrane.complete(REQUEST);
+      expect(response.usage.inputTokens).toBe(2_000);
+      expect(response.details.usage.cacheReadTokens).toBe(8_000);
+    }
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toContain('exceeds promptTokenCount(2000)');
+  });
+
+  it('that total reconciles with a tool-use prompt and thoughts in it too: every term of the sum membrane counts', async () => {
+    resetPromptExcludesCacheWarning();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // prompt + tool-use prompt + cached + candidates + thoughts = 2,000 + 500 + 8,000 + 5 + 1,000 = 11,505.
+    stubComplete({
+      promptTokenCount: 2_000, toolUsePromptTokenCount: 500, cachedContentTokenCount: 8_000,
+      candidatesTokenCount: 5, thoughtsTokenCount: 1_000, totalTokenCount: 11_505,
+    });
+    const response = await new Membrane(new GeminiAdapter({ apiKey: 'zz-key-not-used' })).complete(REQUEST);
+    expect(response.usage.inputTokens).toBe(2_500);
+    expect(response.details.usage.cacheReadTokens).toBe(8_000);
+    expect(response.usage.outputTokens).toBe(1_005);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toContain('exceeds promptTokenCount(2000)');
+  });
+
+  it('a total that matches neither sum still says so, naming both, and where the rest is only when it exceeds both', async () => {
+    resetPromptExcludesCacheWarning();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const membrane = new Membrane(new GeminiAdapter({ apiKey: 'zz-key-not-used' }));
+    const sums = '[membrane:gemini] usageMetadata does not reconcile: promptTokenCount(2000)'
+      + ' + toolUsePromptTokenCount(0) + candidatesTokenCount(5) + thoughtsTokenCount(0)'
+      + ' = 2005 (10005 with cachedContentTokenCount(8000))';
+    // Between the two sums: above one, below the other, so no field is named.
+    stubComplete({ promptTokenCount: 2_000, cachedContentTokenCount: 8_000, candidatesTokenCount: 5, totalTokenCount: 9_000 });
+    await membrane.complete(REQUEST);
+    expect(warn.mock.calls[0]).toEqual([`${sums}, but totalTokenCount = 9000.`]);
+    expect(warn).toHaveBeenCalledTimes(2); // and the cache-excluded warning
+    // Above both.
+    stubComplete({ promptTokenCount: 2_000, cachedContentTokenCount: 8_000, candidatesTokenCount: 5, totalTokenCount: 12_000 });
+    await membrane.complete(REQUEST);
+    expect(warn.mock.calls[2]).toEqual([
+      `${sums}, but totalTokenCount = 12000.`
+      + ' Some billed tokens are in a usageMetadata field outside prompt, tool-use prompt, cached, candidates and thoughts.',
+    ]);
+  });
+
+  it('a response the inclusive reading explains gets no such allowance: a total that adds the cached span again warns', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // 10,000 prompt tokens already hold the 8,000 cached; 18,005 counts them twice.
+    stubComplete({ promptTokenCount: 10_000, cachedContentTokenCount: 8_000, candidatesTokenCount: 5, totalTokenCount: 18_005 });
+    await new Membrane(new GeminiAdapter({ apiKey: 'zz-key-not-used' })).complete(REQUEST);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toMatch(/= 10005, but totalTokenCount = 18005\. Some billed tokens are in a usageMetadata field outside prompt, tool-use prompt, candidates and thoughts\.$/);
+  });
+
+  it('a total below the sum names no field the rest could be in', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    stubComplete({ promptTokenCount: 10_000, cachedContentTokenCount: 8_000, candidatesTokenCount: 5, totalTokenCount: 9_000 });
+    await new Membrane(new GeminiAdapter({ apiKey: 'zz-key-not-used' })).complete(REQUEST);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toMatch(/= 10005, but totalTokenCount = 9000\.$/);
   });
 
   it('one cached token above the prompt count is enough', async () => {
