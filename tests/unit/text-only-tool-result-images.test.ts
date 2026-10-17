@@ -88,7 +88,6 @@ const geminiResponse = () => new Response(JSON.stringify({
 
 const adapters: Array<[string, () => ProviderAdapter, string, () => Response]> = [
   ['OpenAI', () => new OpenAIAdapter({ apiKey: 'test-key' }), 'gpt-4o', chatCompletion],
-  ['OpenRouter', () => new OpenRouterAdapter({ apiKey: 'test-key' }), 'openai/gpt-4o', chatCompletion],
   ['OpenAI-compatible', () => new OpenAICompatibleAdapter({ apiKey: 'test-key', baseURL: 'http://localhost:9999/v1' }), 'local-model', chatCompletion],
   ['Gemini', () => new GeminiAdapter({ apiKey: 'test-key' }), 'gemini-2.5-flash', geminiResponse],
 ];
@@ -118,6 +117,42 @@ describe.each(adapters)('%s adapter: Membrane.complete with tool-result image hi
     const resultContent: ContentBlock[] = [{ type: 'text', text: 'line one' }, { type: 'text', text: 'line two' }];
     const body = await sentBody(resultContent);
     expect(body).toContain(JSON.stringify(JSON.stringify(resultContent)));
+  });
+});
+
+describe('OpenRouter adapter: tool-result images are shown natively', () => {
+  async function sentBody(resultContent: ContentBlock[]): Promise<string> {
+    const fetchMock = vi.fn().mockImplementation(async () => chatCompletion());
+    vi.stubGlobal('fetch', fetchMock);
+    await new Membrane(new OpenRouterAdapter({ apiKey: 'test-key' }), { formatter: new NativeFormatter() }).complete({
+      messages: history(resultContent),
+      assistantParticipant: 'Claude',
+      config: { model: 'openai/gpt-4o', maxTokens: 32 },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    return fetchMock.mock.calls[0]![1].body as string;
+  }
+
+  it('sends tool-result images as image_url parts, not placeholder text', async () => {
+    const body = await sentBody([{ type: 'text', text: 'Screenshot taken' }, imageBlock()]);
+    // The image travels as a proper data URL inside an image_url part...
+    expect(body).toContain('"type":"image_url"');
+    expect(body).toContain(PAYLOAD_PROBE); // inside the image_url data URL
+    // ...not as stringified base64 text inside the tool message.
+    const parsed = JSON.parse(body);
+    const toolMsg = parsed.messages.find((m: { role?: string }) => m.role === 'tool');
+    expect(Array.isArray(toolMsg.content)).toBe(true);
+    const textPart = toolMsg.content.find((p: { type?: string }) => p.type === 'text');
+    expect(textPart.text).not.toContain(PAYLOAD_PROBE);
+    expect(textPart.text).toContain('Screenshot taken');
+  });
+
+  it('keeps text-only tool results exactly as JSON.stringify produced them', async () => {
+    const resultContent: ContentBlock[] = [{ type: 'text', text: 'line one' }, { type: 'text', text: 'line two' }];
+    const body = await sentBody(resultContent);
+    const parsed = JSON.parse(body);
+    const toolMsg = parsed.messages.find((m: { role?: string }) => m.role === 'tool');
+    expect(toolMsg.content).toBe(JSON.stringify(resultContent));
   });
 });
 

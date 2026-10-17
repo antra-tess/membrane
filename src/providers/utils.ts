@@ -327,6 +327,78 @@ export function textOnlyToolResultContent(content: unknown): string {
   return JSON.stringify(replaced ? blocks : content);
 }
 
+
+/**
+ * Serialize tool_result content for the OpenRouter Chat Completions wire.
+ *
+ * The Responses API path already emits tool-result images as native parts;
+ * this brings the Chat Completions path to parity where the endpoint
+ * provably honors them (verified against OpenRouter + a multimodal model,
+ * 2026-10-16). Image-free arrays keep the legacy stringified form so a
+ * history that holds them serializes to the same bytes on every request;
+ * images with unusable sources degrade to the same constant placeholder
+ * {@link TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER} used by the text-only
+ * path, so the placeholder's cache-stability guarantee is preserved.
+ */
+export type ToolResultWirePart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
+export function toolResultWireContent(content: unknown): string | ToolResultWirePart[] {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return JSON.stringify(content);
+  const imageish = (block: unknown): boolean => {
+    if (!block || typeof block !== 'object') return false;
+    const t = (block as { type?: unknown }).type;
+    return t === 'image' || t === 'generated_image';
+  };
+  if (!content.some(imageish)) {
+    return JSON.stringify(content);
+  }
+  const parts: ToolResultWirePart[] = [];
+  for (const block of content) {
+    if (imageish(block)) {
+      const b = block as {
+        type?: unknown;
+        data?: unknown;
+        source?: { type?: unknown; data?: unknown; media_type?: unknown; mediaType?: unknown; url?: unknown };
+      };
+      let url: string | null = null;
+      if (b.type === 'generated_image' && typeof b.data === 'string') {
+        url = `data:image/png;base64,${b.data}`;
+      } else if (b.type === 'image' && typeof b.data === 'string') {
+        // MCP-shaped image content: data on the block itself.
+        url = `data:image/png;base64,${b.data}`;
+      } else if (b.type === 'image' && b.source && typeof b.source === 'object') {
+        if (b.source.type === 'base64' && typeof b.source.data === 'string') {
+          const mediaType =
+            (typeof b.source.media_type === 'string' && b.source.media_type) ||
+            (typeof b.source.mediaType === 'string' && b.source.mediaType) ||
+            'image/png';
+          url = `data:${mediaType};base64,${b.source.data}`;
+        } else if (b.source.type === 'url' && typeof b.source.url === 'string') {
+          url = b.source.url;
+        }
+      }
+      parts.push(
+        url
+          ? { type: 'image_url', image_url: { url } }
+          : { type: 'text', text: TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER },
+      );
+    } else if (
+      block &&
+      typeof block === 'object' &&
+      (block as { type?: unknown }).type === 'text' &&
+      typeof (block as { text?: unknown }).text === 'string'
+    ) {
+      parts.push({ type: 'text', text: (block as { text: string }).text });
+    } else {
+      parts.push({ type: 'text', text: JSON.stringify(block) });
+    }
+  }
+  return parts;
+}
+
 /**
  * `fetch` rejects with the signal's own `reason` object, identity and extra
  * properties intact, on both the pre-headers and the body-read paths.

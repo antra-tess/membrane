@@ -21,7 +21,7 @@ import {
 import { errorFromThrown } from '../types/errors.js';
 import { isRawItemCarrier } from '../utils/fidelity.js';
 import { convertMcpMedia } from '../utils/mcp-media.js';
-import { toolUseInputFromText, textOnlyToolResultContent, openAIImagePart, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved, streamedToolCalls, isEventObject, callerAbort } from './utils.js';
+import { toolUseInputFromText, textOnlyToolResultContent, toolResultWireContent, openAIImagePart, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved, streamedToolCalls, isEventObject, callerAbort } from './utils.js';
 
 /** Content block for messages through OpenRouter */
 type OpenRouterContentBlock =
@@ -511,10 +511,16 @@ export class OpenRouterAdapter implements ProviderAdapter {
               },
             });
           } else if (block.type === 'tool_result') {
+            // Collect ALL tool results - each becomes a separate message.
+            // Array content carrying inline images is emitted as native
+            // image_url parts (OpenRouter honors image parts in role:'tool'
+            // messages for multimodal models); unusable image sources
+            // degrade to the text-only placeholder; image-free content
+            // keeps the legacy stringified form.
             toolResults.push({
               role: 'tool' as const,
               tool_call_id: block.tool_use_id || block.toolUseId,
-              content: textOnlyToolResultContent(block.content),
+              content: toolResultWireContent(block.content),
             });
           }
         }
