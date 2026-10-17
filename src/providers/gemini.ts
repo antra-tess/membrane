@@ -357,31 +357,38 @@ export class GeminiAdapter implements ProviderAdapter {
       };
       let buffer = '';
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        // Keep the last potentially incomplete line in buffer
-        buffer = lines.pop() ?? '';
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          // Keep the last potentially incomplete line in buffer
+          buffer = lines.pop() ?? '';
 
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          this.consumeStreamFrame(line.slice(6).trim(), streamState, callbacks, geminiRequest, options?.onProgress);
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            this.consumeStreamFrame(line.slice(6).trim(), streamState, callbacks, geminiRequest, options?.onProgress);
+          }
         }
-      }
 
-      // Process any remaining data in the buffer (final chunk may not end with newline)
-      const trailing = buffer.trim();
-      if (trailing) {
-        this.consumeStreamFrame(
-          trailing.startsWith('data: ') ? trailing.slice(6).trim() : trailing,
-          streamState,
-          callbacks,
-          geminiRequest,
-          options?.onProgress,
-        );
+        // Process any remaining data in the buffer (final chunk may not end with newline)
+        const trailing = buffer.trim();
+        if (trailing) {
+          this.consumeStreamFrame(
+            trailing.startsWith('data: ') ? trailing.slice(6).trim() : trailing,
+            streamState,
+            callbacks,
+            geminiRequest,
+            options?.onProgress,
+          );
+        }
+      } finally {
+        // A read loop that ends early, on a callback's error or any other,
+        // leaves the body unread: cancel it, so the provider stops sending
+        // and the connection is let go. After a full read it does nothing.
+        void reader.cancel().catch(() => {});
       }
 
       assertTerminalEventObserved(
@@ -434,9 +441,10 @@ export class GeminiAdapter implements ProviderAdapter {
       // A frame that isn't valid JSON carries nothing to accumulate
       return;
     }
-    // A parsed provider event is progress.
+    // `data: null` carries nothing to read, as on the other adapters.
+    if (parsed === null) return;
+    // A parsed provider event is progress (`data: null` is no event).
     onProgress?.();
-
     throwOnStreamErrorFrame(parsed, 'Gemini', rawRequest);
     if (parsed.modelVersion) streamState.lastModelVersion = parsed.modelVersion;
     const candidate = parsed.candidates?.[0];

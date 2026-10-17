@@ -131,12 +131,14 @@ export class LocalStopSequences {
   private stopped = false;
   /** The text block completed at the stop: its own later completion is not reported again. */
   private completedAtStop: number | undefined;
+  /** A delivery threw: release() hands the caller nothing more. */
+  private deliveryFailed = false;
 
   constructor(stops: readonly string[] | undefined, private readonly inner: StreamCallbacks) {
     this.stops = [...new Set((stops ?? []).filter(stop => typeof stop === 'string' && stop.length > 0))];
     this.longest = Math.max(0, ...this.stops.map(stop => stop.length));
     this.callbacks = this.stops.length === 0 ? inner : {
-      onChunk: chunk => this.onChunk(chunk),
+      onChunk: chunk => this.delivering(() => this.onChunk(chunk)),
       onContentBlock: (index, block) => this.onContentBlock(index, block),
       onThinkingSignature: (index, signature) => {
         this.waiting.push({ kind: 'signature', index, signature, at: this.held.length });
@@ -148,10 +150,21 @@ export class LocalStopSequences {
    * The adapter threw. Before a stop, everything held was received and is
    * delivered, so partialContent keeps it. After a stop found while
    * streaming, there is no returned content to settle it against, so only
-   * what was delivered before the stop stands.
+   * what was delivered before the stop stands. After a delivery threw, the
+   * caller's callback has failed, so it is handed nothing more.
    */
   release(): void {
-    if (!this.stopped) this.releaseTo(this.held.length, () => true);
+    if (!this.stopped && !this.deliveryFailed) this.releaseTo(this.held.length, () => true);
+  }
+
+  /** Run one delivery, noting a throw from it (the caller's callback, as a rule). */
+  private delivering(deliver: () => void): void {
+    try {
+      deliver();
+    } catch (error) {
+      this.deliveryFailed = true;
+      throw error;
+    }
   }
 
   /**
