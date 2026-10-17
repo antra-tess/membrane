@@ -46,6 +46,27 @@ export type MembraneErrorType =
   | 'rate_limit'
   | 'context_length'
   | 'invalid_request'
+  /**
+   * The provider refused a signed thinking block the request sent back
+   * (Anthropic's 400 "Invalid `signature` in `thinking` block"). Either the
+   * block was minted in another conversation, or what came before it has
+   * changed since (Anthropic's block binding: seen live under
+   * `prefix_mismatch_behavior: 'error'`, while under the default one
+   * account saw this 400 and another a silent drop), or its signature was
+   * altered, which was refused live under every behavior, `'drop_block'`
+   * included. A `redacted_thinking` block's refusal is matched by analogy;
+   * it hasn't been seen. The request as a whole is well formed: the fix is
+   * to leave that block out, or, for the binding only, to ask the provider
+   * to drop such blocks. On Anthropic's own API and on Bedrock a request can
+   * ask that today: give the whole `thinking` object in `providerParams` (it
+   * replaces the one membrane would send), with
+   * `block_binding: { prefix_mismatch_behavior: 'drop_block' }`, and send the
+   * `thinking-binding-controls-2026-08-01` beta (in the Anthropic client's
+   * `defaultHeaders`, or as Bedrock's `anthropic_beta` in `providerParams`).
+   * An altered signature is refused under `'drop_block'` too, so leaving the
+   * block out is its only remedy. Not retryable as it stands.
+   */
+  | 'thinking_binding'
   | 'auth'
   | 'server'
   | 'network'
@@ -385,6 +406,21 @@ const NON_RETRYABLE_RATE_LIMIT_CODES = new Set([
 const CONTEXT_LENGTH_PATTERN =
   /context[ _-]?(?:length|limit|window)|maximum context|too many tokens|token limit|(?:prompt|input)(?: is)? too long|exceeds? the maximum number of (?:input )?tokens|input token count/i;
 
+/**
+ * Anthropic's 400 for a signed thinking block it won't accept in this
+ * request. A block bound to another conversation, live under
+ * `prefix_mismatch_behavior: "error"` (2026-10-10): "messages.1.content.0:
+ * Invalid `signature` in `thinking` block. The block is bound to a different
+ * conversation. Remove the block, or set
+ * `thinking.block_binding.prefix_mismatch_behavior` to "drop_block". Content
+ * before this block differs from when it was created, first at
+ * `messages.0.content.0`." A block whose signature was altered gets the first
+ * sentence alone, live under every behavior the same day. The
+ * `redacted_thinking` form is matched by analogy, unseen. Read only under a
+ * 400 or 422.
+ */
+const THINKING_BINDING_PATTERN = /invalid `signature` in `(?:redacted_)?thinking` block/i;
+
 // "rate limit" only where no letter precedes it, so "moderate limit" and
 // "generate limit" aren't rate limits, while "user_rate_limit" still is.
 const RATE_LIMIT_PATTERN = /\b429\b|(?<![a-z])rate[ _-]?limit|too many requests/i;
@@ -611,6 +647,11 @@ function classifyByStatus(
   if (status === 401 || status === 402 || status === 403) return { type: 'auth', retryable: false };
   if (status === 413) return { type: 'context_length', retryable: false };
   if (status === 404) return { type: 'invalid_request', retryable: false };
+  // A refused thinking block isn't a malformed request: a consumer that sheds
+  // or rewrites its newest message over invalid_request mustn't act on it.
+  if ((status === 400 || status === 422) && THINKING_BINDING_PATTERN.test(message)) {
+    return { type: 'thinking_binding', retryable: false };
+  }
   // Context-length is a request-shape problem and only ever arrives as a 4xx.
   // Checking the message BEFORE the status would let a transient 5xx whose
   // body happens to say "context" or "too long" become a non-retryable
