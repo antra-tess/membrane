@@ -7,6 +7,7 @@ import { assertMessagePrefillSupported } from './request-capabilities.js';
 
 import Anthropic, { type ClientOptions } from '@anthropic-ai/sdk';
 import { stripEmptyTextBlocks, stripEmptyTextRequest } from '../utils/empty-text.js';
+import { anthropicServerBlockFor, isAnthropicServerBlock, unpairedServerBlocks, type AnthropicServerBlock } from '../utils/anthropic-server-blocks.js';
 import { imageForRequest, urlImageForRequest, assertWithinByteBudget, shedImagesToFitByteBudget } from '../utils/image-media.js';
 import type {
   ProviderAdapter,
@@ -32,6 +33,7 @@ import {
 } from '../types/index.js';
 import { statusForProviderCode } from '../types/errors.js';
 import { flattenRootSchemaUnion } from './anthropic-tool-schema.js';
+import { isPlainObject } from '../utils/tool-schema.js';
 import { assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, isDeadlineAbort, deadlineTimeoutError } from './utils.js';
 import { fetchWithCredentials, validateCredential, type CredentialContext, type CredentialResolver } from './credentials.js';
 import { CacheKeepalive, type CacheKeepaliveConfig } from '../cache-keepalive.js';
@@ -257,6 +259,8 @@ export class AnthropicAdapter implements ProviderAdapter {
    */
   readonly reportsContentAlterations = true;
   readonly cacheReceiptBasis = 'wire-request' as const;
+  /** Membrane sends server-tool blocks back through this adapter, in the turn that produced them. Live checks had the API accept each type, with or without a cache marker, but `container_upload`, which it refuses in an assistant turn and so is left out (see utils/anthropic-server-blocks.ts). */
+  readonly replaysAnthropicServerBlocks = true;
 
   /**
    * Verified live 2026-08-25 (claude-haiku-4-5, 4,650-token cached system
@@ -538,6 +542,40 @@ export class AnthropicAdapter implements ProviderAdapter {
               const parsed = toolUseInputFromText(currentBlockInputJson);
               if (parsed.unparseableInput === undefined) block.input = parsed.input;
               else block.unparseableInput = parsed.unparseableInput;
+            }
+          } else if (isAnthropicServerBlock(block) && 'input' in block) {
+            // A server tool's call (server_tool_use, mcp_tool_use) streams its
+            // input as input_json_delta fragments, as a tool_use does, and its
+            // content_block_start carried `input: {}`. The block is sent back
+            // verbatim in later turns, so it must hold the input the model
+            // wrote: only a block that stopped has all of it. One that didn't
+            // stop, or whose fragments don't parse to an object (the API
+            // refuses any other input), keeps the start's input and the raw
+            // accumulation in `unparseableInput`, as a tool_use does, so a
+            // consumer can tell the call it holds isn't the one the model
+            // made. A cut-off call has no result after it, so it goes
+            // back only where a lone call can (the request's final message),
+            // as stored, without the marker; anywhere else it's left out as
+            // a lone call (unpairedServerBlocks).
+            let whole = sawBlockStop;
+            // Whitespace alone is no input, {} unmarked, as a tool_use's is.
+            if (whole && currentBlockInputJson.trim()) {
+              let parsed: unknown;
+              try {
+                parsed = JSON.parse(currentBlockInputJson);
+              } catch {
+                whole = false;
+              }
+              if (whole && isPlainObject(parsed)) block.input = parsed;
+              else whole = false;
+            }
+            if (!whole) {
+              block.unparseableInput = currentBlockInputJson;
+              console.warn(
+                `[membrane:anthropic] the streamed input of ${String(block.type)} ${String(block.id ?? '(no id)')} ` +
+                `${sawBlockStop ? "didn't parse to an object" : 'was cut off before its block stopped'} ` +
+                `(${currentBlockInputJson.length} characters); it keeps the start's input, marked`,
+              );
             }
           }
         }
@@ -1133,10 +1171,48 @@ function anthropicUrlImage(url: string): Anthropic.ImageBlockParam | Anthropic.T
     : { type: 'image', source: { type: 'url', url: image.url } };
 }
 
-export function toAnthropicContent(blocks: ContentBlock[]): Anthropic.ContentBlockParam[] {
+/**
+ * Convert one turn's normalized content to Anthropic content blocks, for a
+ * caller outside membrane's own builds, which go through NativeFormatter.
+ *
+ * With `role: 'assistant'`, an Anthropic server-tool block, or its zero-width
+ * carrier, goes out as the block itself, in the place it had in the turn that
+ * produced it, as NativeFormatter sends it when its build replays server
+ * blocks (see utils/anthropic-server-blocks.ts), except a server call with no
+ * result after it in the turn, or a result with no call before it, which the
+ * API refuses (unpairedServerBlocks). With `lastMessage`, the turn is the
+ * request's final message, a paused turn being resumed, and keeps its lone
+ * calls, as NativeFormatter keeps them there; without it, every lone one is
+ * left out. In any other role a server block is left out, as NativeFormatter
+ * leaves it out of a user turn, which has no place for one. A caller that
+ * names no role gets that too, as it always got for a carrier. Nothing
+ * reports what it leaves out: it has no alteration callback. It sees one
+ * turn, so a turn whose only blocks pairing leaves out comes back empty, for
+ * the caller to drop as NativeFormatter drops it.
+ */
+export function toAnthropicContent(
+  blocks: ContentBlock[],
+  options: { role?: 'user' | 'assistant'; lastMessage?: boolean } = {},
+): Anthropic.ContentBlockParam[] {
   const result: Anthropic.ContentBlockParam[] = [];
-  
-  for (const block of stripEmptyTextBlocks(blocks)) {
+
+  // An Anthropic server-tool block (web search and the like), kept on a
+  // zero-width carrier, is that block on this wire: it is part of the turn
+  // the model produced (see utils/anthropic-server-blocks.ts). In an
+  // assistant turn, swap it in before the empty-text cleanup, which would
+  // drop the carrier as empty text; in any other, leave it out.
+  const swapped = blocks.flatMap((block): Array<ContentBlock | AnthropicServerBlock> => {
+    const serverBlock = anthropicServerBlockFor(block);
+    if (serverBlock === undefined) return [block];
+    return options.role === 'assistant' ? [serverBlock] : [];
+  });
+  const unpaired = unpairedServerBlocks(swapped, options.lastMessage === true);
+  const sendable = stripEmptyTextBlocks(swapped.filter((block) => !unpaired.has(block)));
+  for (const block of sendable) {
+    if (isAnthropicServerBlock(block)) {
+      result.push(block as unknown as Anthropic.ContentBlockParam);
+      continue;
+    }
     switch (block.type) {
       case 'text': {
         const textBlock: any = { type: 'text', text: block.text };
@@ -1294,9 +1370,13 @@ export function fromAnthropicContent(blocks: Anthropic.ContentBlock[]): ContentB
           // Preserve the encrypted `data` payload — without it the block
           // cannot be round-tripped and prior reasoning is lost.
           result.push({ type: 'redacted_thinking', data: (block as any).data } as any);
+        } else if (isAnthropicServerBlock(block)) {
+          // A server-tool block is its own native form: carried as itself,
+          // with no unknown-type warning, as membrane's response path does.
+          result.push({ type: 'text', text: '', rawItem: block } as ContentBlock);
         } else {
-          // server_tool_use, web_search_tool_result, search_result, mcp_tool_use
-          // and anything Anthropic adds later used to fall out here silently.
+          // search_result and anything Anthropic adds later used to fall out
+          // here silently.
           result.push(preserveUnconvertibleBlock(block, 'anthropic'));
         }
         break;

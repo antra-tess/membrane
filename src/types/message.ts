@@ -3,6 +3,7 @@
  */
 
 import type { ContentBlock, CacheControl } from './content.js';
+import { isRawItemCarrier } from '../utils/fidelity.js';
 
 // Re-export CacheControl for consumers
 export type { CacheControl } from './content.js';
@@ -70,11 +71,12 @@ export function textMessage(participant: string, text: string, metadata?: Messag
 }
 
 /**
- * Extract all text content from a message
+ * Extract all text content from a message. A zero-width carrier (a provider
+ * item kept as empty text) has no text, so it adds no line.
  */
 export function extractText(message: NormalizedMessage): string {
   return message.content
-    .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
+    .filter((block): block is { type: 'text'; text: string } => block.type === 'text' && !isRawItemCarrier(block))
     .map((block) => block.text)
     .join('\n');
 }

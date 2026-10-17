@@ -100,6 +100,7 @@ import {
 } from './formatters/normalize-tool-pairs.js';
 import { YieldingStreamImpl } from './yielding-stream.js';
 import { calculateCost, warnUnpricedModel } from './utils/cost.js';
+import { isAnthropicServerBlock } from './utils/anthropic-server-blocks.js';
 import {
   TurnUsageAccumulator,
   calculateCacheHitRatio,
@@ -110,7 +111,7 @@ import {
   shedImagesToFitByteBudget, assertWithinByteBudget,
 } from './utils/image-media.js';
 import { getDefaultPricing } from './registry/default-pricing.js';
-import { FidelityNotes, requestFingerprint, type MessageOrigin } from './utils/fidelity.js';
+import { FidelityNotes, isRawItemCarrier, requestFingerprint, type MessageOrigin } from './utils/fidelity.js';
 
 /** Anthropic's thinking-binding controls, as a thinking config carries them. */
 type BlockBindingParam = { prefix_mismatch_behavior: 'error' | 'drop_block' };
@@ -2007,18 +2008,19 @@ export class Membrane {
           // tool records have no normalized ContentBlock equivalent. Retain a
           // zero-width carrier so Chronicle and the Responses formatter can
           // replay the raw item without surfacing synthetic prompt text.
-          // Anthropic-bound conversion paths filter these out (empty text
-          // blocks are a 400 there); the Responses formatter replays rawItem.
+          // The Responses formatter replays a Responses item; Anthropic-shaped
+          // requests send an Anthropic server-tool block back as itself and
+          // filter any other carrier out (empty text blocks are a 400 there).
           //
           // An item with a `type` this switch does not know (server_tool_use,
           // web_search_tool_result, search_result, mcp_tool_use, or whatever a
           // provider adds next) used to fall out of this chain and vanish. It
-          // gets the same carrier treatment, holding the item itself, plus a
-          // one-time warning so the gap surfaces instead of being inferred
-          // later from missing content.
-          const carriedRawItem = item.rawItem ?? item;
-          if (!item.rawItem) warnUnconvertibleProviderItem(item.type);
-          blocks.push({ type: 'text', text: '', rawItem: carriedRawItem });
+          // gets the same carrier treatment, holding the item itself. An
+          // Anthropic server-tool block is a known type there (a build that
+          // replays them sends it back as itself), so only another type gets
+          // a one-time warning, which surfaces the gap instead of leaving it
+          // to be inferred later from missing content.
+          blocks.push(providerItemCarrier(item));
         }
       }
       return blocks;
@@ -2375,6 +2377,7 @@ export class Membrane {
       maxParticipantsForStop,
       contextPrefix: request.contextPrefix,
       prefillUserMessage: request.prefillUserMessage,
+      anthropicServerBlocks: this.adapter.replaysAnthropicServerBlocks === true,
       ...(fidelity ? { fidelity } : {}),
     });
 
@@ -2947,6 +2950,12 @@ export class Membrane {
             data: block.data,
             mimeType: block.mimeType,
           });
+        } else if (block && (block.rawItem || block.type)) {
+          // A provider block with no normalized form (an Anthropic server-tool
+          // block, an opaque Responses item) used to vanish here, so a turn
+          // that used a server tool reached the history without it. Keep it
+          // as the tool loops do.
+          content.push(providerItemCarrier(block));
         }
       }
     } else if (typeof providerResponse.content === 'string') {
@@ -2960,10 +2969,12 @@ export class Membrane {
       providerResponse.stopSequence?.startsWith('</');
     if (stoppedOnClosingTag && providerResponse.stopSequence) {
       rawAssistantText += providerResponse.stopSequence;
-      // Update the last text content block if it exists
+      // Update the last text content block if it exists. A zero-width
+      // carrier is a text block holding a provider item, not text, so it keeps
+      // its empty text and stays a carrier.
       for (let i = content.length - 1; i >= 0; i--) {
         const block = content[i]!;
-        if (block.type === 'text') {
+        if (block.type === 'text' && !isRawItemCarrier(block)) {
           (block as { type: 'text'; text: string }).text += providerResponse.stopSequence;
           break;
         }
@@ -4642,4 +4653,18 @@ export class Membrane {
       }
     }
   }
+}
+
+/**
+ * The zero-width carrier for a provider item no normalized ContentBlock
+ * represents (an Anthropic server-tool block, an opaque Responses item): the
+ * item rides on it as `rawItem`, so a formatter for its wire can send it back,
+ * and normalized consumers see no text. An item that already holds its native
+ * form as `rawItem` is carried as that form, and so is an Anthropic server-tool
+ * block, which is its own native form; any other is new to this module, and
+ * warns once per type.
+ */
+function providerItemCarrier(item: { type?: unknown; rawItem?: unknown }): ContentBlock {
+  if (!item.rawItem && !isAnthropicServerBlock(item)) warnUnconvertibleProviderItem(String(item.type));
+  return { type: 'text', text: '', rawItem: item.rawItem ?? item };
 }

@@ -28,6 +28,7 @@ import {
   isTypedAbortError,
   withRawRequest,
 } from '../types/index.js';
+import { isRawItemCarrier } from '../utils/fidelity.js';
 import { imageForRequest, GEMINI_IMAGE_TYPES } from '../utils/image-media.js';
 import { createCombinedSignal, textOnlyToolResultContent, toolUseInputFromValue, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
 
@@ -850,7 +851,9 @@ export class GeminiAdapter implements ProviderAdapter {
  * Convert normalized content blocks to Gemini parts
  */
 export function toGeminiParts(blocks: ContentBlock[]): GeminiPart[] {
-  return blocks.map(block => {
+  // A zero-width carrier holds a block this wire has no form for, so it adds
+  // no part, as the builder's own text branch skips empty text.
+  return blocks.filter(block => !isRawItemCarrier(block)).map(block => {
     if (block.type === 'text') {
       return { text: (block as any).text };
     }

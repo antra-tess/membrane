@@ -1027,30 +1027,33 @@ describe('slimepriestess\'s review of #104', () => {
     });
   });
 
-  describe('a zero-width carrier is all raw form: a path that leaves it out alters its message', () => {
+  describe('a zero-width carrier is all raw form: a path that leaves it out alters its message, and one that sends its item carries it', () => {
     // How Anthropic's unconvertible response blocks (server-tool results) are kept.
     const carrier = (): ContentBlock => ({ type: 'text', text: '', rawItem: { type: 'web_search_tool_result', tool_use_id: 'srv_1', content: [] } }) as ContentBlock;
+    // The call the result answers: the API takes a result only after its call.
+    const callCarrier = (): ContentBlock => ({ type: 'text', text: '', rawItem: { type: 'server_tool_use', id: 'srv_1', name: 'web_search', input: { query: 'zz' } } }) as ContentBlock;
     const conversations = {
       'beside text': (): NormalizedRequest['messages'] => [
         { participant: 'User', content: [text('search for it')] },
-        { participant: 'Claude', content: [text('found it'), carrier()] },
+        { participant: 'Claude', content: [text('found it'), callCarrier(), carrier()] },
         { participant: 'User', content: [text('go on')] },
       ],
       alone: (): NormalizedRequest['messages'] => [
         { participant: 'User', content: [text('search for it')] },
-        { participant: 'Claude', content: [carrier()] },
+        { participant: 'Claude', content: [callCarrier(), carrier()] },
         { participant: 'User', content: [text('go on')] },
       ],
     };
 
-    it('the yielding native loop with the real Anthropic builder; plain \'\' text is still no loss', async () => {
+    it('the yielding native loop with the real Anthropic builder sends a server block in its turn, and names nothing; plain \'\' text is still no loss', async () => {
       for (const messages of Object.values(conversations)) {
         const adapter = new ScriptedAnthropic([{ content: [{ type: 'text', text: 'done' }], stopReason: 'end_turn' }]);
         const { rounds } = await drive(new Membrane(adapter), {
           messages: messages(), config: { model: 'claude-sonnet-4-5', maxTokens: 1000 }, tools: [noopTool], toolMode: 'native', promptCaching: false,
         });
-        expect(JSON.stringify(adapter.sent[0].messages)).not.toContain('web_search_tool_result');
-        expect(rounds[0]!.altered.messages).toEqual([1]);
+        expect(adapter.sent[0].messages[1].role).toBe('assistant');
+        expect(JSON.stringify(adapter.sent[0].messages[1].content)).toContain('web_search_tool_result');
+        expect(rounds[0]!.altered.messages).toEqual([]);
         expect(rounds[0]!.fidelity).toBe('established');
       }
       const plain = new ScriptedAnthropic([{ content: [{ type: 'text', text: 'done' }], stopReason: 'end_turn' }]);
@@ -1061,16 +1064,88 @@ describe('slimepriestess\'s review of #104', () => {
       expect(rounds[0]!.altered.messages).toEqual([]);
     });
 
+    it('BedrockAdapter doesn\'t declare that it replays server blocks', async () => {
+      const { BedrockAdapter } = await import('../../src/providers/bedrock.js');
+      const bedrock = new BedrockAdapter({ accessKeyId: 'test', secretAccessKey: 'test', region: 'us-west-2' });
+      expect((bedrock as { replaysAnthropicServerBlocks?: boolean }).replaysAnthropicServerBlocks).not.toBe(true);
+      expect(new AnthropicAdapter({ apiKey: 'zz-key', cacheKeepalive: { enabled: false } }).replaysAnthropicServerBlocks).toBe(true);
+    });
+
+    it('an Anthropic-shaped build that doesn\'t replay server blocks leaves the block out, and names its message', async () => {
+      for (const messages of Object.values(conversations)) {
+        const adapter = new ScriptedAnthropic([{ content: [{ type: 'text', text: 'done' }], stopReason: 'end_turn' }]);
+        (adapter as { replaysAnthropicServerBlocks: boolean }).replaysAnthropicServerBlocks = false; // as a build that doesn't declare it
+        const { rounds } = await drive(new Membrane(adapter), {
+          messages: messages(), config: { model: 'claude-sonnet-4-5', maxTokens: 1000 }, tools: [noopTool], toolMode: 'native', promptCaching: false,
+        });
+        expect(JSON.stringify(adapter.sent[0].messages)).not.toContain('web_search_tool_result');
+        expect(rounds[0]!.altered.messages).toEqual([1]);
+        expect(rounds[0]!.fidelity).toBe('established');
+      }
+    });
+
     it.each([
-      ['NativeFormatter', () => new NativeFormatter()],
-      ['AnthropicXmlFormatter', () => new AnthropicXmlFormatter()],
-      ['CompletionsFormatter', () => new CompletionsFormatter()],
-    ] as const)('%s', (_name, formatter) => {
+      ['AnthropicXmlFormatter', () => new AnthropicXmlFormatter(), {}],
+      ['CompletionsFormatter', () => new CompletionsFormatter(), {}],
+      ['NativeFormatter, not replaying server blocks', () => new NativeFormatter(), { anthropicServerBlocks: false }],
+    ] as const)('%s leaves it out', (_name, formatter, extra) => {
       for (const messages of Object.values(conversations)) {
         const notes = new FidelityNotes();
-        formatter().buildMessages(messages(), { assistantParticipant: 'Claude', participantMode: 'multiuser', fidelity: notes } as any);
+        const built = formatter().buildMessages(messages(), { assistantParticipant: 'Claude', participantMode: 'multiuser', fidelity: notes, ...extra } as any);
+        expect(JSON.stringify(built.messages)).not.toContain('web_search_tool_result');
         expect(sorted(notes.altered)).toEqual([1]);
       }
+    });
+
+    it('NativeFormatter sends a server block in the assistant turn that holds it, and names nothing; in a user turn it leaves it out, and names that message', () => {
+      for (const messages of Object.values(conversations)) {
+        const notes = new FidelityNotes();
+        const built = new NativeFormatter().buildMessages(messages(), { assistantParticipant: 'Claude', participantMode: 'multiuser', fidelity: notes, anthropicServerBlocks: true } as any);
+        expect(JSON.stringify(built.messages)).toContain('web_search_tool_result');
+        expect(sorted(notes.altered)).toEqual([]);
+      }
+      const notes = new FidelityNotes();
+      const built = new NativeFormatter().buildMessages([
+        { participant: 'User', content: [text('search for it'), carrier()] },
+        { participant: 'Claude', content: [text('found it')] },
+      ], { assistantParticipant: 'Claude', participantMode: 'multiuser', fidelity: notes, anthropicServerBlocks: true } as any);
+      expect(JSON.stringify(built.messages)).not.toContain('web_search_tool_result');
+      expect(sorted(notes.altered)).toEqual([0]);
+    });
+
+    it('NativeFormatter leaves out a carrier of another wire\'s item, even in an assistant turn, and names its message', () => {
+      const reasoning = { type: 'reasoning', id: 'rs_1', summary: [] };
+      const notes = new FidelityNotes();
+      const built = new NativeFormatter().buildMessages([
+        { participant: 'User', content: [text('think about it')] },
+        { participant: 'Claude', content: [text('thought'), { type: 'text', text: '', rawItem: reasoning } as ContentBlock] },
+        { participant: 'User', content: [text('go on')] },
+      ], { assistantParticipant: 'Claude', participantMode: 'multiuser', fidelity: notes } as any);
+      expect(JSON.stringify(built.messages)).not.toContain('rs_1');
+      expect(sorted(notes.altered)).toEqual([1]);
+    });
+
+    it('the Responses formatter leaves an Anthropic server block out, and names its message', async () => {
+      const { round, wire } = await responsesRound([
+        { participant: 'User', content: [text('search for it')] },
+        { participant: 'Claude', content: [text('found it'), carrier()] },
+        { participant: 'User', content: [text('go on')] },
+      ]);
+      expect(wire).not.toContain('web_search_tool_result');
+      expect(wire).toContain('found it');
+      expect(round.altered.messages).toEqual([1]);
+      expect(round.fidelity).toBe('established');
+    });
+
+    it('the Responses input normalization leaves an Anthropic server block out, and hears it as the request\'s own block', () => {
+      const block = carrier();
+      const dropped: unknown[] = [];
+      const items = normalizeResponsesInput([
+        { role: 'assistant', content: [{ type: 'text', text: 'found it' }, block] },
+      ] as any, (b) => dropped.push(b));
+      expect(JSON.stringify(items)).not.toContain('web_search_tool_result');
+      expect(dropped).toEqual([block]);
+      expect(dropped[0]).toBe(block);
     });
 
     it('the Responses formatter sends the carrier\'s item, and names nothing', async () => {

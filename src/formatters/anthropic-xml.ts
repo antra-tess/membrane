@@ -661,9 +661,15 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     for (let i = 0; i < content.length; i++) {
       const block = content[i]!;
       if (block.type === 'text') {
+        // A zero-width carrier (a provider item with no normalized form, such
+        // as an Anthropic server-tool block) has no text: an empty part would
+        // only add a line to the document. Its item is its content, and the
+        // transcript can't carry it.
+        if (isRawItemCarrier(block)) {
+          onAltered?.();
+          continue;
+        }
         parts.push(block.text);
-        // A zero-width carrier's item is its content; the transcript can't carry it.
-        if (isRawItemCarrier(block)) onAltered?.();
       } else if (block.type === 'image') {
         if (block.source.type === 'base64') {
           const { mediaType, placeholder } = imageForRequest(block.source.data, block.source.mediaType);

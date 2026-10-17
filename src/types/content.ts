@@ -40,10 +40,20 @@ export interface TextContent {
   cache_control?: CacheControl;
   /**
    * Opaque provider-native item this block was derived from (e.g. an OpenAI
-   * Responses output item). Provider-native formatters replay it verbatim;
-   * other providers must ignore it. A zero-width carrier (`text: ''` plus
-   * `rawItem`) has no normalized equivalent and must be filtered out of
-   * requests for providers that reject empty text blocks (Anthropic).
+   * Responses output item, or an Anthropic server-tool block). Formatters
+   * for its own wire replay it verbatim; other providers must ignore it. A
+   * zero-width carrier (`text: ''` plus `rawItem`) has no normalized
+   * equivalent. Membrane's build for an adapter that declares
+   * `replaysAnthropicServerBlocks` (AnthropicAdapter) sends one holding an
+   * Anthropic server-tool block as that block, in the assistant turn that
+   * produced it (`utils/anthropic-server-blocks.ts`), unless the block can't
+   * go alone there: a server call with no result after it in its turn, or a
+   * result with no call before it, is left out and its message reported, and
+   * the request's final message, if it's the assistant's, keeps its lone
+   * calls. Membrane's build for any other adapter, Bedrock's included, leaves
+   * it out; an adapter's own `buildRequest` sends what it is given. Every
+   * Anthropic-shaped build filters out any other carrier, since Anthropic
+   * rejects empty text blocks. Text serializations leave it out.
    *
    * Where it is replayed, it goes out in place of this block's other fields,
    * which are not read: a consumer that changes the block's content

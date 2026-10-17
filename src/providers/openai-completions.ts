@@ -30,6 +30,7 @@ import {
   withRawRequest,
 } from '../types/index.js';
 import { createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
+import { isRawItemCarrier } from '../utils/fidelity.js';
 
 // ============================================================================
 // Types
@@ -409,6 +410,8 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
 
       for (const block of content) {
         if (block.type === 'text') {
+          // A zero-width carrier holds a block this wire has no form for.
+          if (isRawItemCarrier(block)) continue;
           textParts.push(block.text);
         } else if (block.type === 'image' || block.type === 'image_url') {
           hadImages = true;

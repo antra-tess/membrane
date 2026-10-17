@@ -361,9 +361,15 @@ export class CompletionsFormatter implements PrefillFormatter {
 
     for (const block of content) {
       if (block.type === 'text') {
+        // A zero-width carrier (a provider item with no normalized form, such
+        // as an Anthropic server-tool block) has no text: an empty part would
+        // only add a line to the prompt. Its item is its content, and the
+        // prompt can't carry it.
+        if (isRawItemCarrier(block)) {
+          leftOut = true;
+          continue;
+        }
         textParts.push(block.text);
-        // A zero-width carrier's item is its content; the prompt can't carry it.
-        if (isRawItemCarrier(block)) leftOut = true;
       } else {
         if (block.type === 'image') hadImages = true;
         // Skip tool_use, tool_result, thinking and media blocks for base models

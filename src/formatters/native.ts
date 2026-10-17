@@ -9,7 +9,7 @@
  * - 'multiuser': Multiple participants, names prefixed to content
  */
 
-import { followNormalizedBlocks, isRawItemCarrier, ownBlocks } from '../utils/fidelity.js';
+import { followNormalizedBlocks, isRawItemCarrier, ownBlocks, type FidelityNotes } from '../utils/fidelity.js';
 import { sanitizeToolName } from '../utils/tool-names.js';
 import { unsupportedError } from '../types/errors.js';
 
@@ -36,6 +36,7 @@ import type {
 import { normalizeToolPairs, mergeConsecutiveRoles } from './normalize-tool-pairs.js';
 import { imageForRequest, toolResultContentForRequest } from '../utils/image-media.js';
 import { assertCacheMarkersWithinLimit, countWireCacheMarkers } from '../utils/cache-marker-budget.js';
+import { anthropicServerBlockFor, unpairedServerBlocks } from '../utils/anthropic-server-blocks.js';
 
 /** Index of the last content block that can carry cache_control. Anthropic
  *  rejects cache_control on thinking / redacted_thinking blocks, so a cache
@@ -261,6 +262,8 @@ export class NativeFormatter implements PrefillFormatter {
       // Convert content (recording alterations against this message's index)
       const content = this.convertContent(message.content, message.participant, {
         includeNames: participantMode === 'multiuser' && !isAssistant,
+        isAssistant,
+        serverBlocks: options.anthropicServerBlocks === true,
         ...(options.fidelity ? { onAltered: () => options.fidelity!.alter(i) } : {}),
       });
 
@@ -315,7 +318,14 @@ export class NativeFormatter implements PrefillFormatter {
     });
 
     // Merge consecutive same-role messages (API requires alternating)
-    const mergedMessages = mergeConsecutiveRoles(normalized.messages);
+    let mergedMessages = mergeConsecutiveRoles(normalized.messages);
+    // A server call goes out only with its result in its turn, and a result
+    // only with its call: the API refuses either alone. The request's final
+    // message, if it's the assistant's, keeps its lone calls (a paused turn
+    // is resumed there). The turn is the one sent, after the merge, so a
+    // call and its result stored as two consecutive assistant messages stay
+    // together. With server blocks off, none reached this far.
+    mergedMessages = NativeFormatter.pairServerBlocks(mergedMessages, options.fidelity);
 
     // Build system content. The system block is cached only as a FALLBACK: a
     // message breakpoint already caches a prefix that begins at the front of
@@ -421,10 +431,46 @@ export class NativeFormatter implements PrefillFormatter {
   // PRIVATE HELPERS
   // ==========================================================================
 
+  /**
+   * Leave out of each assistant turn the server blocks the API refuses there
+   * (unpairedServerBlocks: a lone call or result, a second block with an id,
+   * an id that isn't a string, `container_upload`), reporting each one's
+   * message altered. The final message, if it's the assistant's, keeps its
+   * lone calls: a paused turn is resumed as the request's last message. A
+   * marker the builder put on a block left out moves to the turn's last block
+   * that can hold one, unless a kept block already carries one; with no kept
+   * block that can hold one, it goes. A turn left with nothing is dropped,
+   * its marker with it, and its neighbours merge again.
+   */
+  private static pairServerBlocks(messages: ProviderMessage[], fidelity?: FidelityNotes): ProviderMessage[] {
+    const emptied = new Set<number>();
+    const paired = messages.map((message, index) => {
+      if (message.role !== 'assistant' || !Array.isArray(message.content)) return message;
+      const unpaired = unpairedServerBlocks(message.content, index === messages.length - 1);
+      if (unpaired.size === 0) return message;
+      const blocks = message.content as Record<string, unknown>[];
+      let marker: unknown;
+      const kept = blocks.filter((block) => {
+        if (!unpaired.has(block)) return true;
+        fidelity?.alterBlock(block);
+        if (block.cache_control) marker = block.cache_control;
+        return false;
+      });
+      if (marker !== undefined && !kept.some((block) => block.cache_control)) {
+        const at = lastCacheableBlockIndex(kept);
+        if (at >= 0) kept[at]!.cache_control = marker;
+      }
+      if (kept.length === 0) emptied.add(index);
+      return { ...message, content: kept };
+    });
+    if (emptied.size === 0) return paired;
+    return mergeConsecutiveRoles(paired.filter((_, index) => !emptied.has(index)));
+  }
+
   private convertContent(
     content: ContentBlock[],
     participant: string,
-    options: { includeNames: boolean; onAltered?: () => void }
+    options: { includeNames: boolean; isAssistant: boolean; serverBlocks: boolean; onAltered?: () => void }
   ): unknown[] {
     const result: unknown[] = [];
     let hasUnsupportedMedia = false;
@@ -433,11 +479,26 @@ export class NativeFormatter implements PrefillFormatter {
     const altered = () => options.onAltered?.();
 
     for (const block of content) {
+      // An Anthropic server-tool block (web search and the like), kept on a
+      // zero-width carrier, goes back as the block itself in the assistant
+      // turn that produced it (see utils/anthropic-server-blocks.ts), when
+      // the build replays them (BuildOptions.anthropicServerBlocks). In a
+      // message sent as a user turn, such as another participant's, it has
+      // no place and is left out. An adapter for another wire leaves out a
+      // block type it has no form for.
+      // Sent, it is carried: the block is the carrier's item, its content.
+      // Left out, the message loses it.
+      const serverBlock = anthropicServerBlockFor(block);
+      if (serverBlock) {
+        if (options.isAssistant && options.serverBlocks) result.push(serverBlock);
+        else altered();
+        continue;
+      }
       if (block.type === 'text') {
-        // Empty text blocks are rejected by the Anthropic API. In particular,
-        // zero-width rawItem carriers (opaque provider-native items smuggled
-        // through normalized history) must not leak here. Filter BEFORE the
-        // name prefix below would make them non-empty. A carrier's item is
+        // Empty text blocks are rejected by the Anthropic API. Any other
+        // zero-width rawItem carrier (an opaque provider-native item from
+        // another wire) has no form here and must not leak. Filter BEFORE
+        // the name prefix below would make it non-empty. A carrier's item is
         // its content, and it is not sent here.
         if (block.text === '') {
           if (isRawItemCarrier(block)) altered();

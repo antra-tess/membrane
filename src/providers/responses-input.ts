@@ -1,5 +1,6 @@
 import type { ProviderRequest } from '../types/index.js';
 import { imageForRequest, urlImageForRequest } from '../utils/image-media.js';
+import { carriesAnthropicServerBlock } from '../utils/anthropic-server-blocks.js';
 import type { OpenAIResponsesInputItem } from './openai-responses-api.js';
 
 type JsonObject = Record<string, unknown>;
@@ -34,10 +35,14 @@ export function normalizeResponsesInput(
     }
 
     // Native messages (including phase, status and developer/system roles)
-    // must survive replay verbatim. Only translate normalized content blocks,
-    // and decide an input_image whose data: URL holds no accepted image.
+    // must survive replay verbatim. Only translate normalized content blocks
+    // and Anthropic server-tool blocks, which are left out below, and decide
+    // an input_image whose data: URL holds no accepted image.
     if (Array.isArray(rawMessage.content) && !rawMessage.content.some((block) =>
-      isObject(block) && ['text', 'image', 'tool_use', 'tool_result', 'redacted_thinking'].includes(asString(block.type))
+      isObject(block) && (
+        ['text', 'image', 'tool_use', 'tool_result', 'redacted_thinking'].includes(asString(block.type))
+        || carriesAnthropicServerBlock(block)
+      )
     )) {
       const content = nativeParts(rawMessage.content, onDropped);
       output.push(content === rawMessage.content ? rawMessage : { ...rawMessage, content });
@@ -64,6 +69,13 @@ export function normalizeResponsesInput(
     for (const rawBlock of blocks) {
       if (!isObject(rawBlock)) {
         onDropped?.();
+        continue;
+      }
+      // An Anthropic server-tool block, bare or on its zero-width carrier (an
+      // Anthropic-shaped builder sends one back for its own wire), has no
+      // form on this one, so the message loses it.
+      if (carriesAnthropicServerBlock(rawBlock)) {
+        onDropped?.(rawBlock);
         continue;
       }
       if (rawBlock.type === 'text') {
