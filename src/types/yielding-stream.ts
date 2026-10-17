@@ -13,6 +13,7 @@ import type { NormalizedMessage } from './message.js';
 import type { ToolCall, ToolResult, ToolContext } from './tools.js';
 import type { DetailedUsage, NormalizedResponse, StopReason } from './response.js';
 import type { ChunkMeta, BlockEvent } from './streaming.js';
+import type { MembraneError } from './errors.js';
 
 // ============================================================================
 // Stream Events
@@ -205,7 +206,9 @@ export interface CompleteEvent {
 }
 
 /**
- * Error event - something went wrong.
+ * Error event - something went wrong. When a provider call failed, the error
+ * is a MembraneError, whose `attempts` says how many times membrane sent the
+ * request.
  */
 export interface ErrorEvent {
   type: 'error';
@@ -242,6 +245,36 @@ export interface RetryingEvent {
 }
 
 /**
+ * Backoff event — a provider call failed before it delivered anything, with
+ * an error membrane retries (a 529 overload, a 429 rate limit unless
+ * `retryRateLimits` is false, a 5xx, a 408 or a connection failure), and
+ * membrane waits `delayMs` before sending the call again. It can come in any
+ * round of a tool loop, and each round's provider call counts its own
+ * retries.
+ *
+ * Unlike `retrying`, there is nothing to discard: the failed call emitted
+ * nothing. The event lets a consumer show or log the wait. cancel(), or the
+ * caller's signal, ends the wait, and the stream then ends with `aborted`.
+ */
+export interface BackoffEvent {
+  type: 'backoff';
+  /**
+   * The schedule the wait is drawn from: `overloaded` for a 529 (see
+   * RetryConfig.overloaded), `base` for everything else. What failed is on
+   * `error` (its `type`, `httpStatus` and `retryAfterMs`).
+   */
+  schedule: 'overloaded' | 'base';
+  /** 1-based index of the retry about to be issued, in this round's call. */
+  attempt: number;
+  /** The most retries membrane makes for this round's call. */
+  maxAttempts: number;
+  /** How long membrane waits before sending the call again, in milliseconds. */
+  delayMs: number;
+  /** The error this send failed with. Its `attempts` is the sends so far. */
+  error: MembraneError;
+}
+
+/**
  * Aborted event - stream was cancelled.
  */
 export interface AbortedEvent {
@@ -260,6 +293,7 @@ export type StreamEvent =
   | TokensEvent
   | StreamBlockEvent
   | RetryingEvent
+  | BackoffEvent
   | ToolCallsEvent
   | UsageEvent
   | CompleteEvent
@@ -437,6 +471,20 @@ export interface YieldingStreamOptions {
    * tokens are real spend.
    */
   refusalRetries?: number;
+
+  /**
+   * Whether membrane retries a 429 rate limit itself. Default true: a 429
+   * that ends a provider call before it delivered anything is retried, like a
+   * 529, with a `backoff` event before each wait, unless its stated wait is
+   * longer than its schedule's `maxRetryDelayMs`: that one ends the stream
+   * with an `error` event at once. With `false`, a 429 is the caller's:
+   * membrane doesn't retry it, and the stream ends with an `error` event at
+   * once, carrying the provider's stated wait on `retryAfterMs`. For a caller
+   * that paces rate limits itself, such as an agent framework sharing one
+   * organization's limit across its agents. A 529 is still retried either
+   * way.
+   */
+  retryRateLimits?: boolean;
 
   /**
    * Maximum tool execution depth. Default: unlimited.

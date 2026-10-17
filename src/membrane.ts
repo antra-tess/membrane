@@ -65,6 +65,7 @@ import {
   isAbortedResponse,
   unsupportedError,
 } from './types/index.js';
+import { withAttempts, isDeadlineExpiry, errorFromThrown } from './types/errors.js';
 import type { BuildResult } from './formatters/types.js';
 import { computeCacheWireReceipt } from './cache-wire-receipt.js';
 import { createProgressDeadline } from './providers/utils.js';
@@ -86,6 +87,7 @@ import type {
   YieldingStreamOptions,
   StreamEvent,
   ToolCallsEvent,
+  BackoffEvent,
   RoundReport,
   RoundUsage,
   ThinkingBindingEntry,
@@ -373,8 +375,14 @@ export class Membrane {
   ): Promise<NormalizedResponse> {
     const startTime = Date.now();
     let attempts = 0;
+    // The transport-error budget's count: passes since the last refusal
+    // re-issue, which starts it again.
+    let tries = 0;
+    // Sends since the last refusal re-issue, for the error this call may end
+    // with (`tries` also counts a pass that failed before its send).
+    let sends = 0;
     let rawRequest: unknown;
-    // Counted separately from `attempts` (the transport-error budget): a
+    // Counted separately from `tries` (the transport-error budget): a
     // refusal is a successful HTTP call with an unwanted verdict, and letting
     // it consume error retries would couple two unrelated budgets.
     let refusalRetriesUsed = 0;
@@ -389,6 +397,10 @@ export class Membrane {
 
     while (true) {
       attempts++;
+      tries++;
+      // This pass's receipt guard: a receipt consumer that threw ends the
+      // call with its own error, before anything is classified or retried.
+      let receiptGuard: ReturnType<Membrane['wireReceiptGuard']> | undefined;
 
       try {
         const { providerRequest, prefillResult, toolMode } = this.transformRequest(request, activeFormatter);
@@ -409,7 +421,7 @@ export class Membrane {
         const useWireReceipt = this.adapter.cacheReceiptBasis === 'wire-request';
         let receiptEmitted = false;
         if (!useWireReceipt) request.onCacheWireReceipt?.(computeCacheWireReceipt(finalRequest));
-        const receiptGuard = useWireReceipt && request.onCacheWireReceipt
+        receiptGuard = useWireReceipt && request.onCacheWireReceipt
           ? this.wireReceiptGuard(options.signal)
           : undefined;
 
@@ -421,6 +433,7 @@ export class Membrane {
         );
         let rawProviderResponse: ProviderResponse;
         try {
+          sends++;
           const adapterCall = this.adapter.complete(finalRequest, {
             requestContext: {
               formatterName: activeFormatter.name,
@@ -480,6 +493,8 @@ export class Membrane {
           refusalRetriesUsed < Math.max(0, options.refusalRetries ?? 0)
         ) {
           refusalRetriesUsed++;
+          tries = 0;
+          sends = 0;
           discardedUsage = this.mergeDiscardedAttempts(
             discardedUsage,
             this.discardedAttemptFrom(response.usage)
@@ -508,15 +523,20 @@ export class Membrane {
         // a refused build included, and never retried. The error stays on it
         // as evidence. stream()'s paths judge the signal first too.
         if (options.signal?.aborted) {
-          if (isTypedAbortError(error)) throw this.attachRawRequest(error, rawRequest);
-          throw new MembraneError({
-            type: 'abort',
-            message: 'Request was aborted',
-            retryable: false,
-            rawError: error,
-            rawRequest,
-          });
+          const cancelled = isTypedAbortError(error)
+            ? this.attachRawRequest(error, rawRequest)
+            : new MembraneError({
+                type: 'abort',
+                message: 'Request was aborted',
+                retryable: false,
+                rawError: error,
+                rawRequest,
+              });
+          throw sends > 0 ? withAttempts(cancelled, sends) : cancelled;
         }
+        // A receipt consumer that threw stopped the call before its request
+        // went out: its error, typed as before, is the answer, never retried.
+        if (receiptGuard?.failure) throw this.attachRawRequest(error, rawRequest);
         // A refused build never reached the provider, and its own type is
         // the answer. Rethrow it as it is instead of wrapping it as a
         // transport error.
@@ -524,23 +544,21 @@ export class Membrane {
         const classifiedError = this.attachRawRequest(error, rawRequest);
         const errorInfo = classifyError(classifiedError);
 
-        // Retryable rate limits (429) get up to 5 attempts regardless of
-        // config, while overload (529) uses its own longer schedule. Terminal
-        // billing/quota codes are excluded by classification. The default
-        // maxRetries of 0 would otherwise turn a capacity blip into a dead
-        // turn. Other retryable errors only retry when maxRetries > 0.
-        // overloaded.maxRetries: 0 disables the dedicated policy entirely;
-        // the 529 then follows the base config like any retryable server
-        // error (exactly the pre-policy behavior), rather than being
-        // silently re-promoted to the long schedule by a positive base limit.
-        const { isOverloaded, effectiveMax } = this.resolveRetryPolicy(errorInfo);
+        // The one retry policy (retryPlan): a 529 on the overloaded schedule,
+        // a 429 with its floor of five, any other retryable error within
+        // maxRetries. Terminal billing/quota codes are excluded by
+        // classification (on AnthropicAdapter the API's x-should-retry has
+        // the last word), and a deadline on a sent request is the caller's.
+        const plan = isDeadlineExpiry(classifiedError)
+          ? undefined
+          : this.retryPlan(errorInfo, tries, { retryRateLimits: options.retryRateLimits });
 
-        if (errorInfo.retryable && attempts < effectiveMax) {
+        if (plan) {
           // Check hook for retry decision
           if (this.config.hooks?.onError) {
-            const decision = await this.config.hooks.onError(errorInfo, attempts);
+            const decision = await this.config.hooks.onError(errorInfo, tries);
             if (decision === 'abort') {
-              throw classifiedError;
+              throw sends > 0 ? withAttempts(classifiedError, sends) : classifiedError;
             }
           }
 
@@ -548,28 +566,28 @@ export class Membrane {
           // sleep must fail like every other failure of this method — a
           // MembraneError — rather than escaping the loop as a raw
           // DOMException whose shape no caller of complete() expects.
-          const delay = this.calculateRetryDelay(attempts, isOverloaded, errorInfo);
+          const delay = this.calculateRetryDelay(tries, plan.overloaded, errorInfo);
           try {
             await this.sleep(delay, options.signal);
           } catch (sleepError) {
             // The caller's signal fired: that is a cancellation whatever it
             // was aborted with (a plain Error, a string), not an unknown
             // failure. The reason stays on the error as evidence.
-            if (options.signal?.aborted) {
-              throw new MembraneError({
-                type: 'abort',
-                message: 'Request was aborted',
-                retryable: false,
-                rawError: sleepError,
-                rawRequest,
-              });
-            }
-            throw this.attachRawRequest(sleepError, rawRequest);
+            const ended = options.signal?.aborted
+              ? new MembraneError({
+                  type: 'abort',
+                  message: 'Request was aborted',
+                  retryable: false,
+                  rawError: sleepError,
+                  rawRequest,
+                })
+              : this.attachRawRequest(sleepError, rawRequest);
+            throw sends > 0 ? withAttempts(ended, sends) : ended;
           }
           continue;
         }
 
-        throw classifiedError;
+        throw sends > 0 ? withAttempts(classifiedError, sends) : classifiedError;
       }
     }
   }
@@ -652,102 +670,13 @@ export class Membrane {
     // Determine tool mode against the formatter that will build the request
     const activeFormatter = this.resolveActiveFormatter(options.formatter);
     const toolMode = this.resolveToolMode(request, activeFormatter);
-    const useNative = toolMode === 'native';
 
-    // Overloaded (529) pre-emission retry. The streaming paths have no retry
-    // loop of their own, so a capacity error used to kill the turn outright —
-    // and 529s most often arrive INSTEAD of a stream, before anything reaches
-    // the caller, where retrying is transparent. Once any callback has
-    // delivered output (tokens, blocks, usage), retrying would replay content
-    // the caller already consumed, so mid-stream errors still throw.
-    let attempts = 0;
-    const retryDelaysMs: number[] = [];
-    while (true) {
-      attempts++;
-      let emitted = false;
-      const mark = <A extends unknown[], R>(fn?: (...args: A) => R) =>
-        fn && ((...args: A): R => { emitted = true; return fn(...args); });
-      const tracked: StreamOptions = {
-        ...options,
-        onChunk: mark(options.onChunk),
-        onContentBlockUpdate: mark(options.onContentBlockUpdate),
-        onToolCalls: mark(options.onToolCalls),
-        onPreToolContent: mark(options.onPreToolContent),
-        onUsage: mark(options.onUsage),
-        onBlock: mark(options.onBlock),
-        onResponse: mark(options.onResponse),
-        // onRequest fires before the send — it is not an emission.
-      };
-
-      try {
-        const result = useNative
-          ? await this.streamWithNativeTools(request, tracked, activeFormatter)
-          : await this.streamWithXmlTools(request, tracked, activeFormatter);
-        // The inner paths count their own provider calls but cannot see this
-        // wrapper's discarded attempts. Each failed attempt here died before
-        // emitting anything (that is the precondition for retrying), so it
-        // cost at least the one call it failed on — ADD those to the inner
-        // count rather than overwriting it, or a turn that retried twice and
-        // then ran three tool rounds would report 2 calls instead of 5.
-        if (attempts > 1 && 'details' in result) {
-          result.details.timing.attempts += attempts - 1;
-          result.details.timing.retryDelaysMs = retryDelaysMs;
-        }
-        return result;
-      } catch (error) {
-        const errorInfo = classifyError(error);
-        // Same semantics as complete(): maxRetries bounds total attempts,
-        // the overloaded floor applies over the base config, and
-        // overloaded.maxRetries: 0 opts out of stream retries entirely
-        // (streaming had no retry before this policy existed).
-        //
-        // A 429 arriving INSTEAD of a stream is exactly as transparent to
-        // retry as a 529 — nothing has reached the caller yet — so it takes
-        // the same pre-emission path, on the base schedule and under the
-        // same five-attempt floor complete() applies. Post-emission errors
-        // still throw: retrying would replay content already consumed.
-        const { isRateLimit, isOverloaded, effectiveMax } = this.resolveRetryPolicy(errorInfo);
-        if (!emitted && (isOverloaded || isRateLimit) && attempts < effectiveMax) {
-          // Honor the same pre-retry hook contract as complete(): hosts use
-          // onError for circuit-breaking, and its 'abort' decision must work
-          // on the streaming path too.
-          if (this.config.hooks?.onError) {
-            const decision = await this.config.hooks.onError(errorInfo, attempts);
-            if (decision === 'abort') {
-              throw error;
-            }
-          }
-          const delay = this.calculateRetryDelay(attempts, isOverloaded, errorInfo);
-          retryDelaysMs.push(delay);
-          // An abort during the backoff window is still a cancellation of
-          // this stream, and stream() documents cancellation as an
-          // AbortedResponse. Letting the sleep's rejection escape made that
-          // contract depend on which millisecond the abort landed in.
-          // Nothing has been emitted on this path (that is the precondition
-          // for retrying at all), so there is no partial content to report.
-          try {
-            await this.sleep(delay, options.signal);
-          } catch (sleepError) {
-            // The caller's signal is authoritative: whatever it was aborted
-            // with — a DOMException, a plain Error, a string — this is the
-            // documented cancellation, not an error to throw.
-            if (options.signal?.aborted || this.isAbortError(sleepError)) {
-              return this.buildAbortedResponse(
-                '',
-                { inputTokens: 0, outputTokens: 0 },
-                [],
-                [],
-                this.abortReason(sleepError, options.signal),
-                []
-              );
-            }
-            throw sleepError;
-          }
-          continue;
-        }
-        throw error;
-      }
-    }
+    // A provider call that fails before it delivers anything is sent again
+    // inside streamOnce, on every streaming path and in every round: nothing
+    // has reached the caller from it, so retrying replays nothing.
+    return toolMode === 'native'
+      ? this.streamWithNativeTools(request, options, activeFormatter)
+      : this.streamWithXmlTools(request, options, activeFormatter);
   }
 
   /**
@@ -843,6 +772,7 @@ export class Membrane {
       timeoutMs,
       idleTimeoutMs,
       progressTimeoutMs,
+      retryRateLimits,
     } = options;
 
     // The formatter stream() selected: the same instance that resolved the
@@ -867,6 +797,8 @@ export class Membrane {
     // re-issues inside streamOnce) and continuation rounds.
     let providerCalls = 0;
     let rounds = 0;
+    // The waits before each call that was sent again (see streamOnce).
+    const retryDelaysMs: number[] = [];
     const contentBlocks: ContentBlock[] = [];
     let lastStopReason: StopReason = 'end_turn';
     let lastProviderStopReason: string | undefined;
@@ -1073,6 +1005,7 @@ export class Membrane {
             timeoutMs,
             idleTimeoutMs,
             progressTimeoutMs,
+            retryRateLimits,
             normalizedRequest: request,
             formatterName: formatter.name,
             requiresAssistantPrefill: true,
@@ -1091,6 +1024,7 @@ export class Membrane {
         if (typedCallbacks) tracker.flush();
         rounds++;
         providerCalls += streamResult.providerCalls;
+        retryDelaysMs.push(...streamResult.retryDelaysMs);
 
         // If we detected stop sequence manually, fix up the parser and result
         if (detectedStopSequence && truncatedAccumulated !== null) {
@@ -1473,6 +1407,7 @@ export class Membrane {
       this.mergeProviderThinkingBlocks(response.content, providerThinkingBlocks);
 
       response.details.timing.rounds = rounds;
+      if (retryDelaysMs.length > 0) response.details.timing.retryDelaysMs = retryDelaysMs;
 
       return response;
     } catch (error) {
@@ -1521,6 +1456,7 @@ export class Membrane {
       timeoutMs,
       idleTimeoutMs,
       progressTimeoutMs,
+      retryRateLimits,
     } = options;
 
     let toolDepth = 0;
@@ -1534,6 +1470,8 @@ export class Membrane {
     // re-issues inside streamOnce) and continuation rounds.
     let providerCalls = 0;
     let rounds = 0;
+    // The waits before each call that was sent again (see streamOnce).
+    const retryDelaysMs: number[] = [];
     let lastStopReason: StopReason = 'end_turn';
     let lastProviderStopReason: string | undefined;
     let lastStopSequence: string | undefined;
@@ -1603,6 +1541,7 @@ export class Membrane {
             timeoutMs,
             idleTimeoutMs,
             progressTimeoutMs,
+            retryRateLimits,
             normalizedRequest: request,
             formatterName: activeFormatter.name,
             requiresAssistantPrefill: false,
@@ -1632,6 +1571,7 @@ export class Membrane {
         tracker.flush();
         rounds++;
         providerCalls += streamResult.providerCalls;
+        retryDelaysMs.push(...streamResult.retryDelaysMs);
 
         rawResponse = streamResult.raw;
 
@@ -1745,6 +1685,7 @@ export class Membrane {
             totalDurationMs: durationMs,
             attempts: providerCalls,
             rounds,
+            ...(retryDelaysMs.length > 0 ? { retryDelaysMs } : {}),
           },
           model: {
             requested: request.config.model,
@@ -2154,6 +2095,8 @@ export class Membrane {
     const state: { failure?: { error: unknown } } = {};
     return {
       signal: callerSignal ? AbortSignal.any([callerSignal, controller.signal]) : controller.signal,
+      /** The consumer's failure, once it has thrown: the call ends with it. */
+      get failure(): { error: unknown } | undefined { return state.failure; },
       emit(send: () => void): void {
         try {
           send();
@@ -2181,8 +2124,11 @@ export class Membrane {
    * Returns the (possibly modified) request, or the original if no hook is
    * configured. This is the single point that all request-build sites should
    * route through before invoking the adapter, so observers / mutators
-   * (logging, redaction, model rewriting) see every API call regardless of
+   * (logging, redaction, model rewriting) see every request regardless of
    * whether it came from `complete()`, `stream()`, or `streamYielding()`.
+   * The streaming paths run it once per round: a call membrane sends again
+   * after a failure goes out as the hook left it. `complete()` runs it on
+   * every pass.
    */
   private async applyBeforeRequestHook(
     normalizedRequest: NormalizedRequest,
@@ -2532,16 +2478,26 @@ export class Membrane {
        */
       refusalRetries?: number;
       /**
-       * REQUIRED to enable streaming retries. Called immediately before a
-       * re-issue so the caller can discard the abandoned attempt: reset its
-       * accumulators and tell its own consumer to drop what it emitted.
+       * REQUIRED for a refusal re-issue (refusalRetries) on this path.
+       * Called immediately before the re-issue so the caller can discard the
+       * abandoned attempt: reset its accumulators and tell its own consumer
+       * to drop what it emitted.
        *
-       * Without it a retry would silently concatenate two attempts, so a
-       * caller that does not pass this simply does not get retries — an
+       * Without it a re-issue would silently concatenate two attempts, so a
+       * caller that does not pass this simply does not get re-issues — an
        * unaware consumer can never be corrupted by enabling the option
-       * somewhere upstream.
+       * somewhere upstream. A call that failed before it delivered anything
+       * is sent again without it, since there is nothing to discard.
        */
       onRetrying?: (info: { attempt: number; maxAttempts: number; category?: string }) => void;
+      /** See StreamOptions.retryRateLimits: false leaves a 429 to the caller. */
+      retryRateLimits?: boolean;
+      /**
+       * Called before each wait to send a call again that failed before it
+       * delivered anything (see retryPlan). Nothing reached the callbacks from
+       * the failed call, so there is nothing to discard.
+       */
+      onBackoff?: (info: Omit<BackoffEvent, 'type'>) => void;
       /**
        * Starts with the post-hook/post-clamp input count. Wire-request
        * adapters update it from onRequest; default adapters retain the
@@ -2564,8 +2520,10 @@ export class Membrane {
   ): Promise<
     import('./types/provider.js').ProviderResponse & {
       discardedUsage?: DiscardedAttemptsUsage;
-      /** Provider calls this helper made, including refusal re-issues. */
+      /** Provider calls this helper made, including refusal re-issues and retries. */
       providerCalls: number;
+      /** The waits before each retry of a failed call, in order; empty when none failed. */
+      retryDelaysMs: number[];
     }
   > {
     // Strip `normalizedRequest` before forwarding to the adapter — it's
@@ -2573,7 +2531,7 @@ export class Membrane {
     // compatibility won't catch the excess field (checked only on object
     // literals, not on variables). Leaving it in would silently leak the
     // normalized form into every adapter's options.
-    const { normalizedRequest, formatterName, requiresAssistantPrefill, refusalRetries, onRetrying, onWireCacheMarkers, progressTimeoutMs, fidelity, ...adapterOptions } = options;
+    const { normalizedRequest, formatterName, requiresAssistantPrefill, refusalRetries, onRetrying, retryRateLimits, onBackoff, onWireCacheMarkers, progressTimeoutMs, fidelity, ...adapterOptions } = options;
     // Fingerprint around the hook only when both a hook and a reader exist
     // (the yielding loops pass notes only when they emit usage events, which
     // carry the round report): an observer or a no-op hook keeps fidelity
@@ -2646,8 +2604,13 @@ export class Membrane {
     // abandoned spend rides back out on the result itself.
     let discardedUsage: DiscardedAttemptsUsage | undefined;
     let providerCalls = 0;
+    // Sends since the last refusal re-issue, which starts the count again: the
+    // transport-error budget, and the attempts an error reports.
+    let tries = 0;
+    const retryDelaysMs: number[] = [];
     while (true) {
       providerCalls++;
+      tries++;
       attemptAlterations = [];
       // A native attempt ends at the request's first stop whether or not the
       // provider applied it (see LocalStopSequences). The explicit-XML loops
@@ -2655,14 +2618,32 @@ export class Membrane {
       // attempt before the refusal check below, so an attempt that stopped
       // locally is never re-issued for a refusal that came after its stop.
       const localStops = requiresAssistantPrefill ? undefined : new LocalStopSequences(finalRequest.stopSequences, callbacks);
-      // Each provider call, refusal re-issues included, gets its own progress
-      // deadline; time outside the call (tool execution) never counts.
+      // Whether this call has delivered anything. The callers' accumulators
+      // and their consumers only ever see a call through these callbacks, so
+      // a call that failed before any of them ran left nothing behind: it can
+      // be sent again without a rollback and without replaying anything.
+      let delivered = false;
+      const sent = localStops?.callbacks ?? callbacks;
+      const attemptCallbacks: StreamCallbacks = {
+        onChunk: (chunk) => { delivered = true; sent.onChunk(chunk); },
+        ...(sent.onContentBlock
+          ? { onContentBlock: (index: number, block: unknown) => { delivered = true; sent.onContentBlock!(index, block); } }
+          : {}),
+        ...(sent.onThinkingSignature
+          ? { onThinkingSignature: (index: number, signature: string) => { delivered = true; sent.onThinkingSignature!(index, signature); } }
+          : {}),
+      };
+      let attemptResult: ProviderResponse | undefined;
+      let failure: { error: unknown } | undefined;
+      // Each send gets its own progress deadline, made here and cleaned up
+      // before anything decides whether to send it again: refusal re-issues
+      // and retries each get a new one, and time outside the send (the wait
+      // before a retry, tool execution) never counts.
       const progress = createProgressDeadline(observedOptions.signal, progressTimeoutMs);
-      let attemptResult: ProviderResponse;
       try {
         const streamCall = this.adapter.stream(
           finalRequest,
-          localStops?.callbacks ?? callbacks,
+          attemptCallbacks,
           progress.renew ? { ...observedOptions, signal: progress.signal, onProgress: progress.renew } : observedOptions,
         );
         attemptResult = receiptGuard ? await receiptGuard.settle(streamCall) : await streamCall;
@@ -2670,11 +2651,58 @@ export class Membrane {
         // Held text was received: deliver it so partialContent keeps it. The
         // attempt's own error is the one to report, whatever delivery does.
         try { localStops?.release(); } catch { /* keep the original error */ }
-        throw error;
+        failure = { error };
       } finally {
         progress.cleanup();
       }
-      const rawResult = localStops ? localStops.finish(attemptResult) : attemptResult;
+      // Whether to send the call again is decided once the send is over, so
+      // nothing that belongs to the send stays live through the wait.
+      if (failure) {
+        // Typed once, as every path's caller gets it: a failure that isn't a
+        // MembraneError yet is typed by errorFromThrown, so the retry is
+        // decided on that type and `attempts` stays on what is thrown.
+        const typed = errorFromThrown(failure.error);
+        // A receipt consumer that threw stopped the call before its request
+        // went out: its error is the answer, never retried.
+        if (receiptGuard?.failure) throw typed;
+        // A call that delivered anything can't be sent again, and it starts
+        // the count again: membrane hasn't retried this failure.
+        if (delivered) throw withAttempts(typed, 1);
+        // The call's signal first, as complete() reads the caller's: a
+        // cancellation plans no retry and asks onError nothing, and each path
+        // reports it as the cancellation it is.
+        if (adapterOptions.signal?.aborted) throw withAttempts(typed, tries);
+        const errorInfo = classifyError(typed);
+        const plan = isDeadlineExpiry(typed) ? undefined : this.retryPlan(errorInfo, tries, { retryRateLimits });
+        if (!plan) throw withAttempts(typed, tries);
+        // The same pre-retry hook contract as complete(): hosts use onError
+        // for circuit-breaking, and its 'abort' decision ends the call here.
+        if (this.config.hooks?.onError) {
+          const decision = await this.config.hooks.onError(errorInfo, tries);
+          if (decision === 'abort') throw withAttempts(typed, tries);
+        }
+        const delayMs = this.calculateRetryDelay(tries, plan.overloaded, errorInfo);
+        // A cancellation can land while onError decides. Then the sleep below
+        // rejects at once, and no wait is announced or reported that won't
+        // happen (an aborted stream's last event stays `aborted`).
+        if (!adapterOptions.signal?.aborted) {
+          retryDelaysMs.push(delayMs);
+          onBackoff?.({
+            schedule: plan.overloaded ? 'overloaded' : 'base',
+            attempt: tries,
+            maxAttempts: plan.maxAttempts - 1,
+            delayMs,
+            error: withAttempts(typed, tries),
+          });
+        }
+        // The call's signal ends the wait: the caller's, or on streamYielding
+        // the stream's own, which cancel() aborts. Each path reports that as
+        // the cancellation it is (an AbortedResponse, an aborted event), with
+        // what earlier rounds delivered.
+        await this.sleep(delayMs, adapterOptions.signal);
+        continue;
+      }
+      const rawResult = localStops ? localStops.finish(attemptResult!) : attemptResult!;
       // Restate usage in the one convention before any accumulator, ratio or
       // price sees it — this is the only door streamed usage enters through.
       const result: ProviderResponse = {
@@ -2686,10 +2714,12 @@ export class Membrane {
         return {
           ...result,
           providerCalls,
+          retryDelaysMs,
           ...(discardedUsage ? { discardedUsage } : {}),
         };
       }
       retried++;
+      tries = 0;
       discardedUsage = this.mergeDiscardedAttempts(
         discardedUsage,
         this.discardedAttemptFrom(result.usage)
@@ -3314,9 +3344,10 @@ export class Membrane {
   /**
    * The server's own `retry-after` outranks our backoff when it is longer:
    * retrying inside a window the provider has already told us to wait out
-   * burns the whole attempt budget on guaranteed failures. maxRetryDelayMs
-   * still caps Membrane's own sleep, so a hostile or absurd retry-after
-   * cannot park the call. The error a caller receives carries the provider's
+   * burns the whole attempt budget on guaranteed failures. A stated wait
+   * longer than maxRetryDelayMs isn't retried at all (see retryPlan), so a
+   * hostile or absurd retry-after cannot park the call; the min() below keeps
+   * that bound here too. The error a caller receives carries the provider's
    * stated wait as stated (retryAfterMs): pacing across calls is the
    * caller's.
    */
@@ -3340,28 +3371,49 @@ export class Membrane {
   }
 
   /**
-   * One retry policy, read the same way by complete() and stream().
+   * One retry policy, read the same way by complete() and streamOnce() for
+   * every adapter: membrane is the one layer that retries a call's requests
+   * (AnthropicAdapter turns its SDK client's own retries off for them).
+   * Whether a request that failed with this error, after `attempt` tries, is
+   * sent again: undefined when it isn't; otherwise the schedule it waits on
+   * (overloaded) and the most tries it gets in all (maxAttempts). The callers
+   * send again only what failed before delivering anything, and leave a
+   * deadline that ran out on a sent request (isDeadlineExpiry) to the caller.
    *
-   * The 429 floor exists because a transient rate limit with the default
-   * maxRetries of 0 would otherwise kill a turn outright — so it applies
-   * only where retrying can work. A 429 whose provider code says the account
-   * is out of quota is not a rate limit in that sense: it is classified
-   * non-retryable at the boundary, and gets no floor.
+   * A 529 takes the overloaded schedule, a 429 at least five attempts, and
+   * any other retryable error (a 5xx, a 408, a connection failure) the base
+   * schedule within maxRetries. The 429 floor exists so a transient rate
+   * limit doesn't end a turn whatever maxRetries says. A 429 whose provider
+   * code says the account is out of quota is not a rate limit in that sense:
+   * it is classified non-retryable at the boundary, and gets no floor.
+   *
+   * With `retryRateLimits: false` a 429 belongs to the caller: it isn't retried.
+   * Nor is an error whose stated wait is longer than its schedule's
+   * maxRetryDelayMs.
    */
-  private resolveRetryPolicy(errorInfo: ErrorInfo): {
-    isRateLimit: boolean;
-    isOverloaded: boolean;
-    effectiveMax: number;
-  } {
-    const isRateLimit = errorInfo.type === 'rate_limit' && errorInfo.retryable;
-    const isOverloaded =
+  private retryPlan(
+    errorInfo: ErrorInfo,
+    attempt: number,
+    options: { retryRateLimits?: boolean },
+  ): { overloaded: boolean; maxAttempts: number } | undefined {
+    if (!errorInfo.retryable) return undefined;
+    const isRateLimit = errorInfo.type === 'rate_limit';
+    if (isRateLimit && options.retryRateLimits === false) return undefined;
+    const overloaded =
       isOverloadedError(errorInfo) && this.retryConfig.overloaded.maxRetries > 0;
-    const effectiveMax = isRateLimit
+    const maxAttempts = isRateLimit
       ? Math.max(this.retryConfig.maxRetries, 5)
-      : isOverloaded
+      : overloaded
         ? Math.max(this.retryConfig.maxRetries, this.retryConfig.overloaded.maxRetries)
         : this.retryConfig.maxRetries;
-    return { isRateLimit, isOverloaded, effectiveMax };
+    if (attempt >= maxAttempts) return undefined;
+    // A stated wait longer than the schedule's ceiling can't be waited out
+    // here, and retrying at the ceiling would send the call back inside the
+    // window the provider named. The caller gets the error, with the stated
+    // wait on retryAfterMs.
+    const { maxRetryDelayMs } = overloaded ? this.retryConfig.overloaded : this.retryConfig;
+    if (errorInfo.retryAfterMs !== undefined && errorInfo.retryAfterMs > maxRetryDelayMs) return undefined;
+    return { overloaded, maxAttempts };
   }
 
   private attachRawRequest(error: unknown, rawRequest: unknown): MembraneError {
@@ -3371,9 +3423,7 @@ export class Membrane {
     // through as it is.
     if (isBuildRefusal(error)) return error;
     if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
-    const errorInfo = classifyError(error);
-    errorInfo.rawRequest = rawRequest;
-    return new MembraneError(errorInfo);
+    return errorFromThrown(error, rawRequest);
   }
 
   private sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -3582,6 +3632,8 @@ export class Membrane {
     // re-issues inside streamOnce) and continuation rounds.
     let providerCalls = 0;
     let rounds = 0;
+    // The waits before each call that was sent again (see streamOnce).
+    const retryDelaysMs: number[] = [];
     // Once-per-stream latch for the injectedMessages-unsupported warning.
     let warnedInjectionUnsupported = false;
     // See streamWithXmlTools: one accumulator per turn, pricing each round
@@ -3772,6 +3824,8 @@ export class Membrane {
             timeoutMs: options.timeoutMs,
             idleTimeoutMs: options.idleTimeoutMs,
             progressTimeoutMs: options.progressTimeoutMs,
+            retryRateLimits: options.retryRateLimits,
+            onBackoff: (info) => stream.emit({ type: 'backoff', ...info }),
             normalizedRequest: request,
             formatterName: formatter.name,
             requiresAssistantPrefill: true,
@@ -3789,6 +3843,7 @@ export class Membrane {
         if (typedCallbacks) tracker.flush();
         rounds++;
         providerCalls += streamResult.providerCalls;
+        retryDelaysMs.push(...streamResult.retryDelaysMs);
 
         // If we detected stop sequence manually, fix up the parser and result
         if (detectedStopSequence && truncatedAccumulated !== null) {
@@ -4196,6 +4251,7 @@ export class Membrane {
 
       response.content.push(...extraContentBlocks);
       response.details.timing.rounds = rounds;
+      if (retryDelaysMs.length > 0) response.details.timing.retryDelaysMs = retryDelaysMs;
 
       stream.emit({ type: 'complete', response });
     } catch (error) {
@@ -4260,6 +4316,8 @@ export class Membrane {
     // re-issues inside streamOnce) and continuation rounds.
     let providerCalls = 0;
     let rounds = 0;
+    // The waits before each call that was sent again (see streamOnce).
+    const retryDelaysMs: number[] = [];
     let lastStopReason: StopReason = 'end_turn';
     let lastProviderStopReason: string | undefined;
     let lastStopSequence: string | undefined;
@@ -4360,6 +4418,8 @@ export class Membrane {
             timeoutMs: options.timeoutMs,
             idleTimeoutMs: options.idleTimeoutMs,
             progressTimeoutMs: options.progressTimeoutMs,
+            retryRateLimits: options.retryRateLimits,
+            onBackoff: (info) => stream.emit({ type: 'backoff', ...info }),
             normalizedRequest: request,
             formatterName: activeFormatter.name,
             requiresAssistantPrefill: false,
@@ -4405,6 +4465,7 @@ export class Membrane {
         tracker.flush();
         rounds++;
         providerCalls += streamResult.providerCalls;
+        retryDelaysMs.push(...streamResult.retryDelaysMs);
 
         rawResponse = streamResult.raw;
         lastStopReason = this.mapStopReason(streamResult.stopReason);
@@ -4570,6 +4631,7 @@ export class Membrane {
             totalDurationMs: durationMs,
             attempts: providerCalls,
             rounds,
+            ...(retryDelaysMs.length > 0 ? { retryDelaysMs } : {}),
           },
           model: {
             requested: request.config.model,

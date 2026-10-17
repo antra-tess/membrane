@@ -27,7 +27,7 @@ import { MockAdapter } from '../../src/providers/mock.js';
 import { rawSseResponse } from '../helpers/sse-fixtures.js';
 import { chunkFrame, streamBody } from '../helpers/bedrock-event-stream.js';
 import { createCombinedSignal, createProgressDeadline, isDeadlineAbort, deadlineTimeoutError } from '../../src/providers/utils.js';
-import { TimeoutAbortError, isAbortedResponse } from '../../src/types/index.js';
+import { TimeoutAbortError, isAbortedResponse, serverError } from '../../src/types/index.js';
 import type { NormalizedRequest, StreamEvent } from '../../src/types/index.js';
 import type { ProviderAdapter, ProviderRequest, ProviderRequestOptions, ProviderResponse } from '../../src/types/provider.js';
 import type { StreamCallbacks } from '../../src/types/streaming.js';
@@ -449,6 +449,120 @@ describe('Membrane core: one renewable deadline per provider call', () => {
     await vi.advanceTimersByTimeAsync(800);
     expect(isAbortedResponse(await streamed)).toBe(false);
     expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
+  });
+
+  /**
+   * Sends a call's answer after `quietMs` of silence, honouring its signal as
+   * an adapter does; `fails` decides, per send, what the send throws instead.
+   */
+  class QuietSends implements ProviderAdapter {
+    readonly name = 'zz-quiet-sends';
+    calls = 0;
+    readonly signals: AbortSignal[] = [];
+    constructor(private readonly quietMs: (send: number) => number, private readonly fails: (send: number) => Error | undefined) {}
+    supportsModel(): boolean { return true; }
+    private async attempt(request: ProviderRequest, options?: ProviderRequestOptions, callbacks?: StreamCallbacks): Promise<ProviderResponse> {
+      const send = this.calls++;
+      const signal = options!.signal!;
+      this.signals.push(signal);
+      await new Promise<void>((resolve, reject) => {
+        const abort = (): void => reject(isDeadlineAbort(signal.reason) ? deadlineTimeoutError(signal.reason) : signal.reason);
+        // A send whose signal is already aborted fails at once, as fetch does.
+        if (signal.aborted) { abort(); return; }
+        const quiet = this.quietMs(send);
+        const timer = Number.isFinite(quiet) ? setTimeout(resolve, quiet) : undefined;
+        signal.addEventListener('abort', () => { clearTimeout(timer); abort(); }, { once: true });
+      });
+      const failure = this.fails(send);
+      if (failure) throw failure;
+      callbacks?.onChunk('zz answer');
+      return {
+        content: [{ type: 'text', text: 'zz answer' }],
+        stopReason: 'end_turn',
+        usage: { inputTokens: 10, outputTokens: 2 },
+        model: request.model,
+        rawRequest: request,
+        raw: {},
+      } as unknown as ProviderResponse;
+    }
+    async complete(request: ProviderRequest, options?: ProviderRequestOptions): Promise<ProviderResponse> {
+      return this.attempt(request, options);
+    }
+    async stream(request: ProviderRequest, callbacks: StreamCallbacks, options?: ProviderRequestOptions): Promise<ProviderResponse> {
+      return this.attempt(request, options, callbacks);
+    }
+  }
+
+  it('gives each retry of a failed send a deadline of its own, and counts the wait before it against none', async () => {
+    // Each send is silent for three quarters of the deadline, and the first
+    // then fails with a 529 before delivering anything. The retry waits 400
+    // ms first. One deadline shared by both sends would expire in the retry,
+    // and so would a retry's deadline that counted its wait.
+    vi.useFakeTimers();
+    // The overloaded schedule's jitter draws from [delay / 2, delay): take its least.
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    const schedule = { retry: { overloaded: { maxRetries: 2, retryDelayMs: 800, maxRetryDelayMs: 800, backoffMultiplier: 1 } } };
+    const overloadedOnce = (): QuietSends => new QuietSends(() => 750, (send) => (send === 0 ? serverError('zz overloaded', 529) : undefined));
+
+    const viaComplete = overloadedOnce();
+    const completed = new Membrane(viaComplete, schedule).complete(REQUEST, { progressTimeoutMs: 1000 });
+    await vi.advanceTimersByTimeAsync(2000);
+    const response = await completed;
+    expect(viaComplete.calls).toBe(2);
+    expect(response.content).toEqual([{ type: 'text', text: 'zz answer' }]);
+    expect(response.details.timing.attempts).toBe(2);
+    expect(viaComplete.signals[0]).not.toBe(viaComplete.signals[1]);
+
+    const viaStream = overloadedOnce();
+    const streamed = new Membrane(viaStream, schedule).stream(XML_REQUEST, { progressTimeoutMs: 1000 });
+    await vi.advanceTimersByTimeAsync(2000);
+    const result = await streamed;
+    expect(isAbortedResponse(result)).toBe(false);
+    expect(viaStream.calls).toBe(2);
+    expect('details' in result && result.details.timing.retryDelaysMs).toEqual([400]);
+    expect(viaStream.signals[0]).not.toBe(viaStream.signals[1]);
+
+    const viaYielding = overloadedOnce();
+    const collecting = collect(new Membrane(viaYielding, schedule).streamYielding(NATIVE_REQUEST, { progressTimeoutMs: 1000 }));
+    await vi.advanceTimersByTimeAsync(2000);
+    const events = await collecting;
+    expect(viaYielding.calls).toBe(2);
+    expect(events.filter((e) => e.type === 'backoff').map((e) => (e as { delayMs: number }).delayMs)).toEqual([400]);
+    expect(events.filter((e) => e.type === 'aborted')).toEqual([]);
+    expect(events.some((e) => e.type === 'complete')).toBe(true);
+    expect(viaYielding.signals[0]).not.toBe(viaYielding.signals[1]);
+  });
+
+  it('sends a call whose deadline ran out once, and leaves its timeout to the caller', async () => {
+    // The first send is silent past its deadline; a second send would answer
+    // at once. Membrane's retries don't send it again: a deadline that ran
+    // out on a sent request is the caller's.
+    vi.useFakeTimers();
+    const silentFirst = (): QuietSends => new QuietSends((send) => (send === 0 ? Infinity : 10), () => undefined);
+
+    const viaComplete = silentFirst();
+    const settled = new Membrane(viaComplete).complete(REQUEST, { progressTimeoutMs: 1000 }).then(() => undefined, (error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(1500);
+    const error = await settled;
+    expect(error).toBeInstanceOf(TimeoutAbortError);
+    expect((error as TimeoutAbortError).attempts).toBe(1);
+    expect(viaComplete.calls).toBe(1);
+
+    const viaStream = silentFirst();
+    const streamed = new Membrane(viaStream).stream(XML_REQUEST, { progressTimeoutMs: 1000 });
+    await vi.advanceTimersByTimeAsync(1500);
+    const result = await streamed;
+    expect(isAbortedResponse(result)).toBe(true);
+    expect((result as { reason: string }).reason).toBe('timeout');
+    expect(viaStream.calls).toBe(1);
+
+    const viaYielding = silentFirst();
+    const collecting = collect(new Membrane(viaYielding).streamYielding(NATIVE_REQUEST, { progressTimeoutMs: 1000 }));
+    await vi.advanceTimersByTimeAsync(1500);
+    const events = await collecting;
+    expect(viaYielding.calls).toBe(1);
+    expect(events.filter((e) => e.type === 'backoff')).toEqual([]);
+    expect(events.find((e) => e.type === 'aborted')).toMatchObject({ reason: 'timeout' });
   });
 
   it('keeps a mock stream alive while its chunks come faster than the deadline', async () => {

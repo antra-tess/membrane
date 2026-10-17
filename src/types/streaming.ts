@@ -222,6 +222,17 @@ export interface StreamOptions {
    */
   progressTimeoutMs?: number;
 
+  /**
+   * Whether membrane retries a 429 rate limit itself. Default true: a 429
+   * that ends a provider call before it delivered anything is retried, like a
+   * 529, unless its stated wait is longer than its schedule's
+   * `maxRetryDelayMs`, which reaches the caller at once. With `false`, a 429
+   * is the caller's: membrane doesn't retry it and throws it at once, with
+   * the provider's stated wait on `retryAfterMs`. For a caller that paces
+   * rate limits itself. A 529 is still retried.
+   */
+  retryRateLimits?: boolean;
+
   /** Request ID for correlation */
   requestId?: string;
   
@@ -301,6 +312,16 @@ export interface CompleteOptions {
    * — cheaper and far less invasive than rewriting the conversation.
    */
   refusalRetries?: number;
+
+  /**
+   * Whether membrane retries a 429 rate limit itself. Default true, unless
+   * the 429's stated wait is longer than its schedule's `maxRetryDelayMs`,
+   * which is thrown at once. With `false`, a 429 is the caller's: membrane
+   * doesn't retry it and throws it at once, with the provider's stated wait
+   * on `retryAfterMs`. For a caller that paces rate limits itself. Other
+   * retryable errors keep their retries.
+   */
+  retryRateLimits?: boolean;
 
   /** Request timeout */
   timeoutMs?: number;

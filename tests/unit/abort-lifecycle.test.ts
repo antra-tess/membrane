@@ -491,7 +491,7 @@ describe('stream() with streaming: false reports a cancellation as its streaming
   });
 
   it('still throws a failure that is not a cancellation', async () => {
-    const membrane = new Membrane(new OverloadedAdapter(), { retry: { overloaded: { maxRetries: 0 } } });
+    const membrane = new Membrane(new OverloadedAdapter(), { retry: { maxRetries: 1, overloaded: { maxRetries: 0 } } });
     await expect(membrane.stream(NON_STREAMING, {})).rejects.toMatchObject({ type: 'server', httpStatus: 529 });
   });
 });

@@ -20,11 +20,11 @@ import type {
 import {
   MembraneError,
   abortError,
-  classifyError,
   errorFromHttpResponse,
   isTypedAbortError,
   withRawRequest,
 } from '../types/index.js';
+import { errorFromThrown } from '../types/errors.js';
 import { toolUseInputFromText, textOnlyToolResultContent, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved } from './utils.js';
 
 // ============================================================================
@@ -778,9 +778,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
     if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
     if (isTypedAbortError(error)) return abortError(undefined, rawRequest);
 
-    const info = classifyError(error);
-    info.rawRequest = rawRequest;
-    return new MembraneError(info);
+    return errorFromThrown(error, rawRequest);
   }
 }
 

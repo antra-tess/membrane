@@ -31,10 +31,10 @@ const factories = [
 async function invokeAdapter(adapter: ProviderAdapter, entry: string, options = {}) {
   return entry === 'complete' ? adapter.complete(wire, options) : adapter.stream(wire, { onChunk() {} }, options);
 }
-async function invoke(membrane: Membrane, entry: string) {
-  if (entry === 'complete') return membrane.complete(request);
-  if (entry === 'stream') return membrane.stream(request);
-  for await (const event of membrane.streamYielding(request)) {
+async function invoke(membrane: Membrane, entry: string, options: { retryRateLimits?: boolean } = {}) {
+  if (entry === 'complete') return membrane.complete(request, options);
+  if (entry === 'stream') return membrane.stream(request, options);
+  for await (const event of membrane.streamYielding(request, options)) {
     if (event.type === 'error') throw event.error;
     if (event.type === 'complete') return event.response;
   }
@@ -51,22 +51,21 @@ describe('fetch failures preserve transport retryability', () => {
       await expect(invokeAdapter(create(), entry)).rejects.toMatchObject({ type: 'network', retryable: true });
     });
   }
-  it.each(['complete', 'stream', 'yielding'])('%s retains its own retry policy', async entry => {
+  it.each(['complete', 'stream', 'yielding'])('%s retries a connection failure within maxRetries', async entry => {
     let sends = 0;
     vi.stubGlobal('fetch', vi.fn(async () => {
       if (++sends === 1) throw new TypeError('fetch failed');
-      return new Response(JSON.stringify({ choices: [{ message: { content: 'done' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1 } }));
+      return entry === 'complete'
+        ? new Response(JSON.stringify({ choices: [{ message: { content: 'done' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1 } }))
+        : sse([{ choices: [{ delta: { content: 'done' }, finish_reason: 'stop' }] }, '[DONE]']);
     }));
     const membrane = new Membrane(new OpenAIAdapter({ apiKey: 'zz-key' }), {
       formatter: new NativeFormatter(), retry: { maxRetries: 2, retryDelayMs: 1 },
     });
-    if (entry === 'complete') {
-      await invoke(membrane, entry);
-      expect(sends).toBe(2);
-    } else {
-      await expect(invoke(membrane, entry)).rejects.toMatchObject({ type: 'network', retryable: true });
-      expect(sends).toBe(1);
-    }
+    // One retry layer, the same on every entry point: the connection failed
+    // before anything was delivered, so the request is sent again.
+    await invoke(membrane, entry);
+    expect(sends).toBe(2);
   });
 });
 
@@ -290,20 +289,27 @@ describe('SSE payload classification shares HTTP-boundary semantics', () => {
       await expect(invoke(membrane, entry)).rejects.toMatchObject({ type: 'rate_limit', retryable: false, providerErrorCode: 'insufficient_quota' });
       expect(fetch).toHaveBeenCalledTimes(1);
     });
-    it(entry + ' keeps its existing transient SSE-rate-limit retry policy', async () => {
+    it(entry + ' retries a transient SSE rate limit that arrives before any output', async () => {
       let sends = 0;
       const fetch = vi.fn(async () => ++sends === 1
         ? sse([{ error: { status: 429, code: 'rate_limit_exceeded', message: 'wait', retry_after_ms: 1 } }])
         : sse([{ choices: [{ delta: { content: 'done' }, finish_reason: 'stop' }] }, '[DONE]']));
       vi.stubGlobal('fetch', fetch);
       const membrane = new Membrane(new OpenAIAdapter({ apiKey: 'zz-key' }), { formatter: new NativeFormatter(), retry: { retryDelayMs: 1 } });
-      if (entry === 'stream') {
-        await invoke(membrane, entry);
-        expect(sends).toBe(2);
-      } else {
-        await expect(invoke(membrane, entry)).rejects.toMatchObject({ type: 'rate_limit', retryable: true, providerErrorCode: 'rate_limit_exceeded' });
-        expect(sends).toBe(1);
-      }
+      await invoke(membrane, entry);
+      expect(sends).toBe(2);
+    });
+    it(entry + ' leaves the rate limit to a caller that sets retryRateLimits: false', async () => {
+      let sends = 0;
+      const fetch = vi.fn(async () => ++sends === 1
+        ? sse([{ error: { status: 429, code: 'rate_limit_exceeded', message: 'wait', retry_after_ms: 1 } }])
+        : sse([{ choices: [{ delta: { content: 'done' }, finish_reason: 'stop' }] }, '[DONE]']));
+      vi.stubGlobal('fetch', fetch);
+      const membrane = new Membrane(new OpenAIAdapter({ apiKey: 'zz-key' }), { formatter: new NativeFormatter(), retry: { retryDelayMs: 1 } });
+      await expect(invoke(membrane, entry, { retryRateLimits: false })).rejects.toMatchObject({
+        type: 'rate_limit', retryable: true, providerErrorCode: 'rate_limit_exceeded', retryAfterMs: 1, attempts: 1,
+      });
+      expect(sends).toBe(1);
     });
   }
 });

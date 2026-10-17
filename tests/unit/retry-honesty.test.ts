@@ -82,16 +82,18 @@ describe('calculateRetryDelay honors retry-after (MAJOR-2)', () => {
     expect(elapsedMs).toBeGreaterThanOrEqual(150);
   });
 
-  it('still clamps to maxRetryDelayMs when the server asks for longer', async () => {
+  it('gives the caller a stated wait longer than maxRetryDelayMs instead of retrying inside it', async () => {
     const adapter = new FailingAdapter(1, () => rateLimit(60_000));
     adapter.queueResponse('zz-recovered');
     const membrane = new Membrane(adapter, { retry: { maxRetries: 2, retryDelayMs: 1, maxRetryDelayMs: 40 } });
 
     const startedAt = Date.now();
-    await membrane.complete(zzRequest);
-    const elapsedMs = Date.now() - startedAt;
-
-    expect(elapsedMs).toBeLessThan(2_000);
+    await expect(membrane.complete(zzRequest)).rejects.toMatchObject({
+      type: 'rate_limit', retryAfterMs: 60_000, attempts: 1,
+    });
+    // Not parked on the stated wait, and not sent back inside it.
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(adapter.completeCalls).toBe(1);
   });
 
   it('waits the backoff when the stated wait is shorter (0)', async () => {
