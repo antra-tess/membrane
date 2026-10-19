@@ -399,8 +399,10 @@ describe('data: URLs', () => {
         ] },
       ] }],
     });
+    // The API takes a breakpoint in a tool_result's content on its last block
+    // only (utils/anthropic-wire-blocks.ts), so the first one is left out.
     expect(built.messages[0].content[0].content).toEqual([
-      { type: 'text', text: expect.stringContaining(SAID), cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: expect.stringContaining(SAID) },
       { type: 'text', text: expect.stringContaining(SAID), cache_control: { type: 'ephemeral' } },
     ]);
   });

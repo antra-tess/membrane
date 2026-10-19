@@ -63,7 +63,8 @@ describe.each(['Anthropic', 'Bedrock'])('%s empty text at the wire boundary', ki
     expect(built.messages[0]).toEqual(request.messages[0]);
     expect(built.messages[1].content).toEqual([
       { type: 'tool_result', tool_use_id: 'call', content: [text('ok'), image] },
-      { type: 'tool_result', tool_use_id: 'empty-array', content: [], is_error: true },
+      // The API takes no error result without content (anthropic-wire-blocks.ts).
+      { type: 'tool_result', tool_use_id: 'empty-array', content: [{ type: 'text', text: '[system: this tool error came with no content.]' }], is_error: true },
       { type: 'tool_result', tool_use_id: 'empty-string', content: '' },
     ]);
   });

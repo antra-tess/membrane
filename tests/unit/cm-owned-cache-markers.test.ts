@@ -149,6 +149,20 @@ describe('cm-owned cache marker contract', () => {
     expect(() => build(formatter, messages)).toThrow(/imported block-level/);
   });
 
+  it.each([
+    ['a block in a tool result', [{ type: 'text', text: 'stale', cache_control: { type: 'ephemeral' } }]],
+    ['a search result in a tool result', [{ type: 'search_result', source: 'zz', title: 'zz', content: [{ type: 'text', text: 'stale', cache_control: { type: 'ephemeral' } }] }]],
+    ["a document's content source in a tool result", [{ type: 'document', source: { type: 'content', content: [{ type: 'text', text: 'stale', cache_control: { type: 'ephemeral' } }] } }]],
+  ])('native rejects an imported marker nested in %s in cm-owned mode', (_where, content) => {
+    const formatter = new NativeFormatter();
+    const messages: NormalizedMessage[] = [
+      { participant: 'User', content: [{ type: 'text', text: 'go' }] },
+      { participant: 'Claude', content: [{ type: 'tool_use', id: 'toolu_zz1', name: 'read', input: {} }] },
+      { participant: 'User', content: [{ type: 'tool_result', toolUseId: 'toolu_zz1', content } as never] },
+    ];
+    expect(() => build(formatter, messages)).toThrow(/imported block-level/);
+  });
+
   it('fails closed when a final hook adds a fifth caller-owned marker', async () => {
     let receiptCalls = 0;
     const membrane = new Membrane(new MockAdapter(), {

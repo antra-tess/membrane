@@ -469,7 +469,7 @@ describe('usage at the adapter boundary: a reported 0 is 0, an unreported count 
 });
 
 describe('adapters report the content they leave out', () => {
-  it('Anthropic: a nested tool-result block with no Anthropic form, or whitespace text cleaned away, but not an exactly empty block', () => {
+  it('Anthropic: a nested tool-result block of a type the API refuses there, or whitespace text cleaned away, but not an exactly empty block or a document', () => {
     const adapter = new AnthropicAdapter({ apiKey: 'test', cacheKeepalive: { enabled: false } }) as any;
     const request = (nested: unknown[]) => ({
       model: 'claude-sonnet-4-5', maxTokens: 64,
@@ -483,7 +483,10 @@ describe('adapters report the content they leave out', () => {
     expect(altered).toBe(0);
     adapter.buildRequest(request([{ type: 'text', text: 'result' }, { type: 'text', text: ' ' }]), () => altered++);
     expect(altered).toBe(1);
+    // The API takes a document inside a tool_result, so it goes.
     adapter.buildRequest(request([{ type: 'text', text: 'result' }, { type: 'document', source: { type: 'base64', mediaType: 'application/pdf', data: 'JVBERi0=' } }]), () => altered++);
+    expect(altered).toBe(1);
+    adapter.buildRequest(request([{ type: 'text', text: 'result' }, { type: 'tool_use', id: 'inner', name: 'noop', input: {} }]), () => altered++);
     expect(altered).toBe(2);
   });
 

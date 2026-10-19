@@ -948,6 +948,42 @@ describe('normalizeToolPairs', () => {
         expect(block.text).toBe(`${prefix}]: one\ntwo`);
       });
 
+      it("carries a marker nested in a search result's content or a document's content source, the last one the budget's walk finds", () => {
+        // After a part's own marker, the nested one is the last, TTL included.
+        const inSearch = build(resultWith({
+          content: [
+            { type: 'text', text: 'one', cache_control: { type: 'ephemeral' } },
+            { type: 'search_result', source: 'zz', title: 'zz', content: [{ type: 'text', text: 'hit', cache_control: marker }] },
+          ],
+        }));
+        expect(textified(normalize(inSearch).messages, prefix).cache_control).toEqual(marker);
+        const inSource = build(resultWith({
+          content: [{ type: 'document', source: { type: 'content', content: [
+            { type: 'text', text: 'part 1' },
+            { type: 'text', text: 'part 2', cache_control: marker },
+          ] } }],
+        }));
+        expect(textified(normalize(inSource).messages, prefix).cache_control).toEqual(marker);
+      });
+
+      it("keeps the result's own marker over one nested in it, and the last marked block over unmarked ones after it", () => {
+        const own = build(resultWith({
+          cache_control: { type: 'ephemeral' },
+          content: [{ type: 'search_result', source: 'zz', title: 'zz', content: [{ type: 'text', text: 'hit', cache_control: marker }] }],
+        }));
+        expect(textified(normalize(own).messages, prefix).cache_control).toEqual({ type: 'ephemeral' });
+        const thenUnmarked = build(resultWith({
+          content: [
+            { type: 'search_result', source: 'zz', title: 'zz', content: [
+              { type: 'text', text: 'hit', cache_control: marker },
+              { type: 'text', text: 'more' },
+            ] },
+            { type: 'text', text: 'after' },
+          ],
+        }));
+        expect(textified(normalize(thenUnmarked).messages, prefix).cache_control).toEqual(marker);
+      });
+
       it('says when the result was an error', () => {
         const input = build(resultWith({ content: 'it failed', is_error: true }));
         expect(textified(normalize(input).messages, prefix).text).toBe(`${prefix}, an error]: it failed`);

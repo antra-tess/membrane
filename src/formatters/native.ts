@@ -36,7 +36,7 @@ import type {
 import { normalizeToolPairs, mergeConsecutiveRoles } from './normalize-tool-pairs.js';
 import { imageForRequest, toolResultContentForRequest } from '../utils/image-media.js';
 import { convertMcpMedia } from '../utils/mcp-media.js';
-import { assertCacheMarkersWithinLimit, countWireCacheMarkers } from '../utils/cache-marker-budget.js';
+import { assertCacheMarkersWithinLimit, blockCacheMarker, countWireCacheMarkers } from '../utils/cache-marker-budget.js';
 import { anthropicServerBlockFor, unpairedServerBlocks } from '../utils/anthropic-server-blocks.js';
 
 /** Index of the last content block that can carry cache_control. Anthropic
@@ -272,9 +272,17 @@ export class NativeFormatter implements PrefillFormatter {
         ...(options.fidelity ? { onAltered: () => options.fidelity!.alter(i) } : {}),
       });
 
+      // Under cm-owned, no breakpoint but the strategy's goes in the built
+      // messages: one a caller handed in that conversion keeps is refused at
+      // any depth the cache-marker budget walks, as the budget would count it.
+      // Conversion already leaves out one on an image, a tool_use or a
+      // tool_result block itself, and a replayed server block's; a top-level
+      // document is refused, or left out with its breakpoints under
+      // `unsupportedMedia: 'strip'`; a passthrough `extra.messages` isn't
+      // built here.
       if (
         cacheMarkers === 'cm-owned' &&
-        content.some((block) => Boolean((block as Record<string, unknown>).cache_control))
+        content.some((block) => Boolean(blockCacheMarker(block)))
       ) {
         throw new Error('cm-owned cache markers reject imported block-level cache_control');
       }
@@ -458,10 +466,11 @@ export class NativeFormatter implements PrefillFormatter {
       const kept = blocks.filter((block) => {
         if (!unpaired.has(block)) return true;
         fidelity?.alterBlock(block);
-        if (block.cache_control) marker = block.cache_control;
+        const carried = blockCacheMarker(block);
+        if (carried) marker = carried;
         return false;
       });
-      if (marker !== undefined && !kept.some((block) => block.cache_control)) {
+      if (marker !== undefined && !kept.some((block) => blockCacheMarker(block))) {
         const at = lastCacheableBlockIndex(kept);
         if (at >= 0) kept[at]!.cache_control = marker;
       }
