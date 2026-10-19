@@ -10,6 +10,7 @@ import { stripEmptyTextBlocks, stripEmptyTextRequest } from '../utils/empty-text
 import { anthropicServerBlockFor, isAnthropicServerBlock, unpairedServerBlocks, type AnthropicServerBlock } from '../utils/anthropic-server-blocks.js';
 import { imageForRequest, urlImageForRequest, assertWithinByteBudget, shedImagesToFitByteBudget } from '../utils/image-media.js';
 import { convertMcpMedia, isSourcelessMedia } from '../utils/mcp-media.js';
+import { anthropicToolResultContent, anthropicWireMessages, blockBuiltFrom } from '../utils/anthropic-wire-blocks.js';
 import type {
   ProviderAdapter,
   ProviderInputTransformation,
@@ -144,9 +145,10 @@ export function sendsBlockBinding(params: { thinking?: unknown }): boolean {
 /**
  * A response's `input_transformations` (Anthropic and Bedrock alike), each
  * entry with the block at its `messages.{i}.content.{j}` path in `messages`,
- * the messages as sent. Both adapters send a request's thinking blocks as
- * the request's own objects, so that is the block membrane built. Nothing
- * when the response carried no report.
+ * the messages as sent. Both adapters build each block of a type membrane
+ * uses as a copy of the request's own, so the entry names the block it was
+ * built from (blockBuiltFrom): the one membrane built. Nothing when the
+ * response carried no report.
  */
 export function readInputTransformations(
   raw: unknown,
@@ -166,7 +168,9 @@ export function readInputTransformations(
       type,
       ...(typeof reason === 'string' ? { reason } : {}),
       ...(typeof path === 'string' ? { path } : {}),
-      ...(block !== undefined ? { block } : {}),
+      // The request's own block: a block the wire's build copied names the
+      // one it was built from (utils/anthropic-wire-blocks.ts).
+      ...(block !== undefined ? { block: blockBuiltFrom(block) } : {}),
     });
   }
   return { inputTransformations };
@@ -286,10 +290,13 @@ function observeBodyActivity(base: SdkFetch, observe?: () => void): SdkFetch {
 export class AnthropicAdapter implements ProviderAdapter {
   readonly name = 'anthropic';
   /**
-   * Carries message content verbatim, and reports what it can't: an image
-   * whose data the API doesn't accept, which goes as the placeholder (at the
-   * top level or nested in a tool result), and the nested tool-result blocks
-   * it has no form for.
+   * Reports what it leaves out: media with no source, whitespace-only text
+   * its cleanup removes, an image whose data the API doesn't accept, which
+   * goes as the placeholder (at the top level or nested in a tool result), a
+   * nested tool-result block of a type the API refuses there, and a
+   * passthrough `messages` that replaces the built ones. Otherwise it carries
+   * message content as built, each block built from the API's fields for its
+   * type, in the wire's spellings (utils/anthropic-wire-blocks.ts).
    */
   readonly reportsContentAlterations = true;
   readonly cacheReceiptBasis = 'wire-request' as const;
@@ -866,81 +873,12 @@ export class AnthropicAdapter implements ProviderAdapter {
   }
 
   private buildRequest(request: ProviderRequest, onContentAltered?: (block?: unknown) => void): Anthropic.MessageCreateParams {
-    // Strip provider-specific fields (e.g., sourceUrl for Gemini) from image blocks
-    // before sending to Anthropic, which rejects extra inputs.
-    // Also normalize nested tool_result content blocks: Membrane uses camelCase
-    // `mediaType`, Anthropic expects snake_case `media_type`. Without this,
-    // an image returned by a tool reaches the API as `{source: {mediaType: ...}}`
-    // and is silently rejected (the model sees the text label only).
-    const sanitizedMessages = (request.messages as any[]).map((msg: any) => {
-      if (!Array.isArray(msg.content)) return msg;
-      // Media in MCP's form becomes membrane's first, for a caller that
-      // builds a request directly (Membrane's own builds have converted it
-      // already, utils/mcp-media.ts). A report about a block names the one
-      // the caller handed in.
-      const converted = convertMcpMedia(msg.content as unknown[]);
-      return {
-        ...msg,
-        content: msg.content.map((original: any, index: number) => {
-          const block = converted[index] as any;
-          if (isSourcelessMedia(block)) {
-            // Media with no source object (MCP's form that didn't convert)
-            // has no form the API takes: left out, as in a tool_result, and
-            // reported.
-            onContentAltered?.(original);
-            return undefined;
-          }
-          if (block.type === 'image') {
-            const { sourceUrl, ...rest } = block;
-            if (block.source?.type === 'url') {
-              // A data: URL holds its image inline, so it goes as base64 data
-              // labelled by its header, or as the placeholder. Any other URL is
-              // the API's to fetch.
-              const image = urlImageForRequest(block.source.url);
-              if (image.placeholder) {
-                onContentAltered?.(original);
-                return rest.cache_control ? { ...image.placeholder, cache_control: rest.cache_control } : image.placeholder;
-              }
-              if (image.data) return { ...rest, source: { type: 'base64', media_type: image.mediaType, data: image.data } };
-              return rest;
-            }
-            if (block.source?.type !== 'base64') return rest;
-            // Overwrite media_type in place: a wire-shaped source keeps its key
-            // order, so an already-correct image serializes to the same bytes
-            // as before; only camelCase input gains a trailing media_type.
-            const { mediaType, ...source } = block.source;
-            const image = imageForRequest(source.data, source.media_type ?? mediaType);
-            if (image.placeholder) {
-              // Data that is no accepted image goes as the placeholder text,
-              // keeping any cache breakpoint the image carried.
-              onContentAltered?.(original);
-              return rest.cache_control ? { ...image.placeholder, cache_control: rest.cache_control } : image.placeholder;
-            }
-            return {
-              ...rest,
-              source: {
-                ...source,
-                media_type: image.mediaType,
-              },
-            };
-          }
-          if (block.type === 'tool_result' && Array.isArray(block.content)) {
-            let substituted = false;
-            const content = toAnthropicToolResultContent(block.content as ContentBlock[], () => { substituted = true; });
-            // Nested blocks other than text and base64/URL images have no
-            // Anthropic tool_result form and are left out, whitespace-only
-            // nested text is cleaned away, and an image whose data the API
-            // doesn't accept goes as the placeholder. Only an exactly empty ''
-            // text block carried nothing.
-            const carried = (block.content as Array<{ type?: string; text?: unknown }>)
-              .filter((b) => !(b?.type === 'text' && (typeof b.text !== 'string' || b.text === ''))).length;
-            if (content.length !== carried || substituted) onContentAltered?.(original);
-            return { ...block, content };
-          }
-          return block;
-        }).filter((block: unknown) => block !== undefined),
-      };
-    });
+    // Each content block as the API takes it: built from the API's fields
+    // for its type, at the top of a message and inside a tool_result, since
+    // the API refuses a field it doesn't define (utils/anthropic-wire-blocks.ts).
+    // A tool_result's content keeps the API's own key order, as this adapter
+    // always built it, so a request that went out before keeps its bytes.
+    const sanitizedMessages = anthropicWireMessages(request.messages, { onContentAltered, nestedInApiOrder: true }) as Array<{ content?: unknown }>;
 
     // Byte-wall INVARIANT at the last exit before the SDK (2026-07-12): the
     // policy decision (shed with explicit opt-in, or fail loudly) happens
@@ -1049,7 +987,9 @@ export class AnthropicAdapter implements ProviderAdapter {
       Object.assign(params, rest);
     }
 
-    stripEmptyTextRequest(params, onContentAltered);
+    // A text block the cleanup removes was built above, so its report names
+    // the block it was built from.
+    stripEmptyTextRequest(params, onContentAltered ? (dropped) => onContentAltered(blockBuiltFrom(dropped)) : undefined);
     return params;
   }
 
@@ -1193,34 +1133,6 @@ export class AnthropicAdapter implements ProviderAdapter {
 // ============================================================================
 
 /**
- * Convert Membrane tool-result content blocks to Anthropic's tool_result.content
- * mixed array (text + image). This is what carries an image returned by a tool
- * (e.g. an MCP fetch_attachment result) all the way to the model. Other block
- * types are not valid inside tool_result.content per the Anthropic API and are
- * dropped. `onPlaceholder` hears each image that goes as the placeholder.
- */
-function toAnthropicToolResultContent(
-  blocks: ContentBlock[],
-  onPlaceholder?: () => void,
-): Array<Anthropic.TextBlockParam | Anthropic.ImageBlockParam> {
-  const out: Array<Anthropic.TextBlockParam | Anthropic.ImageBlockParam> = [];
-  for (const block of stripEmptyTextBlocks(blocks)) {
-    if (block.type === 'text') {
-      out.push({ type: 'text', text: block.text });
-    } else if (block.type === 'image') {
-      // An image with no source object, someone else's shape that isn't
-      // MCP's form, has nothing to send and is left out.
-      const image = block.source?.type === 'base64'
-        ? anthropicImage(block.source.data, block.source.mediaType ?? (block.source as { media_type?: string }).media_type)
-        : block.source?.type === 'url' ? anthropicUrlImage(block.source.url) : undefined;
-      if (image?.type === 'text') onPlaceholder?.();
-      if (image) out.push(image);
-    }
-  }
-  return out;
-}
-
-/**
  * Convert normalized content blocks to Anthropic format
  * Preserves cache_control for prompt caching
  */
@@ -1265,6 +1177,12 @@ function anthropicUrlImage(url: string): Anthropic.ImageBlockParam | Anthropic.T
  * top of the turn and inside a `tool_result`. A document that doesn't
  * convert, with no source after that, is left out, and so is an image with no
  * source object that isn't MCP's form, with neither `data` nor `mimeType`.
+ * A `tool_result`'s content goes as the API takes it there
+ * (utils/anthropic-wire-blocks.ts): text, images and documents, and the
+ * API's own search results and tool references as they came, each alone. Its
+ * result names no toolset, so a browser state, which the API takes only in a
+ * browser toolset member's result, is left out there, as is a block of any
+ * other type; an error result carries text only.
  * Nothing reports what it leaves out: it has no alteration callback. It sees
  * one turn, so a turn whose only blocks pairing leaves out comes back empty,
  * for the caller to drop as NativeFormatter drops it.
@@ -1351,9 +1269,7 @@ export function toAnthropicContent(
         result.push({
           type: 'tool_result',
           tool_use_id: block.toolUseId,
-          content: typeof block.content === 'string'
-            ? block.content
-            : toAnthropicToolResultContent(block.content),
+          content: anthropicToolResultContent(block.content, { is_error: block.isError }) as Anthropic.ToolResultBlockParam['content'],
           is_error: block.isError,
         });
         break;

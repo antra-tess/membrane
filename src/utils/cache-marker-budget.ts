@@ -13,10 +13,12 @@
  * module owns it and every site calls it.
  *
  * A marker can also ride a block NESTED inside another block's content array
- * (`tool_result.content` is `string | ContentBlock[]`, passed through to the
- * wire verbatim), so discovery recurses. A belt that cannot see a marker
- * cannot clamp it, and a top-level-only count would report four while five
- * shipped — the request rejected outright with the belt's blessing.
+ * (`tool_result.content` is `string | ContentBlock[]`), so discovery recurses.
+ * A belt that cannot see a marker cannot clamp it, and a top-level-only count
+ * would report four while five shipped — the request rejected outright with
+ * the belt's blessing. The Anthropic-family adapters leave out a nested
+ * marker where the API doesn't take one (utils/anthropic-wire-blocks.ts), so
+ * a marker counted here may not ship.
  */
 
 /** Anthropic's hard limit on cache_control breakpoints per request. */
@@ -27,12 +29,12 @@ export const MAX_CACHE_BREAKPOINTS = 4;
  * a top-level block.
  *
  * A marker can ride a block inside another block's own content array —
- * `ToolResultContent.content` is typed `string | ContentBlock[]` and every
- * builder passes it through verbatim, so a caller-built tool_result whose
- * members carry `cache_control` puts real markers on the wire. The API's own
- * nesting is one level deep; 4 is headroom for shapes it grows later, and it
- * is also what makes this walk TOTAL — a caller-built structure that points
- * back at itself terminates at the cap instead of hanging the request.
+ * `ToolResultContent.content` is typed `string | ContentBlock[]`, so a
+ * caller-built tool_result whose members carry `cache_control` can put real
+ * markers on the wire. The API's own nesting is one level deep; 4 is
+ * headroom for shapes it grows later, and it is also what makes this walk
+ * TOTAL — a caller-built structure that points back at itself terminates at
+ * the cap instead of hanging the request.
  * Markers below the cap are outside the belt's reach, by construction.
  */
 export const MAX_NESTED_CONTENT_DEPTH = 4;

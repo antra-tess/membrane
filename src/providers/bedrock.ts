@@ -36,8 +36,7 @@ import {
   sendsBlockBinding,
   thinkingEnabled,
 } from './anthropic.js';
-import { imageForRequest, urlImageForRequest } from '../utils/image-media.js';
-import { convertMcpMedia, isSourcelessMedia } from '../utils/mcp-media.js';
+import { anthropicWireMessages, blockBuiltFrom } from '../utils/anthropic-wire-blocks.js';
 
 // ============================================================================
 // Adapter Configuration
@@ -294,12 +293,14 @@ async function signRequest(
 export class BedrockAdapter implements ProviderAdapter {
   readonly name = 'bedrock';
   /**
-   * Reports what it leaves out: whitespace-only text its cleanup removes, an
-   * image whose data the API doesn't accept, which goes as the placeholder
-   * (at the top level or nested in a tool result), and a passthrough
-   * `messages` that replaces the built ones. Otherwise it carries message
-   * content as built, nested tool-result blocks included; only wire fields
-   * (sourceUrl, cache ttl, media_type spelling) change.
+   * Reports what it leaves out: media with no source, whitespace-only text
+   * its cleanup removes, an image whose data the API doesn't accept, which
+   * goes as the placeholder (at the top level or nested in a tool result), a
+   * nested tool-result block of a type the API refuses there, and a
+   * passthrough `messages` that replaces the built ones. Otherwise it carries
+   * message content as built, each block built from the API's fields for its
+   * type, in the wire's spellings and without a cache ttl
+   * (utils/anthropic-wire-blocks.ts).
    */
   readonly reportsContentAlterations = true;
   readonly cacheReceiptBasis = 'wire-request' as const;
@@ -438,104 +439,15 @@ export class BedrockAdapter implements ProviderAdapter {
   }
 
   private buildRequest(request: ProviderRequest, bedrockModelId?: string, onContentAltered?: (block?: unknown) => void): BedrockMessageRequest {
-    // Wire copies of the request's own blocks, so a block the cleanup drops
-    // is reported as the block membrane built (and can attribute).
-    const originals = new WeakMap<object, unknown>();
-    const remember = <T>(copy: T, original: unknown): T => {
-      if (copy !== original && copy !== null && typeof copy === 'object') originals.set(copy as object, original);
-      return copy;
-    };
-    // Strip provider-specific fields (e.g., sourceUrl for Gemini) from image blocks
-    // before sending to Bedrock/Anthropic, which rejects extra inputs.
-    //
-    // Same treatment for cache_control.ttl: Bedrock's prompt cache runs at the
-    // fixed default (5m) TTL — the ttl field is a direct-API extension and
-    // Bedrock rejects it as an extra input. The marker itself is fine and
-    // caching works without the field, so strip just the ttl and keep the
-    // breakpoint. Transport quirks belong to the transport, not to every
-    // caller that sets cacheTtl. (Connectome issue #35.)
-    // Bedrock is strict about the wire shape of image sources: internal blocks
-    // carry camelCase `mediaType`, the API requires snake_case `media_type`.
-    // The Anthropic adapter converts on both paths (top-level images in its
-    // buildRequest, nested ones through toAnthropicToolResultContent); without
-    // the same conversion here a tool-returned image 400s with
-    // "media_type: Field required" mid-turn
-    // (observed on eidoverse snapshot results, 2026-08-08). Applies to
-    // top-level image blocks AND images nested inside tool_result content.
-    // Data that is no image the API accepts goes as imageForRequest's
-    // placeholder text instead, keeping any cache breakpoint the image
-    // carried; `onPlaceholder` hears each one.
-    const toWireImage = (block: any, onPlaceholder: () => void): any => {
-      const source = block.source;
-      if (source?.type === 'url') {
-        // A data: URL holds its image inline, so it goes as base64 data or
-        // the placeholder; any other URL goes as it is.
-        const image = urlImageForRequest(source.url);
-        if (image.placeholder) {
-          onPlaceholder();
-          return block.cache_control ? { ...image.placeholder, cache_control: block.cache_control } : image.placeholder;
-        }
-        return image.data ? { ...block, source: { type: 'base64', media_type: image.mediaType, data: image.data } } : block;
-      }
-      if (!source || source.type !== 'base64') return block;
-      const { mediaType, media_type, ...restSource } = source;
-      const image = imageForRequest(source.data, media_type ?? mediaType);
-      if (image.placeholder) {
-        onPlaceholder();
-        return block.cache_control ? { ...image.placeholder, cache_control: block.cache_control } : image.placeholder;
-      }
-      return {
-        ...block,
-        source: {
-          ...restSource,
-          media_type: image.mediaType,
-        },
-      };
-    };
-    const sanitizedMessages = (request.messages as any[]).map((msg: any) => {
-      if (!Array.isArray(msg.content)) return msg;
-      // Media in MCP's form becomes membrane's first, for a caller that
-      // builds a request directly (Membrane's own builds have converted it
-      // already, utils/mcp-media.ts), as the Anthropic adapter converts it. A
-      // report about a block names the one the caller handed in.
-      const converted = convertMcpMedia(msg.content as unknown[]) as any[];
-      return {
-        ...msg,
-        content: msg.content.flatMap((original: any, index: number) => {
-          const block = converted[index];
-          if (isSourcelessMedia(block)) {
-            // Media with no source object (MCP's form that didn't convert)
-            // has no form the API takes: left out, and reported.
-            onContentAltered?.(original);
-            return [];
-          }
-          return [remember((() => {
-            if (block.type === 'image' && block.sourceUrl !== undefined) {
-              const { sourceUrl, ...rest } = block;
-              return stripCacheTtl(toWireImage(rest, () => onContentAltered?.(original)));
-            }
-            if (block.type === 'image') {
-              return stripCacheTtl(toWireImage(block, () => onContentAltered?.(original)));
-            }
-            if (block.type === 'tool_result' && Array.isArray(block.content)) {
-              let altered = false;
-              // Media with no source object has no form the API takes here
-              // either: left out, and the result reported, as at the top.
-              const content = block.content.flatMap((inner: any) => {
-                if (isSourcelessMedia(inner)) {
-                  altered = true;
-                  return [];
-                }
-                return [inner?.type === 'image' ? toWireImage(inner, () => { altered = true; }) : inner];
-              });
-              if (altered) onContentAltered?.(original);
-              return stripCacheTtl({ ...block, content });
-            }
-            return stripCacheTtl(block);
-          })(), original)];
-        }),
-      };
-    });
+    // Each content block as the API takes it: built from the API's fields
+    // for its type, at the top of a message and inside a tool_result, since
+    // the API refuses a field it doesn't define (utils/anthropic-wire-blocks.ts).
+    // Bedrock refuses the direct API's `cache_control.ttl` too (stripCacheTtl),
+    // so each block that goes leaves it behind, and the breakpoint stays at
+    // Bedrock's default TTL (Connectome issue #35). An image's `media_type`
+    // goes after the rest of its source, as this adapter always sent it, so a
+    // request that went out before keeps its bytes.
+    const sanitizedMessages = anthropicWireMessages(request.messages, { onContentAltered, finish: stripCacheTtl, imageMediaTypeLast: true });
 
     const params: BedrockMessageRequest = {
       anthropic_version: this.anthropicVersion,
@@ -621,9 +533,9 @@ export class BedrockAdapter implements ProviderAdapter {
       params.anthropic_beta = [...new Set([...existing, THINKING_BINDING_BETA])];
     }
 
-    stripEmptyTextRequest(params, onContentAltered
-      ? (dropped) => onContentAltered(dropped !== null && typeof dropped === 'object' ? originals.get(dropped) ?? dropped : dropped)
-      : undefined);
+    // A text block the cleanup removes was built above, so its report names
+    // the block it was built from.
+    stripEmptyTextRequest(params, onContentAltered ? (dropped) => onContentAltered(blockBuiltFrom(dropped)) : undefined);
     return params;
   }
 
