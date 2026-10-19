@@ -17,6 +17,8 @@
  * (linkImageNote).
  */
 
+import { copyBlockTree } from './cache-marker-budget.js';
+
 export type RasterImageMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
 export type ImageMediaType = RasterImageMediaType | 'image/heic' | 'image/heif';
 
@@ -192,20 +194,24 @@ export function urlImageForRequest(url: string): UrlImageForRequest {
  *  same way, and anything else replaced by `imageForRequest`'s placeholder. An
  *  image may carry its data in a `source`, or MCP-style as `data` and
  *  `mimeType`; either way an accepted one comes back with a base64 `source`.
- *  Remote URL images and other blocks pass through, non-array content is
- *  returned as it is, and the content itself is not mutated. Each block
- *  comes back as its own object, so an adapter's report about one names
- *  exactly one occurrence, and `onAltered` hears each placeholder
- *  substitution. */
+ *  A remote URL image goes as it is, other blocks keep their fields,
+ *  non-array content is returned as it is, and nothing handed in is changed.
+ *  Each block comes back as its own object, copied as deep as the
+ *  cache-marker budget walks (copyBlockTree: a search result's content, a
+ *  document's content source), since the budget's clamp strips markers in
+ *  place and would otherwise strip the caller's own. So an adapter's report
+ *  about one names exactly one occurrence, and `onAltered` hears each
+ *  placeholder substitution. */
 export function toolResultContentForRequest(content: unknown, onAltered?: () => void): unknown {
   if (!Array.isArray(content)) return content;
   const placeholder = (note: { type: 'text'; text: string }) => {
     onAltered?.();
     return note;
   };
-  return content.map((item) => {
+  return content.map((given) => {
+    const item = copyBlockTree(given, 1);
     if (!item || typeof item !== 'object') return item;
-    if ((item as { type?: unknown }).type !== 'image') return { ...item };
+    if ((item as { type?: unknown }).type !== 'image') return item;
     const block = item as { source?: { type?: string; url?: unknown; data?: unknown; mediaType?: unknown; media_type?: unknown }; data?: unknown; mimeType?: unknown };
     const src = block.source;
     if (src?.type === 'url') {

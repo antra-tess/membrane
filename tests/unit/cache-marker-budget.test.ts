@@ -14,6 +14,9 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
+import { AnthropicAdapter } from '../../src/providers/anthropic.js';
+import { BedrockAdapter } from '../../src/providers/bedrock.js';
+import { toolResultContentForRequest } from '../../src/utils/image-media.js';
 import {
   countWireCacheMarkers,
   clampCacheMarkers,
@@ -111,6 +114,17 @@ const nestedOverBudgetWire = () => ({
   ],
 });
 
+/** A document whose content source holds two text blocks, its last marked
+ *  when `markLast`: the API takes a breakpoint there and counts it toward
+ *  the four. */
+const contentSourceDocument = (markLast: boolean) => ({
+  type: 'document',
+  source: { type: 'content', content: [
+    { type: 'text', text: 'zz part 1' },
+    { type: 'text', text: 'zz part 2', ...(markLast ? { cache_control: marked } : {}) },
+  ] },
+});
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -138,6 +152,26 @@ describe('countWireCacheMarkers', () => {
     // native builder passes it through verbatim, so a nested marker is a real
     // wire marker. Four top-level plus one nested is five on the wire.
     expect(countWireCacheMarkers(nestedOverBudgetWire())).toBe(5);
+  });
+
+  it("sees a marker in a document's content source, at the top and inside a tool_result", () => {
+    expect(countWireCacheMarkers({ messages: [
+      { role: 'user', content: [contentSourceDocument(true)] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'zz-t1', content: [contentSourceDocument(true)] }] },
+    ] })).toBe(2);
+    // On any of its blocks, including one whose breakpoint the adapters will
+    // strip, since it isn't the source's last.
+    expect(countWireCacheMarkers({ messages: [{ role: 'user', content: [{
+      type: 'document',
+      source: { type: 'content', content: [{ type: 'text', text: 'zz first', cache_control: marked }, { type: 'text', text: 'zz last' }] },
+    }] }] })).toBe(1);
+    // A document's blocks are its content source's: a `content` of its own
+    // is nothing the API reads on one.
+    expect(countWireCacheMarkers({ messages: [{ role: 'user', content: [{
+      type: 'document',
+      source: { type: 'base64', media_type: 'application/pdf', data: 'zz' },
+      content: [{ type: 'text', text: 'zz stray', cache_control: marked }],
+    }] }] })).toBe(0);
   });
 
   it('stops descending at the nested-content depth cap', () => {
@@ -223,6 +257,47 @@ describe('tools/system fallback gate (caller-marked system blocks are real wire 
     expect(providerRequest.tools.some((t: any) => t.cache_control)).toBe(true);
     expect((providerRequest.system as any[]).some((b) => b.cache_control)).toBe(true);
     expect(countWireCacheMarkers(providerRequest)).toBe(2);
+  });
+
+  it("withholds both fallbacks when the only marker sits in a document's content source in a tool result", async () => {
+    const messages: NormalizedMessage[] = [
+      user('zz go'),
+      assistantToolCall('zz-t1'),
+      { participant: 'zzOperator', content: [{ type: 'tool_result', toolUseId: 'zz-t1', content: [contentSourceDocument(true)] }] as any },
+    ];
+    // The native tool loop's gates.
+    const providerRequest = build(makeRequest(), messages);
+    expect(providerRequest.tools.some((t: any) => t.cache_control)).toBe(false);
+    expect(JSON.stringify(providerRequest.system)).not.toContain('cache_control');
+    expect(countWireCacheMarkers(providerRequest)).toBe(1);
+    // The native formatter's, through complete().
+    const { adapter, captured } = captureAdapter();
+    await new Membrane(adapter as any).complete(makeRequest({ messages }));
+    expect(JSON.stringify(captured[0].system)).not.toContain('cache_control');
+    expect(countWireCacheMarkers(captured[0])).toBe(1);
+  });
+
+  it("counts a breakpoint the adapters will leave out of a content source: both gates stand down, and neither wire carries one", () => {
+    // A breakpoint on a source block that isn't its last, which the API refuses there.
+    const leftOut = { type: 'document', source: { type: 'content', content: [
+      { type: 'text', text: 'zz part 1', cache_control: marked },
+      { type: 'text', text: 'zz part 2' },
+    ] } };
+    const messages: NormalizedMessage[] = [
+      user('zz go'),
+      assistantToolCall('zz-t1'),
+      { participant: 'zzOperator', content: [{ type: 'tool_result', toolUseId: 'zz-t1', content: [leftOut] }] as any },
+    ];
+    const providerRequest = build(makeRequest(), messages);
+    expect(countWireCacheMarkers(providerRequest)).toBe(1);
+    expect(providerRequest.tools.some((t: any) => t.cache_control)).toBe(false);
+    expect(JSON.stringify(providerRequest.system)).not.toContain('cache_control');
+    const anthropic = (new AnthropicAdapter({ apiKey: 'zz', cacheKeepalive: { enabled: false } }) as any).buildRequest(providerRequest);
+    const bedrock = (new BedrockAdapter({ accessKeyId: 'zz', secretAccessKey: 'zz', region: 'us-west-2' }) as any).buildRequest(providerRequest, undefined);
+    expect(JSON.stringify(anthropic.messages)).toContain('zz part 1');
+    expect(wireMarkerCensus(anthropic)).toBe(0);
+    expect(JSON.stringify(bedrock.messages)).toContain('zz part 1');
+    expect(wireMarkerCensus(bedrock)).toBe(0);
   });
 
   it('withholds the fallback when a stale passthrough marker rides a message block', () => {
@@ -315,6 +390,21 @@ describe('nested markers are clamped exactly like top-level ones', () => {
     expect(warn).toHaveBeenCalled();
   });
 
+  it("drops a marker in a document's content source when it is shallowest", () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const document = contentSourceDocument(true);
+    const wire = {
+      messages: [
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'zz-t1', content: [document] }] },
+        ...[1, 2, 3, 4].map((n) => ({ role: 'user', content: [{ type: 'text', text: `zz m${n}`, cache_control: marked }] })),
+      ],
+    };
+    expect(clampCacheMarkers(wire, 'zz-test-site')).toEqual({ total: MAX_CACHE_BREAKPOINTS, dropped: 1, strippedFromThinking: 0 });
+    expect((document.source.content[1] as any).cache_control).toBeUndefined();
+    expect(wireMarkerCensus(wire)).toBe(MAX_CACHE_BREAKPOINTS);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
   it('leaves a request with only top-level markers byte-unchanged', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const wire = {
@@ -360,6 +450,68 @@ describe('the clamp never reaches back into the caller request', () => {
     expect(callerSystem[0]!.content[0]!.cache_control).toBeDefined();
   });
 
+
+  it("leaves a tool result's caller-owned blocks intact when the clamp drops their markers: a search result's content, a document's content source", async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { adapter, captured } = captureAdapter();
+    const membrane = new Membrane(adapter as any);
+    // Stored blocks a caller hands in turn after turn: an in-place strip of
+    // either would delete its breakpoint for good.
+    const hit = { type: 'text', text: 'zz hit', cache_control: marked };
+    const document = contentSourceDocument(true);
+    const messages: NormalizedMessage[] = [
+      user('zz go'),
+      {
+        participant: 'Claude',
+        content: [
+          { type: 'tool_use' as const, id: 'zz-t1', name: 'zz_shell', input: {} },
+          { type: 'tool_use' as const, id: 'zz-t2', name: 'zz_shell', input: {} },
+        ],
+      },
+      {
+        participant: 'zzOperator',
+        content: [
+          { type: 'tool_result', toolUseId: 'zz-t1', content: [{ type: 'search_result', source: 'zz', title: 'zz', content: [hit] }] },
+          { type: 'tool_result', toolUseId: 'zz-t2', content: [document] },
+        ] as any,
+      },
+      ...[1, 2, 3, 4].map((n) => ({
+        participant: 'zzOperator',
+        content: [{ type: 'text', text: `zz later ${n}`, cache_control: marked } as any],
+      })),
+    ];
+
+    await membrane.complete(makeRequest({ messages }));
+
+    // The two nested markers are the shallowest of six, and the clamp drops
+    // them from its own copies, which still go.
+    expect(countWireCacheMarkers(captured[0])).toBe(MAX_CACHE_BREAKPOINTS);
+    const results = captured[0].messages
+      .flatMap((m: any) => (Array.isArray(m.content) ? m.content : []))
+      .filter((b: any) => b.type === 'tool_result');
+    const [sentHit] = results[0].content[0].content;
+    const sentPart = results[1].content[0].source.content[1];
+    expect(sentHit).toEqual({ type: 'text', text: 'zz hit' });
+    expect(sentPart).toEqual({ type: 'text', text: 'zz part 2' });
+    expect(hit.cache_control).toEqual(marked);
+    expect((document.source.content[1] as any).cache_control).toEqual(marked);
+  });
+
+  it("copies a tool result's blocks as deep as the walk reaches, an image's own content included", () => {
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==';
+    const given: any[] = [
+      { type: 'search_result', source: 'zz', title: 'zz', content: [{ type: 'text', text: 'zz hit', cache_control: marked }] },
+      contentSourceDocument(true),
+      { type: 'image', source: { type: 'base64', data: png, mediaType: 'image/png' }, content: [{ type: 'text', text: 'zz odd', cache_control: marked }] },
+    ];
+    const copied = toolResultContentForRequest(given) as any[];
+    expect(copied[0].content[0]).toEqual(given[0].content[0]);
+    expect(copied[0].content[0]).not.toBe(given[0].content[0]);
+    expect(copied[1].source.content[1]).toEqual(given[1].source.content[1]);
+    expect(copied[1].source.content[1]).not.toBe(given[1].source.content[1]);
+    expect(copied[2].content[0]).toEqual(given[2].content[0]);
+    expect(copied[2].content[0]).not.toBe(given[2].content[0]);
+  });
 
   it('leaves a caller-owned system array intact when the wire clamp drops markers', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});

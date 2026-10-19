@@ -12,7 +12,8 @@
   `redacted_thinking` block's `tokenEstimate` on both (agent-framework,
   whose stamp that is, leaves it off its requests since
   anima-research/agent-framework#571). A block of another type, such as a
-  server-tool block the API produced, still goes as it came, and so do the
+  server-tool block the API produced, still goes as it came (a server block
+  without any `cache_control` stored in it, as Changed says), and so do the
   blocks of a passthrough `extra.messages`.
 - A document in membrane's form now goes with `media_type`, and its
   `filename` as its `title`, as `toAnthropicContent` sends it, where a
@@ -43,5 +44,33 @@
 - A `null` block inside a `tool_result`'s content is now left out and
   reported, on both adapters. Before, Anthropic's adapter threw while
   building the request, and Bedrock's sent it and the API refused it.
+- A document's content source is now built as the API takes it, on both
+  adapters: its text and images from their own fields, and any other block
+  there left out and reported. A cache breakpoint there stays on its last
+  block only, and only where the document itself could carry one: not
+  beside the document's own, and inside a `tool_result` only when the
+  document is the last block there that ships and the `tool_result` carries
+  none. A document whose source holds nothing the API takes there (an empty
+  string, or no text or image) is left out and reported. Before, Bedrock's
+  adapter sent a content source as it came, with whatever the API refuses
+  there: a stray field, a block of another type, a breakpoint anywhere else,
+  or an empty source.
+- The cache-marker budget now counts a breakpoint inside a document's
+  content source, which the API counts toward its four ("Found 5"), so a
+  request with four other breakpoints and one there has its shallowest
+  dropped. Before, Bedrock's adapter sent all five.
+- A tool result's blocks are now copied as deep as the budget walks before
+  its clamp drops a breakpoint. Before, the clamp deleted a breakpoint from
+  a search result's content inside a tool result the caller holds, for good,
+  and now that the budget counts one in a document's content source, the
+  copy keeps the clamp off the caller's source too.
+- A `tool_result` turned into text as an orphan or a duplicate now keeps a
+  cache breakpoint nested in it, in a search result's content or a
+  document's content source, as it kept one on a block of its own content.
+  Before, the text lost it, and the request took the fallback breakpoints.
+- The cache-wire receipt now marks a block that holds a breakpoint anywhere
+  inside it, as the cache-marker budget counts it, once for the block,
+  taking the prefix through the block. Before, a block holding only nested
+  breakpoints was missing from the receipt.
 - A field the API takes is kept, so a request that succeeds today goes out
   with the same bytes, except as Changed says.

@@ -99,6 +99,13 @@ describe('anthropicServerBlockFor', () => {
     expect(marked).toEqual(before);
   });
 
+  it('sends no cache marker stored deeper in the block, and leaves the stored one in place', () => {
+    const stored = { ...searchResult, content: [{ ...searchResult.content[0], cache_control: { type: 'ephemeral', ttl: '1h' } }] };
+    const before = structuredClone(stored);
+    expect(anthropicServerBlockFor(carrier(stored))).toEqual(searchResult);
+    expect(stored).toEqual(before);
+  });
+
   it('gives back a server block given as itself, as a copy', () => {
     const sent = anthropicServerBlockFor(serverUse);
     expect(sent).toEqual(serverUse);
@@ -876,6 +883,18 @@ describe('a server call and its result go out together, or not at all', () => {
     const turn = built.messages[1]!.content as Array<Record<string, unknown>>;
     expect(JSON.stringify(turn)).not.toContain('zz-marked');
     expect(turn.at(-1)!.cache_control).toEqual({ type: 'ephemeral' });
+  });
+
+  it('NativeFormatter carries no marker stored deeper in a server block it leaves out', () => {
+    const notes = new FidelityNotes();
+    const stored = { ...result('zz-alone'), content: [{ type: 'web_search_result', title: 'zz', url: 'https://zz.example/', encrypted_content: 'zz-enc', page_age: null, cache_control: { type: 'ephemeral', ttl: '1h' } }] };
+    const built = new NativeFormatter().buildMessages([
+      { participant: 'User', content: [say('zz ask')] },
+      { participant: 'Claude', content: [say('zz searching'), carrier(stored)] },
+      { participant: 'User', content: [say('zz go on')] },
+    ], options(notes));
+    expect(JSON.stringify(built.messages)).not.toContain('zz-alone');
+    expect(JSON.stringify(built.messages)).not.toContain('cache_control');
   });
 
   it('NativeFormatter leaves a dropped marker where it is when a kept block of the turn already holds one', () => {

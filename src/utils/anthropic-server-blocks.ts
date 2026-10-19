@@ -21,6 +21,7 @@
 
 import type { ContentBlock } from '../types/content.js';
 import { isRawItemCarrier } from './fidelity.js';
+import { withoutCacheMarkers } from './cache-marker-budget.js';
 
 /**
  * The response block types for server tools that membrane has no normalized
@@ -78,22 +79,23 @@ export function carriesAnthropicServerBlock(block: unknown): boolean {
 /**
  * What an Anthropic-shaped request sends for `block` when it is an Anthropic
  * server-tool block, or a zero-width carrier holding one: a copy of that
- * block, without any `cache_control` stored on it or on its carrier. A
- * marker is the request's own, placed by the builder, so a stale one kept in
- * history isn't sent and doesn't count toward the four-marker limit, as it
- * never did while carriers were dropped. Because it's a copy, a breakpoint
- * the builder places marks it and never the stored item. A server call whose
- * streamed input didn't arrive whole carries `unparseableInput` (the
- * Anthropic adapter marks it, as it marks a tool_use); it goes out as stored,
- * with the start's input, as a marked tool_use does, and without the marker,
- * which is membrane's record, not the API's field. Undefined for every other
- * block.
+ * block, without any `cache_control` stored on it, at any depth the
+ * cache-marker budget walks, or on its carrier. A marker is the request's
+ * own, placed by the builder, so a stale one kept in history isn't sent and
+ * doesn't count toward the four-marker limit, as it never did while carriers
+ * were dropped, and a block removed later carries none onto what stays
+ * (blockCacheMarker). Because it's a copy, a breakpoint the builder places
+ * marks it and never the stored item. A server call whose streamed input
+ * didn't arrive whole carries `unparseableInput` (the Anthropic adapter marks
+ * it, as it marks a tool_use); it goes out as stored, with the start's input,
+ * as a marked tool_use does, and without the marker, which is membrane's
+ * record, not the API's field. Undefined for every other block.
  */
 export function anthropicServerBlockFor(block: unknown): AnthropicServerBlock | undefined {
   const item = serverBlockOf(block);
   if (item === undefined) return undefined;
-  const { cache_control: _stored, unparseableInput: _marker, ...sent } = item;
-  return sent as AnthropicServerBlock;
+  const { unparseableInput: _marker, ...sent } = item;
+  return withoutCacheMarkers(sent) as AnthropicServerBlock;
 }
 
 /** The server-tool call types: a result's `tool_use_id` names a call's `id`. */

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { blockCacheMarker } from './utils/cache-marker-budget.js';
 
 export interface CacheWireMarkerReceipt {
   ordinal: number;
@@ -13,7 +14,9 @@ export interface CacheWireReceipt {
 
 /** Hash the selected cache-layout representation and every marked prefix.
  * The adapter's cacheReceiptBasis selects post-hook ProviderRequest (default)
- * or its final request observation. Token offsets are estimates. */
+ * or its final request observation. A unit is marked when it holds a
+ * breakpoint at any depth the cache-marker budget walks, once however many
+ * it holds. Token offsets are estimates. */
 export function computeCacheWireReceipt(rawRequest: unknown): CacheWireReceipt {
   const requestHash = sha(stableStringify(rawRequest));
   const blocks = flattenWireBlocks(rawRequest);
@@ -49,13 +52,13 @@ function flattenWireBlocks(rawRequest: unknown): ReceiptUnit[] {
   if (Array.isArray(request.tools)) {
     request.tools.forEach((tool, index) => out.push({
       identity: { surface: 'tool', index, tool },
-      marked: hasCacheControl(tool),
+      marked: isMarked(tool),
       estimatedChars: stableStringify(tool).length,
     }));
   } else if (request.tools !== undefined) {
     out.push({
       identity: { surface: 'tools', value: request.tools },
-      marked: hasCacheControl(request.tools),
+      marked: isMarked(request.tools),
       estimatedChars: stableStringify(request.tools).length,
     });
   }
@@ -64,13 +67,13 @@ function flattenWireBlocks(rawRequest: unknown): ReceiptUnit[] {
     if (Array.isArray(system)) {
       system.forEach((block, index) => out.push({
         identity: { surface: 'system', index, block },
-        marked: hasCacheControl(block),
+        marked: isMarked(block),
         estimatedChars: stableStringify(block).length,
       }));
     } else {
       out.push({
         identity: { surface: 'system', value: system },
-        marked: hasCacheControl(system),
+        marked: isMarked(system),
         estimatedChars: stableStringify(system).length,
       });
     }
@@ -93,13 +96,13 @@ function flattenWireBlocks(rawRequest: unknown): ReceiptUnit[] {
             surface: 'message-block', messageIndex, blockIndex,
             role: record.role, block,
           },
-          marked: hasCacheControl(block),
+          marked: isMarked(block),
           estimatedChars: stableStringify({ role: record.role, content: [block] }).length,
         }));
       } else {
         out.push({
           identity: { surface: 'message', messageIndex, role: record.role, content },
-          marked: hasCacheControl(message),
+          marked: isMarked(message),
           estimatedChars: stableStringify(message).length,
         });
       }
@@ -108,8 +111,12 @@ function flattenWireBlocks(rawRequest: unknown): ReceiptUnit[] {
   return out;
 }
 
-function hasCacheControl(value: unknown): boolean {
-  return Boolean(value && typeof value === 'object' && (value as Record<string, unknown>).cache_control);
+/** Whether a unit holds a breakpoint, its own or one nested in it, as the
+ *  cache-marker budget finds them (blockCacheMarker). The units are top-level
+ *  blocks, so a nested breakpoint's prefix is taken through the block that
+ *  holds it, and a block holding several is marked once. */
+function isMarked(value: unknown): boolean {
+  return Boolean(blockCacheMarker(value));
 }
 
 function stableStringify(value: unknown): string {

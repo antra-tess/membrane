@@ -16,25 +16,29 @@
  * (`tool_result.content` is `string | ContentBlock[]`), so discovery recurses.
  * A belt that cannot see a marker cannot clamp it, and a top-level-only count
  * would report four while five shipped — the request rejected outright with
- * the belt's blessing. The Anthropic-family adapters leave out a nested
- * marker where the API doesn't take one (utils/anthropic-wire-blocks.ts), so
- * a marker counted here may not ship.
+ * the belt's blessing. A document's content source holds blocks too
+ * (`source.content`), and the API takes a marker on its last one and counts
+ * it toward the four, so discovery descends there as well. The
+ * Anthropic-family adapters leave out a nested marker where the API doesn't
+ * take one (utils/anthropic-wire-blocks.ts), so a marker counted here may not
+ * ship.
  */
 
 /** Anthropic's hard limit on cache_control breakpoints per request. */
 export const MAX_CACHE_BREAKPOINTS = 4;
 
 /**
- * How many levels of nested `content` arrays marker discovery descends below
- * a top-level block.
+ * How many levels of nested content marker discovery descends below a
+ * top-level block: `content` arrays, and documents' content sources.
  *
  * A marker can ride a block inside another block's own content array —
  * `ToolResultContent.content` is typed `string | ContentBlock[]`, so a
  * caller-built tool_result whose members carry `cache_control` can put real
- * markers on the wire. The API's own nesting is one level deep; 4 is
- * headroom for shapes it grows later, and it is also what makes this walk
- * TOTAL — a caller-built structure that points back at itself terminates at
- * the cap instead of hanging the request.
+ * markers on the wire. The API's own nesting is two levels deep at most (a
+ * tool_result's document's content source); 4 is headroom for shapes it
+ * grows later, and it is also what makes this walk TOTAL — a caller-built
+ * structure that points back at itself terminates at the cap instead of
+ * hanging the request.
  * Markers below the cap are outside the belt's reach, by construction.
  */
 export const MAX_NESTED_CONTENT_DEPTH = 4;
@@ -45,7 +49,9 @@ export const MAX_NESTED_CONTENT_DEPTH = 4;
  *
  * This is the single traversal law: marker discovery and the ownership copy
  * that protects caller-owned blocks from it both descend exactly here, so
- * the clamp can never reach a grain that ownership did not copy.
+ * the clamp can never reach a grain that ownership did not copy. Readers of
+ * a request's breakpoints elsewhere reach it through collectMarkedBlocks and
+ * blockCacheMarker. A block in a message's content is at depth 0.
  */
 function walkBlockTree(
   candidate: unknown,
@@ -55,19 +61,31 @@ function walkBlockTree(
   if (!candidate || typeof candidate !== 'object') return;
   const block = candidate as Record<string, unknown>;
   visitBlock(block);
-  const nested = nestedContentBlocks(block, depth);
+  const nested = nestedContent(block, depth);
   if (!nested) return;
-  for (const child of nested) walkBlockTree(child, depth + 1, visitBlock);
+  for (const child of nested.blocks) walkBlockTree(child, depth + 1, visitBlock);
 }
 
 /**
- * The one rule for what counts as nested content: an array-valued `content`
- * on a block, while still above the depth cap. Discovery and the ownership
- * copy both ask here, so neither can descend where the other does not.
+ * The one rule for what counts as nested content, and where it sits, while
+ * still above the depth cap: a document's blocks are its content source's
+ * (`source.content`), and any other block's are an array-valued `content`.
+ * A document has no `content` of its own on the wire, so one there is
+ * nothing the API reads. Discovery and the ownership copy both ask here, so
+ * neither can descend where the other does not.
  */
-function nestedContentBlocks(block: Record<string, unknown>, depth: number): unknown[] | undefined {
+function nestedContent(
+  block: Record<string, unknown>,
+  depth: number
+): { blocks: unknown[]; inSource: boolean } | undefined {
   if (depth >= MAX_NESTED_CONTENT_DEPTH) return undefined;
-  return Array.isArray(block.content) ? block.content : undefined;
+  if (block.type === 'document') {
+    const source = block.source as Record<string, unknown> | null | undefined;
+    return source && typeof source === 'object' && source.type === 'content' && Array.isArray(source.content)
+      ? { blocks: source.content, inSource: true }
+      : undefined;
+  }
+  return Array.isArray(block.content) ? { blocks: block.content, inSource: false } : undefined;
 }
 
 export interface WireCacheSurfaces {
@@ -85,9 +103,10 @@ export interface WireCacheSurfaces {
  * ONE walk serves both the count and the clamp's strip, so a marker the
  * counter can see is always a marker the clamp can strip. A collector that
  * stopped at the top level would count four while five rode to the wire, and
- * the provider would reject the request the belt just declared legal.
+ * the provider would reject the request the belt just declared legal. The
+ * Anthropic adapter's keepalive reads a request's breakpoints through it too.
  */
-function collectMarkedBlocks(surfaces: WireCacheSurfaces): Array<Record<string, unknown>> {
+export function collectMarkedBlocks(surfaces: WireCacheSurfaces): Array<Record<string, unknown>> {
   const marked: Array<Record<string, unknown>> = [];
   const collectIfMarked = (candidate: unknown) =>
     walkBlockTree(candidate, 0, (block) => {
@@ -128,7 +147,9 @@ function collectMarkedBlocks(surfaces: WireCacheSurfaces): Array<Record<string, 
  * The copy descends exactly as far as marker discovery does: a shallow
  * `{...block}` leaves any nested `content` array shared with the caller, and
  * the clamp now strips markers at that grain, so ownership has to reach it
- * too or the leak just moves one level down.
+ * too or the leak just moves one level down. A tool_result's content takes
+ * the same copy where the native formatter builds it
+ * (toolResultContentForRequest).
  */
 export function ownSystemBlocks(system: unknown): unknown {
   if (!Array.isArray(system)) return system;
@@ -137,14 +158,50 @@ export function ownSystemBlocks(system: unknown): unknown {
 }
 
 /**
- * Shallow-copy a block and, recursively, its nested content blocks, to the
- * same depth marker discovery walks. Non-objects pass through untouched.
+ * The cache breakpoint `block` carries: its own `cache_control`, else the last
+ * one the walk finds inside it. Where membrane removes a block and carries its
+ * breakpoint onto what stays (a tool_result the tool-pair normalizer turns into
+ * text, an unpaired server block), and where a reader asks whether a block
+ * holds one (cm-owned's import guard, the cache-wire receipt), it asks this,
+ * so a nested breakpoint counts as it does in the budget.
  */
-function copyBlockTree(candidate: unknown, depth: number): unknown {
+export function blockCacheMarker(block: unknown): unknown {
+  if (!block || typeof block !== 'object') return undefined;
+  const own = (block as Record<string, unknown>).cache_control;
+  if (own) return own;
+  let last: unknown;
+  walkBlockTree(block, 0, (inner) => {
+    if (inner.cache_control) last = inner.cache_control;
+  });
+  return last;
+}
+
+/**
+ * A copy of `block`, as deep as the walk reaches, with no `cache_control` at
+ * any of those depths: for a block whose breakpoints aren't the request's,
+ * such as an Anthropic server block replayed from history.
+ */
+export function withoutCacheMarkers(block: unknown): unknown {
+  const copy = copyBlockTree(block, 0);
+  walkBlockTree(copy, 0, (inner) => {
+    delete inner.cache_control;
+  });
+  return copy;
+}
+
+/**
+ * Shallow-copy a block and, recursively, its nested content blocks, to the
+ * same depth marker discovery walks: `depth` is the block's own, 0 at the top
+ * of a message. Non-objects pass through untouched.
+ */
+export function copyBlockTree(candidate: unknown, depth: number): unknown {
   if (!candidate || typeof candidate !== 'object') return candidate;
   const copy = { ...(candidate as Record<string, unknown>) };
-  const nested = nestedContentBlocks(copy, depth);
-  if (nested) copy.content = nested.map((child) => copyBlockTree(child, depth + 1));
+  const nested = nestedContent(copy, depth);
+  if (!nested) return copy;
+  const blocks = nested.blocks.map((child) => copyBlockTree(child, depth + 1));
+  if (nested.inSource) copy.source = { ...(copy.source as Record<string, unknown>), content: blocks };
+  else copy.content = blocks;
   return copy;
 }
 

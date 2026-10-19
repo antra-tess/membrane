@@ -38,6 +38,7 @@
 // request shape that can't tolerate `max_tokens: 0` is skipped outright rather
 // than "fixed up" — see `ineligibleReason()`.
 
+import { collectMarkedBlocks } from './utils/cache-marker-budget.js';
 import { createHash } from 'node:crypto';
 
 /** Vendor usage fields used by keepalive checks and spend observers. */
@@ -190,41 +191,16 @@ export function ineligibleReason(wire: Record<string, unknown>): string | null {
 }
 
 /**
- * Walk system + tools + messages for cache_control markers.
- *
- * This runs on every outbound request, and `messages` on a large resident is
- * megabytes of blocks — so it short-circuits the moment it finds a 1h marker,
- * which is the answer in the overwhelmingly common case.
+ * The request's cache_control markers in system, tools and messages, as the
+ * cache-marker budget finds them (collectMarkedBlocks), so the keepalive and
+ * the budget agree on which breakpoints a request has. It reads every block
+ * rather than stopping at the first 1h marker, which costs well under a
+ * millisecond on a request of megabytes.
  */
 function scanCacheMarkers(wire: Record<string, unknown>): { any: boolean; oneHour: boolean } {
-  let any = false;
-  let oneHour = false;
-
-  const visit = (node: unknown): void => {
-    if (oneHour) return; // nothing left to learn
-    if (Array.isArray(node)) {
-      for (const item of node) {
-        visit(item);
-        if (oneHour) return;
-      }
-      return;
-    }
-    if (!node || typeof node !== 'object') return;
-    const obj = node as Record<string, unknown>;
-    const cc = obj.cache_control as { ttl?: string } | undefined;
-    if (cc && typeof cc === 'object') {
-      any = true;
-      if ((cc.ttl ?? '5m') === '1h') {
-        oneHour = true;
-        return;
-      }
-    }
-    if (obj.content) visit(obj.content);
-  };
-
-  visit(wire.system);
-  visit(wire.tools);
-  visit(wire.messages);
+  const marked = collectMarkedBlocks({ system: wire.system, tools: wire.tools, messages: wire.messages });
+  const any = marked.length > 0;
+  const oneHour = marked.some((block) => ((block.cache_control as { ttl?: string }).ttl ?? '5m') === '1h');
   return { any, oneHour };
 }
 

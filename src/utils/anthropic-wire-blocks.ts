@@ -23,6 +23,18 @@
  * wherever it is. A source of a type the API names that membrane doesn't
  * build, such as a file id, goes as it came.
  *
+ * A document's content source holds blocks of its own, and the API takes
+ * only text and images there ("does not match any of the expected tags:
+ * 'text', 'image'"), so they are built as text and images are anywhere, and
+ * anything else there is left out and reported. A content source with
+ * nothing the API takes in it, an empty string or no such block, gives its
+ * document no form the API takes ("document content cannot be empty"). The
+ * API takes a cache breakpoint there on the source's last block only, and on
+ * none when the document carries its own ("Instead, place it directly on
+ * `document`"), so one anywhere else stays behind. It takes that one as the
+ * document's own, so inside a tool_result the rules below read it as the
+ * document's.
+ *
  * Inside a tool_result, the API takes six block types, as its own refusal of
  * any other lists them: text, image, document, search_result, tool_reference
  * and browser_state. Text, images and documents are built as at the top of a
@@ -56,13 +68,18 @@
  * A request that succeeds today goes out with the same bytes, so prompt
  * caches keep their prefixes, except where Anthropic's wire now sends what
  * its adapter used to leave out of a tool_result
- * (changelog.d/161-wire-fields.changed.md). Each wire lays a block out as its
- * adapter always did: in the block's own key order, except a tool_result's
- * content on Anthropic's wire, which its adapter built in the API's own order
+ * (changelog.d/161-wire-fields.changed.md). That is what this module builds
+ * from what it's handed: the fallback breakpoints on the system prompt and
+ * the tool list are decided before the build, by the breakpoint budget's
+ * count (utils/cache-marker-budget.ts), which a breakpoint in a document's
+ * content source now joins. Each wire lays a block out as its adapter always
+ * did: in the block's own key order, except a tool_result's content on
+ * Anthropic's wire, which its adapter built in the API's own order
  * (`nestedInApiOrder`), and an image's base64 source on Bedrock's, whose
- * adapter put `media_type` last (`imageMediaTypeLast`). An image given as a
- * data: URL goes as base64 data with `media_type` first on both, as both
- * adapters built it.
+ * adapter put `media_type` last (`imageMediaTypeLast`), but in a document's
+ * content source, which it sent as it came. An image given as a data: URL
+ * goes as base64 data with `media_type` first on both, as both adapters
+ * built it.
  */
 
 import { hasNonEmptyText } from './empty-text.js';
@@ -144,13 +161,46 @@ const SOURCE_TYPES = new Map<unknown, ReadonlySet<unknown>>([
   ['document', new Set(['base64', 'content', 'file', 'text', 'url'])],
 ]);
 
+/** The block types the API takes in a document's content source, as its
+ *  refusal of any other lists them. */
+const CONTENT_SOURCE_TYPES: ReadonlySet<unknown> = new Set(['text', 'image']);
+
+/** A content source's fields: its whole list, as the API's refusal of any
+ *  other ("Extra inputs are not permitted") holds it. */
+const CONTENT_SOURCE_FIELDS: readonly string[] = ['type', 'content'];
+
 /** Media with no form the API takes (see the module doc): media with no
- *  source object, or an image or a document whose source is of no type the
- *  API names for it. */
+ *  source object, an image or a document whose source is of no type the API
+ *  names for it, or a document whose content source holds nothing the API
+ *  takes there. */
 function hasNoWireForm(block: Block): boolean {
   if (isSourcelessMedia(block)) return true;
   const types = SOURCE_TYPES.get(block.type);
-  return types !== undefined && !types.has((block.source as Block).type);
+  if (types === undefined) return false;
+  const source = block.source as Block;
+  if (!types.has(source.type)) return true;
+  return block.type === 'document' && source.type === 'content' && holdsNothing(source);
+}
+
+/** Whether `item` is a block a document's content source can carry: text, or
+ *  an image with a form the API takes. */
+function takenInContentSource(item: unknown): item is Block {
+  return isRecord(item) && CONTENT_SOURCE_TYPES.has(item.type) && !hasNoWireForm(item);
+}
+
+/** Whether a content source would go with nothing in it: an empty string, or
+ *  no block the API takes there. */
+function holdsNothing(source: Block): boolean {
+  if (typeof source.content === 'string') return source.content === '';
+  return !Array.isArray(source.content) || !source.content.some(takenInContentSource);
+}
+
+/** A document's content source's blocks, if it has a content source holding
+ *  an array of them. */
+function contentSourceBlocks(block: Block): unknown[] | undefined {
+  if (block.type !== 'document' || !isRecord(block.source)) return undefined;
+  const source = block.source;
+  return source.type === 'content' && Array.isArray(source.content) ? source.content : undefined;
 }
 
 /** Each built block's original, for a report about it made after the build
@@ -225,12 +275,50 @@ function wireImage(block: Block, fields: readonly string[], onPlaceholder: () =>
   return built;
 }
 
-function wireDocument(block: Block, apiOrder: boolean): Block {
-  const built = pick(block, FIELDS.get('document')!, apiOrder);
-  built.source = wireSource(block.source as Block, apiOrder);
+/** A document as the API takes it. `onAltered` hears each block its content
+ *  source loses, and each image there that goes as the placeholder. */
+function wireDocument(block: Block, layout: Layout, onAltered: () => void, finish: Finish): Block {
+  const built = pick(block, FIELDS.get('document')!, layout.apiOrder);
+  const source = block.source as Block;
+  built.source = source.type === 'content'
+    ? wireContentSource(source, hasMarker(block), onAltered, finish, layout)
+    : wireSource(source, layout.apiOrder);
   if (built.title === undefined && typeof block.filename === 'string' && block.filename !== '') {
     built.title = block.filename;
   }
+  return built;
+}
+
+/** A content source as the API takes it (see the module doc): a string as it
+ *  is, or its blocks built as text and images, anything else left out, and a
+ *  breakpoint kept only on the last block, and there only when the document
+ *  carries none (`documentMarked`). */
+function wireContentSource(
+  source: Block,
+  documentMarked: boolean,
+  onAltered: () => void,
+  finish: Finish,
+  layout: Layout,
+): Block {
+  const built = pick(source, CONTENT_SOURCE_FIELDS, layout.apiOrder);
+  if (!Array.isArray(source.content)) return built;
+  // Bedrock's adapter sent a content source as it came, so an image there
+  // keeps its source's own layout rather than Bedrock's media_type last.
+  const inner: Layout = { apiOrder: layout.apiOrder, imageMediaTypeLast: false };
+  const blocks = source.content.flatMap((item) => {
+    if (!takenInContentSource(item)) {
+      onAltered();
+      return [];
+    }
+    const block = item.type === 'image'
+      ? wireImage(item, FIELDS.get('image')!, onAltered, inner)
+      : pick(item, FIELDS.get('text')!, inner.apiOrder);
+    return [{ block, original: item }];
+  });
+  built.content = blocks.map(({ block, original }, index) => finish(
+    hasMarker(block) && (index < blocks.length - 1 || documentMarked) ? withoutOwnMarker(block) : block,
+    original,
+  ));
   return built;
 }
 
@@ -241,6 +329,33 @@ type Finish = (built: Block, handedIn: Block) => Block;
  *  null, which the API takes as none. */
 function hasMarker(block: Block): boolean {
   return block.cache_control !== undefined && block.cache_control !== null;
+}
+
+/** `block` without its own `cache_control`. */
+function withoutOwnMarker(block: Block): Block {
+  const { cache_control: _marker, ...rest } = block;
+  return rest;
+}
+
+/** The cache breakpoint `block` carries, if any: its own, or, for a
+ *  document, the one on the last block of its content source that the build
+ *  takes, which the API takes as the document's own. */
+function breakpointOf(block: Block): unknown {
+  if (hasMarker(block)) return block.cache_control;
+  const last = contentSourceBlocks(block)?.filter(takenInContentSource).at(-1);
+  return last !== undefined && hasMarker(last) ? last.cache_control : undefined;
+}
+
+/** `block` without the breakpoint breakpointOf finds: its own, and its
+ *  content source's last block's. It is given built blocks, whose content
+ *  source holds only blocks the build takes, so its last block is the one
+ *  breakpointOf reads. */
+function withoutBreakpoint(block: Block): Block {
+  const out = hasMarker(block) ? withoutOwnMarker(block) : block;
+  const blocks = contentSourceBlocks(out);
+  const last = blocks?.at(-1);
+  if (!blocks || !isRecord(last) || !hasMarker(last)) return out;
+  return { ...out, source: { ...(out.source as Block), content: [...blocks.slice(0, -1), withoutOwnMarker(last)] } };
 }
 
 /** A tool_result's content as the API takes it there (see the module doc).
@@ -289,7 +404,7 @@ function toolResultContent(
       leaveOut();
       return [];
     }
-    return [{ block: nestedBlock(block, onAltered, layout), original }];
+    return [{ block: nestedBlock(block, onAltered, finish, layout), original }];
   });
   // The API takes a breakpoint inside a tool_result on the content's last
   // block only, and on none when the tool_result carries its own. A block the
@@ -298,9 +413,8 @@ function toolResultContent(
   while (lastShipped >= 0 && !ships(built[lastShipped]!.block)) lastShipped--;
   const sent = built.map(({ block, original }, index) => {
     const keepsMarker = !ships(block) || (index === lastShipped && !hasMarker(result));
-    if (keepsMarker || !hasMarker(block)) return finish(block, original);
-    const { cache_control: _marker, ...rest } = block;
-    return finish(rest, original);
+    if (keepsMarker || breakpointOf(block) === undefined) return finish(block, original);
+    return finish(withoutBreakpoint(block), original);
   });
   if (!error || lastShipped >= 0) return sent;
   // An error result that would go with no content, which the API refuses,
@@ -311,7 +425,8 @@ function toolResultContent(
   onAltered();
   const last = [...content].reverse().find((item): item is Block => isRecord(item) && ships(item));
   const note: Block = { type: 'text', text: leftOut ? EMPTIED_ERROR_NOTE : NO_CONTENT_ERROR_NOTE };
-  if (last !== undefined && hasMarker(last) && !hasMarker(result)) note.cache_control = last.cache_control;
+  const breakpoint = last === undefined ? undefined : breakpointOf(last);
+  if (breakpoint !== undefined && !hasMarker(result)) note.cache_control = breakpoint;
   return [...sent, finish(note, note)];
 }
 
@@ -327,9 +442,9 @@ function errorImage(block: Block, onPlaceholder: () => void, layout: Layout): Bl
 }
 
 /** One block of a tool_result's content, of a type the API takes there. */
-function nestedBlock(block: Block, onAltered: () => void, layout: Layout): Block {
+function nestedBlock(block: Block, onAltered: () => void, finish: Finish, layout: Layout): Block {
   if (block.type === 'image') return wireImage(block, FIELDS.get('image')!, onAltered, layout);
-  if (block.type === 'document') return wireDocument(block, layout.apiOrder);
+  if (block.type === 'document') return wireDocument(block, layout, onAltered, finish);
   if (block.type === 'text') return pick(block, FIELDS.get('text')!, layout.apiOrder);
   return block;
 }
@@ -373,15 +488,18 @@ export function blockBuiltFrom(block: unknown): unknown {
  * already, utils/mcp-media.ts). Media with no form the API takes is left
  * out, at the top of a message or in a tool_result.
  * `onContentAltered` hears, with the block the caller handed in, each block
- * left out at the top, each image there that goes as the placeholder, and
- * each tool_result whose content lost a block, or an image to the placeholder
- * or a note, or that carries a note in place of content it couldn't send or
- * never had. `finish`, when given, is the wire's last step for every block
- * that goes, at the top and in a tool_result: Bedrock's leaves out
+ * left out at the top, each image there that goes as the placeholder, each
+ * document there whose content source lost a block or an image to the
+ * placeholder, and each tool_result whose content lost a block, or an image
+ * to the placeholder or a note, anywhere in it, or that carries a note in
+ * place of content it couldn't send or never had. `finish`, when given, is
+ * the wire's last step for every block that goes, at the top, in a
+ * tool_result and in a document's content source: Bedrock's leaves out
  * `cache_control.ttl`. The rest lay the blocks out as the wire's adapter
  * always did: `nestedInApiOrder` builds a tool_result's content in the API's
  * own key order, as Anthropic's did, and `imageMediaTypeLast` puts an image's
- * `media_type` after the rest of its source, as Bedrock's did. Nothing handed
+ * `media_type` after the rest of its source, as Bedrock's did, but in a
+ * document's content source, which Bedrock's sent as it came. Nothing handed
  * in is changed.
  */
 export function anthropicWireMessages(
@@ -423,7 +541,12 @@ export function anthropicWireMessages(
  *  the top of a message. */
 function wireBlock(block: Block, original: Block, report: () => void, finish: Finish, top: Layout, nested: Layout): Block {
   if (block.type === 'image') return wireImage(block, FIELDS.get('image')!, report, top);
-  if (block.type === 'document') return wireDocument(block, false);
+  if (block.type === 'document') {
+    let altered = false;
+    const built = wireDocument(block, top, () => { altered = true; }, finish);
+    if (altered) report();
+    return built;
+  }
   if (block.type === 'tool_result') {
     const built = pick(block, FIELDS.get('tool_result')!, false);
     if (!Array.isArray(block.content)) {

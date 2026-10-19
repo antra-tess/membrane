@@ -56,6 +56,48 @@ describe('ineligibleReason', () => {
     expect(ineligibleReason(aux)).toBe('no-cache-breakpoint');
   });
 
+  it("sees a breakpoint in a document's content source, a request's only one once the budget counts it", () => {
+    const inSource = (cacheControl: Record<string, unknown>) => wire({
+      system: 'You are a resident.',
+      messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: [
+        { type: 'document', source: { type: 'content', content: [{ type: 'text', text: 'notes', cache_control: cacheControl }] } },
+      ] }] }],
+    });
+    expect(ineligibleReason(inSource({ type: 'ephemeral', ttl: '1h' }))).toBeNull();
+    expect(ineligibleReason(inSource({ type: 'ephemeral' }))).toBe('no-1h-breakpoint');
+    // Only a content source holds blocks: a source of another type with a
+    // stray `content` holds none, as the budget's walk reads it.
+    const stray = wire({
+      system: 'You are a resident.',
+      messages: [{ role: 'user', content: [
+        { type: 'document', source: { type: 'text', media_type: 'text/plain', data: 'notes', content: [{ type: 'text', text: 'x', cache_control: { type: 'ephemeral', ttl: '1h' } }] } },
+      ] }],
+    });
+    expect(ineligibleReason(stray)).toBe('no-cache-breakpoint');
+    // Nor does a document's own `content`, which the API doesn't read on one.
+    const own = wire({
+      system: 'You are a resident.',
+      messages: [{ role: 'user', content: [
+        { type: 'document', source: { type: 'text', media_type: 'text/plain', data: 'notes' }, content: [{ type: 'text', text: 'x', cache_control: { type: 'ephemeral', ttl: '1h' } }] },
+      ] }],
+    });
+    expect(ineligibleReason(own)).toBe('no-cache-breakpoint');
+  });
+
+  it("reads the tools' breakpoints, and keeps a request warm when any of its breakpoints is a 1h one", () => {
+    const toolsOnly = wire({
+      tools: [{ name: 'zz', input_schema: { type: 'object' }, cache_control: { type: 'ephemeral', ttl: '1h' } }],
+      system: 'You are a resident.',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }],
+    });
+    expect(ineligibleReason(toolsOnly)).toBeNull();
+    const mixed = wire({
+      system: [{ type: 'text', text: 'You are a resident.', cache_control: { type: 'ephemeral', ttl: '1h' } }],
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'go', cache_control: { type: 'ephemeral' } }] }],
+    });
+    expect(ineligibleReason(mixed)).toBeNull();
+  });
+
   it('rejects a 5m-only request: poking a 5m entry every few minutes costs more than it saves', () => {
     const short = wire({
       system: [{ type: 'text', text: 's', cache_control: { type: 'ephemeral' } }],

@@ -62,6 +62,7 @@
 import type { ProviderMessage as LooseProviderMessage } from './types.js';
 import type { NormalizeEvent } from './types.js';
 import { MembraneError } from '../types/errors.js';
+import { blockCacheMarker } from '../utils/cache-marker-budget.js';
 
 // ============================================================================
 // Public API
@@ -894,10 +895,12 @@ function textifyDuplicateResult(
  *     provenance line, which also says when the result was an error, since
  *     a failed call's output must not read as a successful one;
  *   - one cache marker, TTL included: the result's own, else the last one
- *     among its content parts. The block stands where the result stood, so a
- *     caller's breakpoint stays at that boundary; several markers inside one
- *     result can merge into one, never move past it, so the request's marker
- *     count never grows.
+ *     the cache-marker budget's walk finds inside it, in its content parts or
+ *     nested in them (a search result's content, a document's content
+ *     source), as the budget counts them (blockCacheMarker). The block
+ *     stands where the result stood, so a caller's breakpoint stays at that
+ *     boundary; several markers inside one result can merge into one, never
+ *     move past it, so the request's marker count never grows.
  */
 function textifyResult(
   block: ProviderBlock,
@@ -905,7 +908,7 @@ function textifyResult(
 ): { block: ProviderBlock; recoveredChars: number } {
   const recovered = renderResultContent(block);
   const label = block.is_error === true ? `${provenance}, an error` : provenance;
-  const marker = resultCacheMarker(block);
+  const marker = blockCacheMarker(block);
   return {
     block: {
       type: 'text',
@@ -914,17 +917,6 @@ function textifyResult(
     },
     recoveredChars: recovered.length,
   };
-}
-
-function resultCacheMarker(block: ProviderBlock): unknown {
-  if (block.cache_control) return block.cache_control;
-  const content = (block as { content?: unknown }).content;
-  if (!Array.isArray(content)) return undefined;
-  for (let i = content.length - 1; i >= 0; i--) {
-    const marker = (content[i] as { cache_control?: unknown } | null)?.cache_control;
-    if (marker) return marker;
-  }
-  return undefined;
 }
 
 function evictInterlopers(

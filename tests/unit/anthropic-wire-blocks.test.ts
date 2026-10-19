@@ -7,7 +7,8 @@
  * every later request, so one stray field gets them all refused. A field the
  * API takes survives, and a request that succeeds today goes out with the
  * same bytes, except where Anthropic's wire now sends what its adapter left
- * out of a tool_result.
+ * out of a tool_result. (The fallback breakpoints a request is handed are
+ * the breakpoint budget's, tests/unit/cache-marker-budget.test.ts.)
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AnthropicAdapter, toAnthropicContent } from '../../src/providers/anthropic.js';
@@ -317,21 +318,115 @@ describe.each(wires)('%s', (wire) => {
   it('sends a source of a type the API names that membrane doesn\'t build as it came', () => {
     const file = { type: 'file', file_id: 'file_011' };
     const text = { type: 'text', media_type: 'text/plain', data: 'hello' };
-    const content = { type: 'content', content: [{ type: 'text', text: 'hello' }] };
     const fileDocument = { type: 'file', file_id: 'file_012' };
     const request = build(wire, [{ role: 'user', content: [
       { type: 'image', source: file },
       { type: 'document', source: text },
       { type: 'document', source: fileDocument },
-      ...result([{ type: 'image', source: file }, { type: 'document', source: content }, { type: 'document', source: fileDocument }])[0].content,
+      ...result([{ type: 'image', source: file }, { type: 'document', source: text }, { type: 'document', source: fileDocument }])[0].content,
     ] }]);
     const [image, document, documentFile, block] = request.messages[0].content;
     expect(image.source).toBe(file);
     expect(document.source).toBe(text);
     expect(documentFile.source).toBe(fileDocument);
-    expect(block.content.map((b: any) => b.source)).toEqual([file, content, fileDocument]);
-    expect(block.content[1].source).toBe(content);
+    expect(block.content.map((b: any) => b.source)).toEqual([file, text, fileDocument]);
+    expect(block.content[1].source).toBe(text);
     expect(block.content[2].source).toBe(fileDocument);
+  });
+
+  it("builds a document's content source as the API takes it: text and images from their fields, anything else left out and reported", () => {
+    const source = () => ({ type: 'content', media_type: 'text/plain', content: [
+      { type: 'text', text: 'a', ...EXTRA },
+      { type: 'image', source: { type: 'base64', data: PNG, mediaType: 'image/png' }, ...EXTRA },
+      { type: 'document', source: { type: 'text', media_type: 'text/plain', data: 'x' } },
+      { type: 'search_result', source: 's', title: 't', content: [{ type: 'text', text: 'x' }] },
+      { type: 'image', source: {} },
+      'stray',
+    ] });
+    const document = { type: 'document', title: 'notes', source: source() };
+    const nested = { type: 'tool_result', tool_use_id: 'toolu_1', content: [{ type: 'document', title: 'notes', source: source() }] };
+    const altered: unknown[] = [];
+    const [top, block] = build(wire, [{ role: 'user', content: [document, nested] }], (b) => altered.push(b)).messages[0].content;
+    const expected = { type: 'content', content: [
+      { type: 'text', text: 'a' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG } },
+    ] };
+    expect(top.source).toEqual(expected);
+    expect(block.content[0].source).toEqual(expected);
+    // Each reported once, as the block handed in.
+    expect(altered).toHaveLength(2);
+    expect(altered[0]).toBe(document);
+    expect(altered[1]).toBe(nested);
+    // A content source that is a string goes as it is.
+    const plain = { type: 'document', source: { type: 'content', content: 'plain notes' } };
+    expect(build(wire, [{ role: 'user', content: [plain] }]).messages[0].content[0].source).toEqual({ type: 'content', content: 'plain notes' });
+  });
+
+  it('leaves out, and reports, a document whose content source holds nothing the API takes, wherever it is', () => {
+    const empties = [
+      { type: 'document', source: { type: 'content', content: [] } },
+      { type: 'document', source: { type: 'content', content: '' } },
+      { type: 'document', source: { type: 'content', content: [{ type: 'search_result', source: 's', title: 't', content: [] }, { type: 'image', source: {} }] } },
+      { type: 'document', source: { type: 'content' } },
+    ];
+    const nested = { type: 'tool_result', tool_use_id: 'toolu_1', content: [{ type: 'text', text: 'kept' }, ...empties] };
+    const altered: unknown[] = [];
+    const [message] = build(wire, [{ role: 'user', content: [{ type: 'text', text: 'see' }, ...empties, nested] }], (b) => altered.push(b)).messages;
+    expect(message.content.map((b: any) => b.type)).toEqual(['text', 'tool_result']);
+    expect(message.content[1].content).toEqual([{ type: 'text', text: 'kept' }]);
+    expect(altered).toHaveLength(empties.length + 1);
+    empties.forEach((empty, i) => expect(altered[i]).toBe(empty));
+    expect(altered.at(-1)).toBe(nested);
+  });
+
+  it("keeps a breakpoint in a document's content source only on its last block, only when the document has none, and in a tool_result only where the document's own would stay", () => {
+    const doc = (marks: number[], own = false) => ({
+      type: 'document', title: 'notes', ...(own ? { cache_control: MARK } : {}),
+      source: { type: 'content', content: [0, 1, 2].map((i) => ({ type: 'text', text: `part ${i}`, ...(marks.includes(i) ? { cache_control: MARK } : {}) })) },
+    });
+    const marks = (d: any) => [d.cache_control, ...d.source.content.map((b: any) => b.cache_control)];
+    const atTop = (d: object) => build(wire, [{ role: 'user', content: [d] }]).messages[0].content[0];
+    expect(marks(atTop(doc([0, 1, 2])))).toEqual([undefined, undefined, undefined, MARK]);
+    expect(marks(atTop(doc([0, 2], true)))).toEqual([MARK, undefined, undefined, undefined]);
+    // In a tool_result, the API takes the source's last breakpoint as the document's own.
+    expect(marks(built(wire, [{ type: 'text', text: 'a' }, doc([1, 2])])[1])).toEqual([undefined, undefined, undefined, MARK]);
+    expect(marks(built(wire, [doc([2]), { type: 'text', text: 'b' }])[0])).toEqual([undefined, undefined, undefined, undefined]);
+    expect(marks(built(wire, [doc([2])], { cache_control: MARK })[0])).toEqual([undefined, undefined, undefined, undefined]);
+    // The caller's document keeps its breakpoints.
+    const given = doc([0, 2], true);
+    atTop(given);
+    built(wire, [given, { type: 'text', text: 'b' }]);
+    expect(marks(given)).toEqual([MARK, MARK, undefined, MARK]);
+    // An error result's note stands in for a document whose source's last
+    // block carried the breakpoint, as for any block it held.
+    expect(built(wire, [doc([2])], { is_error: true })).toEqual([{ type: 'text', text: EMPTIED_ERROR_NOTE, cache_control: MARK }]);
+  });
+
+  it("reads a content source as it will be built: the last block it takes keeps the breakpoint, and a null or an image the API doesn't take reports its document, while one built as given reports nothing", () => {
+    const svg = Buffer.from('<svg/>').toString('base64');
+    const search = { type: 'search_result', source: 's', title: 't', content: [{ type: 'text', text: 'x' }] };
+    const source = (content: unknown[]) => ({ type: 'document', source: { type: 'content', content } });
+    // The last block that ships keeps its breakpoint, though one the build
+    // leaves out comes after it.
+    expect(built(wire, [source([{ type: 'text', text: 'a', cache_control: MARK }, search])])[0].source.content)
+      .toEqual([{ type: 'text', text: 'a', cache_control: MARK }]);
+    // An error result's note takes the breakpoint the build would keep, and
+    // not that of a block it would leave out.
+    expect(built(wire, [source([{ type: 'text', text: 'a', cache_control: MARK }, search])], { is_error: true }))
+      .toEqual([{ type: 'text', text: EMPTIED_ERROR_NOTE, cache_control: MARK }]);
+    expect(built(wire, [source([{ type: 'text', text: 'a' }, { ...search, cache_control: MARK }])], { is_error: true }))
+      .toEqual([{ type: 'text', text: EMPTIED_ERROR_NOTE }]);
+    const withNull = source([null, { type: 'text', text: 'a' }]);
+    const withSvg = source([{ type: 'text', text: 'a' }, { type: 'image', source: { type: 'base64', media_type: 'image/svg+xml', data: svg }, cache_control: MARK }]);
+    const plain = source([{ type: 'text', text: 'as given' }]);
+    const altered: unknown[] = [];
+    const [nullDocument, svgDocument, plainDocument] = build(wire, [{ role: 'user', content: [withNull, withSvg, plain] }], (b) => altered.push(b)).messages[0].content;
+    expect(nullDocument.source.content).toEqual([{ type: 'text', text: 'a' }]);
+    expect(svgDocument.source.content.map((b: any) => [b.type, b.cache_control])).toEqual([['text', undefined], ['text', MARK]]);
+    expect(plainDocument).toEqual(plain);
+    expect(altered).toHaveLength(2);
+    expect(altered[0]).toBe(withNull);
+    expect(altered[1]).toBe(withSvg);
   });
 
   it("keeps a document's own title over its filename", () => {
@@ -467,6 +562,26 @@ describe('the wires that differ', () => {
         image(dataFirst), image(dataFirst), image(dataFirst), { text: 'given in its own order', type: 'text' }, image(wireFirst),
       ] },
     ]));
+  });
+
+  it("lays out a document's content source as each wire's adapter sent it, and Bedrock leaves out a ttl there", () => {
+    const image = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG } };
+    const given = { title: 'notes', type: 'document', source: { content: [{ text: 'a', type: 'text' }, image], type: 'content' } };
+    // Bedrock's adapter sent a tool_result's content source as it came.
+    expect(JSON.stringify(built('Bedrock', [given]))).toBe(JSON.stringify([given]));
+    // Anthropic's left a tool_result's document out, and it now goes in the
+    // API's own key order.
+    expect(JSON.stringify(built('Anthropic', [given]))).toBe(JSON.stringify([
+      { type: 'document', source: { type: 'content', content: [{ type: 'text', text: 'a' }, image] }, title: 'notes' },
+    ]));
+    const ttl = { type: 'ephemeral', ttl: '1h' };
+    const marked = { type: 'document', source: { type: 'content', content: [{ type: 'text', text: 'a', cache_control: ttl }] } };
+    expect(built('Bedrock', [marked])[0].source.content[0].cache_control).toEqual(MARK);
+    expect(built('Anthropic', [marked])[0].source.content[0].cache_control).toEqual(ttl);
+    // And at the top of a message.
+    const top = (wire: Wire) => build(wire, [{ role: 'user', content: [marked] }]).messages[0].content[0];
+    expect(top('Bedrock').source.content[0].cache_control).toEqual(MARK);
+    expect(top('Anthropic').source.content[0].cache_control).toEqual(ttl);
   });
 
   it("toAnthropicContent sends a tool_result's document, which it used to leave out, in the API's key order", () => {

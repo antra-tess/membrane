@@ -40,6 +40,27 @@ describe('cache wire receipt', () => {
     expect(receipt.markers).toHaveLength(1);
   });
 
+  it('receipts a breakpoint nested in a block through the block that holds it', () => {
+    const mark = { type: 'ephemeral' };
+    const nested = (content: unknown[]) => computeCacheWireReceipt({ messages: [
+      { role: 'user', content: [{ type: 'text', text: 'go' }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content }] },
+    ] });
+    const inResult = nested([{ type: 'text', text: 'a' }, { type: 'text', text: 'b', cache_control: mark }]);
+    const inSource = nested([{ type: 'document', source: { type: 'content', content: [{ type: 'text', text: 'a', cache_control: mark }] } }]);
+    const unmarked = nested([{ type: 'text', text: 'a' }]);
+    expect(inResult.markers).toHaveLength(1);
+    expect(inSource.markers).toHaveLength(1);
+    expect(unmarked.markers).toHaveLength(0);
+    expect(inResult.markers[0]!.estimatedOffset).toBeGreaterThan(0);
+    // The prefix runs from the start of the request through the block.
+    const after = computeCacheWireReceipt({ messages: [
+      { role: 'user', content: [{ type: 'text', text: 'went' }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't', content: [{ type: 'text', text: 'a' }, { type: 'text', text: 'b', cache_control: mark }] }] },
+    ] });
+    expect(after.markers[0]!.prefixHash).not.toBe(inResult.markers[0]!.prefixHash);
+  });
+
   it('includes message role and envelope identity in marked-prefix hashes', () => {
     const block = { type: 'text', text: 'same', cache_control: { type: 'ephemeral' } };
     const user = computeCacheWireReceipt({ messages: [{ role: 'user', content: [block] }] });
