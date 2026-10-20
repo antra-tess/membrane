@@ -71,9 +71,12 @@ source and compiled-file hashes. No dependency versions changed.
 
 The added `workspace read optional paging through Membrane` tests exercise
 both API-key/Responses-formatter and subscription/native-formatter paths. They
-assert the actual HTTP body carries the unchanged workspace schema with
-`strict: false`, then check that a mocked tool call retains only the selected
-arguments on its return through Membrane. Cases cover path-only defaults,
+use a fixture mirroring the property names, types and required list of the
+agent-framework 0.22.1 workspace read schema, with abbreviated descriptions.
+They assert the actual HTTP body carries that fixture's schema unchanged with
+`strict: false`, then use `toStrictEqual` to check that a mocked tool call retains
+only the selected arguments on its return through Membrane, including absence
+of extra properties with `undefined` values. Cases cover path-only defaults,
 line paging, and character paging.
 
 The mocked responses do **not** demonstrate live model behavior; the live

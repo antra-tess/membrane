@@ -460,7 +460,8 @@ describe('save_recent_image through Membrane', () => {
   });
 });
 
-// agent-framework 0.22.1 workspace read selects its paging mode by presence:
+// Mirrors the property names, types and required list of agent-framework 0.22.1
+// workspace read; descriptions are abbreviated. Paging is selected by presence:
 // line arguments and character arguments cannot be supplied together.
 const WORKSPACE_READ: ToolDefinition = frozen({
   name: 'workspace--read',
@@ -515,7 +516,6 @@ describe.each(Object.entries(MODES))('workspace read optional paging through Mem
       type: 'function', name: WORKSPACE_READ.name, description: WORKSPACE_READ.description,
       parameters: WORKSPACE_READ.inputSchema, strict: false,
     }]);
-    expect(result.toolCalls).toEqual([{ id: 'call_read', name: WORKSPACE_READ.name, input }]);
-    expect(WORKSPACE_READ.inputSchema.required).toEqual(['path']);
+    expect(result.toolCalls).toStrictEqual([{ id: 'call_read', name: WORKSPACE_READ.name, input }]);
   });
 });
