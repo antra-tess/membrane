@@ -459,3 +459,63 @@ describe('save_recent_image through Membrane', () => {
     expect(tool!.parameters.required).toEqual(['path']);
   });
 });
+
+// agent-framework 0.22.1 workspace read selects its paging mode by presence:
+// line arguments and character arguments cannot be supplied together.
+const WORKSPACE_READ: ToolDefinition = frozen({
+  name: 'workspace--read',
+  description: 'Read workspace text using either line or character paging, never both.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      path: { type: 'string' },
+      offset: { type: 'number' },
+      limit: { type: 'number' },
+      offsetChars: { type: 'integer' },
+      limitChars: { type: 'integer' },
+    },
+    required: ['path'],
+  },
+});
+
+describe.each(Object.entries(MODES))('workspace read optional paging through Membrane, %s', (modeName, mode) => {
+  it.each([
+    ['default', { path: 'workspace/check.txt' }],
+    ['lines', { path: 'workspace/check.txt', offset: 3, limit: 2 }],
+    ['characters', { path: 'workspace/unicode.txt', offsetChars: 5, limitChars: 5 }],
+  ])('keeps %s paging optional on the wire and preserves omitted arguments on return', async (_case, input) => {
+    const response = {
+      id: 'resp_read', model: 'gpt-5.6', status: 'completed',
+      output: [{
+        type: 'function_call', id: 'fc_read', call_id: 'call_read',
+        name: WORKSPACE_READ.name, arguments: JSON.stringify(input), status: 'completed',
+      }],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    };
+    const subscription = modeName === 'subscription mode';
+    const fetchMock = stubFetch(() => new Response(
+      subscription
+        ? `data: ${JSON.stringify({ type: 'response.completed', response })}\n\n`
+        : JSON.stringify(response),
+      { headers: { 'Content-Type': subscription ? 'text/event-stream' : 'application/json' } },
+    ));
+    const membrane = new Membrane(mode.adapter(), {
+      formatter: subscription ? new NativeFormatter() : new OpenAIResponsesFormatter(),
+      assistantParticipant: 'Reader',
+    });
+
+    const result = await membrane.complete({
+      messages: [{ participant: 'user', content: [{ type: 'text', text: 'Read the requested file range.' }] }],
+      config: { model: 'gpt-5.6', maxTokens: 100 },
+      tools: [WORKSPACE_READ],
+    });
+
+    // This is the regression assertion: the old adapter omits strict here.
+    expect(sentTools(fetchMock)).toEqual([{
+      type: 'function', name: WORKSPACE_READ.name, description: WORKSPACE_READ.description,
+      parameters: WORKSPACE_READ.inputSchema, strict: false,
+    }]);
+    expect(result.toolCalls).toEqual([{ id: 'call_read', name: WORKSPACE_READ.name, input }]);
+    expect(WORKSPACE_READ.inputSchema.required).toEqual(['path']);
+  });
+});
