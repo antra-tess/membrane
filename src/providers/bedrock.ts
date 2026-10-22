@@ -866,8 +866,8 @@ export class BedrockAdapter implements ProviderAdapter {
             if (eventData === undefined) console.warn('[membrane:bedrock] Skipping malformed stream event:', skipped);
 
             if (eventData !== undefined) {
-              // A decoded model event is progress; a ping only proves the
-              // connection.
+              // A decoded model event is progress; a ping is no event, and it
+              // isn't reported at all (see the read loop on liveness).
               if ((eventData as { type?: unknown }).type !== 'ping') {
                 onProgress?.(progressOfAnthropicEvent(eventData as { type?: unknown; content_block?: { type?: unknown } }, summarized));
               }

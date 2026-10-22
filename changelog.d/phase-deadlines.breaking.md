@@ -22,16 +22,18 @@
 - **Callers of `AnthropicAdapter`:** its own first-event and idle timers are
   gone, and `firstEventTimeoutMs` with them. The first event now falls under
   the 400 s for first content, where it had 600 s. `idleTimeoutMs` now sets
-  the liveness bound membrane keeps on any call whose adapter can see its
-  transport: no byte at all, keepalive pings included, for 180 s (it was
-  600 s), in every phase from the first byte, where the idle timer started at
+  the liveness bound membrane keeps on a stream whose adapter reports its
+  transport, as `AnthropicAdapter` does and `BedrockAdapter` doesn't: no
+  byte at all, keepalive pings included, for 180 s (it was 600 s), in every
+  phase from the first byte, where the idle timer started at
   the first event. `null` counts as unset, and 0 turns it off, as a negative
   number or NaN does. When either timer ran out, the call threw a retryable
   `MembraneError` of type `timeout`; any expiry is now a `TimeoutAbortError`,
   which isn't retryable, and a stream that stalls ends as an `aborted` result
   with reason `'timeout'` carrying its partial content instead of throwing.
   The deadlines are `Membrane`'s: an adapter called directly, not through
-  `Membrane`, now bounds nothing but its caller's `signal`.
+  `Membrane`, now bounds nothing but its caller's `signal` and its own
+  `timeoutMs`.
 - **Provider adapters:** `ProviderRequestOptions.idleTimeoutMs` and
   `firstEventTimeoutMs` are removed: membrane core keeps a call's progress
   and liveness deadlines (`timeoutMs` stays the adapter's), and the adapter

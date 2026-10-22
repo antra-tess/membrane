@@ -202,6 +202,19 @@ describe('the report at the send', () => {
   });
 });
 
+describe('a budget reported late', () => {
+  it('is taken after the first event too, as the true limit', () => {
+    const late = start({ phases: false, maxTokens: 70_000 });
+    late.report();
+    late.reportSend({ maxTokens: 350 });
+    vi.advanceTimersByTime(409 * S);
+    expect(expired(late)).toBeUndefined();
+    vi.advanceTimersByTime(1 * S);
+    expect(expired(late)).toMatch(/^No provider event within 410s/);
+    late.cleanup();
+  });
+});
+
 describe('the one timer', () => {
   it('arms no new timer for a report that leaves the expiry where it was or later', () => {
     // Before content, plain events leave the expiry where it is (400 s from the send).
@@ -570,6 +583,9 @@ describe('progressOfAnthropicEvent', () => {
       [{ type: 'content_block_start' }, false, undefined],
       [{ type: 'message_start' }, false, undefined],
       [{ type: 'content_block_stop' }, false, undefined],
+      // Only a block's start says what the block is, whatever else an event carries.
+      [{ type: 'content_block_stop', content_block: { type: 'redacted_thinking' } }, false, undefined],
+      [{ type: 'message_delta', content_block: { type: 'thinking' } }, false, undefined],
       [{ type: 'message_delta' }, false, undefined],
       [{ type: 'ping' }, false, undefined],
       [{}, false, undefined],

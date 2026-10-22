@@ -406,9 +406,12 @@ export interface ProviderRequestOptions {
    * else (`null`, a number, a string, an array), which carries no event, nor
    * for keepalives (Anthropic's and Bedrock's `ping`), SSE comments or raw
    * body bytes: those prove the connection is up, not that the model is
-   * making progress, and an adapter that can see them reports them as
-   * `'alive'`. An adapter whose stream reports its phases (SendReport.
-   * reportsPhases) reports a content delta or a `redacted_thinking` block's
+   * making progress. An adapter that can see them and knows their cadence
+   * reports them as `'alive'`, which arms the liveness bound
+   * (`AnthropicAdapter` does; `BedrockAdapter`, whose pings through a silent
+   * think are unchecked, doesn't). An adapter whose stream reports its
+   * phases (SendReport.reportsPhases) reports a content delta or a
+   * `redacted_thinking` block's
    * start as `'content'`, and a silent think's start as `'think'`;
    * any other adapter may call it with nothing for every event. Decorators
    * must forward it with the other options; one that drops it leaves the

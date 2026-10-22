@@ -538,8 +538,9 @@ export class AnthropicAdapter implements ProviderAdapter {
     // it saw. Each chunk of the response body, the SSE pings the SDK drops
     // before the loop below included, is the transport alive
     // (observeBodyActivity), and each event says what it is by
-    // progressOfAnthropicEvent. (Membrane sends Fable and Mythos no thinking
-    // config, and they think silently by default.)
+    // progressOfAnthropicEvent. A body that asks for no display, as for the
+    // Fable and Mythos models when Membrane sends them no thinking config,
+    // counts as silent: those models think silently by default.
     const summarized = (fullRequest.thinking as { display?: unknown } | undefined)?.display === 'summarized';
     let session: ReturnType<AnthropicAdapter['credentialSession']> | undefined;
 
