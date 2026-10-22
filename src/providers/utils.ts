@@ -676,8 +676,9 @@ const positiveMs = (value: unknown): number | undefined =>
  * - Anything else (0, a negative number, NaN): off.
  *
  * A connection that sends nothing at all is left to the runtime's own body
- * timeout (undici's, Bun's), which the phases outlast only in a silent
- * think's allowance.
+ * timeout (undici's, Bun's), counted from its last byte. A phase bound can
+ * outlast it before content, on a call without phases and in a silent
+ * think's allowance; after content, 180 s between events is shorter.
  *
  * The output budget is the one the adapter reports sending, or else
  * `maxTokens` when it's a positive number, or else DEFAULT_BUDGET_TOKENS. A
