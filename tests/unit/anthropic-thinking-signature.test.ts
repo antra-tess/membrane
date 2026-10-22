@@ -6,8 +6,11 @@
  *   - Inbound streaming path: signature_delta events are accumulated onto
  *     contentBlocks[idx].signature during for-await on the SSE stream.
  *   - Inbound non-streaming path: fromAnthropicContent captures signature.
- *   - Outbound path: toAnthropicContent emits signature when present, omits
- *     it when absent.
+ *   - Outbound path: toAnthropicContent emits signature when present, and
+ *     leaves out a thinking block with none (#191).
+ *   - Request path: the Anthropic and Bedrock adapters leave out a thinking
+ *     block with no signature, another provider's reasoning the API refuses,
+ *     and report it (#191).
  *
  * Background: prior to this fix, the streaming accumulator dropped
  * signature_delta events and the outbound serializer stripped the signature
@@ -23,6 +26,7 @@ import {
   toAnthropicContent,
   fromAnthropicContent,
 } from '../../src/providers/anthropic.js';
+import { BedrockAdapter } from '../../src/providers/bedrock.js';
 import type { ContentBlock } from '../../src/types/index.js';
 
 // ---------------------------------------------------------------------------
@@ -177,24 +181,105 @@ describe('toAnthropicContent: thinking signature', () => {
     expect(block.signature).toBe('sig-xyz');
   });
 
-  it('omits the signature field when absent', () => {
+  // The API refuses a thinking block with no signature ("signature: Field
+  // required") and one with an empty or made-up signature ("Invalid
+  // `signature` in `thinking` block"), so another provider's reasoning has no
+  // thinking form here, and as text the model would read it as what it said
+  // (#191).
+  it('leaves out a thinking block with no signature', () => {
     const out = toAnthropicContent([
       { type: 'thinking', thinking: 'no sig' },
+      { type: 'text', text: 'answer' },
     ]);
-    const block = out[0] as any;
-    expect(block.type).toBe('thinking');
-    expect(block.thinking).toBe('no sig');
-    expect('signature' in block).toBe(false);
+    expect(out).toEqual([{ type: 'text', text: 'answer' }]);
   });
 
-  it('omits the signature field when empty string', () => {
-    // An empty signature is just as invalid to the API as a missing one
-    // (HTTP 400 "Invalid signature in thinking block"). Don't ship it.
+  it('leaves out a thinking block whose signature is empty', () => {
     const out = toAnthropicContent([
       { type: 'thinking', thinking: 'empty sig', signature: '' },
+      { type: 'text', text: 'answer' },
     ]);
-    const block = out[0] as any;
-    expect('signature' in block).toBe(false);
+    expect(out).toEqual([{ type: 'text', text: 'answer' }]);
+  });
+
+  it('leaves a turn of only a thinking block with no signature empty, for the caller to drop', () => {
+    expect(toAnthropicContent([{ type: 'thinking', thinking: 'no sig' }])).toEqual([]);
+  });
+
+  it('keeps a signature-only block, Anthropic\'s own with its thinking omitted', () => {
+    const out = toAnthropicContent([{ type: 'thinking', thinking: '', signature: 'sig-only' }]);
+    expect(out).toEqual([{ type: 'thinking', thinking: '', signature: 'sig-only' }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3b. Request path — the adapters' own builders (#191)
+// ---------------------------------------------------------------------------
+
+/** A history whose assistant turn holds `blocks`, between two user turns. */
+function history(blocks: unknown[]) {
+  return {
+    model: 'claude-haiku-4-5',
+    maxTokens: 64,
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: 'Say hello.' }] },
+      { role: 'assistant', content: blocks },
+      { role: 'user', content: [{ type: 'text', text: 'Again?' }] },
+    ],
+  };
+}
+
+const UNSIGNED = { type: 'thinking', thinking: 'another provider\'s reasoning' };
+const SIGNED = { type: 'thinking', thinking: 'mine', signature: 'sig-own' };
+const SIGNATURE_ONLY = { type: 'thinking', thinking: '', signature: 'sig-only' };
+const ANSWER = { type: 'text', text: 'Hello!' };
+
+const builders: Array<[string, (request: unknown, onAltered: (block?: unknown) => void) => any]> = [
+  ['AnthropicAdapter', (request, onAltered) =>
+    (new AnthropicAdapter({ apiKey: 'test', cacheKeepalive: { enabled: false } }) as any).buildRequest(request, onAltered)],
+  ['BedrockAdapter', (request, onAltered) =>
+    (new BedrockAdapter({ accessKeyId: 'test-key', secretAccessKey: 'test-secret', region: 'us-west-2' }) as any)
+      .buildRequest(request, undefined, onAltered)],
+];
+
+describe.each(builders)('%s request: a thinking block with no signature', (_name, build) => {
+  it('is left out of its turn and reported, its signed siblings kept', () => {
+    const heard: unknown[] = [];
+    const built = build(history([UNSIGNED, SIGNED, SIGNATURE_ONLY, ANSWER]), (block) => heard.push(block));
+
+    expect(built.messages[1].content).toEqual([SIGNED, SIGNATURE_ONLY, ANSWER]);
+    // The report names the caller's own block, which Membrane's round report
+    // finds by identity (utils/fidelity.ts).
+    expect(heard).toHaveLength(1);
+    expect(heard[0]).toBe(UNSIGNED);
+  });
+
+  it('with an empty signature is left out and reported too', () => {
+    const heard: unknown[] = [];
+    const empty = { ...UNSIGNED, signature: '' };
+    const built = build(history([empty, ANSWER]), (block) => heard.push(block));
+
+    expect(built.messages[1].content).toEqual([ANSWER]);
+    expect(heard).toHaveLength(1);
+    expect(heard[0]).toBe(empty);
+  });
+
+  it('that was its turn\'s only block leaves no empty assistant turn', () => {
+    const heard: unknown[] = [];
+    const built = build(history([UNSIGNED]), (block) => heard.push(block));
+
+    expect(built.messages.map((m: { role: string }) => m.role)).toEqual(['user', 'user']);
+    expect(heard).toContain(UNSIGNED);
+  });
+
+  it('that was the final assistant turn\'s only block is refused, as an emptied final turn is', () => {
+    // Dropping the turn would make a continuation a fresh reply, which the
+    // empty-turn cleanup refuses (utils/empty-text.ts).
+    const heard: unknown[] = [];
+    const final = { ...history([UNSIGNED]), messages: history([UNSIGNED]).messages.slice(0, 2) };
+
+    expect(() => build(final, (block) => heard.push(block))).toThrow("would change the request's final role to user");
+    expect(heard).toContain(UNSIGNED);
   });
 });
 

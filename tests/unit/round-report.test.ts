@@ -544,6 +544,22 @@ describe('producer-boundary losses', () => {
     expect(rounds.map((r) => r.fidelity)).toEqual(['unknown', 'unknown']);
   });
 
+  it('names the message whose thinking block with no signature was left out (#191)', async () => {
+    // NativeFormatter rebuilds each thinking block, and the adapter reports the one it was handed:
+    // the round report traces it back to the consumer's message.
+    const adapter = new ScriptedAnthropic([{ content: [{ type: 'text', text: 'done' }], stopReason: 'end_turn' }]);
+    const { rounds } = await drive(new Membrane(adapter), nativeAnthropicRequest({
+      messages: [
+        { participant: 'User', content: [{ type: 'text', text: 'hello' }] },
+        { participant: 'Claude', content: [{ type: 'thinking', thinking: 'reasoning from another provider' }, { type: 'text', text: 'hi' }] },
+        { participant: 'User', content: [{ type: 'text', text: 'again' }] },
+      ],
+    }));
+    expect(adapter.sent[0].messages[1].content).toEqual([{ type: 'text', text: 'hi' }]);
+    expect(rounds[0]!.altered).toEqual({ messages: [1], injected: [] });
+    expect(rounds[0]!.fidelity).toBe('established');
+  });
+
   it('a passthrough that replaces the built messages makes the round unknown (Anthropic, Bedrock)', async () => {
     const adapter = new ScriptedAnthropic([{ content: [{ type: 'text', text: 'done' }], stopReason: 'end_turn' }]);
     const { rounds } = await drive(new Membrane(adapter), nativeAnthropicRequest({

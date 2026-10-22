@@ -28,6 +28,7 @@ import {
 } from '../types/index.js';
 import { errorFromThrown } from '../types/errors.js';
 import { stripEmptyTextRequest } from '../utils/empty-text.js';
+import { isUnsignedThinking } from '../utils/thinking-carriers.js';
 import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, streamIndex, isEventObject, progressOfAnthropicEvent } from './utils.js';
 import {
   INTERLEAVED_THINKING_BETA,
@@ -512,6 +513,13 @@ export class BedrockAdapter implements ProviderAdapter {
           if (isSourcelessMedia(block)) {
             // Media with no source object (MCP's form that didn't convert)
             // has no form the API takes: left out, and reported.
+            onContentAltered?.(original);
+            return [];
+          }
+          if (isUnsignedThinking(block)) {
+            // Another provider's reasoning has no signature, and the
+            // Anthropic API refuses a thinking block without a valid one
+            // (#191): left out, and reported, as the Anthropic adapter does.
             onContentAltered?.(original);
             return [];
           }

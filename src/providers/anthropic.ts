@@ -10,6 +10,7 @@ import { stripEmptyTextBlocks, stripEmptyTextRequest } from '../utils/empty-text
 import { anthropicServerBlockFor, isAnthropicServerBlock, unpairedServerBlocks, type AnthropicServerBlock } from '../utils/anthropic-server-blocks.js';
 import { imageForRequest, urlImageForRequest, assertWithinByteBudget, shedImagesToFitByteBudget } from '../utils/image-media.js';
 import { convertMcpMedia, isSourcelessMedia } from '../utils/mcp-media.js';
+import { isUnsignedThinking } from '../utils/thinking-carriers.js';
 import type {
   ProviderAdapter,
   ProviderInputTransformation,
@@ -719,8 +720,8 @@ export class AnthropicAdapter implements ProviderAdapter {
           } else if ((event.delta as { type: string }).type === 'signature_delta') {
             // Accumulate the cryptographic signature that authenticates this
             // thinking block. Without this, signatures never land on the
-            // streaming path and the next request — which carries the block
-            // back in history — fails Anthropic's signature validation.
+            // streaming path, and the next request, which carries the block
+            // back in history, leaves it out as unsigned (isUnsignedThinking).
             const sig = (event.delta as { signature?: string }).signature;
             const block = contentBlocks[currentBlockIndex];
             if (block && block.type === 'thinking' && sig) {
@@ -897,6 +898,14 @@ export class AnthropicAdapter implements ProviderAdapter {
             // Media with no source object (MCP's form that didn't convert)
             // has no form the API takes: left out, as in a tool_result, and
             // reported.
+            onContentAltered?.(original);
+            return undefined;
+          }
+          if (isUnsignedThinking(block)) {
+            // Another provider's reasoning, such as Gemini's thought parts or
+            // an OpenAI-compatible reasoning channel, has no signature, and
+            // the API refuses a thinking block without a valid one (#191):
+            // left out, and reported.
             onContentAltered?.(original);
             return undefined;
           }
@@ -1314,9 +1323,11 @@ function anthropicUrlImage(url: string): Anthropic.ImageBlockParam | Anthropic.T
  * top of the turn and inside a `tool_result`. A document that doesn't
  * convert, with no source after that, is left out, and so is an image with no
  * source object that isn't MCP's form, with neither `data` nor `mimeType`.
+ * A thinking block with no signature is left out too (isUnsignedThinking).
  * Nothing reports what it leaves out: it has no alteration callback. It sees
- * one turn, so a turn whose only blocks pairing leaves out comes back empty,
- * for the caller to drop as NativeFormatter drops it.
+ * one turn, so a turn whose only blocks it or pairing leaves out comes back
+ * empty, for the caller to drop as the adapters' cleanup drops it, and to
+ * refuse when it's the final turn, as that cleanup does.
  */
 export function toAnthropicContent(
   blocks: ContentBlock[],
@@ -1408,10 +1419,14 @@ export function toAnthropicContent(
         break;
         
       case 'thinking':
+        // A thinking block with no signature, another provider's reasoning,
+        // has no form the API takes (#191): left out.
+        if (isUnsignedThinking(block)) break;
+        // Signed, so the signature always goes.
         result.push({
           type: 'thinking',
           thinking: block.thinking,
-          ...(block.signature ? { signature: block.signature } : {}),
+          signature: block.signature,
         } as any);
         break;
 

@@ -588,6 +588,27 @@ describe('system changes: turns as the API reads them, the float, and withdrawn 
       expect(roles(build([user('u0'), s, reply(call('t1')), { participant: 'User', content: [result('t1')] }])))
         .toEqual(['user', 'system', 'assistant', 'user']);
     });
+
+    it('an assistant turn of another provider\'s unsigned thinking alone is no point, since the adapter leaves the block out (#191)', () => {
+      // u0, aU, u2, a3: the adapter leaves aU out, so u0 and u2 are one user turn, and S goes before a3.
+      // Placed before aU, S would sit between u0 and u2 once aU is gone, where the API refuses a system message.
+      const unsigned: ContentBlock = { type: 'thinking', thinking: 'reasoning from another provider' };
+      expect(shape(build([user('u0'), s, reply(unsigned), user('u2'), reply(text('a3'))])))
+        .toEqual(['user:u0', 'assistant:thinking', 'user:u2', 'system:s', 'assistant:a3']);
+    });
+
+    it('an unsigned thinking block doesn\'t date the turn it shares with later blocks', () => {
+      // u0, aU, S, a3, u4: aU and a3 are one assistant turn, dated by a3 since the adapter leaves aU
+      // out, so S goes before that turn, as it does for a whitespace block in its place.
+      const unsigned: ContentBlock = { type: 'thinking', thinking: 'reasoning from another provider' };
+      expect(roles(build([user('u0'), reply(unsigned), s, reply(text('a3')), user('u4')])))
+        .toEqual(['user', 'system', 'assistant', 'user']);
+    });
+
+    it('a trailing turn of unsigned thinking alone leaves the end a point, as a trailing turn of whitespace does', () => {
+      const unsigned: ContentBlock = { type: 'thinking', thinking: 'reasoning from another provider' };
+      expect(shape(build([user('u0'), s, reply(unsigned)]))).toEqual(['user:u0', 'assistant:thinking', 'system:s']);
+    });
   });
 
   it('through the real AnthropicAdapter, whitespace the cleanup drops is left out of what is sent, and the change keeps its place', async () => {
@@ -604,6 +625,32 @@ describe('system changes: turns as the API reads them, the float, and withdrawn 
     const assistantTexts = (sent[0]!.messages[2] as unknown as { content: Array<{ type: string; text?: string }> }).content
       .filter((b) => b.type === 'text').map((b) => b.text);
     expect(assistantTexts).toEqual(['a3']);
+  });
+
+  it('through the real AnthropicAdapter, a turn of unsigned thinking alone is left out, and the change goes before the next assistant turn (#191)', async () => {
+    const sent: Array<{ messages: Array<{ role: string }> }> = [];
+    const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
+    (adapter as any).client = { messages: { create: async (body: { messages: Array<{ role: string }> }) => {
+      sent.push(body);
+      return { content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn', model: 'm', usage: { input_tokens: 1, output_tokens: 1 } };
+    } } };
+    const unsigned: ContentBlock = { type: 'thinking', thinking: 'reasoning from another provider' };
+    await new Membrane(adapter, { formatter: new NativeFormatter() }).complete(request([user('u0'), s, reply(unsigned), user('u2'), reply(text('a3')), user('u4')]));
+    expect(sent[0]!.messages.map((m) => m.role)).toEqual(['user', 'user', 'system', 'assistant', 'user']);
+  });
+
+  it('through the real AnthropicAdapter, a trailing turn of unsigned thinking alone with a change after the last user turn is dropped, not refused (#191)', async () => {
+    // The change ends the request after the trailing turn, so leaving the turn out doesn't change
+    // the final role, as for a trailing turn of whitespace.
+    const sent: Array<{ messages: Array<{ role: string }> }> = [];
+    const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
+    (adapter as any).client = { messages: { create: async (body: { messages: Array<{ role: string }> }) => {
+      sent.push(body);
+      return { content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn', model: 'm', usage: { input_tokens: 1, output_tokens: 1 } };
+    } } };
+    const unsigned: ContentBlock = { type: 'thinking', thinking: 'reasoning from another provider' };
+    await new Membrane(adapter, { formatter: new NativeFormatter() }).complete(request([user('u0'), s, reply(unsigned)]));
+    expect(sent[0]!.messages.map((m) => m.role)).toEqual(['user', 'system']);
   });
 
   it('the previous round\'s endpoint the float marks is the message before the assistant turn that made the round\'s calls, a change injected at the end included', async () => {

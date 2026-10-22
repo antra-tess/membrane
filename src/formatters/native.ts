@@ -14,6 +14,7 @@ import { sanitizeToolName } from '../utils/tool-names.js';
 import { systemChangeRefusedError, unsupportedError } from '../types/errors.js';
 import { isSystemChangeContent } from '../types/content.js';
 import { hasNonEmptyText } from '../utils/empty-text.js';
+import { isUnsignedThinking } from '../utils/thinking-carriers.js';
 
 import type {
   NormalizedMessage,
@@ -534,9 +535,10 @@ export class NativeFormatter implements PrefillFormatter {
    * assistant turn that follows a user turn (a tool-result turn included), or
    * at the end after a user turn. Never after an assistant turn, so never
    * after a paused one, which takes no tool change. The turns are read as the
-   * adapter's empty-text cleanup (utils/empty-text.ts) leaves them: a message
-   * of only empty or whitespace text is dropped there, and the surviving
-   * messages of one role between two of the other are one turn. The API
+   * adapter leaves them: its empty-text cleanup (utils/empty-text.ts) drops a
+   * message of only empty or whitespace text, it leaves out a thinking block
+   * with no signature (isUnsignedThinking), and the surviving messages of one
+   * role between two of the other are one turn. The API
    * accepts consecutive messages of one role, and judges a system message, or
    * a run of them, by the message right before it, so a change goes right
    * after a user turn's
@@ -563,8 +565,11 @@ export class NativeFormatter implements PrefillFormatter {
     changes: BuiltSystemChange[],
     origin: WeakMap<object, number>,
   ): ProviderMessage[] {
-    // A block the adapter's empty-text cleanup keeps, and a turn holding one.
-    const survives = (block: { type?: string; text?: unknown }): boolean => block.type !== 'text' || hasNonEmptyText(block.text);
+    // A block the adapter keeps, and a turn holding one: its empty-text
+    // cleanup drops whitespace text, and it leaves out a thinking block with
+    // no signature (#191).
+    const survives = (block: { type?: string; text?: unknown }): boolean =>
+      (block.type !== 'text' || hasNonEmptyText(block.text)) && !isUnsignedThinking(block);
     const kept = (message: ProviderTurnMessage): boolean =>
       Array.isArray(message.content) && (message.content as Array<{ type?: string; text?: unknown }>).some(survives);
     // The turns as the cleanup leaves them: it drops a message with no
@@ -770,7 +775,8 @@ export class NativeFormatter implements PrefillFormatter {
         // Round-trip thinking blocks verbatim, including the signature — the
         // API validates it and (on display:'omitted' models) decrypts it to
         // reconstruct the original reasoning. Signature-only blocks (empty
-        // thinking field) are valid and must be passed back unchanged.
+        // thinking field) are valid and must be passed back unchanged. The
+        // Anthropic and Bedrock builders leave out one with no signature.
         result.push({
           type: 'thinking',
           thinking: block.thinking,

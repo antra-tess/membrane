@@ -109,6 +109,22 @@ export function stripThinkingForPrefill<T extends { thinking?: unknown; extra?: 
 }
 
 /**
+ * Whether a block is a thinking block with no signature, or an empty one:
+ * another provider's reasoning, such as Gemini's thought parts or an
+ * OpenAI-compatible reasoning channel. Anthropic's API refuses it as a
+ * thinking block (#191), and would refuse any signature given it there, and
+ * as text the model would read it as what it said, so the Anthropic and
+ * Bedrock request paths leave it out, and NativeFormatter's placement of
+ * system changes counts it as gone. A signature-only block, with empty
+ * thinking and a signature, is Anthropic's own and is kept. No adapter makes
+ * a thinking block with a signature that isn't the provider's own.
+ */
+export function isUnsignedThinking(block: unknown): boolean {
+  const value = block as { type?: unknown; signature?: unknown } | null | undefined;
+  return value?.type === 'thinking' && !value.signature;
+}
+
+/**
  * De-duplication key for a thinking / redacted_thinking carrier: two carriers
  * are the same carrier when their payload and signature match. Any other block
  * type gets a unique key so it can never collide.
