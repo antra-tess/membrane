@@ -49,9 +49,9 @@ const NATIVE_REQUEST: NormalizedRequest = {
   tools: [{ name: 'zz_probe', description: 'zz probe', inputSchema: { type: 'object', properties: { fld1: { type: 'string' } } } }],
 };
 
-/** createCallDeadline with a positive `progressTimeoutMs`, its flat bound, and the liveness bound off. */
+/** createCallDeadline with a positive `progressTimeoutMs`: its flat bound. */
 function flatDeadline(signal: AbortSignal | undefined, ms: number | undefined) {
-  const deadline = createCallDeadline(signal, { progressTimeoutMs: ms, idleTimeoutMs: 0 });
+  const deadline = createCallDeadline(signal, { progressTimeoutMs: ms });
   return { ...deadline, renew: deadline.report };
 }
 
@@ -271,12 +271,12 @@ describe('createCallDeadline, flat (a positive progressTimeoutMs)', () => {
     backward.cleanup();
   });
 
-  it('with both bounds off passes the caller signal through, and its reports do nothing', () => {
+  it('with the deadline off passes the caller signal through, and its reports do nothing', () => {
     const caller = new AbortController();
-    for (const [progressTimeoutMs, idleTimeoutMs] of [[0, 0], [-1, -1], [Number.NaN, Number.NaN]]) {
-      const deadline = createCallDeadline(caller.signal, { progressTimeoutMs, idleTimeoutMs });
+    for (const progressTimeoutMs of [0, -1, Number.NaN]) {
+      const deadline = createCallDeadline(caller.signal, { progressTimeoutMs });
       expect(deadline.signal).toBe(caller.signal);
-      deadline.report('alive');
+      deadline.report();
       deadline.report('content');
       deadline.reportSend({ maxTokens: 10, reportsPhases: true });
       deadline.cleanup();
@@ -370,7 +370,7 @@ describe('Membrane core: one renewable deadline per provider call', () => {
   it('gives the adapter onProgress, onSend and a deadline signal on every path, and keeps the options to itself', async () => {
     const on = new RecordingAdapter();
     const caller = new AbortController();
-    for (const options of [{}, { progressTimeoutMs: 60_000, idleTimeoutMs: 60_000 }]) {
+    for (const options of [{}, { progressTimeoutMs: 60_000 }]) {
       await new Membrane(on).stream(XML_REQUEST, { ...options, signal: caller.signal });
       await new Membrane(on).stream(NATIVE_REQUEST, { ...options, signal: caller.signal });
       await new Membrane(on).complete(REQUEST, { ...options, signal: caller.signal });
@@ -385,7 +385,6 @@ describe('Membrane core: one renewable deadline per provider call', () => {
       expect(options?.signal).not.toBe(caller.signal);
       // Core keeps the options to itself.
       expect(options !== undefined && 'progressTimeoutMs' in options).toBe(false);
-      expect(options !== undefined && 'idleTimeoutMs' in options).toBe(false);
     }
     expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
   });
@@ -590,7 +589,7 @@ describe('Anthropic: the deadline follows SDK events, not keepalives', () => {
     }));
     const result = await new Membrane(anthropic()).stream(REQUEST, { progressTimeoutMs: PROGRESS_MS });
     // An aborted response with reason 'timeout' comes only from a deadline's
-    // mark: here the flat bound's, since the pings keep the liveness bound open.
+    // mark: here the flat bound's, since pings are no event.
     expect(isAbortedResponse(result)).toBe(true);
     expect((result as { reason: string }).reason).toBe('timeout');
     expect(torn[0]).toBe(true);

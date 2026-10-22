@@ -924,7 +924,6 @@ export class Membrane {
       maxToolDepth = 10,
       signal,
       timeoutMs,
-      idleTimeoutMs,
       progressTimeoutMs,
       retry,
     } = options;
@@ -1151,7 +1150,6 @@ export class Membrane {
           {
             signal,
             timeoutMs,
-            idleTimeoutMs,
             progressTimeoutMs,
             retry,
             normalizedRequest: request,
@@ -1622,7 +1620,6 @@ export class Membrane {
       maxToolDepth = 10,
       signal,
       timeoutMs,
-      idleTimeoutMs,
       progressTimeoutMs,
       retry,
     } = options;
@@ -1710,7 +1707,6 @@ export class Membrane {
           {
             signal,
             timeoutMs,
-            idleTimeoutMs,
             progressTimeoutMs,
             retry,
             normalizedRequest: request,
@@ -2678,9 +2674,8 @@ export class Membrane {
     options: {
       signal?: AbortSignal;
       timeoutMs?: number;
-      idleTimeoutMs?: number | null;
-      /** See StreamOptions.progressTimeoutMs: the deadlines Membrane keeps per provider call. */
-      progressTimeoutMs?: number | null;
+      /** See StreamOptions.progressTimeoutMs: the deadline Membrane keeps per provider call. */
+      progressTimeoutMs?: number;
       onRequest?: (rawRequest: unknown) => void;
       /** See ProviderRequestOptions.wrapThinkingTags */
       wrapThinkingTags?: boolean;
@@ -2751,7 +2746,7 @@ export class Membrane {
     // compatibility won't catch the excess field (checked only on object
     // literals, not on variables). Leaving it in would silently leak the
     // normalized form into every adapter's options.
-    const { normalizedRequest, formatterName, requiresAssistantPrefill, refusalRetries, onRetrying, retry, onWireCacheMarkers, progressTimeoutMs, idleTimeoutMs, fidelity, ...adapterOptions } = options;
+    const { normalizedRequest, formatterName, requiresAssistantPrefill, refusalRetries, onRetrying, retry, onWireCacheMarkers, progressTimeoutMs, fidelity, ...adapterOptions } = options;
     // Fingerprint around the hook only when both a hook and a reader exist
     // (the yielding loops pass notes only when they emit usage events, which
     // carry the round report): an observer or a no-op hook keeps fidelity
@@ -2862,7 +2857,6 @@ export class Membrane {
       // before a retry, tool execution) never counts.
       const progress = createCallDeadline(observedOptions.signal, {
         progressTimeoutMs,
-        idleTimeoutMs,
         maxTokens: finalRequest.maxTokens,
       });
       try {
@@ -4102,7 +4096,6 @@ export class Membrane {
           {
             signal: stream.signal,
             timeoutMs: options.timeoutMs,
-            idleTimeoutMs: options.idleTimeoutMs,
             progressTimeoutMs: options.progressTimeoutMs,
             retry: options.retry,
             normalizedRequest: request,
@@ -4710,7 +4703,6 @@ export class Membrane {
           {
             signal: stream.signal,
             timeoutMs: options.timeoutMs,
-            idleTimeoutMs: options.idleTimeoutMs,
             progressTimeoutMs: options.progressTimeoutMs,
             retry: options.retry,
             normalizedRequest: request,

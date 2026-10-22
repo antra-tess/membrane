@@ -696,10 +696,9 @@ export class BedrockAdapter implements ProviderAdapter {
     rawRequest: unknown,
     onProgress?: (seen?: ProgressSeen) => void,
   ): Promise<ProviderResponse> {
-    // What this stream saw, for Membrane core's deadlines: a ping is nothing,
+    // What this stream saw, for Membrane core's deadline: a ping is nothing,
     // and every other event says what it is by progressOfAnthropicEvent,
-    // since Bedrock carries Anthropic's events. It reports no 'alive' (see
-    // the read loop), so it has no liveness bound.
+    // since Bedrock carries Anthropic's events.
     const summarized = request.thinking?.display === 'summarized';
     const url = new URL(
       `${this.baseURL ?? `https://bedrock-runtime.${this.region}.amazonaws.com`}/model/${encodeURIComponent(modelId)}/invoke-with-response-stream`
@@ -766,10 +765,6 @@ export class BedrockAdapter implements ProviderAdapter {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        // No chunk is reported as the transport alive: whether Bedrock relays
-        // Anthropic's pings through a silent think is unchecked, and a
-        // liveness bound that a working think could outlast would cut it.
-
         // Append new data to buffer
         const newBuffer = new Uint8Array(buffer.length + value.length);
         newBuffer.set(buffer);
@@ -874,8 +869,7 @@ export class BedrockAdapter implements ProviderAdapter {
             if (eventData === undefined) console.warn('[membrane:bedrock] Skipping malformed stream event:', skipped);
 
             if (eventData !== undefined) {
-              // A decoded model event is progress; a ping is no event, and it
-              // isn't reported at all (see the read loop on liveness).
+              // A decoded model event is progress; a ping is no event.
               if ((eventData as { type?: unknown }).type !== 'ping') {
                 onProgress?.(progressOfAnthropicEvent(eventData as { type?: unknown; content_block?: { type?: unknown } }, summarized));
               }

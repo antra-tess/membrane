@@ -617,14 +617,6 @@ export const BETWEEN_EVENTS_MS = 180_000;
  */
 export const THINK_TOKENS_PER_SECOND = 35;
 
-/**
- * The liveness bound: no byte at all, keepalive pings included, for this
- * long means the connection is gone. Anthropic pings a stream that has
- * nothing else to send, and in a sample of open connections none went
- * 30.5 s without a byte.
- */
-export const LIVENESS_MS = 180_000;
-
 /** The output budget assumed for a call whose adapter reports none and whose request names none: the default of every built-in adapter that sends an output limit. */
 export const DEFAULT_BUDGET_TOKENS = 4096;
 
@@ -655,8 +647,8 @@ const positiveMs = (value: unknown): number | undefined =>
   typeof value === 'number' && value > 0 ? value : undefined;
 
 /**
- * The progress and liveness deadlines for one provider call, combined with
- * the caller's signal. (A caller's per-request `timeoutMs` stays the
+ * The progress deadline for one provider call, combined with the caller's
+ * signal. (A caller's per-request `timeoutMs` stays the
  * adapter's own.) Membrane core owns them, and the adapter says what it saw:
  * as it sends the request, what it sent (`ProviderRequestOptions.onSend`,
  * `reportSend`), and then each event and sign of its transport
@@ -666,7 +658,8 @@ const positiveMs = (value: unknown): number | undefined =>
  * this, so building and signing the request and resolving credentials count
  * against the first bound too.
  *
- * The progress deadline, by `progressTimeoutMs` (null counts as unset):
+ * The progress deadline, by `progressTimeoutMs` (anything that isn't a
+ * number, `null` included, counts as unset):
  * - Unset, in a call whose adapter reported at the send, before any event,
  *   that its stream reports phases: bounds per phase. Before the first
  *   content, BEFORE_CONTENT_MS from the send. A
@@ -682,10 +675,9 @@ const positiveMs = (value: unknown): number | undefined =>
  *   from each event, whatever the phase, as one flat bound.
  * - Anything else (0, a negative number, NaN): off.
  *
- * The liveness bound, by `idleTimeoutMs`: unset (or null), LIVENESS_MS; a
- * positive number, that; anything else, off. It's armed by the first
- * `'alive'` report, so only an adapter that reports its transport gets it
- * (AnthropicAdapter), and any report renews it, in every phase.
+ * A connection that sends nothing at all is left to the runtime's own body
+ * timeout (undici's, Bun's), which the phases outlast only in a silent
+ * think's allowance.
  *
  * The output budget is the one the adapter reports sending, or else
  * `maxTokens` when it's a positive number, or else DEFAULT_BUDGET_TOKENS. A
@@ -704,7 +696,7 @@ const positiveMs = (value: unknown): number | undefined =>
  */
 export function createCallDeadline(
   signal: AbortSignal | undefined,
-  options: { progressTimeoutMs?: number | null; idleTimeoutMs?: number | null; maxTokens?: number },
+  options: { progressTimeoutMs?: number; maxTokens?: number },
 ): {
   signal?: AbortSignal;
   report: (seen?: ProgressSeen) => void;
@@ -714,13 +706,10 @@ export function createCallDeadline(
   const flatMs = positiveMs(options.progressTimeoutMs);
   // Unset, the call starts on the bound for an answer that arrives whole,
   // and takes the phases when its adapter reports them at the send.
-  let mode: 'phases' | 'whole' | 'flat' | 'off' = options.progressTimeoutMs === undefined || options.progressTimeoutMs === null
+  let mode: 'phases' | 'whole' | 'flat' | 'off' = typeof options.progressTimeoutMs !== 'number'
     ? 'whole'
     : flatMs !== undefined ? 'flat' : 'off';
-  const livenessMs = options.idleTimeoutMs === undefined || options.idleTimeoutMs === null
-    ? LIVENESS_MS
-    : positiveMs(options.idleTimeoutMs);
-  if (mode === 'off' && livenessMs === undefined) return { signal, report: () => {}, reportSend: () => {}, cleanup: () => {} };
+  if (mode === 'off') return { signal, report: () => {}, reportSend: () => {}, cleanup: () => {} };
 
   const controller = new AbortController();
   const beganAt = Date.now();
@@ -736,12 +725,10 @@ export function createCallDeadline(
   let thinkEnds: number | undefined;
   // After content: whether the last event was a silent think's start.
   let thinking = false;
-  // The last report of any kind, once an 'alive' has armed the liveness bound.
-  let liveAt: number | undefined;
   let cancelTimer: (() => void) | undefined;
   let armedAt = Infinity;
-  // Settled by expiry, the caller's abort or cleanup: a late report (a body
-  // chunk read after the call ended) arms nothing.
+  // Settled by expiry, the caller's abort or cleanup: a late report (an
+  // event read after the call ended) arms nothing.
   let over = false;
 
   const allowanceMs = (): number => Math.ceil(budget / THINK_TOKENS_PER_SECOND) * 1000;
@@ -766,9 +753,6 @@ export function createCallDeadline(
       next = thinking && allowanceMs() > BETWEEN_EVENTS_MS
         ? { at: lastAt + allowanceMs(), why: () => `No provider event within ${s(allowanceMs())} of a silent think's start (${budgetText()})` }
         : { at: lastAt + BETWEEN_EVENTS_MS, why: () => `No provider event within ${s(BETWEEN_EVENTS_MS)}` };
-    }
-    if (liveAt !== undefined && liveAt + livenessMs! < next.at) {
-      next = { at: liveAt + livenessMs!, why: () => `No byte from the provider within ${s(livenessMs!)}, so the connection is taken as gone` };
     }
     return next;
   };
@@ -817,14 +801,6 @@ export function createCallDeadline(
     report: (seen) => {
       if (over) return;
       const now = performance.now();
-      if (seen === 'alive') {
-        if (livenessMs === undefined) return;
-        const first = liveAt === undefined;
-        liveAt = now;
-        if (first) moved();
-        return;
-      }
-      if (liveAt !== undefined) liveAt = now;
       lastAt = now;
       lastWall = Date.now();
       events++;

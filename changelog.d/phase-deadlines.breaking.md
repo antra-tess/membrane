@@ -1,6 +1,7 @@
 - **Callers:** every provider call now has a progress deadline by default.
-  Left unset or `null`, `progressTimeoutMs` used to mean none; it now means
-  bounds per phase of the call. On a stream from `AnthropicAdapter` or
+  Left unset, or set to anything that isn't a number (`null` included),
+  `progressTimeoutMs` used to mean none; it now means bounds per phase of
+  the call. On a stream from `AnthropicAdapter` or
   `BedrockAdapter`, which report their phases: 400 s from the send for the
   first content; a silent think (thinking whose display isn't `'summarized'`)
   is allowed its request's whole `max_tokens` at 35 tokens a second from its
@@ -17,17 +18,15 @@
   now turn a stalled stream into a partial answer marked as a success. A
   positive `progressTimeoutMs` still gives one flat bound, from the send and
   from each event, and `Infinity` none; 0 still turns it off, as a negative
-  number or NaN does. Neither touches the liveness bound below, which
-  `idleTimeoutMs` sets.
+  number or NaN does.
 - **Callers of `AnthropicAdapter`:** its own first-event and idle timers are
   gone, and `firstEventTimeoutMs` with them. The first event now falls under
-  the 400 s for first content, where it had 600 s. `idleTimeoutMs` now sets
-  the liveness bound membrane keeps on a stream whose adapter reports its
-  transport, as `AnthropicAdapter` does and `BedrockAdapter` doesn't: no
-  byte at all, keepalive pings included, for 180 s (it was 600 s), in every
-  phase from the first byte, where the idle timer started at
-  the first event. `null` counts as unset, and 0 turns it off, as a negative
-  number or NaN does. When either timer ran out, the call threw a retryable
+  the 400 s for first content, where it had 600 s. `idleTimeoutMs` is
+  removed from `stream()`'s and `streamYielding()`'s options, where it set
+  that idle timer: a connection that sends no byte at all, keepalive pings
+  included, is now left to the runtime's own body timeout, such as undici's
+  on Node (300 s by default), where the idle timer gave 600 s from the first
+  event. When either timer ran out, the call threw a retryable
   `MembraneError` of type `timeout`; any expiry is now a `TimeoutAbortError`,
   which isn't retryable, and a stream that stalls ends as an `aborted` result
   with reason `'timeout'` carrying its partial content instead of throwing.
@@ -36,14 +35,13 @@
   gone.
 - **Provider adapters:** `ProviderRequestOptions.idleTimeoutMs` and
   `firstEventTimeoutMs` are removed: membrane core keeps a call's progress
-  and liveness deadlines (`timeoutMs` stays the adapter's), and the adapter
-  says what it saw. The new `onSend`, beside `onRequest`, takes a
+  deadline (`timeoutMs` stays the adapter's), and the adapter says what it
+  saw. The new `onSend`, beside `onRequest`, takes a
   `SendReport`: the output-token limit the body asks for (`maxTokens`), and
   whether this stream reports its phases (`reportsPhases`). `onProgress` takes
   an optional `ProgressSeen`: `'content'` for a content delta or a
-  `redacted_thinking` block's start, `'think'` for a silent think's start,
-  `'alive'` for transport that carries no event (a chunk of the response
-  body, a keepalive ping). A stream whose adapter reports phases at the send
+  `redacted_thinking` block's start, or `'think'` for a silent think's start.
+  A stream whose adapter reports phases at the send
   is bounded per phase. An adapter that calls neither, or calls `onProgress()`
   with nothing, as before, keeps working, and gets the bound for an answer
   that can arrive whole, sized from the request's `maxTokens`.

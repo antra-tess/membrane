@@ -307,40 +307,6 @@ export interface AnthropicAdapterConfig {
 // Anthropic Adapter
 // ============================================================================
 
-/** The SDK's fetch signature, taken from its public ClientOptions. */
-type SdkFetch = NonNullable<ClientOptions['fetch']>;
-
-/**
- * Wrap a fetch so each nonempty chunk of a successful response body is
- * reported to `observe` before the SDK parses it. The SDK drops SSE `ping`
- * events before callers see them, so this is the only point where keepalive
- * bytes are observable through public APIs. Bytes and headers pass through
- * unchanged; error responses are returned untouched so SDK error
- * classification keeps their full metadata. The rebuilt Response has an empty
- * `url`, which SDK 0.52 reads only for debug logging. Without `observe` the
- * base fetch is returned as is. SDK-supported bodies without pipeThrough also
- * pass through unchanged and report nothing, so a call on one gets no
- * liveness bound (Membrane core arms it at the first report).
- */
-function observeBodyActivity(base: SdkFetch, observe?: () => void): SdkFetch {
-  if (!observe) return base;
-  return async (input, init) => {
-    const response = await base(input, init);
-    if (!response.ok || !response.body || typeof response.body.pipeThrough !== 'function') return response;
-    const body = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
-      transform(chunk, controller) {
-        if (chunk.byteLength > 0) observe();
-        controller.enqueue(chunk);
-      },
-    }));
-    return new Response(body, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: response.headers,
-    });
-  };
-}
-
 export class AnthropicAdapter implements ProviderAdapter {
   readonly name = 'anthropic';
   /**
@@ -419,23 +385,15 @@ export class AnthropicAdapter implements ProviderAdapter {
   }
 
   /** One SDK operation owns its failure state: concurrent calls cannot
-   * overwrite each other's auth error or cancel each other's requests.
-   * observeBody (stream only) is told about each nonempty chunk of a
-   * successful response body before SDK parsing, so transport liveness stays
-   * visible even for SSE keepalives the SDK filters out. */
-  private credentialSession(signal?: AbortSignal, observeBody?: () => void) {
+   * overwrite each other's auth error or cancel each other's requests. */
+  private credentialSession(signal?: AbortSignal) {
     const credentials = this.credentials;
-    if (!credentials) {
-      const client = observeBody
-        ? this.client.withOptions({ fetch: observeBodyActivity((input, init) => fetch(input, init), observeBody) })
-        : this.client;
-      return { client, signal, failure: () => undefined };
-    }
+    if (!credentials) return { client: this.client, signal, failure: () => undefined };
     const abort = new AbortController();
     const combined = signal ? AbortSignal.any([signal, abort.signal]) : abort.signal;
     let failure: MembraneError | undefined;
     const client = this.client.withOptions({
-      fetch: observeBodyActivity((input, init) => {
+      fetch: (input, init) => {
         const headers = new Headers(init?.headers);
         headers.delete('x-api-key');
         return fetchWithCredentials(input, { ...init, headers }, async context => {
@@ -457,7 +415,7 @@ export class AnthropicAdapter implements ProviderAdapter {
             throw failure;
           }
         });
-      }, observeBody),
+      },
     });
     return { client, signal: combined, failure: () => failure };
   }
@@ -534,19 +492,17 @@ export class AnthropicAdapter implements ProviderAdapter {
     const headers = this.betaHeaders(request, anthropicRequest);
     const live = this.liveHeaders(headers, 'stream');
 
-    // The call's progress and liveness deadlines are Membrane core's
-    // (createCallDeadline), on the signal it passes; this adapter says what
-    // it saw. Each chunk of the response body, the SSE pings the SDK drops
-    // before the loop below included, is the transport alive
-    // (observeBodyActivity), and each event says what it is by
-    // progressOfAnthropicEvent. A body that asks for no display, as for the
+    // The call's progress deadline is Membrane core's (createCallDeadline), on
+    // the signal it passes; this adapter says what each event is, by
+    // progressOfAnthropicEvent. (The SDK drops SSE pings before the loop
+    // below, so they're no event.) A body that asks for no display, as for the
     // Fable and Mythos models when Membrane sends them no thinking config,
     // counts as silent: those models think silently by default.
     const summarized = (fullRequest.thinking as { display?: unknown } | undefined)?.display === 'summarized';
     let session: ReturnType<AnthropicAdapter['credentialSession']> | undefined;
 
     try {
-      session = this.credentialSession(options?.signal, () => options?.onProgress?.('alive'));
+      session = this.credentialSession(options?.signal);
       const stream = await session.client.messages.stream(anthropicRequest, {
         signal: session.signal,
         headers: live,

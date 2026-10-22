@@ -198,24 +198,11 @@ export interface StreamOptions {
   timeoutMs?: number;
 
   /**
-   * The liveness bound, per provider call (default: 180000 ms): no byte of
-   * the response, keepalive pings included, for this long ends the call as a
-   * `TimeoutAbortError`, in any phase: the connection is taken as gone.
-   * It's armed by the first chunk of the response body on `AnthropicAdapter`,
-   * which watches its transport, and any provider event renews it too. A
-   * call on any other adapter, and every `complete()`, has none: such a call
-   * can be silent on the wire until its answer comes, and whether
-   * `BedrockAdapter`'s pings come through a silent think is unchecked. A positive number of ms sets it, `Infinity`
-   * included, and `null` counts as unset; 0 turns it off, as any other
-   * value does (a negative number, NaN). Parity with YieldingStreamOptions.
-   */
-  idleTimeoutMs?: number | null;
-
-  /**
    * The progress deadline, per provider call. On expiry the call aborts as a
    * `TimeoutAbortError` (type `timeout`, aborted reason `'timeout'`).
    *
-   * Unset (the default, `null` included), it's bounded per phase on a
+   * Unset (the default; anything that isn't a number, `null` included,
+   * counts as unset), it's bounded per phase on a
    * stream whose adapter reports its phases (`AnthropicAdapter`,
    * `BedrockAdapter`; see SendReport):
    * - before the first content (a content delta, or a redacted thinking
@@ -236,7 +223,8 @@ export interface StreamOptions {
    * data frame that parses to an object); keepalives, SSE comments and raw
    * bytes don't, so a connection that stays up while the model sends nothing
    * still ends. Time between provider calls, such as tool execution, never
-   * counts.
+   * counts. A connection that sends nothing at all is left to the runtime's
+   * own body timeout (undici's, Bun's).
    *
    * A positive number of ms, `Infinity` included, replaces these with one
    * flat bound: that long from the send and from each provider event,
@@ -245,7 +233,7 @@ export interface StreamOptions {
    * other value does (a negative number, NaN). Parity with
    * YieldingStreamOptions.
    */
-  progressTimeoutMs?: number | null;
+  progressTimeoutMs?: number;
 
   /**
    * Whether membrane retries the call's failed provider calls itself. Default
@@ -375,7 +363,7 @@ export interface CompleteOptions {
    * other value does (a negative number, NaN). On expiry `complete()` throws
    * a `TimeoutAbortError`.
    */
-  progressTimeoutMs?: number | null;
+  progressTimeoutMs?: number;
 
   /** Request ID for correlation */
   requestId?: string;

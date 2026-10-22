@@ -359,11 +359,8 @@ export interface ProviderRequestContext {
  * - `'think'`: a silent think has started: a thinking block began in a call
  *   whose body doesn't ask for `display: 'summarized'`, so nothing need
  *   arrive until the think ends.
- * - `'alive'`: transport only, such as a chunk of the response body or a
- *   keepalive ping. It proves the connection is up, not that the model is
- *   making progress, so it renews the liveness bound and nothing else.
  */
-export type ProgressSeen = 'content' | 'think' | 'alive';
+export type ProgressSeen = 'content' | 'think';
 
 /**
  * What an adapter tells Membrane core about one attempt as it sends it,
@@ -399,20 +396,17 @@ export interface ProviderRequestOptions {
   timeoutMs?: number;
   /**
    * What the adapter saw, for the deadlines Membrane core keeps per provider
-   * call (`progressTimeoutMs`, `idleTimeoutMs`; see ProgressSeen). An adapter
+   * call (`progressTimeoutMs`; see ProgressSeen). An adapter
    * calls it once per parsed provider event: each SDK event, each SSE data
    * frame that parses to a JSON object, each event-stream message that
    * decodes to one. Never as an event for a frame that parses to anything
    * else (`null`, a number, a string, an array), which carries no event, nor
    * for keepalives (Anthropic's and Bedrock's `ping`), SSE comments or raw
    * body bytes: those prove the connection is up, not that the model is
-   * making progress. An adapter that can see them and knows their cadence
-   * reports them as `'alive'`, which arms the liveness bound
-   * (`AnthropicAdapter` does; `BedrockAdapter`, whose pings through a silent
-   * think are unchecked, doesn't). An adapter whose stream reports its
-   * phases (SendReport.reportsPhases) reports a content delta or a
-   * `redacted_thinking` block's
-   * start as `'content'`, and a silent think's start as `'think'`;
+   * making progress. An adapter whose stream reports its phases
+   * (SendReport.reportsPhases) reports a content delta or a
+   * `redacted_thinking` block's start as `'content'`, and a silent think's
+   * start as `'think'`;
    * any other adapter may call it with nothing for every event. Decorators
    * must forward it with the other options; one that drops it leaves the
    * call to its bound from the send alone.

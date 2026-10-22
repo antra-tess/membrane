@@ -2,10 +2,8 @@
  * The deadlines Membrane core keeps per provider call when `progressTimeoutMs`
  * is left unset (createCallDeadline): bounds per phase on an adapter that
  * reports them, the bound for an answer that can arrive whole everywhere
- * else, the output budget they're sized from, and the liveness bound
- * (`idleTimeoutMs`). The flat bound a positive `progressTimeoutMs` gives is
- * pinned in progress-deadline.test.ts, and the liveness bound through a live
- * Anthropic body in anthropic-stream-idle.test.ts.
+ * else, and the output budget they're sized from. The flat bound a positive
+ * `progressTimeoutMs` gives is pinned in progress-deadline.test.ts.
  *
  * The bounds are the real ones (400 s, 180 s, 35 tokens a second), on fake
  * timers, which move performance.now() and Date together.
@@ -54,12 +52,11 @@ function start({ phases = true, ...options }: Parameters<typeof createCallDeadli
 }
 
 describe('bounds per phase, on an adapter that reports them', () => {
-  it('ends a call with no content 400 s after the send, whatever other events and transport reports come first', () => {
-    const deadline = start({ idleTimeoutMs: Infinity });
-    // Pings every 20 s, and message_start at 120 s: none of them is content.
+  it('ends a call with no content 400 s after the send, whatever other events come first', () => {
+    const deadline = start();
+    // message_start at 120 s, which isn't content.
     for (let t = 20; t <= 380; t += 20) {
       vi.advanceTimersByTime(20 * S);
-      deadline.report('alive');
       if (t === 120) deadline.report();
     }
     vi.advanceTimersByTime(19 * S);
@@ -218,7 +215,7 @@ describe('a budget reported late', () => {
 describe('the one timer', () => {
   it('arms no new timer for a report that leaves the expiry where it was or later', () => {
     // Before content, plain events leave the expiry where it is (400 s from the send).
-    const before = start({ idleTimeoutMs: 0 });
+    const before = start();
     let armed = vi.spyOn(globalThis, 'setTimeout');
     for (let i = 0; i < 100; i++) before.report();
     expect(armed).toHaveBeenCalledTimes(0);
@@ -226,19 +223,18 @@ describe('the one timer', () => {
     armed.mockRestore();
     // After content, each report moves it later.
     const deadline = start();
-    deadline.report('alive');
     deadline.report('content');
     armed = vi.spyOn(globalThis, 'setTimeout');
     for (let i = 0; i < 1000; i++) {
       vi.advanceTimersByTime(10);
-      deadline.report(i % 2 ? 'content' : 'alive');
+      deadline.report(i % 2 ? 'content' : undefined);
     }
     expect(armed).toHaveBeenCalledTimes(0);
     deadline.cleanup();
   });
 
-  it('arms no timer at all for a flat bound of Infinity with the liveness bound off', () => {
-    const deadline = start({ progressTimeoutMs: Infinity, idleTimeoutMs: 0 });
+  it('arms no timer at all for a flat bound of Infinity', () => {
+    const deadline = start({ progressTimeoutMs: Infinity });
     deadline.report('content');
     expect(vi.getTimerCount()).toBe(0);
     vi.advanceTimersByTime(10 * 3600 * S);
@@ -317,81 +313,24 @@ describe('the bound for an answer that can arrive whole', () => {
     deadline.cleanup();
   });
 
-  it('counts null as unset, as it counted before there was a default', () => {
-    const deadline = start({ progressTimeoutMs: null });
-    vi.advanceTimersByTime(399 * S);
-    expect(expired(deadline)).toBeUndefined();
-    vi.advanceTimersByTime(1 * S);
-    expect(expired(deadline)).toMatch(/^No content within 400s of the send: /);
-    deadline.cleanup();
-  });
-
-  it('turns the progress deadline off for 0, a negative number or NaN', () => {
-    for (const off of [0, -1, Number.NaN]) {
-      const deadline = start({ progressTimeoutMs: off, phases: false });
-      vi.advanceTimersByTime(10 * 3600 * S);
+  it("counts anything that isn't a number as unset, null included, as it counted before there was a default", () => {
+    for (const unset of [null, '1000', {}]) {
+      const deadline = start({ progressTimeoutMs: unset as unknown as number });
+      vi.advanceTimersByTime(399 * S);
       expect(expired(deadline)).toBeUndefined();
+      vi.advanceTimersByTime(1 * S);
+      expect(expired(deadline)).toMatch(/^No content within 400s of the send: /);
       deadline.cleanup();
     }
   });
-});
 
-describe('the liveness bound', () => {
-  it("isn't armed until the transport is first reported alive, and then ends a call 180 s after its last report of any kind", () => {
-    const deadline = start({ progressTimeoutMs: 0 });
-    deadline.report();
-    vi.advanceTimersByTime(3600 * S);
-    expect(expired(deadline)).toBeUndefined();
-    deadline.report('alive');
-    vi.advanceTimersByTime(170 * S);
-    deadline.report('content');
-    vi.advanceTimersByTime(170 * S);
-    deadline.report('alive');
-    vi.advanceTimersByTime(179 * S);
-    expect(expired(deadline)).toBeUndefined();
-    vi.advanceTimersByTime(1 * S);
-    expect(expired(deadline)).toMatch(/^No byte from the provider within 180s, so the connection is taken as gone: the call began at \S+, provider events: 2, the last at \S+$/);
-    deadline.cleanup();
-  });
-
-  it('ends a silent think whose connection is gone, though its allowance runs longer', () => {
-    const deadline = start({ maxTokens: 128_000 });
-    deadline.report('alive');
-    deadline.report('think');
-    vi.advanceTimersByTime(180 * S);
-    expect(expired(deadline)).toMatch(/^No byte from the provider within 180s/);
-    deadline.cleanup();
-  });
-
-  it('takes idleTimeoutMs as its bound, the default for null, and is off for 0, a negative number or NaN', () => {
-    const set = start({ progressTimeoutMs: 0, idleTimeoutMs: 5 * S });
-    set.report('alive');
-    vi.advanceTimersByTime(5 * S);
-    expect(expired(set)).toMatch(/^No byte from the provider within 5s/);
-    set.cleanup();
-
-    const byDefault = start({ progressTimeoutMs: 0, idleTimeoutMs: null });
-    byDefault.report('alive');
-    vi.advanceTimersByTime(180 * S);
-    expect(expired(byDefault)).toMatch(/^No byte from the provider within 180s/);
-    byDefault.cleanup();
-
+  it('turns the progress deadline off for 0, a negative number or NaN, keeping nothing beside the caller\'s signal', () => {
     for (const off of [0, -1, Number.NaN]) {
-      // With the progress deadline off too, nothing is left to keep: the caller's signal (none here) passes through.
-      const deadline = start({ progressTimeoutMs: 0, idleTimeoutMs: off });
+      const deadline = start({ progressTimeoutMs: off, phases: false });
       expect(deadline.signal).toBeUndefined();
-      deadline.report('alive');
       vi.advanceTimersByTime(10 * 3600 * S);
       expect(vi.getTimerCount()).toBe(0);
       deadline.cleanup();
-
-      const withProgress = start({ progressTimeoutMs: 1000, idleTimeoutMs: off });
-      withProgress.report('alive');
-      vi.advanceTimersByTime(999);
-      withProgress.report();
-      vi.advanceTimersByTime(999);
-      expect(expired(withProgress)).toBeUndefined();
-      withProgress.cleanup();
     }
   });
 });
@@ -400,7 +339,7 @@ describe('a deadline that has ended', () => {
   it('arms nothing on a report that comes after cleanup, expiry or the caller leaving', () => {
     const cleaned = start();
     cleaned.cleanup();
-    cleaned.report('alive');
+    cleaned.report();
     cleaned.report('content');
     cleaned.reportSend({ maxTokens: 100, reportsPhases: true });
     expect(vi.getTimerCount()).toBe(0);
@@ -408,7 +347,7 @@ describe('a deadline that has ended', () => {
     const ran = start({ progressTimeoutMs: 1000 });
     vi.advanceTimersByTime(1000);
     expect(ran.signal!.aborted).toBe(true);
-    ran.report('alive');
+    ran.report();
     ran.report('content');
     expect(vi.getTimerCount()).toBe(0);
     ran.cleanup();
@@ -417,7 +356,7 @@ describe('a deadline that has ended', () => {
     const left = createCallDeadline(caller.signal, {});
     caller.abort('zz gone');
     expect(left.signal!.reason).toBe('zz gone');
-    left.report('alive');
+    left.report('content');
     expect(vi.getTimerCount()).toBe(0);
     left.cleanup();
   });
@@ -535,14 +474,6 @@ describe('Membrane core: which bound each call gets', () => {
     expect(fallback.seconds).toBe(518);
     expect(fallback.result).toMatchObject({ aborted: true, reason: 'timeout', message: expect.stringMatching(/^No answer within 518s/) });
   });
-
-  it('passes idleTimeoutMs to the liveness bound, and keeps it from the adapter', async () => {
-    vi.useFakeTimers();
-    const adapter = new Silent(true, (options) => options.onProgress?.('alive'));
-    const ended = await settlesAfter(new Membrane(adapter).stream(REQUEST, { idleTimeoutMs: 30 * S }));
-    expect(ended.seconds).toBe(30);
-    expect(adapter.seen[0] !== undefined && 'idleTimeoutMs' in adapter.seen[0]).toBe(false);
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -585,17 +516,16 @@ const anthropicRequest = (extra?: Record<string, unknown>): ProviderRequest => (
 const anthropic = (): AnthropicAdapter => new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
 
 /** Every report one Anthropic stream makes, one chunk of body per frame. */
-async function anthropicReports(frames: string[], request: ProviderRequest): Promise<{ events: Array<ProgressSeen | undefined>; alive: number; sends: SendReport[]; sentBeforeFetch: boolean }> {
+async function anthropicReports(frames: string[], request: ProviderRequest): Promise<{ events: Array<ProgressSeen | undefined>; sends: SendReport[]; sentBeforeFetch: boolean }> {
   const events: Array<ProgressSeen | undefined> = [];
   const sends: SendReport[] = [];
   let sentBeforeFetch = false;
   stubFetch(() => { sentBeforeFetch = sends.length === 1; return rawSseResponse(frames); });
-  let alive = 0;
   await anthropic().stream(request, { onChunk: () => {} }, {
-    onProgress: (seen) => { if (seen === 'alive') alive++; else events.push(seen); },
+    onProgress: (seen) => { events.push(seen); },
     onSend: (send) => sends.push(send),
   });
-  return { events, alive, sends, sentBeforeFetch };
+  return { events, sends, sentBeforeFetch };
 }
 
 describe('progressOfAnthropicEvent', () => {
@@ -627,14 +557,14 @@ describe('progressOfAnthropicEvent', () => {
 });
 
 describe('AnthropicAdapter reports what it saw', () => {
-  it("reports a silent think's start as think, every content delta as content, and the body's chunks as alive", async () => {
-    const { events, alive } = await anthropicReports(
+  it("reports a silent think's start as think, every content delta as content, and a ping as nothing", async () => {
+    const { events } = await anthropicReports(
       thinkThenAnswer({ type: 'thinking', thinking: '', signature: '' }),
       anthropicRequest({ thinking: { type: 'adaptive', display: 'omitted' } }),
     );
     // message_start, the think, its signature, its stop, the text block's start (an event) and delta, its stop, message_delta (the terminal event).
+    // The ping (dropped by the SDK) is nothing.
     expect(events).toEqual([undefined, 'think', 'content', undefined, undefined, 'content', undefined, undefined]);
-    expect(alive).toBeGreaterThan(0);
   });
 
   it('reports no think for a body that asks for summarized thinking, or for a redacted block', async () => {
@@ -654,7 +584,7 @@ describe('AnthropicAdapter reports what it saw', () => {
     ]));
     const redacted: Array<ProgressSeen | undefined> = [];
     await anthropic().stream(anthropicRequest({ thinking: { type: 'adaptive', display: 'omitted' } }), { onChunk: () => {} }, {
-      onProgress: (seen) => { if (seen !== 'alive') redacted.push(seen); },
+      onProgress: (seen) => { redacted.push(seen); },
     });
     expect(redacted).toEqual([undefined, 'content', undefined, undefined]);
   });
@@ -713,7 +643,7 @@ describe('BedrockAdapter reports what it saw', () => {
     ...(thinking ? { thinking } : {}),
   } as never);
 
-  it("reports a ping as nothing, a silent think's start as think, a content delta as content, no chunk as alive, and at the send the max_tokens it sends and its phases", async () => {
+  it("reports a ping as nothing, a silent think's start as think, a content delta as content, and at the send the max_tokens it sends and its phases", async () => {
     const sends: SendReport[] = [];
     let sentBeforeFetch = false;
     stubFetch(() => { sentBeforeFetch = sends.length === 1; return new Response(frames({ type: 'thinking', thinking: '' }), { status: 200 }); });
@@ -722,7 +652,7 @@ describe('BedrockAdapter reports what it saw', () => {
     await bedrock().stream({ ...request({ type: 'adaptive', display: 'omitted' }), extra: { max_tokens: 9000 } } as never, { onChunk: () => {} }, {
       onProgress: (kind) => seen.push(kind), onSend: (send) => sends.push(send),
     }).catch(() => undefined);
-    // Six frames, one chunk each: the event each carries (the ping none), and no chunk as alive.
+    // Six frames, one chunk each: the event each carries (the ping none).
     expect(seen).toEqual([undefined, 'think', 'content', undefined, undefined]);
     expect(sends).toEqual([{ maxTokens: 9000, reportsPhases: true }]);
     expect(sentBeforeFetch).toBe(true);
@@ -763,7 +693,7 @@ describe('BedrockAdapter reports what it saw', () => {
     expect(sentBeforeFetch).toBe(true);
   });
 
-  it('reports a frame split across chunks once, when it decodes, and no chunk as alive, an empty one included', async () => {
+  it('reports a frame split across chunks once, when it decodes, and nothing for an empty chunk', async () => {
     const frame0 = chunkFrame({ type: 'message_start', message: { usage: { input_tokens: 3 } } });
     const frame1 = chunkFrame({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'zz' } });
     const cut = Math.floor(frame1.length / 2);
@@ -778,7 +708,6 @@ describe('BedrockAdapter reports what it saw', () => {
     }), { status: 200 }));
     const seen: Array<ProgressSeen | undefined> = [];
     await bedrock().stream(request(), { onChunk: () => {} }, { onProgress: (kind) => seen.push(kind) }).catch(() => undefined);
-    // Bedrock's ping cadence through a silent think is unchecked, so no chunk arms the liveness bound.
     expect(seen).toEqual([undefined, 'content']);
   });
 });
