@@ -829,8 +829,8 @@ const DEADLINE_EXPIRY = Symbol.for('membrane.deadlineExpiry');
 
 /**
  * Mark an error as a deadline running out on a call that was under way:
- * AnthropicAdapter's idle and first-event watchdogs, every timeout its SDK
- * client reports, and a runtime's own fetch deadlines (errorFromThrown). It
+ * every timeout AnthropicAdapter's SDK client reports, and a runtime's own
+ * fetch deadlines (errorFromThrown). It
  * stays the retryable timeout a caller sees, but membrane doesn't send the
  * call again: the deadline was the call's budget, and another full one is the
  * caller's to give. (An adapter's `timeoutMs` deadline is a TimeoutAbortError,
@@ -1067,8 +1067,8 @@ function causeChain(error: unknown): object[] {
  * The MembraneError for a failure an adapter caught that isn't one yet, such
  * as what `fetch` throws: typed by classifyError, with the request attached.
  * A runtime's deadline on a request it already sent (undici's headers and
- * body timeouts, Bun's fetch timeout) is marked deadlineExpired, as an
- * adapter's own watchdog is, so membrane leaves it to the caller.
+ * body timeouts, Bun's fetch timeout) is marked deadlineExpired, as the
+ * Anthropic SDK client's timeouts are, so membrane leaves it to the caller.
  */
 export function errorFromThrown(error: unknown, rawRequest?: unknown): MembraneError {
   // Already typed: keep it, and its marks, as it is.

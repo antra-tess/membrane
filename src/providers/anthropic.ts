@@ -36,7 +36,7 @@ import {
 import { markSystemChangeRefused, runCallerCode, statusForProviderCode, deadlineExpired, isDeadlineExpiry, errorFromThrown } from '../types/errors.js';
 import { flattenRootSchemaUnion } from './anthropic-tool-schema.js';
 import { isPlainObject } from '../utils/tool-schema.js';
-import { assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, isDeadlineAbort, deadlineTimeoutError } from './utils.js';
+import { assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, isDeadlineAbort, deadlineTimeoutError, progressOfAnthropicEvent } from './utils.js';
 import { fetchWithCredentials, validateCredential, type CredentialContext, type CredentialResolver } from './credentials.js';
 import { CacheKeepalive, type CacheKeepaliveConfig } from '../cache-keepalive.js';
 
@@ -307,39 +307,6 @@ export interface AnthropicAdapterConfig {
 // Anthropic Adapter
 // ============================================================================
 
-/** The SDK's fetch signature, taken from its public ClientOptions. */
-type SdkFetch = NonNullable<ClientOptions['fetch']>;
-
-/**
- * Wrap a fetch so each nonempty chunk of a successful response body is
- * reported to `observe` before the SDK parses it. The SDK drops SSE `ping`
- * events before callers see them, so this is the only point where keepalive
- * bytes are observable through public APIs. Bytes and headers pass through
- * unchanged; error responses are returned untouched so SDK error
- * classification keeps their full metadata. The rebuilt Response has an empty
- * `url`, which SDK 0.52 reads only for debug logging. Without `observe` the
- * base fetch is returned as is. SDK-supported bodies without pipeThrough also
- * pass through unchanged; their SDK events still refresh the idle watchdog.
- */
-function observeBodyActivity(base: SdkFetch, observe?: () => void): SdkFetch {
-  if (!observe) return base;
-  return async (input, init) => {
-    const response = await base(input, init);
-    if (!response.ok || !response.body || typeof response.body.pipeThrough !== 'function') return response;
-    const body = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
-      transform(chunk, controller) {
-        if (chunk.byteLength > 0) observe();
-        controller.enqueue(chunk);
-      },
-    }));
-    return new Response(body, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: response.headers,
-    });
-  };
-}
-
 export class AnthropicAdapter implements ProviderAdapter {
   readonly name = 'anthropic';
   /**
@@ -418,23 +385,15 @@ export class AnthropicAdapter implements ProviderAdapter {
   }
 
   /** One SDK operation owns its failure state: concurrent calls cannot
-   * overwrite each other's auth error or cancel each other's requests.
-   * observeBody (stream only) is told about each nonempty chunk of a
-   * successful response body before SDK parsing, so transport liveness stays
-   * visible even for SSE keepalives the SDK filters out. */
-  private credentialSession(signal?: AbortSignal, observeBody?: () => void) {
+   * overwrite each other's auth error or cancel each other's requests. */
+  private credentialSession(signal?: AbortSignal) {
     const credentials = this.credentials;
-    if (!credentials) {
-      const client = observeBody
-        ? this.client.withOptions({ fetch: observeBodyActivity((input, init) => fetch(input, init), observeBody) })
-        : this.client;
-      return { client, signal, failure: () => undefined };
-    }
+    if (!credentials) return { client: this.client, signal, failure: () => undefined };
     const abort = new AbortController();
     const combined = signal ? AbortSignal.any([signal, abort.signal]) : abort.signal;
     let failure: MembraneError | undefined;
     const client = this.client.withOptions({
-      fetch: observeBodyActivity((input, init) => {
+      fetch: (input, init) => {
         const headers = new Headers(init?.headers);
         headers.delete('x-api-key');
         return fetchWithCredentials(input, { ...init, headers }, async context => {
@@ -456,7 +415,7 @@ export class AnthropicAdapter implements ProviderAdapter {
             throw failure;
           }
         });
-      }, observeBody),
+      },
     });
     return { client, signal: combined, failure: () => failure };
   }
@@ -487,6 +446,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     const fullRequest = { ...anthropicRequest, stream: false as const };
     assertMessagePrefillSupported(fullRequest.model, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
+    options?.onSend?.({ maxTokens: fullRequest.max_tokens });
 
     const headers = this.betaHeaders(request, anthropicRequest);
     const live = this.liveHeaders(headers, 'complete');
@@ -508,8 +468,9 @@ export class AnthropicAdapter implements ProviderAdapter {
 
       return this.parseResponse(response, fullRequest);
     } catch (error) {
-      // A deadline on the caller's signal (Membrane's progressTimeoutMs) is a
-      // timeout, as on every adapter; the SDK's abort error can't say so.
+      // A deadline on the caller's signal (Membrane core's, which names the
+      // bound that ran out) is a timeout, as on every adapter; the SDK's
+      // abort error can't say so.
       if (isDeadlineAbort(options?.signal?.reason)) throw deadlineTimeoutError(options!.signal!.reason, fullRequest);
       throw this.handleError(error, fullRequest);
     }
@@ -525,66 +486,23 @@ export class AnthropicAdapter implements ProviderAdapter {
     const fullRequest = { ...anthropicRequest, stream: true };
     assertMessagePrefillSupported(fullRequest.model, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
+    // This stream reports its phases through onProgress (progressOfAnthropicEvent below).
+    options?.onSend?.({ maxTokens: fullRequest.max_tokens, reportsPhases: true });
 
     const headers = this.betaHeaders(request, anthropicRequest);
     const live = this.liveHeaders(headers, 'stream');
 
-    // Idle timeout: abort on transport silence after the first SDK event.
-    // The SDK's timeout only covers the initial HTTP response headers;
-    // once streaming starts, a silently dropped connection waits forever.
-    // Default raised 120s → 600s (2026-07-20): on Opus 4.7+/Fable-class models
-    // thinking streams with display:"omitted" by default — a long think emits
-    // NO deltas, and the SDK swallows SSE ping keepalives, so a healthy
-    // request can legitimately be silent for minutes mid-stream. At 120s the
-    // watchdog repeatedly killed real, billing, actively-thinking turns
-    // (Cairn, 2026-07-20: every >120s think died for an hour straight). 600s
-    // matches the SDK's own request timeout. Body keepalives now count as
-    // activity after the first SDK event; this is no total or progress bound.
-    const idleMs = options?.idleTimeoutMs ?? 600_000;
-    // TTFT can legitimately exceed the inter-event idle: on a large context
-    // with a cache miss, the API sends only SSE `ping` keepalives until
-    // message_start — and the SDK swallows pings before they reach this loop
-    // (core/streaming: `if (sse.event === 'ping') continue`). Transport body
-    // bytes, pings included, re-arm the idle timer only after the first event.
-    // The first event retains a fixed longer deadline; killing at idleMs turned
-    // every long-TTFT request into a spurious "idle timeout" (Cairn, 600k
-    // context, 2026-07-20: repeated deaths at exactly 120s). Give the first
-    // event a much longer deadline; keep the tight idle for gaps after that.
-    const firstEventMs = options?.firstEventTimeoutMs ?? Math.max(idleMs, 600_000);
-    const idleAbort = new AbortController();
-    let idleTimer: ReturnType<typeof setTimeout> | null = null;
-    let idleTimedOut = false;
-    let sawEvent = false;
-
-    // Link caller's signal so external cancellation still works
-    const onExternalAbort = () => idleAbort.abort();
-    if (options?.signal) {
-      if (options.signal.aborted) { idleAbort.abort(); }
-      else { options.signal.addEventListener('abort', onExternalAbort, { once: true }); }
-    }
-
-    const resetIdleTimer = () => {
-      if (idleTimer) clearTimeout(idleTimer);
-      idleTimer = setTimeout(
-        () => { idleTimedOut = true; idleAbort.abort(); },
-        sawEvent ? idleMs : firstEventMs,
-      );
-    };
-
-    // Body bytes (including SSE pings the SDK filters before the loop below)
-    // prove transport liveness after the first SDK event. They re-arm the idle
-    // timer without extending the fixed first-event deadline; `settled` keeps
-    // late chunks from re-arming after cleanup.
-    let settled = false;
-    const onTransportActivity = () => {
-      if (sawEvent && !settled && !idleAbort.signal.aborted) resetIdleTimer();
-    };
-
-    resetIdleTimer();
+    // The call's progress deadline is Membrane core's (createCallDeadline), on
+    // the signal it passes; this adapter says what each event is, by
+    // progressOfAnthropicEvent. (The SDK drops SSE pings before the loop
+    // below, so they're no event.) A body that asks for no display, as for the
+    // Fable and Mythos models when Membrane sends them no thinking config,
+    // counts as silent: those models think silently by default.
+    const summarized = (fullRequest.thinking as { display?: unknown } | undefined)?.display === 'summarized';
     let session: ReturnType<AnthropicAdapter['credentialSession']> | undefined;
 
     try {
-      session = this.credentialSession(idleAbort.signal, onTransportActivity);
+      session = this.credentialSession(options?.signal);
       const stream = await session.client.messages.stream(anthropicRequest, {
         signal: session.signal,
         headers: live,
@@ -703,8 +621,6 @@ export class AnthropicAdapter implements ProviderAdapter {
       };
 
       for await (const event of stream) {
-        sawEvent = true;
-        resetIdleTimer();
         // The provider has the request's prefix from its message_start on, so
         // the keepalive can hold it warm across idle gaps (`stream: true` is
         // dropped at replay time: transport, not cache key). A call that
@@ -715,7 +631,7 @@ export class AnthropicAdapter implements ProviderAdapter {
           this.cacheKeepalive?.record(fullRequest as unknown as Record<string, unknown>, headers, 'stream');
         }
         // Every SDK event is progress; pings never reach this loop.
-        options?.onProgress?.();
+        options?.onProgress?.(progressOfAnthropicEvent(event, summarized));
         if (event.type === 'message_start') {
           model = event.message.model;
           inputTransformations = (event.message as { input_transformations?: unknown }).input_transformations;
@@ -814,11 +730,6 @@ export class AnthropicAdapter implements ProviderAdapter {
         }
       }
 
-      // Clean up idle timer and external signal listener
-      settled = true;
-      if (idleTimer) clearTimeout(idleTimer);
-      options?.signal?.removeEventListener('abort', onExternalAbort);
-
       // A block still open here never received its content_block_stop: the
       // turn ended mid-block. Finalize it so the accumulated text is not lost
       // and a truncated tool call is marked rather than persisted as `{}`.
@@ -875,29 +786,10 @@ export class AnthropicAdapter implements ProviderAdapter {
       };
 
     } catch (error) {
-      // Clean up timer on error path too
-      settled = true;
-      if (idleTimer) clearTimeout(idleTimer);
-      options?.signal?.removeEventListener('abort', onExternalAbort);
-
-      // Our own idle watchdog fired: whatever shape the SDK wrapped the
-      // abort into (AbortError, APIUserAbortError "Request was aborted.",
-      // a connection error), the CAUSE is the stalled stream — classify as
-      // the retryable timeout, never as a user abort / unknown error. It is
-      // this call's deadline, so membrane doesn't send the call again.
-      if (idleTimedOut) {
-        throw deadlineExpired(new MembraneError({
-          type: 'timeout',
-          message: sawEvent
-            ? `SSE stream idle timeout — no observed activity within ${idleMs}ms`
-            : `SSE stream first-event timeout — no message_start within ${firstEventMs}ms (TTFT deadline)`,
-          retryable: true,
-          rawError: error,
-          rawRequest: fullRequest,
-        }));
-      }
-      // A deadline on the caller's signal (Membrane's progressTimeoutMs) is a
-      // timeout with its own message, whatever the SDK wrapped the abort in.
+      // A deadline on the caller's signal (Membrane core's, which names the
+      // bound that ran out) is a timeout, whatever shape the SDK wrapped the
+      // abort in (AbortError, APIUserAbortError "Request was aborted.", a
+      // connection error).
       if (isDeadlineAbort(options?.signal?.reason)) throw deadlineTimeoutError(options!.signal!.reason, fullRequest);
       throw this.handleError(session?.failure() ?? error, fullRequest);
     }
@@ -1195,8 +1087,9 @@ export class AnthropicAdapter implements ProviderAdapter {
     // 'Error'` (measured against @anthropic-ai/sdk 0.52), so isTypedAbortError
     // does NOT match it; isTypedAbortError covers the other typed shapes —
     // DOMException AbortError, name === 'AbortError', and a membrane abort.
-    // The idle watchdog that motivated the old message arm never reaches here:
-    // the stream catch throws its typed timeout before calling handleError.
+    // Membrane core's deadlines never reach here: the stream and complete
+    // catches turn a deadline abort into its typed timeout before calling
+    // handleError.
     if (error instanceof Anthropic.APIUserAbortError || isTypedAbortError(error)) {
       return abortError(undefined, rawRequest);
     }

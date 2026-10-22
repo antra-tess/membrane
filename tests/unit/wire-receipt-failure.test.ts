@@ -132,13 +132,11 @@ describe('wire-request receipt guard on a generic adapter', () => {
     expect(adapter.sent).toBe(0);
   });
 
-  it('does not touch the signal when no receipt consumer is registered', async () => {
-    let seen: AbortSignal | undefined;
+  it('guards nothing when no receipt consumer is registered', async () => {
     const adapter = new WireBasisAdapter();
-    const original = adapter.complete.bind(adapter);
-    adapter.complete = (req, options) => { seen = options?.signal; return original(req, options); };
-    const controller = new AbortController();
-    await new Membrane(adapter, { formatter: new NativeFormatter() }).complete(request, { signal: controller.signal });
-    expect(seen).toBe(controller.signal);
+    const membrane = new Membrane(adapter, { formatter: new NativeFormatter() });
+    const guard = vi.spyOn(membrane as unknown as { wireReceiptGuard: () => unknown }, 'wireReceiptGuard');
+    await membrane.complete(request, { signal: new AbortController().signal });
+    expect(guard).not.toHaveBeenCalled();
   });
 });

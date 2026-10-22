@@ -198,29 +198,39 @@ export interface StreamOptions {
   timeoutMs?: number;
 
   /**
-   * Anthropic idle deadline after the first SDK event (default: 600000 ms).
-   * Nonempty Web response-body bytes, including SSE keepalives, refresh it;
-   * other SDK-supported bodies refresh it on SDK events. This does not bound
-   * total duration or generation progress. Parity with YieldingStreamOptions.
-   */
-  idleTimeoutMs?: number;
-
-  /**
-   * Progress deadline, per provider call (default: off, as for any value
-   * that isn't a positive number of ms). Every parsed provider event renews
-   * it (an SDK event, an SSE data frame that parses to an object);
-   * keepalives, SSE comments and raw bytes don't, so a connection that stays
-   * up while the model sends nothing
-   * still ends. On expiry the call aborts as a `TimeoutAbortError` (type
-   * `timeout`, aborted reason `'timeout'`). It bounds the wait for the first
-   * event too. Time between provider calls, such as tool execution, never
-   * counts. A stretch with no parsed event counts as no progress whatever the
-   * model is doing: reasoning a provider doesn't stream, while it sends only
-   * keepalives, can expire it, so set it above the longest such stretch you
-   * expect (Anthropic thinking with `display: "omitted"` sends no deltas
-   * while it thinks, which can last minutes). An adapter that streams no
-   * events, such as `OpenAIResponsesAdapter` (the Images API), can't renew
-   * it, so for it the deadline bounds the whole call. Parity with
+   * The progress deadline, per provider call. On expiry the call aborts as a
+   * `TimeoutAbortError` (type `timeout`, aborted reason `'timeout'`).
+   *
+   * Unset (the default; anything that isn't a number, `null` included,
+   * counts as unset), it's bounded per phase on a
+   * stream whose adapter reports its phases (`AnthropicAdapter`,
+   * `BedrockAdapter`; see SendReport):
+   * - before the first content (a content delta, or a redacted thinking
+   *   block, which arrives whole), 400 s from the send (from when Membrane
+   *   hands the call to its adapter, so building and signing the request
+   *   and resolving credentials count too);
+   * - a silent think (thinking whose display isn't `'summarized'`, which
+   *   sends nothing while it thinks) is allowed its request's whole
+   *   `max_tokens` at 35 tokens a second from its start, and before content
+   *   the call ends only once both that and the 400 s have run out;
+   * - after content, 180 s between provider events, or the think's allowance
+   *   after a silent think's start when that's longer.
+   * On any other adapter, whose stream can be silent until its answer comes
+   * (reasoning a provider doesn't stream, or an adapter that streams no
+   * events, such as `OpenAIResponsesAdapter`), the bound is 400 s plus
+   * `max_tokens` at 35 tokens a second, from the send and again from each
+   * provider event. Every parsed provider event counts (an SDK event, an SSE
+   * data frame that parses to an object); keepalives, SSE comments and raw
+   * bytes don't, so a connection that stays up while the model sends nothing
+   * still ends. Time between provider calls, such as tool execution, never
+   * counts. A connection that sends nothing at all is left to the runtime's
+   * own body timeout (undici's, Bun's).
+   *
+   * A positive number of ms, `Infinity` included, replaces these with one
+   * flat bound: that long from the send and from each provider event,
+   * whatever the phase. Set it above the longest silence you expect, since a
+   * silent think can outlast it. 0 turns the progress deadline off, as any
+   * other value does (a negative number, NaN). Parity with
    * YieldingStreamOptions.
    */
   progressTimeoutMs?: number;
@@ -343,12 +353,15 @@ export interface CompleteOptions {
   timeoutMs?: number;
 
   /**
-   * Progress deadline, per provider call (default: off); see
-   * StreamOptions.progressTimeoutMs. A non-streaming call reports no progress
-   * until its response arrives, so on most adapters it bounds the whole call.
-   * `OpenAIResponsesAPIAdapter` in subscription mode answers `complete()` by
-   * streaming, so there its events renew it. On expiry `complete()` throws a
-   * `TimeoutAbortError`.
+   * The progress deadline, per provider call; see StreamOptions.
+   * progressTimeoutMs. Unset (the default, `null` included), a non-streaming
+   * call is bounded at 400 s plus its `max_tokens` at 35 tokens a second,
+   * since its answer arrives whole. `OpenAIResponsesAPIAdapter` in
+   * subscription mode answers `complete()` by streaming, so there each
+   * provider event starts that bound again. A positive number of ms,
+   * `Infinity` included, sets one flat bound instead; 0 turns it off, as any
+   * other value does (a negative number, NaN). On expiry `complete()` throws
+   * a `TimeoutAbortError`.
    */
   progressTimeoutMs?: number;
 

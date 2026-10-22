@@ -344,6 +344,45 @@ export interface ProviderRequestContext {
   requiresAssistantPrefill: boolean;
 }
 
+/**
+ * What an adapter saw, reported through `ProviderRequestOptions.onProgress`
+ * for the deadlines Membrane core keeps per provider call (createCallDeadline
+ * in providers/utils.ts). An adapter calls it with nothing for any other
+ * parsed provider event.
+ *
+ * - `'content'`: a content delta of any kind (text, thinking, tool input, a
+ *   signature), or a `redacted_thinking` block's start, since that block
+ *   arrives whole after its think: the model is producing output. Any other
+ *   block's start is only an event. A text or tool block's content follows
+ *   as deltas, and a server tool's result block, which arrives whole too,
+ *   follows its call's input deltas, so content has begun by then.
+ * - `'think'`: a silent think has started: a thinking block began in a call
+ *   whose body doesn't ask for `display: 'summarized'`, so nothing need
+ *   arrive until the think ends.
+ */
+export type ProgressSeen = 'content' | 'think';
+
+/**
+ * What an adapter tells Membrane core about one attempt as it sends it,
+ * through `ProviderRequestOptions.onSend`, for the call's deadlines.
+ */
+export interface SendReport {
+  /**
+   * The output-token limit the body asks for (its `max_tokens`,
+   * `max_output_tokens` or equivalent, after any default and `extra` the
+   * adapter applied). Core sizes a silent think's allowance and the bound for
+   * an answer that arrives whole from it.
+   */
+  maxTokens?: number;
+  /**
+   * Whether this attempt's stream reports its phases through `onProgress`:
+   * a content delta or a `redacted_thinking` block's start as `'content'`,
+   * and a silent think's start as `'think'`. Core then bounds the stream per
+   * phase (see StreamOptions.progressTimeoutMs).
+   */
+  reportsPhases?: boolean;
+}
+
 export interface ProviderRequestOptions {
   /** Build/protocol facts for validation against the adapter's final model/body.
    * Not provider JSON. Decorators forward this context with the other options. */
@@ -355,30 +394,33 @@ export interface ProviderRequestOptions {
   promptMessages?: import('./message.js').NormalizedMessage[];
   signal?: AbortSignal;
   timeoutMs?: number;
-  /** Anthropic idle deadline after the first SDK event (default: 600000 ms).
-   * Nonempty Web response-body bytes, including SSE keepalives, refresh it;
-   * other SDK-supported bodies refresh it on SDK events. This does not bound
-   * total duration or generation progress. */
-  idleTimeoutMs?: number;
   /**
-   * Deadline for the FIRST stream event (TTFT). Large contexts on a cache
-   * miss legitimately take minutes before message_start while the SDK
-   * swallows ping keepalives (default: max(idleTimeoutMs, 600000)).
+   * What the adapter saw, for the deadlines Membrane core keeps per provider
+   * call (`progressTimeoutMs`; see ProgressSeen). An adapter
+   * calls it once per parsed provider event: each SDK event, each SSE data
+   * frame that parses to a JSON object, each event-stream message that
+   * decodes to one. Never as an event for a frame that parses to anything
+   * else (`null`, a number, a string, an array), which carries no event, nor
+   * for keepalives (Anthropic's and Bedrock's `ping`), SSE comments or raw
+   * body bytes: those prove the connection is up, not that the model is
+   * making progress. An adapter whose stream reports its phases
+   * (SendReport.reportsPhases) reports a content delta or a
+   * `redacted_thinking` block's start as `'content'`, and a silent think's
+   * start as `'think'`;
+   * any other adapter may call it with nothing for every event. Decorators
+   * must forward it with the other options; one that drops it leaves the
+   * call to its bound from the send alone.
    */
-  firstEventTimeoutMs?: number;
+  onProgress?: (seen?: ProgressSeen) => void;
   /**
-   * Stream progress, for the progress deadline Membrane core keeps per
-   * provider call (`progressTimeoutMs`). An adapter calls it once per parsed
-   * provider event: each SDK event, each SSE data frame that parses to a JSON
-   * object, each event-stream message that decodes to one. Never for a frame
-   * that parses to anything else (`null`, a number, a string, an array),
-   * which carries no event, nor for keepalives (Anthropic's and
-   * Bedrock's `ping`), SSE comments or raw body bytes: those prove the
-   * connection is up, not that the model is making progress. Decorators must
-   * forward it with the other options; one that drops it turns the progress
-   * deadline into a total one.
+   * What this attempt sends, for the deadlines Membrane core keeps per
+   * provider call (see SendReport), reported once per attempt beside
+   * `onRequest`, before the request goes out. Without it, core sizes the
+   * call from the request's `maxTokens`, or 4096, and bounds it as an answer
+   * that can arrive whole. Decorators forward it with the other options, so
+   * a router reports for the adapter it picked.
    */
-  onProgress?: () => void;
+  onSend?: (send: SendReport) => void;
   /** Report the final API request body immediately before sending it.
    * Required for adapters declaring cacheReceiptBasis: 'wire-request'.
    * Decorators forward it; raw logging observes each attempt, even when

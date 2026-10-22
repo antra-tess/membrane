@@ -1,5 +1,6 @@
 import { TimeoutAbortError, errorFromProviderStatus, networkError } from '../types/errors.js';
 import { imageForRequest, urlImageForRequest } from '../utils/image-media.js';
+import type { ProgressSeen, SendReport } from '../types/provider.js';
 
 interface StreamErrorFrameFields {
   code?: unknown;
@@ -517,7 +518,7 @@ export function isDeadlineAbort(error: unknown): boolean {
  * caller-signal > timeout > error ladder could read it.
  */
 export function deadlineTimeoutError(error: unknown, rawRequest?: unknown): TimeoutAbortError {
-  // The marked reason names its deadline (see createProgressDeadline).
+  // The marked reason names its deadline (see createCallDeadline).
   const message = isDeadlineAbort(error) ? (error as { message?: unknown }).message : undefined;
   return new TimeoutAbortError(
     typeof message === 'string' && message ? message : 'Request timed out',
@@ -592,56 +593,203 @@ export function createCombinedSignal(
 }
 
 /**
- * A deadline that stream progress renews, for one provider call: it aborts
- * when `timeoutMs` passes with no call to `renew`, combined with the caller's
- * signal. Membrane core owns it (`progressTimeoutMs`); adapters renew it
- * through `ProviderRequestOptions.onProgress` once per parsed provider event.
- *
- * Expiry aborts with the same mark as `createCombinedSignal`'s deadline, so
- * every adapter's `isDeadlineAbort` → `deadlineTimeoutError` path turns it
- * into a TimeoutAbortError: a timeout by type, an abort by provenance. Its
- * message names this deadline and says when the call began, how many provider
- * events it had and when the last came, so a call log that keeps only an
- * error's message still tells a call that never produced an event from one
- * that stopped partway.
- *
- * Silence is measured on the monotonic clock (`performance.now()`), as the
- * timers run, so a step of the system clock moves no expiry; the message's
- * times are wall-clock. `renew` only records the time and counts the event,
- * so calling it per event costs nothing; the one timer re-arms itself for
- * whatever is left when it fires early. Without a positive `timeoutMs`
- * (unset, zero, negative or NaN) the caller's signal passes through and there
- * is no `renew`. `cleanup` MUST run in a `finally`.
+ * The bound before a call's first content (TTFT), from the send: a little
+ * over three times the longest wait before a think began among successful
+ * Anthropic calls on a production router (128 s, so 384 s, rounded up). It
+ * covers the wait for the first event too, which a large cache miss can
+ * stretch: 600,000-token contexts have sent only pings for over 120 s before
+ * their message_start.
  */
-export function createProgressDeadline(
+export const BEFORE_CONTENT_MS = 400_000;
+
+/**
+ * The bound between provider events once content has begun: Claude Code's
+ * stream idle bound (90 s, by our reading of its source), doubled for the
+ * long silences while a large tool call is written.
+ */
+export const BETWEEN_EVENTS_MS = 180_000;
+
+/**
+ * The slowest rate a silent think, or an answer that arrives whole, is
+ * allowed: half the slowest successful think of 10,000 tokens or more on the
+ * same router (71.6 tokens a second, claude-opus-5-5). A think's allowance is
+ * its request's whole output budget at this rate.
+ */
+export const THINK_TOKENS_PER_SECOND = 35;
+
+/** The output budget assumed for a call whose adapter reports none and whose request names none: the default of every built-in adapter that sends an output limit. */
+export const DEFAULT_BUDGET_TOKENS = 4096;
+
+/**
+ * What an Anthropic-format stream event says about its call's phase, for
+ * Membrane core's deadlines, on the adapters that parse those events
+ * (Anthropic's, and Bedrock's, which carries them). A content delta is
+ * content, and so is a redacted_thinking block, which arrives whole, its
+ * think done. Any other block's start is only an event: a text or tool
+ * block's content follows as deltas (a tool call's input can take a while
+ * to come), and a server tool's result, which arrives whole too, follows its
+ * call's input deltas. A thinking block's start is a silent think unless the
+ * body asks for summarized thinking, which streams deltas.
+ */
+export function progressOfAnthropicEvent(
+  event: { type?: unknown; content_block?: { type?: unknown } },
+  summarized: boolean,
+): ProgressSeen | undefined {
+  if (event.type === 'content_block_delta') return 'content';
+  if (event.type !== 'content_block_start') return undefined;
+  const block = event.content_block?.type;
+  if (block === 'redacted_thinking') return 'content';
+  return block === 'thinking' && !summarized ? 'think' : undefined;
+}
+
+/** A positive number of ms (Infinity included), or undefined. */
+const positiveMs = (value: unknown): number | undefined =>
+  typeof value === 'number' && value > 0 ? value : undefined;
+
+/**
+ * The progress deadline for one provider call, combined with the caller's
+ * signal. (A caller's per-request `timeoutMs` stays the
+ * adapter's own.) Membrane core owns them, and the adapter says what it saw:
+ * as it sends the request, what it sent (`ProviderRequestOptions.onSend`,
+ * `reportSend`), and then each provider event, never a keepalive or a raw
+ * byte (`ProviderRequestOptions.onProgress`, `report`).
+ *
+ * "The send" is when Membrane hands the call to its adapter, as it creates
+ * this, so building and signing the request and resolving credentials count
+ * against the first bound too.
+ *
+ * The progress deadline, by `progressTimeoutMs` (anything that isn't a
+ * number, `null` included, counts as unset):
+ * - Unset, in a call whose adapter reported at the send, before any event,
+ *   that its stream reports phases: bounds per phase. Before the first
+ *   content, BEFORE_CONTENT_MS from the send. A
+ *   silent think started before content is allowed its whole output budget
+ *   at THINK_TOKENS_PER_SECOND from its start, and the call ends only once
+ *   both have run out. After content, BETWEEN_EVENTS_MS between events, or
+ *   the larger of that and the allowance after a silent think's start.
+ * - Unset, in any other call (a non-streaming call, or a stream whose
+ *   adapter reports no phases): BEFORE_CONTENT_MS plus the output budget at
+ *   THINK_TOKENS_PER_SECOND, from the send and again from each event, since
+ *   such a call can be silent until its whole answer arrives.
+ * - A positive number, Infinity included: that many ms from the send and
+ *   from each event, whatever the phase, as one flat bound.
+ * - Anything else (0, a negative number, NaN): off.
+ *
+ * A connection that sends nothing at all is left to the runtime's own body
+ * timeout (undici's, Bun's), counted from its last byte. A phase bound can
+ * outlast it before content, on a call without phases and in a silent
+ * think's allowance; after content, 180 s between events is shorter.
+ *
+ * The output budget is the one the adapter reports sending, or else
+ * `maxTokens` when it's a positive number, or else DEFAULT_BUDGET_TOKENS. A
+ * reported budget that isn't a positive finite number is ignored.
+ *
+ * Expiry aborts with the deadline mark, so every adapter's `isDeadlineAbort`
+ * → `deadlineTimeoutError` path turns it into a TimeoutAbortError: a timeout
+ * by type, an abort by provenance. Its message names the bound that ran out
+ * and says when the call began, how many provider events it had and when the
+ * last came. Silence is measured on the monotonic clock
+ * (`performance.now()`), so a step of the system clock moves no expiry; the
+ * message's times are wall-clock. A report only records what it saw, so
+ * reporting each event costs nothing: the one timer re-arms when it fires
+ * early, and is moved only when a report brings the expiry closer.
+ * `cleanup` MUST run in a `finally`.
+ */
+export function createCallDeadline(
   signal: AbortSignal | undefined,
-  timeoutMs: number | undefined,
-): { signal?: AbortSignal; renew?: () => void; cleanup: () => void } {
-  if (!timeoutMs || timeoutMs <= 0) return { signal, cleanup: () => {} };
+  options: { progressTimeoutMs?: number; maxTokens?: number },
+): {
+  signal?: AbortSignal;
+  report: (seen?: ProgressSeen) => void;
+  reportSend: (send: SendReport) => void;
+  cleanup: () => void;
+} {
+  const flatMs = positiveMs(options.progressTimeoutMs);
+  // Unset, the call starts on the bound for an answer that arrives whole,
+  // and takes the phases when its adapter reports them at the send.
+  let mode: 'phases' | 'whole' | 'flat' | 'off' = typeof options.progressTimeoutMs !== 'number'
+    ? 'whole'
+    : flatMs !== undefined ? 'flat' : 'off';
+  if (mode === 'off') return { signal, report: () => {}, reportSend: () => {}, cleanup: () => {} };
 
   const controller = new AbortController();
   const beganAt = Date.now();
-  let lastAt = beganAt;
-  let last = performance.now();
+  const sentAt = performance.now();
+  let lastWall = beganAt;
+  let lastAt = sentAt;
   let events = 0;
+  let budget = typeof options.maxTokens === 'number' && options.maxTokens > 0 && Number.isFinite(options.maxTokens)
+    ? options.maxTokens
+    : DEFAULT_BUDGET_TOKENS;
+  let contentSeen = false;
+  // Before content: when the latest silent think's allowance runs out.
+  let thinkEnds: number | undefined;
+  // After content: whether the last event was a silent think's start.
+  let thinking = false;
   let cancelTimer: (() => void) | undefined;
-  const check = (): void => {
-    const quiet = performance.now() - last;
-    if (quiet >= timeoutMs) {
-      cancelTimer = undefined;
-      controller.abort(deadlineAbortReason(
-        `No provider progress within ${timeoutMs}ms: the call began at ${new Date(beganAt).toISOString()}, ` +
-        `provider events: ${events}${events > 0 ? `, the last at ${new Date(lastAt).toISOString()}` : ''}`,
-      ));
-    } else {
-      cancelTimer = setLongTimeout(check, timeoutMs - quiet);
-    }
-  };
-  cancelTimer = setLongTimeout(check, timeoutMs);
+  let armedAt = Infinity;
+  // Settled by expiry, the caller's abort or cleanup: a late report (an
+  // event read after the call ended) arms nothing.
+  let over = false;
 
-  const onAbort = (): void => {
+  const allowanceMs = (): number => Math.ceil(budget / THINK_TOKENS_PER_SECOND) * 1000;
+  const budgetText = (): string => `max_tokens ${budget} at ${THINK_TOKENS_PER_SECOND} tokens a second`;
+  const s = (ms: number): string => `${ms / 1000}s`;
+  // When the call ends as things stand, and what to say if it does.
+  const due = (): { at: number; why: () => string } => {
+    let next: { at: number; why: () => string } = { at: Infinity, why: () => '' };
+    if (mode === 'flat') {
+      next = { at: lastAt + flatMs!, why: () => `No provider progress within ${flatMs}ms` };
+    } else if (mode === 'whole') {
+      const bound = BEFORE_CONTENT_MS + allowanceMs();
+      next = {
+        at: lastAt + bound,
+        why: () => `${events === 0 ? 'No answer' : 'No provider event'} within ${s(bound)} (${s(BEFORE_CONTENT_MS)} plus ${budgetText()})`,
+      };
+    } else if (mode === 'phases' && !contentSeen) {
+      next = thinkEnds !== undefined && thinkEnds > sentAt + BEFORE_CONTENT_MS
+        ? { at: thinkEnds, why: () => `No content within ${s(allowanceMs())} of a silent think's start (${budgetText()})` }
+        : { at: sentAt + BEFORE_CONTENT_MS, why: () => `No content within ${s(BEFORE_CONTENT_MS)} of the send` };
+    } else if (mode === 'phases') {
+      next = thinking && allowanceMs() > BETWEEN_EVENTS_MS
+        ? { at: lastAt + allowanceMs(), why: () => `No provider event within ${s(allowanceMs())} of a silent think's start (${budgetText()})` }
+        : { at: lastAt + BETWEEN_EVENTS_MS, why: () => `No provider event within ${s(BETWEEN_EVENTS_MS)}` };
+    }
+    return next;
+  };
+  const arm = (at: number): void => {
     cancelTimer?.();
     cancelTimer = undefined;
+    armedAt = at;
+    if (at !== Infinity) cancelTimer = setLongTimeout(check, Math.max(0, at - performance.now()));
+  };
+  const check = (): void => {
+    cancelTimer = undefined;
+    armedAt = Infinity;
+    const next = due();
+    if (performance.now() >= next.at) {
+      over = true;
+      controller.abort(deadlineAbortReason(
+        `${next.why()}: the call began at ${new Date(beganAt).toISOString()}, ` +
+        `provider events: ${events}${events > 0 ? `, the last at ${new Date(lastWall).toISOString()}` : ''}`,
+      ));
+    } else {
+      arm(next.at);
+    }
+  };
+  // A report that brings the expiry closer moves the timer; a later one is
+  // found when the timer fires early.
+  const moved = (): void => {
+    const next = due();
+    if (next.at < armedAt) arm(next.at);
+  };
+  arm(due().at);
+
+  const onAbort = (): void => {
+    over = true;
+    cancelTimer?.();
+    cancelTimer = undefined;
+    armedAt = Infinity;
     controller.abort(signal!.reason);
   };
   if (signal) {
@@ -651,10 +799,37 @@ export function createProgressDeadline(
 
   return {
     signal: controller.signal,
-    renew: () => { last = performance.now(); lastAt = Date.now(); events++; },
+    report: (seen) => {
+      if (over) return;
+      const now = performance.now();
+      lastAt = now;
+      lastWall = Date.now();
+      events++;
+      if (seen === 'content') {
+        contentSeen = true;
+        thinking = false;
+      } else if (seen === 'think') {
+        if (contentSeen) thinking = true;
+        else thinkEnds = now + allowanceMs();
+      } else {
+        thinking = false;
+      }
+      moved();
+    },
+    reportSend: (send) => {
+      if (over) return;
+      const maxTokens = send?.maxTokens;
+      if (typeof maxTokens === 'number' && maxTokens > 0 && Number.isFinite(maxTokens)) budget = maxTokens;
+      // Phases are reported at the send; a report after an event would
+      // judge the call by rules its events weren't read under.
+      if (send?.reportsPhases === true && mode === 'whole' && events === 0) mode = 'phases';
+      moved();
+    },
     cleanup: () => {
+      over = true;
       cancelTimer?.();
       cancelTimer = undefined;
+      armedAt = Infinity;
       signal?.removeEventListener('abort', onAbort);
     },
   };

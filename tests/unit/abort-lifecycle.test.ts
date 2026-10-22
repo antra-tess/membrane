@@ -545,7 +545,8 @@ describe('retry sleeps leave no listener on the caller signal', () => {
     const response = await new Membrane(adapter, { retry: { retryDelayMs: 1, maxRetryDelayMs: 1 } }).complete(REQUEST, { signal });
     expect(response.stopReason).toBe('end_turn');
     const listeners = (spy: typeof added) => spy.mock.calls.filter(([type]) => type === 'abort').map(([, listener]) => listener);
-    expect(listeners(added)).toHaveLength(2);
+    // One for each attempt's deadlines (three attempts) and one for each sleep (two), each removed.
+    expect(listeners(added)).toHaveLength(5);
     expect(listeners(removed)).toEqual(listeners(added));
   });
 });

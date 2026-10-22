@@ -164,8 +164,9 @@ describe('Anthropic handleError: context-length heuristic gated on HTTP 400 (iss
 });
 
 describe('Anthropic handleError: abort classification (fleet incident 2026-07-20)', () => {
-  // The SSE idle watchdog aborts a stalled stream via AbortController; the
-  // SDK surfaces that as APIUserAbortError ("Request was aborted."), whose
+  // A deadline aborts a stalled stream via AbortController (in 2026-07 the
+  // adapter's own SSE idle watchdog; now Membrane core's); the SDK surfaces
+  // that as APIUserAbortError ("Request was aborted."), whose
   // .name is NOT 'AbortError'. Before the fix it fell through to
   // `unknown, retryable: false`, and membrane's message-sniffing then
   // relabeled it a *user* abort — terminal, never retried, and reported as

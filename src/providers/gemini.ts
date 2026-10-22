@@ -344,6 +344,7 @@ export class GeminiAdapter implements ProviderAdapter {
   ): Promise<ProviderResponse> {
     const geminiRequest = this.buildRequest(request);
     options?.onRequest?.(geminiRequest);
+    options?.onSend?.({ maxTokens: geminiRequest.generationConfig?.maxOutputTokens });
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
@@ -387,6 +388,7 @@ export class GeminiAdapter implements ProviderAdapter {
   ): Promise<ProviderResponse> {
     const geminiRequest = this.buildRequest(request);
     options?.onRequest?.(geminiRequest);
+    options?.onSend?.({ maxTokens: geminiRequest.generationConfig?.maxOutputTokens });
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {

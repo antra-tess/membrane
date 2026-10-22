@@ -53,20 +53,18 @@ const NATIVE_REQUEST: NormalizedRequest = {
 };
 
 describe('stream() deadline forwarding', () => {
-  it('forwards timeoutMs and idleTimeoutMs on the XML path', async () => {
+  it('forwards timeoutMs on the XML path', async () => {
     const adapter = new OptionRecordingAdapter();
     const membrane = new Membrane(adapter);
-    await membrane.stream(REQUEST, { timeoutMs: 1234, idleTimeoutMs: 5678 });
+    await membrane.stream({ ...REQUEST, toolMode: 'xml' }, { timeoutMs: 1234 });
     expect(adapter.seenOptions[0]?.timeoutMs).toBe(1234);
-    expect(adapter.seenOptions[0]?.idleTimeoutMs).toBe(5678);
   });
 
-  it('forwards timeoutMs and idleTimeoutMs on the native path', async () => {
+  it('forwards timeoutMs on the native path', async () => {
     const adapter = new OptionRecordingAdapter();
     const membrane = new Membrane(adapter);
-    await membrane.stream(NATIVE_REQUEST, { timeoutMs: 4321, idleTimeoutMs: 8765 });
+    await membrane.stream(NATIVE_REQUEST, { timeoutMs: 4321 });
     expect(adapter.seenOptions[0]?.timeoutMs).toBe(4321);
-    expect(adapter.seenOptions[0]?.idleTimeoutMs).toBe(8765);
   });
 
   it('still forwards through the streaming:false fallback to complete()', async () => {

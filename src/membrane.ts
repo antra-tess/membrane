@@ -69,7 +69,7 @@ import {
 import type { BuildResult } from './formatters/types.js';
 import { computeCacheWireReceipt } from './cache-wire-receipt.js';
 import { awaitCallerCode, runCallerCode, isDeadlineExpiry, errorFromThrown, systemChangeRefusedError } from './types/errors.js';
-import { createProgressDeadline, setLongTimeout } from './providers/utils.js';
+import { createCallDeadline, setLongTimeout } from './providers/utils.js';
 import {
   parseToolCalls,
   formatToolResults,
@@ -552,11 +552,12 @@ export class Membrane {
           ? this.wireReceiptGuard(options.signal)
           : undefined;
 
-        // One progress deadline per provider call. A non-streaming call
-        // reports no progress before its response, so this bounds the call.
-        const progress = createProgressDeadline(
+        // The deadlines for this provider call (createCallDeadline). A
+        // non-streaming call reports no progress before its response, so
+        // unset, its bound is the one for an answer that arrives whole.
+        const progress = createCallDeadline(
           receiptGuard ? receiptGuard.signal : options.signal,
-          options.progressTimeoutMs,
+          { progressTimeoutMs: options.progressTimeoutMs, maxTokens: finalRequest.maxTokens },
         );
         let rawProviderResponse: ProviderResponse;
         try {
@@ -569,7 +570,8 @@ export class Membrane {
             },
             signal: progress.signal,
             timeoutMs: options.timeoutMs,
-            ...(progress.renew ? { onProgress: progress.renew } : {}),
+            onProgress: progress.report,
+            onSend: progress.reportSend,
             onRequest: (req) => {
               rawRequest = req;
               if (useWireReceipt) {
@@ -770,13 +772,15 @@ export class Membrane {
         // abort MembraneError) or an adapter's own deadline. Nothing was
         // streamed, so nothing partial is reported.
         if (this.isCancellation(error, options.signal)) {
+          const { reason, message } = this.abortOutcome(error, options.signal);
           return this.buildAbortedResponse(
             '',
             { inputTokens: 0, outputTokens: 0 },
             [],
             [],
-            this.abortReason(error, options.signal),
-            []
+            reason,
+            [],
+            message,
           );
         }
         throw error;
@@ -920,7 +924,6 @@ export class Membrane {
       maxToolDepth = 10,
       signal,
       timeoutMs,
-      idleTimeoutMs,
       progressTimeoutMs,
       retry,
     } = options;
@@ -1147,7 +1150,6 @@ export class Membrane {
           {
             signal,
             timeoutMs,
-            idleTimeoutMs,
             progressTimeoutMs,
             retry,
             normalizedRequest: request,
@@ -1579,15 +1581,17 @@ export class Membrane {
         const fullAccumulated = parser.getAccumulated();
         const newContent = fullAccumulated.slice(initialPrefillLength);
 
+        const { reason, message } = this.abortOutcome(error, signal);
         return this.buildAbortedResponse(
           newContent,
           turnUsage.total,
           executedToolCalls,
           executedToolResults,
-          this.abortReason(error, signal),
+          reason,
           xmlToolProtocol
             ? attachSplitResults(parseAccumulatedIntoBlocks(newContent, { tools: request.tools, ...(initialBlockType ? { startInsideBlock: initialBlockType } : {}) }), splitRounds).blocks
-            : streamedThinking.content(newContent, (value, context) => formatter.parseContentBlocks(value, request.tools, context))
+            : streamedThinking.content(newContent, (value, context) => formatter.parseContentBlocks(value, request.tools, context)),
+          message,
         );
       }
       // Re-throw with rawRequest attached for logging
@@ -1616,7 +1620,6 @@ export class Membrane {
       maxToolDepth = 10,
       signal,
       timeoutMs,
-      idleTimeoutMs,
       progressTimeoutMs,
       retry,
     } = options;
@@ -1704,7 +1707,6 @@ export class Membrane {
           {
             signal,
             timeoutMs,
-            idleTimeoutMs,
             progressTimeoutMs,
             retry,
             normalizedRequest: request,
@@ -1873,13 +1875,15 @@ export class Membrane {
     } catch (error) {
       // A cancellation, by the caller's signal or a typed abort.
       if (this.isCancellation(error, signal)) {
+        const { reason, message } = this.abortOutcome(error, signal);
         return this.buildAbortedResponse(
           allTextAccumulated,
           turnUsage.total,
           executedToolCalls,
           executedToolResults,
-          this.abortReason(error, signal),
-          [...allContentBlocks, ...(roundReceived?.() ?? [])]
+          reason,
+          [...allContentBlocks, ...(roundReceived?.() ?? [])],
+          message,
         );
       }
       // Re-throw with rawRequest attached for logging
@@ -2670,8 +2674,7 @@ export class Membrane {
     options: {
       signal?: AbortSignal;
       timeoutMs?: number;
-      idleTimeoutMs?: number;
-      /** See StreamOptions.progressTimeoutMs: one renewable deadline per provider call. */
+      /** See StreamOptions.progressTimeoutMs: the deadline Membrane keeps per provider call. */
       progressTimeoutMs?: number;
       onRequest?: (rawRequest: unknown) => void;
       /** See ProviderRequestOptions.wrapThinkingTags */
@@ -2848,16 +2851,19 @@ export class Membrane {
       };
       let attemptResult: ProviderResponse | undefined;
       let failure: { error: unknown } | undefined;
-      // Each attempt gets its own progress deadline, made here and cleaned up
-      // before anything decides whether to send it again: refusal re-issues
-      // and retries each get a new one, and time outside the attempt (the
-      // wait before a retry, tool execution) never counts.
-      const progress = createProgressDeadline(observedOptions.signal, progressTimeoutMs);
+      // Each attempt gets its own deadlines, made here and cleaned up before
+      // anything decides whether to send it again: refusal re-issues and
+      // retries each get new ones, and time outside the attempt (the wait
+      // before a retry, tool execution) never counts.
+      const progress = createCallDeadline(observedOptions.signal, {
+        progressTimeoutMs,
+        maxTokens: finalRequest.maxTokens,
+      });
       try {
         const streamCall = this.adapter.stream(
           finalRequest,
           attemptCallbacks,
-          progress.renew ? { ...observedOptions, signal: progress.signal, onProgress: progress.renew } : observedOptions,
+          { ...observedOptions, signal: progress.signal, onProgress: progress.report, onSend: progress.reportSend },
         );
         attemptResult = receiptGuard ? await receiptGuard.settle(streamCall) : await streamCall;
       } catch (error) {
@@ -3745,6 +3751,16 @@ export class Membrane {
   }
 
   /**
+   * Why a caught abort happened, with what ended it when the caller didn't:
+   * the error's message, which for a deadline names the bound that ran out.
+   */
+  private abortOutcome(error: unknown, signal?: AbortSignal): { reason: 'user' | 'timeout' | 'error'; message?: string } {
+    const reason = this.abortReason(error, signal);
+    const message = reason !== 'user' && error instanceof Error && error.message ? error.message : undefined;
+    return message !== undefined ? { reason, message } : { reason };
+  }
+
+  /**
    * Build an AbortedResponse from current execution state
    */
   private buildAbortedResponse(
@@ -3753,13 +3769,15 @@ export class Membrane {
     toolCalls: ToolCall[],
     toolResults: ToolResult[],
     reason: 'user' | 'timeout' | 'error',
-    blocks: ContentBlock[]
+    blocks: ContentBlock[],
+    message?: string,
   ): AbortedResponse {
     return {
       aborted: true,
       partialContent: blocks.length > 0 ? blocks : undefined,
       partialUsage: usage,
       reason,
+      ...(message !== undefined ? { message } : {}),
       rawAssistantText: accumulated || undefined,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       toolResults: toolResults.length > 0 ? toolResults : undefined,
@@ -4078,7 +4096,6 @@ export class Membrane {
           {
             signal: stream.signal,
             timeoutMs: options.timeoutMs,
-            idleTimeoutMs: options.idleTimeoutMs,
             progressTimeoutMs: options.progressTimeoutMs,
             retry: options.retry,
             normalizedRequest: request,
@@ -4527,7 +4544,7 @@ export class Membrane {
       // Error. Reporting again here would deliver a second aborted.
       if (stream.isCancelled) return;
       if (this.isAbortError(error)) {
-        stream.emit({ type: 'aborted', reason: this.abortReason(error, stream.signal), ...abortedPartial() });
+        stream.emit({ type: 'aborted', ...this.abortOutcome(error, stream.signal), ...abortedPartial() });
       } else {
         throw error;
       }
@@ -4686,7 +4703,6 @@ export class Membrane {
           {
             signal: stream.signal,
             timeoutMs: options.timeoutMs,
-            idleTimeoutMs: options.idleTimeoutMs,
             progressTimeoutMs: options.progressTimeoutMs,
             retry: options.retry,
             normalizedRequest: request,
@@ -4926,7 +4942,7 @@ export class Membrane {
       // As above: a cancelled stream has already reported its abort.
       if (stream.isCancelled) return;
       if (this.isAbortError(error)) {
-        stream.emit({ type: 'aborted', reason: this.abortReason(error, stream.signal), ...abortedPartial() });
+        stream.emit({ type: 'aborted', ...this.abortOutcome(error, stream.signal), ...abortedPartial() });
       } else {
         throw error;
       }

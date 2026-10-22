@@ -14,6 +14,7 @@ import type {
   ProviderResponse,
   StreamCallbacks,
   ContentBlock,
+  ProgressSeen,
 } from '../types/index.js';
 import {
   MembraneError,
@@ -28,7 +29,7 @@ import {
 import { errorFromThrown } from '../types/errors.js';
 import { stripEmptyTextRequest } from '../utils/empty-text.js';
 import { isUnsignedThinking } from '../utils/thinking-carriers.js';
-import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, streamIndex, isEventObject } from './utils.js';
+import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, streamIndex, isEventObject, progressOfAnthropicEvent } from './utils.js';
 import {
   INTERLEAVED_THINKING_BETA,
   THINKING_BINDING_BETA,
@@ -407,6 +408,7 @@ export class BedrockAdapter implements ProviderAdapter {
     const fullRequest = { modelId: bedrockModelId, ...bedrockRequest };
     assertMessagePrefillSupported(bedrockModelId, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
+    options?.onSend?.({ maxTokens: fullRequest.max_tokens });
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
@@ -429,6 +431,8 @@ export class BedrockAdapter implements ProviderAdapter {
     const fullRequest = { modelId: bedrockModelId, ...bedrockRequest, stream: true };
     assertMessagePrefillSupported(bedrockModelId, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
+    // This stream reports its phases through onProgress (invokeModelWithStream).
+    options?.onSend?.({ maxTokens: fullRequest.max_tokens, reportsPhases: true });
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
@@ -690,8 +694,12 @@ export class BedrockAdapter implements ProviderAdapter {
     callbacks: StreamCallbacks,
     signal: AbortSignal | undefined,
     rawRequest: unknown,
-    onProgress?: () => void,
+    onProgress?: (seen?: ProgressSeen) => void,
   ): Promise<ProviderResponse> {
+    // What this stream saw, for Membrane core's deadline: a ping is nothing,
+    // and every other event says what it is by progressOfAnthropicEvent,
+    // since Bedrock carries Anthropic's events.
+    const summarized = request.thinking?.display === 'summarized';
     const url = new URL(
       `${this.baseURL ?? `https://bedrock-runtime.${this.region}.amazonaws.com`}/model/${encodeURIComponent(modelId)}/invoke-with-response-stream`
     );
@@ -757,7 +765,6 @@ export class BedrockAdapter implements ProviderAdapter {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-
         // Append new data to buffer
         const newBuffer = new Uint8Array(buffer.length + value.length);
         newBuffer.set(buffer);
@@ -862,9 +869,10 @@ export class BedrockAdapter implements ProviderAdapter {
             if (eventData === undefined) console.warn('[membrane:bedrock] Skipping malformed stream event:', skipped);
 
             if (eventData !== undefined) {
-              // A decoded model event is progress; a ping only proves the
-              // connection.
-              if ((eventData as { type?: string }).type !== 'ping') onProgress?.();
+              // A decoded model event is progress; a ping is no event.
+              if ((eventData as { type?: unknown }).type !== 'ping') {
+                onProgress?.(progressOfAnthropicEvent(eventData as { type?: unknown; content_block?: { type?: unknown } }, summarized));
+              }
 
               // Check for error events within the stream
               if (eventData.type === 'error') {
