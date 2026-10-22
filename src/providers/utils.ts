@@ -626,7 +626,7 @@ export const THINK_TOKENS_PER_SECOND = 35;
  */
 export const LIVENESS_MS = 180_000;
 
-/** The output budget assumed for a call whose adapter reports none and whose request names none: every built-in adapter's default. */
+/** The output budget assumed for a call whose adapter reports none and whose request names none: the default of every built-in adapter that sends an output limit. */
 export const DEFAULT_BUDGET_TOKENS = 4096;
 
 /** A positive number of ms (Infinity included), or undefined. */
@@ -679,7 +679,7 @@ const positiveMs = (value: unknown): number | undefined =>
  */
 export function createCallDeadline(
   signal: AbortSignal | undefined,
-  options: { progressTimeoutMs?: number; idleTimeoutMs?: number; maxTokens?: number },
+  options: { progressTimeoutMs?: number | null; idleTimeoutMs?: number | null; maxTokens?: number },
 ): {
   signal?: AbortSignal;
   report: (seen?: ProgressSeen) => void;

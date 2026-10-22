@@ -2672,9 +2672,9 @@ export class Membrane {
     options: {
       signal?: AbortSignal;
       timeoutMs?: number;
-      idleTimeoutMs?: number;
+      idleTimeoutMs?: number | null;
       /** See StreamOptions.progressTimeoutMs: the deadlines Membrane keeps per provider call. */
-      progressTimeoutMs?: number;
+      progressTimeoutMs?: number | null;
       onRequest?: (rawRequest: unknown) => void;
       /** See ProviderRequestOptions.wrapThinkingTags */
       wrapThinkingTags?: boolean;

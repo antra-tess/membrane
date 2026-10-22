@@ -537,18 +537,19 @@ export class AnthropicAdapter implements ProviderAdapter {
     // (createCallDeadline), on the signal it passes; this adapter says what
     // it saw. Each chunk of the response body, the SSE pings the SDK drops
     // before the loop below included, is the transport alive
-    // (observeBodyActivity). A content delta is content, and so is the start
-    // of any block but a thinking one, a redacted_thinking block included,
-    // which arrives whole. A thinking block's start is a silent think unless
-    // the body asks for summarized thinking, which streams deltas. (Membrane
-    // sends Fable and Mythos no thinking config, and they think silently by
-    // default.)
+    // (observeBodyActivity). A content delta is content, and so is a
+    // redacted_thinking block, which arrives whole, its think done. Any other
+    // block's content follows its start as deltas (a tool call's input can
+    // take a while to come), so its start is only an event. A thinking
+    // block's start is a silent think unless the body asks for summarized
+    // thinking, which streams deltas. (Membrane sends Fable and Mythos no
+    // thinking config, and they think silently by default.)
     const summarized = (fullRequest.thinking as { display?: unknown } | undefined)?.display === 'summarized';
     const progressOf = (event: { type: string; content_block?: { type?: string } }): ProgressSeen | undefined =>
       event.type === 'content_block_delta' ? 'content'
         : event.type !== 'content_block_start' ? undefined
-          : event.content_block?.type !== 'thinking' ? 'content'
-            : summarized ? undefined : 'think';
+          : event.content_block?.type === 'redacted_thinking' ? 'content'
+            : event.content_block?.type !== 'thinking' || summarized ? undefined : 'think';
     let session: ReturnType<AnthropicAdapter['credentialSession']> | undefined;
 
     try {

@@ -418,14 +418,16 @@ export interface YieldingStreamOptions {
    * The liveness bound, per provider call (default: 180000 ms): no byte of
    * the response, keepalive pings included, for this long ends the call with
    * an `aborted` event whose reason is `'timeout'`, carrying what arrived, in
-   * any phase: the connection is taken as gone. It's armed by the first sign
-   * of the transport an adapter can see and report: `AnthropicAdapter`
-   * reports each chunk of the response body, `BedrockAdapter` each keepalive
-   * ping. Any provider event renews it too. A positive number of ms sets it,
-   * `Infinity` included, and `null` counts as unset; 0 turns it off, as any
-   * other value does (a negative number, NaN).
+   * any phase: the connection is taken as gone.
+   * It's armed by the first chunk of the response body, on the adapters
+   * that can watch their transport (`AnthropicAdapter`, `BedrockAdapter`),
+   * and any provider event renews it too. A call on any other adapter, and
+   * every `complete()`, has none: such a call can be silent on the wire
+   * until its answer comes. A positive number of ms sets it, `Infinity`
+   * included, and `null` counts as unset; 0 turns it off, as any other
+   * value does (a negative number, NaN).
    */
-  idleTimeoutMs?: number;
+  idleTimeoutMs?: number | null;
 
   /**
    * The progress deadline, per provider call. On expiry the stream ends with
@@ -434,7 +436,8 @@ export interface YieldingStreamOptions {
    * Unset (the default, `null` included), it's bounded per phase on a
    * stream whose adapter reports its phases (`AnthropicAdapter`,
    * `BedrockAdapter`; see SendReport):
-   * - before the first content delta, 400 s from the send;
+   * - before the first content (a content delta, or a redacted thinking
+   *   block, which arrives whole), 400 s from the send;
    * - a silent think (thinking whose display isn't `'summarized'`, which
    *   sends nothing while it thinks) is allowed its request's whole
    *   `max_tokens` at 35 tokens a second from its start, and before content
@@ -457,7 +460,7 @@ export interface YieldingStreamOptions {
    * silent think can outlast it. 0 turns the progress deadline off, as any
    * other value does (a negative number, NaN).
    */
-  progressTimeoutMs?: number;
+  progressTimeoutMs?: number | null;
 
   /** Request ID for correlation/logging */
   requestId?: string;

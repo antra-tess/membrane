@@ -713,8 +713,8 @@ describe('every streaming adapter reports progress once per parsed event', () =>
         { onProgress: (kind) => { seen.push(kind); } },
       )
       .catch(() => undefined);
-    // Three events (a block's start is content); a ping is no event, and each chunk is the transport alive.
-    expect(seen.filter((kind) => kind !== 'alive')).toEqual([undefined, 'content', 'content']);
+    // Three events; a ping is no event, and each chunk is the transport alive.
+    expect(seen.filter((kind) => kind !== 'alive')).toEqual([undefined, undefined, 'content']);
     expect(seen.filter((kind) => kind === 'alive')).toHaveLength(8);
   });
 });

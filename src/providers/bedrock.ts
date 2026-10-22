@@ -690,9 +690,10 @@ export class BedrockAdapter implements ProviderAdapter {
   ): Promise<ProviderResponse> {
     // What this stream saw, for Membrane core's deadlines: each chunk of the
     // body, a ping's included, is the transport alive, and a ping is nothing
-    // more; a content delta, or the start of any block but a thinking one, is
-    // content; and a thinking block's start is a silent think unless the body
-    // asks for summarized thinking.
+    // more; a content delta is content, and so is a redacted_thinking block,
+    // which arrives whole (any other block's start is only an event); and a
+    // thinking block's start is a silent think unless the body asks for
+    // summarized thinking.
     const summarized = request.thinking?.display === 'summarized';
     const url = new URL(
       `${this.baseURL ?? `https://bedrock-runtime.${this.region}.amazonaws.com`}/model/${encodeURIComponent(modelId)}/invoke-with-response-stream`
@@ -874,8 +875,8 @@ export class BedrockAdapter implements ProviderAdapter {
                 onProgress?.(
                   kind === 'content_block_delta' ? 'content'
                     : kind !== 'content_block_start' ? undefined
-                      : block?.type !== 'thinking' ? 'content'
-                        : summarized ? undefined : 'think',
+                      : block?.type === 'redacted_thinking' ? 'content'
+                        : block?.type !== 'thinking' || summarized ? undefined : 'think',
                 );
               }
 

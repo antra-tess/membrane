@@ -36,8 +36,8 @@
   says what it saw. The new `onSend`, beside `onRequest`, takes a
   `SendReport`: the output-token limit the body asks for (`maxTokens`), and
   whether this stream reports its phases (`reportsPhases`). `onProgress` takes
-  an optional `ProgressSeen`: `'content'` for a content delta or the start of
-  any block but a thinking one, `'think'` for a silent think's start,
+  an optional `ProgressSeen`: `'content'` for a content delta or a block that
+  arrives whole (`redacted_thinking`), `'think'` for a silent think's start,
   `'alive'` for transport that carries no event (a chunk of the response
   body, a keepalive ping). A stream whose adapter reports phases at the send
   is bounded per phase. An adapter that calls neither, or calls `onProgress()`
