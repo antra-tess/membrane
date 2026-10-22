@@ -18,7 +18,6 @@ import type {
   ProviderResponse,
   StreamCallbacks,
   ContentBlock,
-  ProgressSeen,
 } from '../types/index.js';
 import {
   MembraneError,
@@ -36,7 +35,7 @@ import {
 import { markSystemChangeRefused, runCallerCode, statusForProviderCode, deadlineExpired, isDeadlineExpiry, errorFromThrown } from '../types/errors.js';
 import { flattenRootSchemaUnion } from './anthropic-tool-schema.js';
 import { isPlainObject } from '../utils/tool-schema.js';
-import { assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, isDeadlineAbort, deadlineTimeoutError } from './utils.js';
+import { assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, isDeadlineAbort, deadlineTimeoutError, progressOfAnthropicEvent } from './utils.js';
 import { fetchWithCredentials, validateCredential, type CredentialContext, type CredentialResolver } from './credentials.js';
 import { CacheKeepalive, type CacheKeepaliveConfig } from '../cache-keepalive.js';
 
@@ -510,8 +509,9 @@ export class AnthropicAdapter implements ProviderAdapter {
 
       return this.parseResponse(response, fullRequest);
     } catch (error) {
-      // A deadline on the caller's signal (Membrane's progressTimeoutMs) is a
-      // timeout, as on every adapter; the SDK's abort error can't say so.
+      // A deadline on the caller's signal (Membrane core's, which names the
+      // bound that ran out) is a timeout, as on every adapter; the SDK's
+      // abort error can't say so.
       if (isDeadlineAbort(options?.signal?.reason)) throw deadlineTimeoutError(options!.signal!.reason, fullRequest);
       throw this.handleError(error, fullRequest);
     }
@@ -527,7 +527,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     const fullRequest = { ...anthropicRequest, stream: true };
     assertMessagePrefillSupported(fullRequest.model, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
-    // This stream reports its phases through onProgress (progressOf below).
+    // This stream reports its phases through onProgress (progressOfAnthropicEvent below).
     options?.onSend?.({ maxTokens: fullRequest.max_tokens, reportsPhases: true });
 
     const headers = this.betaHeaders(request, anthropicRequest);
@@ -537,21 +537,10 @@ export class AnthropicAdapter implements ProviderAdapter {
     // (createCallDeadline), on the signal it passes; this adapter says what
     // it saw. Each chunk of the response body, the SSE pings the SDK drops
     // before the loop below included, is the transport alive
-    // (observeBodyActivity). A content delta is content, and so is a
-    // redacted_thinking block, which arrives whole, its think done. Any other
-    // block's start is only an event: a text or tool block's content follows
-    // as deltas (a tool call's input can take a while to come), and a server
-    // tool's result, which arrives whole too, follows its call's input
-    // deltas. A thinking block's start is a silent think unless the body
-    // asks for summarized thinking, which streams deltas. (Membrane sends
-    // Fable and Mythos no thinking config, and they think silently by
-    // default.)
+    // (observeBodyActivity), and each event says what it is by
+    // progressOfAnthropicEvent. (Membrane sends Fable and Mythos no thinking
+    // config, and they think silently by default.)
     const summarized = (fullRequest.thinking as { display?: unknown } | undefined)?.display === 'summarized';
-    const progressOf = (event: { type: string; content_block?: { type?: string } }): ProgressSeen | undefined =>
-      event.type === 'content_block_delta' ? 'content'
-        : event.type !== 'content_block_start' ? undefined
-          : event.content_block?.type === 'redacted_thinking' ? 'content'
-            : event.content_block?.type !== 'thinking' || summarized ? undefined : 'think';
     let session: ReturnType<AnthropicAdapter['credentialSession']> | undefined;
 
     try {
@@ -684,7 +673,7 @@ export class AnthropicAdapter implements ProviderAdapter {
           this.cacheKeepalive?.record(fullRequest as unknown as Record<string, unknown>, headers, 'stream');
         }
         // Every SDK event is progress; pings never reach this loop.
-        options?.onProgress?.(progressOf(event));
+        options?.onProgress?.(progressOfAnthropicEvent(event, summarized));
         if (event.type === 'message_start') {
           model = event.message.model;
           inputTransformations = (event.message as { input_transformations?: unknown }).input_transformations;

@@ -419,11 +419,11 @@ export interface YieldingStreamOptions {
    * the response, keepalive pings included, for this long ends the call with
    * an `aborted` event whose reason is `'timeout'`, carrying what arrived, in
    * any phase: the connection is taken as gone.
-   * It's armed by the first chunk of the response body, on the adapters
-   * that can watch their transport (`AnthropicAdapter`, `BedrockAdapter`),
-   * and any provider event renews it too. A call on any other adapter, and
-   * every `complete()`, has none: such a call can be silent on the wire
-   * until its answer comes. A positive number of ms sets it, `Infinity`
+   * It's armed by the first chunk of the response body on `AnthropicAdapter`,
+   * which watches its transport, and any provider event renews it too. A
+   * call on any other adapter, and every `complete()`, has none: such a call
+   * can be silent on the wire until its answer comes, and whether
+   * `BedrockAdapter`'s pings come through a silent think is unchecked. A positive number of ms sets it, `Infinity`
    * included, and `null` counts as unset; 0 turns it off, as any other
    * value does (a negative number, NaN).
    */
@@ -437,7 +437,9 @@ export interface YieldingStreamOptions {
    * stream whose adapter reports its phases (`AnthropicAdapter`,
    * `BedrockAdapter`; see SendReport):
    * - before the first content (a content delta, or a redacted thinking
-   *   block, which arrives whole), 400 s from the send;
+   *   block, which arrives whole), 400 s from the send (from when Membrane
+   *   hands the call to its adapter, so building and signing the request
+   *   and resolving credentials count too);
    * - a silent think (thinking whose display isn't `'summarized'`, which
    *   sends nothing while it thinks) is allowed its request's whole
    *   `max_tokens` at 35 tokens a second from its start, and before content

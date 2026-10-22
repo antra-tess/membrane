@@ -22,7 +22,7 @@ import { OpenAIResponsesAPIAdapter } from '../../src/providers/openai-responses-
 import { OpenRouterAdapter } from '../../src/providers/openrouter.js';
 import { rawSseResponse } from '../helpers/sse-fixtures.js';
 import { chunkFrame, streamBody } from '../helpers/bedrock-event-stream.js';
-import { createCallDeadline, deadlineTimeoutError, isDeadlineAbort } from '../../src/providers/utils.js';
+import { createCallDeadline, deadlineTimeoutError, isDeadlineAbort, progressOfAnthropicEvent } from '../../src/providers/utils.js';
 import { TimeoutAbortError, isAbortedResponse } from '../../src/types/index.js';
 import type { NormalizedRequest, ProgressSeen, SendReport } from '../../src/types/index.js';
 import type { ProviderAdapter, ProviderRequest, ProviderRequestOptions, ProviderResponse, StreamCallbacks } from '../../src/types/provider.js';
@@ -553,6 +553,31 @@ async function anthropicReports(frames: string[], request: ProviderRequest): Pro
   return { events, alive, sends, sentBeforeFetch };
 }
 
+describe('progressOfAnthropicEvent', () => {
+  it('maps each Anthropic-format event to what it says about the phase', () => {
+    const start = (type: string) => ({ type: 'content_block_start', content_block: { type } });
+    const cases: Array<[{ type?: unknown; content_block?: { type?: unknown } }, boolean, ProgressSeen | undefined]> = [
+      [{ type: 'content_block_delta' }, false, 'content'],
+      [{ type: 'content_block_delta' }, true, 'content'],
+      [start('redacted_thinking'), false, 'content'],
+      [start('redacted_thinking'), true, 'content'],
+      [start('thinking'), false, 'think'],
+      [start('thinking'), true, undefined],
+      [start('text'), false, undefined],
+      [start('tool_use'), false, undefined],
+      [start('server_tool_use'), false, undefined],
+      [start('web_search_tool_result'), false, undefined],
+      [{ type: 'content_block_start' }, false, undefined],
+      [{ type: 'message_start' }, false, undefined],
+      [{ type: 'content_block_stop' }, false, undefined],
+      [{ type: 'message_delta' }, false, undefined],
+      [{ type: 'ping' }, false, undefined],
+      [{}, false, undefined],
+    ];
+    for (const [event, summarized, seen] of cases) expect([event, summarized, progressOfAnthropicEvent(event, summarized)]).toEqual([event, summarized, seen]);
+  });
+});
+
 describe('AnthropicAdapter reports what it saw', () => {
   it("reports a silent think's start as think, every content delta as content, and the body's chunks as alive", async () => {
     const { events, alive } = await anthropicReports(
@@ -640,7 +665,7 @@ describe('BedrockAdapter reports what it saw', () => {
     ...(thinking ? { thinking } : {}),
   } as never);
 
-  it("reports each body chunk as alive, a ping as nothing more, a silent think's start as think, a content delta as content, and at the send the max_tokens it sends and its phases", async () => {
+  it("reports a ping as nothing, a silent think's start as think, a content delta as content, no chunk as alive, and at the send the max_tokens it sends and its phases", async () => {
     const sends: SendReport[] = [];
     let sentBeforeFetch = false;
     stubFetch(() => { sentBeforeFetch = sends.length === 1; return new Response(frames({ type: 'thinking', thinking: '' }), { status: 200 }); });
@@ -649,8 +674,8 @@ describe('BedrockAdapter reports what it saw', () => {
     await bedrock().stream({ ...request({ type: 'adaptive', display: 'omitted' }), extra: { max_tokens: 9000 } } as never, { onChunk: () => {} }, {
       onProgress: (kind) => seen.push(kind), onSend: (send) => sends.push(send),
     }).catch(() => undefined);
-    // Six frames, one chunk each: each chunk is alive, then the event it carries (the ping none).
-    expect(seen).toEqual(['alive', undefined, 'alive', 'alive', 'think', 'alive', 'content', 'alive', undefined, 'alive', undefined]);
+    // Six frames, one chunk each: the event each carries (the ping none), and no chunk as alive.
+    expect(seen).toEqual([undefined, 'think', 'content', undefined, undefined]);
     expect(sends).toEqual([{ maxTokens: 9000, reportsPhases: true }]);
     expect(sentBeforeFetch).toBe(true);
   });
@@ -669,7 +694,7 @@ describe('BedrockAdapter reports what it saw', () => {
     await bedrock().stream(request({ type: 'adaptive', display: 'omitted' }), { onChunk: () => {} }, {
       onProgress: (kind) => seen.push(kind),
     }).catch(() => undefined);
-    expect(seen.filter((kind) => kind !== 'alive')).toEqual([undefined, 'content', undefined, undefined, 'content', undefined, undefined]);
+    expect(seen).toEqual([undefined, 'content', undefined, undefined, 'content', undefined, undefined]);
   });
 
   it('reports no think for a body that asks for summarized thinking, and its summary as content', async () => {
@@ -678,7 +703,7 @@ describe('BedrockAdapter reports what it saw', () => {
     await bedrock().stream(request({ type: 'adaptive', display: 'summarized' }), { onChunk: () => {} }, {
       onProgress: (kind) => seen.push(kind),
     }).catch(() => undefined);
-    expect(seen.filter((kind) => kind !== 'alive')).toEqual([undefined, undefined, 'content', 'content', undefined, undefined]);
+    expect(seen).toEqual([undefined, undefined, 'content', 'content', undefined, undefined]);
   });
 
   it('reports the max_tokens it sends on complete(), extra included, and no phases, before the request goes out', async () => {
@@ -690,7 +715,7 @@ describe('BedrockAdapter reports what it saw', () => {
     expect(sentBeforeFetch).toBe(true);
   });
 
-  it('reports each chunk with bytes as alive as it comes, a frame split across chunks included, and an empty chunk as nothing', async () => {
+  it('reports a frame split across chunks once, when it decodes, and no chunk as alive, an empty one included', async () => {
     const frame0 = chunkFrame({ type: 'message_start', message: { usage: { input_tokens: 3 } } });
     const frame1 = chunkFrame({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'zz' } });
     const cut = Math.floor(frame1.length / 2);
@@ -705,8 +730,8 @@ describe('BedrockAdapter reports what it saw', () => {
     }), { status: 200 }));
     const seen: Array<ProgressSeen | undefined> = [];
     await bedrock().stream(request(), { onChunk: () => {} }, { onProgress: (kind) => seen.push(kind) }).catch(() => undefined);
-    // The split frame's first half is alive before its event decodes; the empty chunk reports nothing.
-    expect(seen).toEqual(['alive', undefined, 'alive', 'alive', 'content']);
+    // Bedrock's ping cadence through a silent think is unchecked, so no chunk arms the liveness bound.
+    expect(seen).toEqual([undefined, 'content']);
   });
 });
 

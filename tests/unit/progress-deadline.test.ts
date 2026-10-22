@@ -693,7 +693,7 @@ describe('every streaming adapter reports progress once per parsed event', () =>
     });
   }
 
-  it('bedrock: decoded events count, an event that decodes to no object does not, nor does a ping; each chunk is the transport alive', async () => {
+  it('bedrock: decoded events count, an event that decodes to no object does not, nor does a ping, and no chunk is reported alive', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     stubFetch(() => new Response(streamBody([
       chunkFrame({ type: 'message_start', message: { usage: { input_tokens: 3 } } }),
@@ -713,9 +713,8 @@ describe('every streaming adapter reports progress once per parsed event', () =>
         { onProgress: (kind) => { seen.push(kind); } },
       )
       .catch(() => undefined);
-    // Three events; a ping is no event, and each chunk is the transport alive.
-    expect(seen.filter((kind) => kind !== 'alive')).toEqual([undefined, undefined, 'content']);
-    expect(seen.filter((kind) => kind === 'alive')).toHaveLength(8);
+    // Three events; a ping is no event, and no chunk is reported alive.
+    expect(seen).toEqual([undefined, undefined, 'content']);
   });
 });
 

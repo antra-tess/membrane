@@ -628,6 +628,28 @@ export const LIVENESS_MS = 180_000;
 /** The output budget assumed for a call whose adapter reports none and whose request names none: the default of every built-in adapter that sends an output limit. */
 export const DEFAULT_BUDGET_TOKENS = 4096;
 
+/**
+ * What an Anthropic-format stream event says about its call's phase, for
+ * Membrane core's deadlines, on the adapters that parse those events
+ * (Anthropic's, and Bedrock's, which carries them). A content delta is
+ * content, and so is a redacted_thinking block, which arrives whole, its
+ * think done. Any other block's start is only an event: a text or tool
+ * block's content follows as deltas (a tool call's input can take a while
+ * to come), and a server tool's result, which arrives whole too, follows its
+ * call's input deltas. A thinking block's start is a silent think unless the
+ * body asks for summarized thinking, which streams deltas.
+ */
+export function progressOfAnthropicEvent(
+  event: { type?: unknown; content_block?: { type?: unknown } },
+  summarized: boolean,
+): ProgressSeen | undefined {
+  if (event.type === 'content_block_delta') return 'content';
+  if (event.type !== 'content_block_start') return undefined;
+  const block = event.content_block?.type;
+  if (block === 'redacted_thinking') return 'content';
+  return block === 'thinking' && !summarized ? 'think' : undefined;
+}
+
 /** A positive number of ms (Infinity included), or undefined. */
 const positiveMs = (value: unknown): number | undefined =>
   typeof value === 'number' && value > 0 ? value : undefined;
@@ -639,6 +661,10 @@ const positiveMs = (value: unknown): number | undefined =>
  * as it sends the request, what it sent (`ProviderRequestOptions.onSend`,
  * `reportSend`), and then each event and sign of its transport
  * (`ProviderRequestOptions.onProgress`, `report`).
+ *
+ * "The send" is when Membrane hands the call to its adapter, as it creates
+ * this, so building and signing the request and resolving credentials count
+ * against the first bound too.
  *
  * The progress deadline, by `progressTimeoutMs` (null counts as unset):
  * - Unset, in a call whose adapter reported at the send, before any event,
@@ -658,8 +684,8 @@ const positiveMs = (value: unknown): number | undefined =>
  *
  * The liveness bound, by `idleTimeoutMs`: unset (or null), LIVENESS_MS; a
  * positive number, that; anything else, off. It's armed by the first
- * `'alive'` report, so only an adapter that can see its transport gets it,
- * and any report renews it, in every phase.
+ * `'alive'` report, so only an adapter that reports its transport gets it
+ * (AnthropicAdapter), and any report renews it, in every phase.
  *
  * The output budget is the one the adapter reports sending, or else
  * `maxTokens` when it's a positive number, or else DEFAULT_BUDGET_TOKENS. A

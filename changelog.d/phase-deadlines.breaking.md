@@ -30,6 +30,8 @@
   `MembraneError` of type `timeout`; any expiry is now a `TimeoutAbortError`,
   which isn't retryable, and a stream that stalls ends as an `aborted` result
   with reason `'timeout'` carrying its partial content instead of throwing.
+  The deadlines are `Membrane`'s: an adapter called directly, not through
+  `Membrane`, now bounds nothing but its caller's `signal`.
 - **Provider adapters:** `ProviderRequestOptions.idleTimeoutMs` and
   `firstEventTimeoutMs` are removed: membrane core keeps a call's progress
   and liveness deadlines (`timeoutMs` stays the adapter's), and the adapter
