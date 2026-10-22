@@ -87,11 +87,11 @@ async function drive(stream: YieldingStream, adapter: TwoRoundAdapter, stop: () 
   return events;
 }
 
-/** The fields an aborted event carries beside its type and reason. */
+/** What an aborted event carries of the turn: everything but why it ended (its type, reason and message). */
 function partOf(events: StreamEvent[]): Record<string, unknown> {
   const aborted = events.filter((event) => event.type === 'aborted');
   expect(aborted).toHaveLength(1);
-  const { type: _type, reason: _reason, ...rest } = aborted[0] as unknown as Record<string, unknown>;
+  const { type: _type, reason: _reason, message: _message, ...rest } = aborted[0] as unknown as Record<string, unknown>;
   return rest;
 }
 
