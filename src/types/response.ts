@@ -250,7 +250,66 @@ export interface ResponseDetails {
   timing: TimingInfo;
   model: ModelInfo;
   cache: CacheInfo;
+
+  /**
+   * Rounds where the provider broke its own response contract and membrane
+   * noticed, one entry per occurrence, in round order. Absent when there
+   * were none.
+   */
+  anomalies?: ResponseAnomaly[];
 }
+
+// ============================================================================
+// Provider anomalies
+// ============================================================================
+
+/**
+ * A round the provider ended with a literal `stop_reason: end_turn` while its
+ * content held client tool calls. A round with no provider stop token (an
+ * adapter that reports none, or an OpenAI-family server that sends no
+ * `finish_reason`) is not this case: it runs nothing, as before. The provider
+ * contract is
+ * that a response carrying a tool call stops with `tool_use`; a caller that
+ * gates on the stop reason runs nothing and the turn ends with the calls
+ * unanswered, silently.
+ *
+ * When every call in the round is complete (its block stopped and its input
+ * parsed to an object), membrane treats the round as `tool_use`: the calls
+ * run (or are returned to the caller) exactly as for a `tool_use` stop, and
+ * `treatedAsToolUse` is true. When any call is incomplete the round keeps its
+ * reported stop, nothing runs, and `treatedAsToolUse` is false. Either way
+ * `providerStopReason` here keeps the round's own token. `details.stop`
+ * describes the response's final round: from `complete()` that is this one,
+ * while a loop that ran the calls goes on to a later round unless its tool
+ * depth limit ends it first.
+ */
+export interface ToolUseWithEndTurnAnomaly {
+  kind: 'tool_use_with_end_turn';
+
+  /** 0-based round index within this call (the index round reports use). */
+  round: number;
+
+  /** The provider's stop token: always `end_turn`, the only token that qualifies. */
+  providerStopReason: 'end_turn';
+
+  /** The round's tool calls, in content order. */
+  toolNames: string[];
+  toolUseIds: string[];
+
+  /** Whether membrane treated the round as a `tool_use` stop. */
+  treatedAsToolUse: boolean;
+
+  /** Model that served the round. */
+  model: string;
+
+  /** The provider's response id (Anthropic message id), when it sent one. */
+  messageId?: string;
+
+  /** The provider's request id (Anthropic `request-id` header), when known. */
+  requestId?: string;
+}
+
+export type ResponseAnomaly = ToolUseWithEndTurnAnomaly;
 
 // ============================================================================
 // Raw Access

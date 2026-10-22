@@ -23,10 +23,13 @@ function events(signatureOnly = false, xml = false) {
     { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'signature' } },
     { type: 'content_block_stop', index: 0 },
   );
+  // The text block follows the thinking block, or, with none, is the
+  // response's first, at index 0, as the API numbers blocks.
+  const at = xml ? 0 : 1;
   result.push(
-    { type: 'content_block_start', index: 1, content_block: { type: 'text', text: '' } },
-    { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: xml ? '<thinking>FROM_XML</thinking>VISIBLE' : visible } },
-    { type: 'content_block_stop', index: 1 },
+    { type: 'content_block_start', index: at, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: at, delta: { type: 'text_delta', text: xml ? '<thinking>FROM_XML</thinking>VISIBLE' : visible } },
+    { type: 'content_block_stop', index: at },
     { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 2 } },
     { type: 'message_stop' },
   );

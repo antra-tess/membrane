@@ -34,7 +34,7 @@ import {
 import { statusForProviderCode } from '../types/errors.js';
 import { flattenRootSchemaUnion } from './anthropic-tool-schema.js';
 import { isPlainObject } from '../utils/tool-schema.js';
-import { assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, isDeadlineAbort, deadlineTimeoutError } from './utils.js';
+import { assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, isDeadlineAbort, deadlineTimeoutError, isToolCallBlock, isToolCallArgumentsDelta } from './utils.js';
 import { fetchWithCredentials, validateCredential, type CredentialContext, type CredentialResolver } from './credentials.js';
 import { CacheKeepalive, type CacheKeepaliveConfig } from '../cache-keepalive.js';
 
@@ -180,6 +180,86 @@ export function thinkingEnabled(request: ProviderRequest): boolean {
   const extraThinking = (request.extra as { thinking?: { type?: string } } | undefined)?.thinking;
   const thinkingConfig = request.thinking ?? extraThinking;
   return thinkingConfig !== undefined && thinkingConfig.type !== 'disabled';
+}
+
+// ============================================================================
+// Response diagnostics
+// ============================================================================
+//
+// The stream loop consumes a fixed set of fields. What the API sends beyond
+// them — a new field on message_start or message_delta, an event or delta
+// type this adapter doesn't read — used to vanish, so a response that broke
+// its contract (2026-10-19: tool calls stopped with end_turn) left nothing to
+// diagnose it from or report it with. The stream path now keeps, on `raw`:
+//   id               message_start's message id
+//   request_id       the `request-id` response header (what support asks for)
+//   provider_events  { message_start: the event, its message without
+//                      `content`; message_delta: the event;
+//                      unhandled: events and deltas the loop doesn't read,
+//                      or doesn't apply (below), first
+//                      UNHANDLED_EVENTS_MAX of them; unhandled_omitted:
+//                      the count past that cap }
+// Each kept event is bounded as boundedProviderEvent says. Block payloads stay
+// in `content`; an event kept in unhandled keeps whatever it carried, payload
+// included, as a citations_delta does. A new event type reaches the loop only
+// if the SDK passes it on: @anthropic-ai/sdk 0.52's stream yields only the
+// message and content-block events. So what this catches today is a new field
+// on message_start or message_delta, extra keys on a content_block_stop, and a
+// delta type the loop doesn't read; a new field on a start or delta the loop
+// applies isn't kept, whether beside its block or delta or inside a delta of
+// a type the loop reads.
+//
+// Blocks: the API sends each block's start, deltas and stop before the next
+// block's start, and a tool call's deltas carry only its arguments. The
+// first block event out of that order (a start while a block is open, or at
+// an index other than the next; a delta or stop while no block is open, or
+// for a block other than the open one; a delta a tool call can't take) stops
+// the loop applying block events, with one
+// warning: a block still open is finalized as cut off, that event and every
+// later block event are kept in unhandled, and every tool_use block in the
+// response is marked (unparseableInput), so the end_turn gate runs none of
+// them and a caller can refuse them. Server tool calls (server_tool_use,
+// mcp_tool_use) ran on the API's side and go back verbatim in later turns,
+// so the marking leaves them as they streamed: one that stopped keeps its
+// input, and one still open is marked as cut off, as before. Citations are
+// the exception to "not applied": the SDK appends each one to the array a
+// text block's start carried, which this loop's copy of the block shares, so
+// a citation lands in such a block whatever the order (a start whose
+// citations is null or absent shares none, and the SDK's new array isn't the
+// loop's). A stream in order is
+// unchanged, and so is one that ends with a block open, as a max_tokens cut
+// does.
+// message_stop is not kept: the loop ends on message_delta, by design (the
+// teardown after it adds latency and carries no data).
+
+/** Events and deltas kept in raw.provider_events.unhandled, at most. */
+const UNHANDLED_EVENTS_MAX = 20;
+/** JSON characters one kept provider event may take before it's truncated. */
+const PROVIDER_EVENT_MAX_CHARS = 4096;
+
+/**
+ * A JSON-safe copy of a provider event, bounded: one whose JSON exceeds
+ * PROVIDER_EVENT_MAX_CHARS keeps its `type`, a `truncated` flag and the first
+ * PROVIDER_EVENT_MAX_CHARS characters of its JSON.
+ */
+export function boundedProviderEvent(event: unknown): unknown {
+  const type = (event as { type?: unknown } | null | undefined)?.type;
+  let json: string | undefined;
+  try {
+    json = JSON.stringify(event);
+  } catch {
+    return { type, unserializable: true };
+  }
+  if (json === undefined) return null;
+  if (json.length <= PROVIDER_EVENT_MAX_CHARS) return JSON.parse(json);
+  return { type, truncated: true, json: json.slice(0, PROVIDER_EVENT_MAX_CHARS) };
+}
+
+/** The SDK's request id: MessageStream.request_id, or a parsed response's `_request_id`. */
+function sdkRequestId(holder: unknown, key: 'request_id' | '_request_id'): string | undefined {
+  if (holder === null || typeof holder !== 'object') return undefined;
+  const id = (holder as Record<string, unknown>)[key];
+  return typeof id === 'string' && id !== '' ? id : undefined;
 }
 
 // ============================================================================
@@ -549,6 +629,16 @@ export class AnthropicAdapter implements ProviderAdapter {
       // The thinking-binding report: final in message_start, replaced by a
       // message_delta's after a server-side model fallback.
       let inputTransformations: unknown;
+      // Diagnostics kept on raw (see "Response diagnostics" above).
+      let messageId: string | undefined;
+      let messageStartEvent: unknown;
+      let messageDeltaEvent: unknown;
+      const unhandledEvents: unknown[] = [];
+      let unhandledOmitted = 0;
+      const noteUnhandled = (event: unknown): void => {
+        if (unhandledEvents.length < UNHANDLED_EVENTS_MAX) unhandledEvents.push(boundedProviderEvent(event));
+        else unhandledOmitted++;
+      };
 
       // Content block tracking — finalized on content_block_stop
       const contentBlocks: Record<string, unknown>[] = [];
@@ -568,6 +658,13 @@ export class AnthropicAdapter implements ProviderAdapter {
       // content_block_start + input_json_delta fragments and then goes
       // straight to message_delta — no content_block_stop at all.
       let openBlockIndex = -1;
+      // Block events come in the API's order: a start while no block is open,
+      // at the next index, then that block's deltas (a tool call's carry only
+      // its arguments: isToolCallBlock, isToolCallArgumentsDelta) and its stop. A
+      // stream that ends with a block open, as a max_tokens cut does, is in
+      // order. Once an event isn't, the stream can't vouch for which call any
+      // arguments belong to: see breakBlockOrder.
+      let blockOrderBroken = false;
 
       const finalizeContentBlock = (blockIdx: number, sawBlockStop: boolean): void => {
         const block = contentBlocks[blockIdx];
@@ -634,6 +731,23 @@ export class AnthropicAdapter implements ProviderAdapter {
         callbacks.onContentBlock?.(blockIdx, contentBlocks[blockIdx]);
       };
 
+      // A block event out of order, and every block event after it, isn't
+      // applied but kept in unhandled, with one warning at the first. A block
+      // still open then gets no more and is finalized as cut off at the
+      // stream's end, and every tool_use block in the response is marked
+      // there.
+      const breakBlockOrder = (event: unknown): void => {
+        if (!blockOrderBroken) {
+          const { type, index } = event as { type?: unknown; index?: unknown };
+          console.warn(
+            `[membrane:anthropic] a ${String(type)} at index ${String(index)} is out of the API's block order: ` +
+            'no later block event is applied, and every tool_use block in the response is marked',
+          );
+        }
+        blockOrderBroken = true;
+        noteUnhandled(event);
+      };
+
       for await (const event of stream) {
         sawEvent = true;
         resetIdleTimer();
@@ -641,6 +755,11 @@ export class AnthropicAdapter implements ProviderAdapter {
         options?.onProgress?.();
         if (event.type === 'message_start') {
           model = event.message.model;
+          messageId = typeof event.message.id === 'string' && event.message.id ? event.message.id : undefined;
+          {
+            const { content: _content, ...messageWithoutContent } = event.message as unknown as Record<string, unknown>;
+            messageStartEvent = boundedProviderEvent({ ...event, message: messageWithoutContent });
+          }
           inputTransformations = (event.message as { input_transformations?: unknown }).input_transformations;
           const usage = event.message.usage as unknown as Record<string, unknown>;
           inputTokens = typeof usage.input_tokens === 'number' ? usage.input_tokens : 0;
@@ -661,15 +780,29 @@ export class AnthropicAdapter implements ProviderAdapter {
           serviceTier = typeof usage.service_tier === 'string' ? usage.service_tier : undefined;
 
         } else if (event.type === 'content_block_start') {
-          currentBlockIndex = event.index;
-          openBlockIndex = event.index;
-          currentBlockContent = '';
-          currentBlockInputJson = '';
-          contentBlocks[currentBlockIndex] = { ...event.content_block };
-          callbacks.onContentBlock?.(currentBlockIndex, event.content_block);
+          // In order only while no block is open, at the next index: that one
+          // condition also refuses an index skipped, negative or not a number.
+          if (blockOrderBroken || openBlockIndex >= 0 || event.index !== contentBlocks.length) {
+            breakBlockOrder(event);
+          } else {
+            currentBlockIndex = event.index;
+            openBlockIndex = event.index;
+            currentBlockContent = '';
+            currentBlockInputJson = '';
+            contentBlocks[currentBlockIndex] = { ...event.content_block };
+            callbacks.onContentBlock?.(currentBlockIndex, event.content_block);
+          }
 
         } else if (event.type === 'content_block_delta') {
-          if (event.delta.type === 'text_delta') {
+          // In order only for the open block, so only while one is open (with
+          // none, openBlockIndex is -1, which an event's index can be too),
+          // and for a tool call only as its arguments.
+          if (
+            blockOrderBroken || openBlockIndex < 0 || event.index !== openBlockIndex ||
+            (isToolCallBlock(contentBlocks[openBlockIndex]) && !isToolCallArgumentsDelta(event.delta))
+          ) {
+            breakBlockOrder(event);
+          } else if (event.delta.type === 'text_delta') {
             const chunk = event.delta.text;
             currentBlockContent += chunk;
             callbacks.onChunk(chunk);
@@ -695,15 +828,26 @@ export class AnthropicAdapter implements ProviderAdapter {
             }
           } else if ((event.delta as { type: string }).type === 'input_json_delta') {
             currentBlockInputJson += (event.delta as { partial_json: string }).partial_json;
+          } else {
+            // A delta type this loop doesn't read (citations_delta, or one
+            // the API added): kept for diagnosis instead of dropped unseen.
+            noteUnhandled(event);
           }
 
         } else if (event.type === 'content_block_stop') {
-          // Finalize block — use event.index for defensive correctness
-          finalizeContentBlock((event as { index: number }).index, true);
-          openBlockIndex = -1;
+          // In order only for the open block, so only while one is open.
+          const stopped = (event as { index: number }).index;
+          if (blockOrderBroken || openBlockIndex < 0 || stopped !== openBlockIndex) {
+            breakBlockOrder(event);
+          } else {
+            finalizeContentBlock(stopped, true);
+            openBlockIndex = -1;
+            // A stop has carried only type and index; anything more is new.
+            if (Object.keys(event).some((key) => key !== 'type' && key !== 'index')) noteUnhandled(event);
+          }
 
         } else if (event.type === 'message_delta') {
-          // All content blocks are finalized by the time message_delta arrives.
+          // A block still open here is finalized after the loop, as cut off.
           // Capture final metadata and exit — message_stop and the SSE connection
           // teardown after it add only variable latency with no useful data.
           const delta = event.delta as {
@@ -714,6 +858,7 @@ export class AnthropicAdapter implements ProviderAdapter {
           stopReason = delta.stop_reason ?? 'end_turn';
           providerStopReason = delta.stop_reason ?? undefined;
           sawTerminalEvent = true;
+          messageDeltaEvent = boundedProviderEvent(event);
           const fallback = (event as { input_transformations?: unknown }).input_transformations;
           if (Array.isArray(fallback)) inputTransformations = fallback;
           stopSequence = delta.stop_sequence ?? undefined;
@@ -734,6 +879,11 @@ export class AnthropicAdapter implements ProviderAdapter {
             cacheReadTokens = deltaUsage.cache_read_input_tokens;
           }
           break;
+        } else {
+          // An event type this loop doesn't read (pings never reach it). The
+          // SDK yields only the event types it knows, so this keeps one only
+          // if a later SDK passes it on.
+          noteUnhandled(event);
         }
       }
 
@@ -749,6 +899,19 @@ export class AnthropicAdapter implements ProviderAdapter {
         finalizeContentBlock(openBlockIndex, false);
         openBlockIndex = -1;
       }
+      // After a break in block order no call in the response counts as
+      // complete, those finished before the break included: each tool_use
+      // block not already marked keeps its arguments, as JSON, in the marker,
+      // and an empty input. One already marked keeps its marker and the input
+      // its start carried, as any marked call does.
+      if (blockOrderBroken) {
+        for (const block of contentBlocks) {
+          if (block?.type === 'tool_use' && block.unparseableInput === undefined) {
+            block.unparseableInput = JSON.stringify(block.input ?? {});
+            block.input = {};
+          }
+        }
+      }
 
       // Force-close the HTTP connection so we don't block on SSE drain
       try { stream.controller.abort(); } catch { /* already closed */ }
@@ -758,11 +921,17 @@ export class AnthropicAdapter implements ProviderAdapter {
       // closed mid-turn, and stopReason is still its 'end_turn' initialiser.
       assertTerminalEventObserved(sawTerminalEvent, 'Anthropic', fullRequest);
 
+      // The SDK's MessageStream records the request-id header on connect,
+      // before its first event.
+      const requestId = sdkRequestId(stream, 'request_id');
+
       return {
         content: contentBlocks,
         stopReason,
         providerStopReason,
         stopSequence,
+        ...(messageId ? { responseId: messageId } : {}),
+        ...(requestId ? { requestId } : {}),
         usage: {
           inputTokens,
           outputTokens,
@@ -794,6 +963,14 @@ export class AnthropicAdapter implements ProviderAdapter {
             ...(serviceTier ? { service_tier: serviceTier } : {}),
           },
           ...(Array.isArray(inputTransformations) ? { input_transformations: inputTransformations } : {}),
+          ...(messageId ? { id: messageId } : {}),
+          ...(requestId ? { request_id: requestId } : {}),
+          provider_events: {
+            ...(messageStartEvent !== undefined ? { message_start: messageStartEvent } : {}),
+            ...(messageDeltaEvent !== undefined ? { message_delta: messageDeltaEvent } : {}),
+            ...(unhandledEvents.length ? { unhandled: unhandledEvents } : {}),
+            ...(unhandledOmitted ? { unhandled_omitted: unhandledOmitted } : {}),
+          },
         },
       };
 
@@ -1035,7 +1212,13 @@ export class AnthropicAdapter implements ProviderAdapter {
   }
 
   private parseResponse(response: Anthropic.Message, rawRequest: unknown): ProviderResponse {
+    // The SDK attaches the request-id header as a non-enumerable
+    // `_request_id`, so it never reached a serialized raw response.
+    const requestId = sdkRequestId(response, '_request_id');
+    const responseId = typeof response.id === 'string' && response.id ? response.id : undefined;
     return {
+      ...(responseId ? { responseId } : {}),
+      ...(requestId ? { requestId } : {}),
       content: response.content,
       stopReason: response.stop_reason ?? 'end_turn',
       providerStopReason: response.stop_reason ?? undefined,
@@ -1053,7 +1236,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       ),
       model: response.model,
       rawRequest,
-      raw: response,
+      raw: requestId ? { ...response, request_id: requestId } : response,
     };
   }
 

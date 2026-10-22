@@ -468,6 +468,20 @@ export interface ProviderResponse {
   /** Model that actually ran */
   model: string;
 
+  /**
+   * The provider's own id for this response (Anthropic: the message id from
+   * `message_start`). Diagnostics only: it names the response in a report to
+   * the provider. Absent when the provider sent none.
+   */
+  responseId?: string;
+
+  /**
+   * The provider's id for the HTTP request (Anthropic: the `request-id`
+   * response header), the id provider support asks for. Absent when the
+   * transport exposed none.
+   */
+  requestId?: string;
+
   /** Raw request that was actually sent to the API */
   rawRequest: unknown;
 

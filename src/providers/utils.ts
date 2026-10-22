@@ -585,3 +585,29 @@ export class SSELineParser {
     return [];
   }
 }
+
+/**
+ * Whether a streamed content block is a tool call: a client tool's
+ * (tool_use), or a server tool's (server_tool_use, mcp_tool_use). The API
+ * streams only its arguments to it (isToolCallArgumentsDelta), so the stream
+ * adapters take any other delta for it as out of the API's block order. Text
+ * and thinking blocks have gained delta types (citations_delta,
+ * signature_delta), so no such check is made of them.
+ */
+export function isToolCallBlock(block: unknown): boolean {
+  if (block === null || typeof block !== 'object') return false;
+  const type = (block as { type?: unknown }).type;
+  return type === 'tool_use' || type === 'server_tool_use' || type === 'mcp_tool_use';
+}
+
+/**
+ * Whether a delta is one a tool call can take: its arguments, as an
+ * input_json_delta whose partial_json is a string. One of that type without
+ * them carries none of the call's arguments where the stream adapters read
+ * them, so they take it as out of the API's block order too.
+ */
+export function isToolCallArgumentsDelta(delta: unknown): boolean {
+  return delta !== null && typeof delta === 'object' &&
+    (delta as { type?: unknown }).type === 'input_json_delta' &&
+    typeof (delta as { partial_json?: unknown }).partial_json === 'string';
+}

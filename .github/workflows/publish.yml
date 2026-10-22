@@ -78,7 +78,7 @@ jobs:
         run: npm run build
 
       - name: Publish
-        run: npm publish --access public --provenance
+        run: npm publish --access public --provenance --tag release-0.6  # 0.6.x backports must not take `latest` from 0.7
 
   github-release:
     name: GitHub release notes

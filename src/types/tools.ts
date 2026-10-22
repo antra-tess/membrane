@@ -57,7 +57,9 @@ export interface ToolCall {
    * The call's tool_use block's marker (ToolUseContent.unparseableInput):
    * present, even as the empty string, when `input` isn't the model's
    * arguments. It holds the arguments as they came, as JSON when they came as
-   * a value. An executor can answer the model with an error result instead of
+   * a value, or, on a call marked because its stream broke the API's block
+   * order, as JSON when they had parsed. An executor can answer the model
+   * with an error result instead of
    * running the call with `{}`.
    */
   unparseableInput?: string;

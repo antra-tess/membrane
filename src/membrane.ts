@@ -28,6 +28,7 @@ import type {
   DiscardedAttemptsUsage,
   StopReason,
   StopInfo,
+  ResponseAnomaly,
   TimingInfo,
   CacheInfo,
   ToolCall,
@@ -1583,6 +1584,8 @@ export class Membrane {
     let providerCalls = 0;
     let rounds = 0;
     let lastStopReason: StopReason = 'end_turn';
+    // Rounds the provider ended with end_turn while returning tool calls.
+    const anomalies: ResponseAnomaly[] = [];
     let lastProviderStopReason: string | undefined;
     let lastStopSequence: string | undefined;
     let rawRequest: unknown;
@@ -1689,6 +1692,14 @@ export class Membrane {
         lastStopReason = this.mapStopReason(streamResult.stopReason);
         lastProviderStopReason = streamResult.providerStopReason;
         lastStopSequence = streamResult.stopSequence ?? undefined;
+        // Complete tool calls the provider stopped with end_turn run as a
+        // tool_use round (ToolUseWithEndTurnAnomaly); details.stop keeps the
+        // provider's own token.
+        const endTurnTools = this.toolUseWithEndTurn(responseBlocks, lastStopReason, streamResult, rounds - 1);
+        if (endTurnTools) {
+          anomalies.push(endTurnTools);
+          if (endTurnTools.treatedAsToolUse) lastStopReason = 'tool_use';
+        }
 
         // Accumulate usage (including cache metrics), priced at this round's
         // model. NOT inlined into the optional call — `onUsage?.(addRound())`
@@ -1806,6 +1817,7 @@ export class Membrane {
             tokensRead: totalUsage.cacheReadTokens ?? 0,
             hitRatio: this.calculateCacheHitRatio(totalUsage),
           },
+          ...(anomalies.length ? { anomalies } : {}),
         },
         raw: {
           request: rawRequest,
@@ -1986,9 +1998,9 @@ export class Membrane {
             // `input` reaches callers as the object ToolUseContent promises,
             // whatever the adapter gave.
             ...toolUseInputFromValue(item.input),
-            // Arguments that weren't a JSON object: the adapter's marker, with
-            // the text as it came, so a consumer can refuse the block instead
-            // of trusting `input`.
+            // The adapter's marker, present when `input` isn't the model's
+            // arguments (ToolUseContent.unparseableInput), so a consumer can
+            // refuse the block instead of trusting `input`.
             ...(item.unparseableInput !== undefined ? { unparseableInput: item.unparseableInput } : {}),
             ...(item.rawItem ? { rawItem: item.rawItem } : {}),
           });
@@ -3006,8 +3018,15 @@ export class Membrane {
     }
     const unclosedToolBlock = xmlToolProtocol && endsWithPartialToolBlock(rawAssistantText);
 
-    const stopReason = this.mapStopReason(providerResponse.stopReason);
+    let stopReason = this.mapStopReason(providerResponse.stopReason);
     if (xmlToolProtocol) this.reportToolParseDiagnostics({ unclosedToolBlock, emptyToolBlocks }, stopReason);
+    // complete() runs no tools, but its caller decides on the stop reason as
+    // a loop does: native calls the provider stopped with end_turn come back
+    // as a tool_use stop (ToolUseWithEndTurnAnomaly).
+    const endTurnTools = xmlToolProtocol
+      ? undefined
+      : this.toolUseWithEndTurn(content, stopReason, providerResponse, 0);
+    if (endTurnTools?.treatedAsToolUse) stopReason = 'tool_use';
     const durationMs = Date.now() - startTime;
     // `NormalizedResponse.usage` is typed DetailedUsage and the streaming paths
     // already return the whole thing; complete() used to narrow it to
@@ -3047,6 +3066,7 @@ export class Membrane {
           tokensRead: providerResponse.usage.cacheReadTokens ?? 0,
           hitRatio: this.calculateCacheHitRatio(providerResponse.usage),
         },
+        ...(endTurnTools ? { anomalies: [endTurnTools] } : {}),
       },
       raw: {
         request: rawRequest ?? null,
@@ -3200,6 +3220,68 @@ export class Membrane {
         response: rawResponse,
       },
     };
+  }
+
+  /**
+   * A native round whose provider stop was literally `end_turn` while its
+   * content holds client tool calls (see ToolUseWithEndTurnAnomaly). The
+   * provider contract is a `tool_use` stop for any response carrying a tool
+   * call; production Anthropic responses broke it on 2026-10-19, and every
+   * native loop, gating tool execution on `tool_use`, silently dropped the
+   * calls and ended the turn.
+   *
+   * Returns undefined when the round is not this case. Otherwise the record,
+   * with `treatedAsToolUse` true when every call is complete — its block
+   * stopped and its input parsed to an object (no `unparseableInput`) — so
+   * the caller can run the round as a `tool_use` stop. A length, refusal,
+   * stop-sequence or pause stop never qualifies, nor does a provider token
+   * membrane doesn't map (it reads as end_turn but isn't the provider saying
+   * end_turn), nor a round with no provider token at all (an adapter that
+   * reports none, or an OpenAI-family server sending no `finish_reason`):
+   * those behave as before, and nothing runs. Warns once per occurrence, with
+   * the ids a provider report needs.
+   */
+  private toolUseWithEndTurn(
+    responseBlocks: ContentBlock[],
+    mappedStopReason: StopReason,
+    provider: {
+      providerStopReason?: string;
+      model?: string;
+      responseId?: string;
+      requestId?: string;
+    },
+    round: number,
+  ): ResponseAnomaly | undefined {
+    // Only the provider's own, literal `end_turn`: a missing token is not the
+    // provider saying end_turn, and runs nothing, as before.
+    if (mappedStopReason !== 'end_turn' || provider.providerStopReason !== 'end_turn') return undefined;
+    const calls = responseBlocks.filter(
+      (b): b is ContentBlock & { type: 'tool_use' } => b.type === 'tool_use'
+    );
+    if (calls.length === 0) return undefined;
+    const incomplete = calls.filter((c) => c.unparseableInput !== undefined);
+    const treatedAsToolUse = incomplete.length === 0;
+    const anomaly: ResponseAnomaly = {
+      kind: 'tool_use_with_end_turn',
+      round,
+      providerStopReason: 'end_turn',
+      toolNames: calls.map((c) => c.name),
+      toolUseIds: calls.map((c) => c.id),
+      treatedAsToolUse,
+      model: provider.model ?? '',
+      ...(provider.responseId ? { messageId: provider.responseId } : {}),
+      ...(provider.requestId ? { requestId: provider.requestId } : {}),
+    };
+    (this.config.logger ?? console).warn(
+      `[membrane] ${provider.model || '(unknown model)'} ended round ${round} with ` +
+      `stop_reason end_turn but returned ${calls.length} tool call(s) ` +
+      `(${anomaly.toolNames.join(', ')}); ` +
+      (treatedAsToolUse
+        ? 'all complete, treating the round as tool_use'
+        : `${incomplete.length} incomplete (${incomplete.map((c) => c.id).join(', ')}), leaving the round as end_turn, nothing runs`) +
+      ` — message ${provider.responseId ?? '(no id)'}, request ${provider.requestId ?? '(no id)'}`,
+    );
+    return anomaly;
   }
 
   private buildStopInfo(
@@ -4341,6 +4423,8 @@ export class Membrane {
     let providerCalls = 0;
     let rounds = 0;
     let lastStopReason: StopReason = 'end_turn';
+    // Rounds the provider ended with end_turn while returning tool calls.
+    const anomalies: ResponseAnomaly[] = [];
     let lastProviderStopReason: string | undefined;
     let lastStopSequence: string | undefined;
     let rawRequest: unknown;
@@ -4490,6 +4574,15 @@ export class Membrane {
         lastStopReason = this.mapStopReason(streamResult.stopReason);
         lastProviderStopReason = streamResult.providerStopReason;
         lastStopSequence = streamResult.stopSequence ?? undefined;
+        // Complete tool calls the provider stopped with end_turn run as a
+        // tool_use round (ToolUseWithEndTurnAnomaly); details.stop keeps the
+        // provider's own token. Decided before the round report, so it
+        // reports the stop the loop acted on.
+        const endTurnTools = this.toolUseWithEndTurn(responseBlocks, lastStopReason, streamResult, rounds - 1);
+        if (endTurnTools) {
+          anomalies.push(endTurnTools);
+          if (endTurnTools.treatedAsToolUse) lastStopReason = 'tool_use';
+        }
 
         // Attempts this round re-issued past a refusal are billed calls whose
         // output was discarded — carry their spend to the final response.
@@ -4663,6 +4756,7 @@ export class Membrane {
             tokensRead: totalUsage.cacheReadTokens ?? 0,
             hitRatio: this.calculateCacheHitRatio(totalUsage),
           },
+          ...(anomalies.length ? { anomalies } : {}),
         },
         raw: {
           request: rawRequest,
