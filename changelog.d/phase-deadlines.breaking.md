@@ -26,7 +26,8 @@
   that idle timer: a connection that sends no byte at all, keepalive pings
   included, is now left to the runtime's own body timeout, such as undici's
   on Node (300 s by default), where the idle timer gave 600 s from the first
-  event. When either timer ran out, the call threw a retryable
+  event. That timeout still throws, as before, rather than ending a stream as
+  an `aborted` result. When either timer ran out, the call threw a retryable
   `MembraneError` of type `timeout`; any expiry is now a `TimeoutAbortError`,
   which isn't retryable, and a stream that stalls ends as an `aborted` result
   with reason `'timeout'` carrying its partial content instead of throwing.

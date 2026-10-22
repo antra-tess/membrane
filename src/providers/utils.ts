@@ -651,8 +651,8 @@ const positiveMs = (value: unknown): number | undefined =>
  * signal. (A caller's per-request `timeoutMs` stays the
  * adapter's own.) Membrane core owns them, and the adapter says what it saw:
  * as it sends the request, what it sent (`ProviderRequestOptions.onSend`,
- * `reportSend`), and then each event and sign of its transport
- * (`ProviderRequestOptions.onProgress`, `report`).
+ * `reportSend`), and then each provider event, never a keepalive or a raw
+ * byte (`ProviderRequestOptions.onProgress`, `report`).
  *
  * "The send" is when Membrane hands the call to its adapter, as it creates
  * this, so building and signing the request and resolving credentials count

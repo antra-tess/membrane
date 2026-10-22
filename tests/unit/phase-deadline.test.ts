@@ -22,6 +22,7 @@ import { rawSseResponse } from '../helpers/sse-fixtures.js';
 import { chunkFrame, streamBody } from '../helpers/bedrock-event-stream.js';
 import { createCallDeadline, deadlineTimeoutError, isDeadlineAbort, progressOfAnthropicEvent } from '../../src/providers/utils.js';
 import { TimeoutAbortError, isAbortedResponse } from '../../src/types/index.js';
+import { abortError } from '../../src/types/errors.js';
 import type { NormalizedRequest, ProgressSeen, SendReport } from '../../src/types/index.js';
 import type { ProviderAdapter, ProviderRequest, ProviderRequestOptions, ProviderResponse, StreamCallbacks } from '../../src/types/provider.js';
 
@@ -160,6 +161,21 @@ describe('bounds per phase, on an adapter that reports them', () => {
     deadline.report('content');
     vi.advanceTimersByTime(180 * S);
     expect(expired(deadline)).toMatch(/^No provider event within 180s: /);
+    deadline.cleanup();
+  });
+});
+
+describe('after a silent think', () => {
+  it("counts its end as content, so the next block's start is under the 180 s between events", () => {
+    const deadline = start({ maxTokens: 32_000 });
+    deadline.report('think');
+    vi.advanceTimersByTime(500 * S);
+    deadline.report('content'); // the think's signature, at its end
+    deadline.report(); // a tool call's start
+    vi.advanceTimersByTime(179 * S);
+    expect(expired(deadline)).toBeUndefined();
+    vi.advanceTimersByTime(1 * S);
+    expect(expired(deadline)).toMatch(/^No provider event within 180s/);
     deadline.cleanup();
   });
 });
@@ -422,22 +438,40 @@ describe('Membrane core: which bound each call gets', () => {
     expect((xml.result as { message?: string }).message).toMatch(/^No content within 400s of the send: /);
   });
 
+  it("carries the message of an abort the caller didn't make, with reason 'error', on stream() and streamYielding", async () => {
+    vi.useFakeTimers();
+    class Cut extends Silent {
+      override async stream(): Promise<ProviderResponse> { throw abortError('zz the transport ended'); }
+    }
+    const result = await new Membrane(new Cut(true)).stream(REQUEST);
+    expect(result).toMatchObject({ aborted: true, reason: 'error', message: 'zz the transport ended' });
+
+    const events: Array<{ type: string; reason?: string; message?: string }> = [];
+    for await (const event of new Membrane(new Cut(true)).streamYielding(REQUEST)) events.push(event as never);
+    expect(events.find((e) => e.type === 'aborted')).toMatchObject({ reason: 'error', message: 'zz the transport ended' });
+  });
+
   it("gives a cancel by the caller no message, on stream() and streamYielding", async () => {
     vi.useFakeTimers();
     const caller = new AbortController();
-    const cancelled = settlesAfter(new Membrane(new Silent(true)).stream(REQUEST, { signal: caller.signal }));
+    const entered = new Silent(true);
+    const cancelled = settlesAfter(new Membrane(entered).stream(REQUEST, { signal: caller.signal }));
     await vi.advanceTimersByTimeAsync(10 * S);
+    // The call is in flight with its adapter when the caller cancels it.
+    expect(entered.seen).toHaveLength(1);
     caller.abort();
     const { result } = await cancelled;
     expect(result).toMatchObject({ aborted: true, reason: 'user' });
     expect('message' in (result as object)).toBe(false);
 
     const yielding = new AbortController();
+    const enteredYielding = new Silent(true);
     const events: Array<{ type: string; reason?: string; message?: string }> = [];
     const ended = settlesAfter((async () => {
-      for await (const event of new Membrane(new Silent(true)).streamYielding(REQUEST, { signal: yielding.signal })) events.push(event as never);
+      for await (const event of new Membrane(enteredYielding).streamYielding(REQUEST, { signal: yielding.signal })) events.push(event as never);
     })());
     await vi.advanceTimersByTimeAsync(10 * S);
+    expect(enteredYielding.seen).toHaveLength(1);
     yielding.abort();
     await ended;
     const aborted = events.find((e) => e.type === 'aborted');
