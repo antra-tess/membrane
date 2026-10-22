@@ -638,7 +638,7 @@ const positiveMs = (value: unknown): number | undefined =>
  * `ProviderRequestOptions.onProgress` (`report`) and the output budget the
  * body they sent asks for through `onMaxTokens` (`reportMaxTokens`).
  *
- * The progress deadline, by `progressTimeoutMs`:
+ * The progress deadline, by `progressTimeoutMs` (null counts as unset):
  * - Unset, in a call whose adapter reports phases (`phases`): bounds per
  *   phase. Before the first content, BEFORE_CONTENT_MS from the send. A
  *   silent think started before content is allowed its whole output budget
@@ -651,7 +651,7 @@ const positiveMs = (value: unknown): number | undefined =>
  *   such a call can be silent until its whole answer arrives.
  * - A positive number, Infinity included: that many ms from the send and
  *   from each event, whatever the phase, as one flat bound.
- * - Anything else (0, a negative number, NaN, null): off.
+ * - Anything else (0, a negative number, NaN): off.
  *
  * The liveness bound, by `idleTimeoutMs`: unset (or null), LIVENESS_MS; a
  * positive number, that; anything else, off. It's armed by the first
@@ -683,7 +683,7 @@ export function createCallDeadline(
   cleanup: () => void;
 } {
   const flatMs = positiveMs(options.progressTimeoutMs);
-  const mode: 'phases' | 'whole' | 'flat' | 'off' = options.progressTimeoutMs === undefined
+  const mode: 'phases' | 'whole' | 'flat' | 'off' = options.progressTimeoutMs === undefined || options.progressTimeoutMs === null
     ? (options.phases ? 'phases' : 'whole')
     : flatMs !== undefined ? 'flat' : 'off';
   const livenessMs = options.idleTimeoutMs === undefined || options.idleTimeoutMs === null

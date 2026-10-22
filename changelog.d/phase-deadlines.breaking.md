@@ -1,6 +1,6 @@
 - **Callers:** every provider call now has a progress deadline by default.
-  Left unset, `progressTimeoutMs` used to mean none; it now means bounds per
-  phase of the call. On `AnthropicAdapter` and `BedrockAdapter`, whose
+  Left unset or `null`, `progressTimeoutMs` used to mean none; it now means
+  bounds per phase of the call. On `AnthropicAdapter` and `BedrockAdapter`, whose
   streams report their phases: 400 s from the send for the first content
   delta; a silent think (thinking whose display isn't `'summarized'`) is
   allowed its request's whole `max_tokens` at 35 tokens a second from its
@@ -14,15 +14,16 @@
   `TimeoutAbortError` (`type: 'timeout'`), on a stream as an `aborted` result
   with reason `'timeout'` carrying what arrived, and membrane doesn't send it
   again. A positive `progressTimeoutMs` still gives one flat bound, from the
-  send and from each event, and `Infinity` none; 0, a negative number or NaN
-  still turns it off.
+  send and from each event, and `Infinity` none; 0 still turns it off, as a
+  negative number or NaN does.
 - **Callers of `AnthropicAdapter`:** its own first-event and idle timers are
   gone, and `firstEventTimeoutMs` with them. The first event now falls under
   the 400 s for first content, where it had 600 s. `idleTimeoutMs` now sets
   the liveness bound membrane keeps on any call whose adapter can see its
   transport: no byte at all, keepalive pings included, for 180 s (it was
   600 s), in every phase from the first byte, where the idle timer started at
-  the first event. 0, a negative number or NaN turns it off. When either
+  the first event. `null` counts as unset, and 0 turns it off, as a negative
+  number or NaN does. When either
   timer ran out, the call threw a retryable `MembraneError` of type
   `timeout`; any expiry is now a `TimeoutAbortError`, which isn't retryable,
   and a stream that stalls ends as an `aborted` result with reason

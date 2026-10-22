@@ -217,8 +217,17 @@ describe('the bound for an answer that can arrive whole', () => {
     deadline.cleanup();
   });
 
-  it('turns the progress deadline off for 0, a negative number, NaN or null', () => {
-    for (const off of [0, -1, Number.NaN, null as unknown as number]) {
+  it('counts null as unset, as it counted before there was a default', () => {
+    const deadline = start({ progressTimeoutMs: null as unknown as number });
+    vi.advanceTimersByTime(399 * S);
+    expect(expired(deadline)).toBeUndefined();
+    vi.advanceTimersByTime(1 * S);
+    expect(expired(deadline)).toMatch(/^No content within 400s of the send: /);
+    deadline.cleanup();
+  });
+
+  it('turns the progress deadline off for 0, a negative number or NaN', () => {
+    for (const off of [0, -1, Number.NaN]) {
       const deadline = start({ progressTimeoutMs: off, phases: false });
       vi.advanceTimersByTime(10 * 3600 * S);
       expect(expired(deadline)).toBeUndefined();

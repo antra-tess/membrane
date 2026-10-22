@@ -273,8 +273,7 @@ describe('createProgressDeadline', () => {
 
   it('with both bounds off passes the caller signal through, and its reports do nothing', () => {
     const caller = new AbortController();
-    // null is off for the progress deadline, as any value that isn't a positive number is, and the default for the liveness bound.
-    for (const [progressTimeoutMs, idleTimeoutMs] of [[0, 0], [-1, -1], [Number.NaN, Number.NaN], [null as unknown as number, 0]]) {
+    for (const [progressTimeoutMs, idleTimeoutMs] of [[0, 0], [-1, -1], [Number.NaN, Number.NaN]]) {
       const deadline = createCallDeadline(caller.signal, { progressTimeoutMs, idleTimeoutMs, phases: true });
       expect(deadline.signal).toBe(caller.signal);
       deadline.report('alive');

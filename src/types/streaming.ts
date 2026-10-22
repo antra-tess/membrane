@@ -204,8 +204,8 @@ export interface StreamOptions {
    * armed by the first sign of the transport an adapter can see and report:
    * `AnthropicAdapter` reports each chunk of the response body,
    * `BedrockAdapter` each keepalive ping. Any provider event renews it too. A
-   * positive number of ms sets it, `Infinity` included; any other value (0, a
-   * negative number, NaN) turns it off. Parity with YieldingStreamOptions.
+   * positive number of ms sets it, `Infinity` included, and `null` counts as
+   * unset; 0 turns it off, as any other value does (a negative number, NaN). Parity with YieldingStreamOptions.
    */
   idleTimeoutMs?: number;
 
@@ -213,8 +213,9 @@ export interface StreamOptions {
    * The progress deadline, per provider call. On expiry the call aborts as a
    * `TimeoutAbortError` (type `timeout`, aborted reason `'timeout'`).
    *
-   * Unset (the default), it's bounded per phase on an adapter that reports
-   * phases (`reportsProgressPhases`: `AnthropicAdapter`, `BedrockAdapter`):
+   * Unset (the default, `null` included), it's bounded per phase on an
+   * adapter that reports phases (`reportsProgressPhases`: `AnthropicAdapter`,
+   * `BedrockAdapter`):
    * - before the first content delta, 400 s from the send;
    * - a silent think (thinking whose display isn't `'summarized'`, which
    *   sends nothing while it thinks) is allowed its request's whole
@@ -235,8 +236,8 @@ export interface StreamOptions {
    * A positive number of ms, `Infinity` included, replaces these with one
    * flat bound: that long from the send and from each provider event,
    * whatever the phase. Set it above the longest silence you expect, since a
-   * silent think can outlast it. Any other value (0, a negative number, NaN)
-   * turns the progress deadline off. Parity with YieldingStreamOptions.
+   * silent think can outlast it. 0 turns the progress deadline off, as any
+   * other value does (a negative number, NaN). Parity with YieldingStreamOptions.
    */
   progressTimeoutMs?: number;
 
@@ -359,13 +360,14 @@ export interface CompleteOptions {
 
   /**
    * The progress deadline, per provider call; see StreamOptions.
-   * progressTimeoutMs. Unset (the default), a non-streaming call is bounded at
-   * 400 s plus its `max_tokens` at 35 tokens a second, since its answer
-   * arrives whole. `OpenAIResponsesAPIAdapter` in subscription mode answers
-   * `complete()` by streaming, so there each provider event starts that bound
-   * again. A positive number of ms, `Infinity` included, sets one flat bound
-   * instead; any other value (0, a negative number, NaN) turns it off. On
-   * expiry `complete()` throws a `TimeoutAbortError`.
+   * progressTimeoutMs. Unset (the default, `null` included), a non-streaming
+   * call is bounded at 400 s plus its `max_tokens` at 35 tokens a second,
+   * since its answer arrives whole. `OpenAIResponsesAPIAdapter` in
+   * subscription mode answers `complete()` by streaming, so there each
+   * provider event starts that bound again. A positive number of ms,
+   * `Infinity` included, sets one flat bound instead; 0 turns it off, as any
+   * other value does (a negative number, NaN). On expiry `complete()` throws
+   * a `TimeoutAbortError`.
    */
   progressTimeoutMs?: number;
 

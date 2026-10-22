@@ -422,8 +422,8 @@ export interface YieldingStreamOptions {
    * of the transport an adapter can see and report: `AnthropicAdapter`
    * reports each chunk of the response body, `BedrockAdapter` each keepalive
    * ping. Any provider event renews it too. A positive number of ms sets it,
-   * `Infinity` included; any other value (0, a negative number, NaN) turns it
-   * off.
+   * `Infinity` included, and `null` counts as unset; 0 turns it off, as any
+   * other value does (a negative number, NaN).
    */
   idleTimeoutMs?: number;
 
@@ -431,8 +431,9 @@ export interface YieldingStreamOptions {
    * The progress deadline, per provider call. On expiry the stream ends with
    * an `aborted` event whose reason is `'timeout'`, carrying what arrived.
    *
-   * Unset (the default), it's bounded per phase on an adapter that reports
-   * phases (`reportsProgressPhases`: `AnthropicAdapter`, `BedrockAdapter`):
+   * Unset (the default, `null` included), it's bounded per phase on an
+   * adapter that reports phases (`reportsProgressPhases`: `AnthropicAdapter`,
+   * `BedrockAdapter`):
    * - before the first content delta, 400 s from the send;
    * - a silent think (thinking whose display isn't `'summarized'`, which
    *   sends nothing while it thinks) is allowed its request's whole
@@ -453,8 +454,8 @@ export interface YieldingStreamOptions {
    * A positive number of ms, `Infinity` included, replaces these with one
    * flat bound: that long from the send and from each provider event,
    * whatever the phase. Set it above the longest silence you expect, since a
-   * silent think can outlast it. Any other value (0, a negative number, NaN)
-   * turns the progress deadline off.
+   * silent think can outlast it. 0 turns the progress deadline off, as any
+   * other value does (a negative number, NaN).
    */
   progressTimeoutMs?: number;
 
