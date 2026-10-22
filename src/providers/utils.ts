@@ -595,25 +595,24 @@ export function createCombinedSignal(
 /**
  * The bound before a call's first content (TTFT), from the send: a little
  * over three times the longest wait before a think began among successful
- * Anthropic calls in a production usage log, 2026-09-29 to 2026-10-12
- * (128 s, so 384 s, rounded up). It covers the
- * wait for the first event too, which a large cache miss can stretch: on
- * 2026-07-20, 600,000-token contexts sent only pings for over 120 s before
+ * Anthropic calls on a production router (128 s, so 384 s, rounded up). It
+ * covers the wait for the first event too, which a large cache miss can
+ * stretch: 600,000-token contexts have sent only pings for over 120 s before
  * their message_start.
  */
 export const BEFORE_CONTENT_MS = 400_000;
 
 /**
  * The bound between provider events once content has begun: Claude Code's
- * stream idle bound (90 s), doubled for the long silences while a large tool
- * call is written.
+ * stream idle bound (90 s, by our reading of its source), doubled for the
+ * long silences while a large tool call is written.
  */
 export const BETWEEN_EVENTS_MS = 180_000;
 
 /**
  * The slowest rate a silent think, or an answer that arrives whole, is
- * allowed: half the slowest successful think of 10,000 tokens or more in the
- * same log (71.6 tokens a second, claude-opus-5-5). A think's allowance is
+ * allowed: half the slowest successful think of 10,000 tokens or more on the
+ * same router (71.6 tokens a second, claude-opus-5-5). A think's allowance is
  * its request's whole output budget at this rate.
  */
 export const THINK_TOKENS_PER_SECOND = 35;
@@ -621,8 +620,8 @@ export const THINK_TOKENS_PER_SECOND = 35;
 /**
  * The liveness bound: no byte at all, keepalive pings included, for this
  * long means the connection is gone. Anthropic pings a stream that has
- * nothing else to send: sampled every 2 s for 4 minutes across 40 open
- * connections, none went 30.5 s without a byte.
+ * nothing else to send, and in a sample of open connections none went
+ * 30.5 s without a byte.
  */
 export const LIVENESS_MS = 180_000;
 
