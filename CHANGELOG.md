@@ -12,6 +12,57 @@ Releases up to and including 0.5.75 predate this file; for their contents see
 
 ## Unreleased
 
+## 0.6.1 — 2026-10-22
+
+### Added
+
+- `AnthropicAdapter` keeps what it needs to report a response to Anthropic,
+  on `ProviderResponse` and on its `raw` response: `responseId` / `raw.id`,
+  the message id, and `requestId` / `raw.request_id`, the `request-id`
+  response header, on `stream()` and `complete()`. Before, the stream path
+  kept neither, and `complete()`'s raw response lost the request id when
+  serialized (the SDK attaches it non-enumerably). The stream path's `raw`
+  also carries `provider_events`: `message_start` (the event, its message
+  without `content`), `message_delta`, and `unhandled`, the first 20 events
+  or deltas the adapter doesn't read or doesn't apply, with
+  `unhandled_omitted` counting the rest; each kept event is cut to 4,096
+  JSON characters. A field the API adds to `message_start` or
+  `message_delta`, a delta type the adapter doesn't read, and a
+  `content_block_stop` carrying more than its type and index are now visible
+  where they used to be dropped. A new event type isn't: the SDK
+  (`@anthropic-ai/sdk` 0.52) yields only the event types it knows. Block
+  content stays in `content`, though an event kept in `unhandled`, such as a
+  `citations_delta`, keeps the payload it carried. `ProviderResponse` gains
+  optional `responseId` and `requestId` for any adapter to fill.
+
+### Fixed
+
+- **Backport of 0.7.1's fix (#168) to 0.6.x.** A round the provider ends with
+  a literal `stop_reason: end_turn` while its content holds complete client
+  tool calls now runs as a `tool_use` round on both native tool loops
+  (`stream()` with `onToolCalls`, and `streamYielding()`), and `complete()`
+  returns it as a `tool_use` stop. Before, every native loop gated execution
+  on `tool_use` alone, so the calls never ran and the turn ended as if
+  finished, with nothing logged; production Anthropic responses had this
+  shape on 2026-10-19. A call is complete when its block stopped and its
+  input parsed to an object (no `unparseableInput`); a round holding an
+  incomplete call runs nothing, as before. A length, refusal, stop-sequence
+  or pause stop never qualifies, nor does a provider token membrane doesn't
+  map, nor a round with no provider stop token at all. Each occurrence warns
+  once, through the configured `logger` when one is set, with the model, the
+  tool names and the message and request ids, and is recorded in
+  `details.anomalies` (`ToolUseWithEndTurnAnomaly`: `kind:
+  'tool_use_with_end_turn'`, `round`, `providerStopReason`, `toolNames`,
+  `toolUseIds`, `treatedAsToolUse`, `model`, `messageId`, `requestId`). The
+  Anthropic stream adapter now holds block events to the API's order (a
+  start while no block is open, at the next index, then that block's deltas,
+  a tool call's being only its arguments, and its stop); the first event out
+  of that order stops block events being applied and marks every `tool_use`
+  block in the response `unparseableInput`, so none of them runs on an
+  `end_turn` round.
+  - **Not in this backport:** the Bedrock adapter's block-order checks and its
+    stop at `message_delta`, which need stream helpers from 0.7; 0.7.1 has them.
+
 ## 0.6.0 — 2026-10-18
 
 ### Breaking
