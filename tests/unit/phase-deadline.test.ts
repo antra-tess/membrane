@@ -518,10 +518,12 @@ const message = {
   id: 'msg_test', type: 'message', role: 'assistant', model: 'claude-sonnet-4-6',
   content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 0 },
 };
-const thinkThenAnswer = (thinking: object): string[] => [
+/** A think, then an answer; with `summary`, the think streams it as a thinking_delta before its signature. */
+const thinkThenAnswer = (thinking: object, summary?: string): string[] => [
   frame('message_start', { message }),
   frame('ping', {}),
   frame('content_block_start', { index: 0, content_block: thinking }),
+  ...(summary === undefined ? [] : [frame('content_block_delta', { index: 0, delta: { type: 'thinking_delta', thinking: summary } })]),
   frame('content_block_delta', { index: 0, delta: { type: 'signature_delta', signature: 'zz-sig' } }),
   frame('content_block_stop', { index: 0 }),
   frame('content_block_start', { index: 1, content_block: { type: 'text', text: '' } }),
@@ -564,11 +566,11 @@ describe('AnthropicAdapter reports what it saw', () => {
 
   it('reports no think for a body that asks for summarized thinking, or for a redacted block', async () => {
     const summarized = await anthropicReports(
-      thinkThenAnswer({ type: 'thinking', thinking: '', signature: '' }),
+      thinkThenAnswer({ type: 'thinking', thinking: '', signature: '' }, 'zz summary'),
       anthropicRequest({ thinking: { type: 'adaptive', display: 'summarized' } }),
     );
     // A summarized think's start is only an event: its summary follows as deltas, which are content.
-    expect(summarized.events).toEqual([undefined, undefined, 'content', undefined, undefined, 'content', undefined, undefined]);
+    expect(summarized.events).toEqual([undefined, undefined, 'content', 'content', undefined, undefined, 'content', undefined, undefined]);
 
     // A redacted block arrives whole, its think done: it's content, which ends the phase before content.
     stubFetch(() => rawSseResponse([
@@ -623,10 +625,11 @@ describe('AnthropicAdapter reports what it saw', () => {
 
 describe('BedrockAdapter reports what it saw', () => {
   const bedrock = (): BedrockAdapter => new BedrockAdapter({ accessKeyId: 'zz-not-a-key-id', secretAccessKey: 'zz-not-a-secret', region: 'zz-region-1' });
-  const frames = (thinking: object) => streamBody([
+  const frames = (thinking: object, summary?: string) => streamBody([
     chunkFrame({ type: 'message_start', message: { usage: { input_tokens: 3 } } }),
     chunkFrame({ type: 'ping' }),
     chunkFrame({ type: 'content_block_start', index: 0, content_block: thinking }),
+    ...(summary === undefined ? [] : [chunkFrame({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: summary } })]),
     chunkFrame({ type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'zz-sig' } }),
     chunkFrame({ type: 'content_block_stop', index: 0 }),
     chunkFrame({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 2 } }),
@@ -652,13 +655,30 @@ describe('BedrockAdapter reports what it saw', () => {
     expect(sentBeforeFetch).toBe(true);
   });
 
-  it('reports no think for a body that asks for summarized thinking, and its events still', async () => {
-    stubFetch(() => new Response(frames({ type: 'thinking', thinking: '' }), { status: 200 }));
+  it("reports a redacted block as content, and a tool call's start as an event, its input as content", async () => {
+    stubFetch(() => new Response(streamBody([
+      chunkFrame({ type: 'message_start', message: { usage: { input_tokens: 3 } } }),
+      chunkFrame({ type: 'content_block_start', index: 0, content_block: { type: 'redacted_thinking', data: 'zz-redacted' } }),
+      chunkFrame({ type: 'content_block_stop', index: 0 }),
+      chunkFrame({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'toolu_zz1', name: 'zz_probe', input: {} } }),
+      chunkFrame({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{}' } }),
+      chunkFrame({ type: 'content_block_stop', index: 1 }),
+      chunkFrame({ type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 2 } }),
+    ]), { status: 200 }));
+    const seen: Array<ProgressSeen | undefined> = [];
+    await bedrock().stream(request({ type: 'adaptive', display: 'omitted' }), { onChunk: () => {} }, {
+      onProgress: (kind) => seen.push(kind),
+    }).catch(() => undefined);
+    expect(seen.filter((kind) => kind !== 'alive')).toEqual([undefined, 'content', undefined, undefined, 'content', undefined, undefined]);
+  });
+
+  it('reports no think for a body that asks for summarized thinking, and its summary as content', async () => {
+    stubFetch(() => new Response(frames({ type: 'thinking', thinking: '' }, 'zz summary'), { status: 200 }));
     const seen: Array<ProgressSeen | undefined> = [];
     await bedrock().stream(request({ type: 'adaptive', display: 'summarized' }), { onChunk: () => {} }, {
       onProgress: (kind) => seen.push(kind),
     }).catch(() => undefined);
-    expect(seen.filter((kind) => kind !== 'alive')).toEqual([undefined, undefined, 'content', undefined, undefined]);
+    expect(seen.filter((kind) => kind !== 'alive')).toEqual([undefined, undefined, 'content', 'content', undefined, undefined]);
   });
 
   it('reports the max_tokens it sends on complete(), extra included, and no phases, before the request goes out', async () => {

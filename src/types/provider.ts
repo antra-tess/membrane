@@ -351,9 +351,11 @@ export interface ProviderRequestContext {
  * parsed provider event.
  *
  * - `'content'`: a content delta of any kind (text, thinking, tool input, a
- *   signature), or a block that arrives whole, as a `redacted_thinking` block
- *   does: the model is producing output. Another block's start is only an
- *   event: its content follows as deltas.
+ *   signature), or a `redacted_thinking` block's start, since that block
+ *   arrives whole after its think: the model is producing output. Any other
+ *   block's start is only an event. A text or tool block's content follows
+ *   as deltas, and a server tool's result block, which arrives whole too,
+ *   follows its call's input deltas, so content has begun by then.
  * - `'think'`: a silent think has started: a thinking block began in a call
  *   whose body doesn't ask for `display: 'summarized'`, so nothing need
  *   arrive until the think ends.
@@ -377,9 +379,9 @@ export interface SendReport {
   maxTokens?: number;
   /**
    * Whether this attempt's stream reports its phases through `onProgress`:
-   * a content delta, or a block that arrives whole, as `'content'`, and a
-   * silent think's start as `'think'`. Core then bounds
-   * the stream per phase (see StreamOptions.progressTimeoutMs).
+   * a content delta or a `redacted_thinking` block's start as `'content'`,
+   * and a silent think's start as `'think'`. Core then bounds the stream per
+   * phase (see StreamOptions.progressTimeoutMs).
    */
   reportsPhases?: boolean;
 }
@@ -406,8 +408,8 @@ export interface ProviderRequestOptions {
    * body bytes: those prove the connection is up, not that the model is
    * making progress, and an adapter that can see them reports them as
    * `'alive'`. An adapter whose stream reports its phases (SendReport.
-   * reportsPhases) reports a content delta, or a block that arrives whole,
-   * as `'content'`, and a silent think's start as `'think'`;
+   * reportsPhases) reports a content delta or a `redacted_thinking` block's
+   * start as `'content'`, and a silent think's start as `'think'`;
    * any other adapter may call it with nothing for every event. Decorators
    * must forward it with the other options; one that drops it leaves the
    * call to its bound from the send alone.

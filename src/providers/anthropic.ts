@@ -539,11 +539,13 @@ export class AnthropicAdapter implements ProviderAdapter {
     // before the loop below included, is the transport alive
     // (observeBodyActivity). A content delta is content, and so is a
     // redacted_thinking block, which arrives whole, its think done. Any other
-    // block's content follows its start as deltas (a tool call's input can
-    // take a while to come), so its start is only an event. A thinking
-    // block's start is a silent think unless the body asks for summarized
-    // thinking, which streams deltas. (Membrane sends Fable and Mythos no
-    // thinking config, and they think silently by default.)
+    // block's start is only an event: a text or tool block's content follows
+    // as deltas (a tool call's input can take a while to come), and a server
+    // tool's result, which arrives whole too, follows its call's input
+    // deltas. A thinking block's start is a silent think unless the body
+    // asks for summarized thinking, which streams deltas. (Membrane sends
+    // Fable and Mythos no thinking config, and they think silently by
+    // default.)
     const summarized = (fullRequest.thinking as { display?: unknown } | undefined)?.display === 'summarized';
     const progressOf = (event: { type: string; content_block?: { type?: string } }): ProgressSeen | undefined =>
       event.type === 'content_block_delta' ? 'content'
