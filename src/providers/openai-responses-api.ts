@@ -282,7 +282,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
     // an input ending in an assistant turn: refuse it here, typed, before HTTP.
     assertMessagePrefillSupported(responsesRequest.model, responsesRequest.input, options, this.name, responsesRequest);
     options?.onRequest?.(responsesRequest);
-    options?.onMaxTokens?.(responsesRequest.max_output_tokens);
+    options?.onSend?.({ maxTokens: responsesRequest.max_output_tokens });
 
     const { signal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
@@ -308,7 +308,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
     responsesRequest.stream = true;
     assertMessagePrefillSupported(responsesRequest.model, responsesRequest.input, options, this.name, responsesRequest);
     options?.onRequest?.(responsesRequest);
-    options?.onMaxTokens?.(responsesRequest.max_output_tokens);
+    options?.onSend?.({ maxTokens: responsesRequest.max_output_tokens });
 
     const { signal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {

@@ -106,6 +106,7 @@ export type {
   ProviderRequestOptions,
   ProviderRequestContext,
   ProgressSeen,
+  SendReport,
   ProviderResponse,
   ProviderInputTransformation,
   StreamCallbacks,

@@ -49,9 +49,9 @@ const NATIVE_REQUEST: NormalizedRequest = {
   tools: [{ name: 'zz_probe', description: 'zz probe', inputSchema: { type: 'object', properties: { fld1: { type: 'string' } } } }],
 };
 
-/** A flat progress deadline (`progressTimeoutMs` set): what `progressTimeoutMs` gave before bounds per phase. */
-function createProgressDeadline(signal: AbortSignal | undefined, ms: number | undefined) {
-  const deadline = createCallDeadline(signal, { progressTimeoutMs: ms, idleTimeoutMs: 0, phases: false });
+/** createCallDeadline with a positive `progressTimeoutMs`, its flat bound, and the liveness bound off. */
+function flatDeadline(signal: AbortSignal | undefined, ms: number | undefined) {
+  const deadline = createCallDeadline(signal, { progressTimeoutMs: ms, idleTimeoutMs: 0 });
   return { ...deadline, renew: deadline.report };
 }
 
@@ -152,11 +152,11 @@ async function collect(stream: AsyncIterable<StreamEvent>, onEvent?: (event: Str
 
 // ---------------------------------------------------------------------------
 
-describe('createProgressDeadline', () => {
+describe('createCallDeadline, flat (a positive progressTimeoutMs)', () => {
   it('aborts with the deadline mark, naming itself and when the call began, when nothing renews it', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-14T12:00:00.000Z'));
-    const deadline = createProgressDeadline(undefined, 1000);
+    const deadline = flatDeadline(undefined, 1000);
     vi.advanceTimersByTime(999);
     expect(deadline.signal!.aborted).toBe(false);
     vi.advanceTimersByTime(1);
@@ -176,7 +176,7 @@ describe('createProgressDeadline', () => {
     // from one that never produced an event (the case above).
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-14T12:00:00.000Z'));
-    const deadline = createProgressDeadline(undefined, 1000);
+    const deadline = flatDeadline(undefined, 1000);
     vi.advanceTimersByTime(200);
     deadline.renew!();
     vi.advanceTimersByTime(300);
@@ -192,7 +192,7 @@ describe('createProgressDeadline', () => {
 
   it('stays open while renewed, and expires a full period after the last renewal', () => {
     vi.useFakeTimers();
-    const deadline = createProgressDeadline(undefined, 1000);
+    const deadline = flatDeadline(undefined, 1000);
     for (let i = 0; i < 12; i++) {
       vi.advanceTimersByTime(400);
       deadline.renew!();
@@ -208,14 +208,14 @@ describe('createProgressDeadline', () => {
   it("passes the caller's cancellation through unmarked, and stops after cleanup", () => {
     vi.useFakeTimers();
     const caller = new AbortController();
-    const cancelled = createProgressDeadline(caller.signal, 1000);
+    const cancelled = flatDeadline(caller.signal, 1000);
     const reason = new Error('caller');
     caller.abort(reason);
     expect(cancelled.signal!.reason).toBe(reason);
     expect(isDeadlineAbort(cancelled.signal!.reason)).toBe(false);
     cancelled.cleanup();
 
-    const cleaned = createProgressDeadline(undefined, 1000);
+    const cleaned = flatDeadline(undefined, 1000);
     cleaned.cleanup();
     vi.advanceTimersByTime(5000);
     expect(cleaned.signal!.aborted).toBe(false);
@@ -225,7 +225,7 @@ describe('createProgressDeadline', () => {
     const caller = new AbortController();
     const reason = new Error('caller');
     caller.abort(reason);
-    const deadline = createProgressDeadline(caller.signal, 1000);
+    const deadline = flatDeadline(caller.signal, 1000);
     expect(deadline.signal!.aborted).toBe(true);
     expect(deadline.signal!.reason).toBe(reason);
     expect(isDeadlineAbort(deadline.signal!.reason)).toBe(false);
@@ -236,7 +236,7 @@ describe('createProgressDeadline', () => {
     // A resident's signal outlives many calls: each call's listener must go
     // with its call.
     const caller = new AbortController();
-    const deadline = createProgressDeadline(caller.signal, 1000);
+    const deadline = flatDeadline(caller.signal, 1000);
     expect(getEventListeners(caller.signal, 'abort')).toHaveLength(1);
     deadline.cleanup();
     expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
@@ -249,7 +249,7 @@ describe('createProgressDeadline', () => {
     // setSystemTime moves Date alone, as an NTP step or a VM restore does.
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-14T12:00:00.000Z'));
-    const forward = createProgressDeadline(undefined, 1000);
+    const forward = flatDeadline(undefined, 1000);
     vi.advanceTimersByTime(500);
     forward.renew!();
     vi.setSystemTime(new Date('2026-10-14T13:00:00.000Z'));
@@ -264,7 +264,7 @@ describe('createProgressDeadline', () => {
     );
     forward.cleanup();
 
-    const backward = createProgressDeadline(undefined, 1000);
+    const backward = flatDeadline(undefined, 1000);
     vi.setSystemTime(new Date('2026-10-14T11:00:00.000Z'));
     vi.advanceTimersByTime(1000);
     expect(backward.signal!.aborted).toBe(true);
@@ -274,11 +274,11 @@ describe('createProgressDeadline', () => {
   it('with both bounds off passes the caller signal through, and its reports do nothing', () => {
     const caller = new AbortController();
     for (const [progressTimeoutMs, idleTimeoutMs] of [[0, 0], [-1, -1], [Number.NaN, Number.NaN]]) {
-      const deadline = createCallDeadline(caller.signal, { progressTimeoutMs, idleTimeoutMs, phases: true });
+      const deadline = createCallDeadline(caller.signal, { progressTimeoutMs, idleTimeoutMs });
       expect(deadline.signal).toBe(caller.signal);
       deadline.report('alive');
       deadline.report('content');
-      deadline.reportMaxTokens(10);
+      deadline.reportSend({ maxTokens: 10, reportsPhases: true });
       deadline.cleanup();
     }
   });
@@ -290,7 +290,7 @@ describe('deadlines past the platform timer limit', () => {
 
   it('a progress deadline of Infinity never expires, and does not re-arm every millisecond', async () => {
     const armed = vi.spyOn(globalThis, 'setTimeout');
-    const deadline = createProgressDeadline(undefined, Infinity);
+    const deadline = flatDeadline(undefined, Infinity);
     await new Promise((r) => setTimeout(r, 20));
     expect(deadline.signal!.aborted).toBe(false);
     expect(armed.mock.calls.length).toBeLessThan(5);
@@ -300,7 +300,7 @@ describe('deadlines past the platform timer limit', () => {
   it('a progress deadline past the limit expires on time', () => {
     vi.useFakeTimers();
     const armed = vi.spyOn(globalThis, 'setTimeout');
-    const deadline = createProgressDeadline(undefined, PAST_LIMIT_MS);
+    const deadline = flatDeadline(undefined, PAST_LIMIT_MS);
     // A deadline re-armed every millisecond would make the long advance below spin for hours.
     vi.advanceTimersByTime(10);
     expect(armed).toHaveBeenCalledTimes(1);
@@ -317,7 +317,7 @@ describe('deadlines past the platform timer limit', () => {
   it('cleanup partway through a long wait cancels the step that is pending', () => {
     vi.useFakeTimers();
     const armed = vi.spyOn(globalThis, 'setTimeout');
-    const deadline = createProgressDeadline(undefined, PAST_LIMIT_MS);
+    const deadline = flatDeadline(undefined, PAST_LIMIT_MS);
     const combined = createCombinedSignal(undefined, PAST_LIMIT_MS);
     // A deadline re-armed every millisecond would make the long advance below spin for hours.
     vi.advanceTimersByTime(10);
@@ -367,7 +367,7 @@ describe('Membrane core: one renewable deadline per provider call', () => {
     }
   }
 
-  it('gives the adapter onProgress, onMaxTokens and a deadline signal on every path, and keeps the options to itself', async () => {
+  it('gives the adapter onProgress, onSend and a deadline signal on every path, and keeps the options to itself', async () => {
     const on = new RecordingAdapter();
     const caller = new AbortController();
     for (const options of [{}, { progressTimeoutMs: 60_000, idleTimeoutMs: 60_000 }]) {
@@ -380,7 +380,7 @@ describe('Membrane core: one renewable deadline per provider call', () => {
     expect(on.seen).toHaveLength(10);
     for (const options of on.seen) {
       expect(typeof options?.onProgress).toBe('function');
-      expect(typeof options?.onMaxTokens).toBe('function');
+      expect(typeof options?.onSend).toBe('function');
       expect(options?.signal).toBeInstanceOf(AbortSignal);
       expect(options?.signal).not.toBe(caller.signal);
       // Core keeps the options to itself.
@@ -693,7 +693,7 @@ describe('every streaming adapter reports progress once per parsed event', () =>
     });
   }
 
-  it('bedrock: decoded events count, an event that decodes to no object does not, and pings count only as alive', async () => {
+  it('bedrock: decoded events count, an event that decodes to no object does not, nor does a ping; each chunk is the transport alive', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     stubFetch(() => new Response(streamBody([
       chunkFrame({ type: 'message_start', message: { usage: { input_tokens: 3 } } }),
@@ -713,8 +713,9 @@ describe('every streaming adapter reports progress once per parsed event', () =>
         { onProgress: (kind) => { seen.push(kind); } },
       )
       .catch(() => undefined);
-    // Three events; each ping is reported as the transport alive, not as an event.
-    expect(seen).toEqual([undefined, 'alive', undefined, 'alive', 'content']);
+    // Three events (a block's start is content); a ping is no event, and each chunk is the transport alive.
+    expect(seen.filter((kind) => kind !== 'alive')).toEqual([undefined, 'content', 'content']);
+    expect(seen.filter((kind) => kind === 'alive')).toHaveLength(8);
   });
 });
 

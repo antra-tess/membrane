@@ -213,7 +213,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
     const openRouterRequest = this.buildRequest(request);
     assertMessagePrefillSupported(openRouterRequest.model, openRouterRequest.messages, options, this.name, openRouterRequest);
     options?.onRequest?.(openRouterRequest);
-    options?.onMaxTokens?.(openRouterRequest.max_tokens);
+    options?.onSend?.({ maxTokens: openRouterRequest.max_tokens });
 
     try {
       const response = await this.makeRequest(openRouterRequest, options);
@@ -234,7 +234,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
     openRouterRequest.stream_options = { include_usage: true };
     assertMessagePrefillSupported(openRouterRequest.model, openRouterRequest.messages, options, this.name, openRouterRequest);
     options?.onRequest?.(openRouterRequest);
-    options?.onMaxTokens?.(openRouterRequest.max_tokens);
+    options?.onSend?.({ maxTokens: openRouterRequest.max_tokens });
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {

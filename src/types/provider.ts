@@ -265,16 +265,6 @@ export interface ProviderAdapter {
    * reported through onRequest. Decorators must forward this capability. */
   readonly cacheReceiptBasis?: 'provider-request' | 'wire-request';
 
-  /**
-   * Whether `stream()` reports the phases of a call through `onProgress`: a
-   * content delta as `'content'` and a silent think's start as `'think'`.
-   * Membrane core then bounds the call per phase (see StreamOptions.
-   * progressTimeoutMs); a call on an adapter that doesn't declare it, and
-   * every `complete()`, gets the bound for a call whose answer can arrive
-   * whole. Decorators must forward this capability with the callback.
-   */
-  readonly reportsProgressPhases?: boolean;
-
   /** Check if this adapter handles a model */
   supportsModel(modelId: string): boolean;
   
@@ -361,7 +351,9 @@ export interface ProviderRequestContext {
  * parsed provider event.
  *
  * - `'content'`: a content delta of any kind (text, thinking, tool input, a
- *   signature): the model is producing output.
+ *   signature), or the start of any block but a thinking one (a block can
+ *   arrive whole, as a `redacted_thinking` block does): the model is
+ *   producing output.
  * - `'think'`: a silent think has started: a thinking block began in a call
  *   whose body doesn't ask for `display: 'summarized'`, so nothing need
  *   arrive until the think ends.
@@ -370,6 +362,27 @@ export interface ProviderRequestContext {
  *   making progress, so it renews the liveness bound and nothing else.
  */
 export type ProgressSeen = 'content' | 'think' | 'alive';
+
+/**
+ * What an adapter tells Membrane core about one attempt as it sends it,
+ * through `ProviderRequestOptions.onSend`, for the call's deadlines.
+ */
+export interface SendReport {
+  /**
+   * The output-token limit the body asks for (its `max_tokens`,
+   * `max_output_tokens` or equivalent, after any default and `extra` the
+   * adapter applied). Core sizes a silent think's allowance and the bound for
+   * an answer that arrives whole from it.
+   */
+  maxTokens?: number;
+  /**
+   * Whether this attempt's stream reports its phases through `onProgress`:
+   * a content delta, or the start of any block but a thinking one, as
+   * `'content'`, and a silent think's start as `'think'`. Core then bounds
+   * the stream per phase (see StreamOptions.progressTimeoutMs).
+   */
+  reportsPhases?: boolean;
+}
 
 export interface ProviderRequestOptions {
   /** Build/protocol facts for validation against the adapter's final model/body.
@@ -392,23 +405,23 @@ export interface ProviderRequestOptions {
    * for keepalives (Anthropic's and Bedrock's `ping`), SSE comments or raw
    * body bytes: those prove the connection is up, not that the model is
    * making progress, and an adapter that can see them reports them as
-   * `'alive'`. An adapter that declares `reportsProgressPhases` reports a
-   * content delta as `'content'` and a silent think's start as `'think'`;
+   * `'alive'`. An adapter whose stream reports its phases (SendReport.
+   * reportsPhases) reports a content delta, or the start of any block but a
+   * thinking one, as `'content'`, and a silent think's start as `'think'`;
    * any other adapter may call it with nothing for every event. Decorators
    * must forward it with the other options; one that drops it leaves the
    * call to its bound from the send alone.
    */
   onProgress?: (seen?: ProgressSeen) => void;
   /**
-   * The output-token limit the body this attempt sends asks for (its
-   * `max_tokens`, `max_output_tokens` or equivalent, after any default and
-   * `extra` the adapter applied), reported once per attempt beside
-   * `onRequest`. Membrane core sizes a silent think's allowance and a
-   * non-streaming call's bound from it; without a report it uses the
-   * request's `maxTokens`, or 4096. Decorators forward it with the other
-   * options.
+   * What this attempt sends, for the deadlines Membrane core keeps per
+   * provider call (see SendReport), reported once per attempt beside
+   * `onRequest`, before the request goes out. Without it, core sizes the
+   * call from the request's `maxTokens`, or 4096, and bounds it as an answer
+   * that can arrive whole. Decorators forward it with the other options, so
+   * a router reports for the adapter it picked.
    */
-  onMaxTokens?: (maxTokens: number | undefined) => void;
+  onSend?: (send: SendReport) => void;
   /** Report the final API request body immediately before sending it.
    * Required for adapters declaring cacheReceiptBasis: 'wire-request'.
    * Decorators forward it; raw logging observes each attempt, even when

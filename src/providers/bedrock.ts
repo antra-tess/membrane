@@ -306,8 +306,6 @@ export class BedrockAdapter implements ProviderAdapter {
    */
   readonly reportsContentAlterations = true;
   readonly cacheReceiptBasis = 'wire-request' as const;
-  /** `stream()` reports a content delta as `'content'`, a silent think's start as `'think'`, and each keepalive ping as `'alive'`. */
-  readonly reportsProgressPhases = true;
 
   /**
    * Bedrock serves Anthropic models over the Anthropic Messages payload shape
@@ -409,7 +407,7 @@ export class BedrockAdapter implements ProviderAdapter {
     const fullRequest = { modelId: bedrockModelId, ...bedrockRequest };
     assertMessagePrefillSupported(bedrockModelId, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
-    options?.onMaxTokens?.(fullRequest.max_tokens);
+    options?.onSend?.({ maxTokens: fullRequest.max_tokens });
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
@@ -432,7 +430,8 @@ export class BedrockAdapter implements ProviderAdapter {
     const fullRequest = { modelId: bedrockModelId, ...bedrockRequest, stream: true };
     assertMessagePrefillSupported(bedrockModelId, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
-    options?.onMaxTokens?.(fullRequest.max_tokens);
+    // This stream reports its phases through onProgress (invokeModelWithStream).
+    options?.onSend?.({ maxTokens: fullRequest.max_tokens, reportsPhases: true });
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
@@ -689,9 +688,11 @@ export class BedrockAdapter implements ProviderAdapter {
     rawRequest: unknown,
     onProgress?: (seen?: ProgressSeen) => void,
   ): Promise<ProviderResponse> {
-    // What this stream saw, for Membrane core's deadlines: a ping is the
-    // transport alive, a content delta is content, and a thinking block's
-    // start is a silent think unless the body asks for summarized thinking.
+    // What this stream saw, for Membrane core's deadlines: each chunk of the
+    // body, a ping's included, is the transport alive, and a ping is nothing
+    // more; a content delta, or the start of any block but a thinking one, is
+    // content; and a thinking block's start is a silent think unless the body
+    // asks for summarized thinking.
     const summarized = request.thinking?.display === 'summarized';
     const url = new URL(
       `${this.baseURL ?? `https://bedrock-runtime.${this.region}.amazonaws.com`}/model/${encodeURIComponent(modelId)}/invoke-with-response-stream`
@@ -758,6 +759,8 @@ export class BedrockAdapter implements ProviderAdapter {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        // Each chunk of the body is the transport alive, whatever it carries.
+        if (value.byteLength > 0) onProgress?.('alive');
 
         // Append new data to buffer
         const newBuffer = new Uint8Array(buffer.length + value.length);
@@ -867,12 +870,14 @@ export class BedrockAdapter implements ProviderAdapter {
               // connection.
               const kind = (eventData as { type?: string }).type;
               const block = (eventData as { content_block?: { type?: unknown } }).content_block;
-              onProgress?.(
-                kind === 'ping' ? 'alive'
-                  : kind === 'content_block_delta' ? 'content'
-                    : kind === 'content_block_start' && block?.type === 'thinking' && !summarized ? 'think'
-                      : undefined,
-              );
+              if (kind !== 'ping') {
+                onProgress?.(
+                  kind === 'content_block_delta' ? 'content'
+                    : kind !== 'content_block_start' ? undefined
+                      : block?.type !== 'thinking' ? 'content'
+                        : summarized ? undefined : 'think',
+                );
+              }
 
               // Check for error events within the stream
               if (eventData.type === 'error') {

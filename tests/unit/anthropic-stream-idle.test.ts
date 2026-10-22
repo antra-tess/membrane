@@ -111,8 +111,8 @@ async function streamWith(
   callbacks: StreamCallbacks,
   { signal, ...deadlines }: { signal?: AbortSignal; progressTimeoutMs?: number; idleTimeoutMs?: number } = {},
 ) {
-  const deadline = createCallDeadline(signal, { progressTimeoutMs: 0, idleTimeoutMs: IDLE_MS, phases: true, ...deadlines });
-  const options: ProviderRequestOptions = { signal: deadline.signal, onProgress: deadline.report, onMaxTokens: deadline.reportMaxTokens };
+  const deadline = createCallDeadline(signal, { progressTimeoutMs: 0, idleTimeoutMs: IDLE_MS, ...deadlines });
+  const options: ProviderRequestOptions = { signal: deadline.signal, onProgress: deadline.report, onSend: deadline.reportSend };
   try {
     return await adapter.stream(req, callbacks, options);
   } finally {

@@ -355,8 +355,6 @@ export class AnthropicAdapter implements ProviderAdapter {
   readonly replaysAnthropicServerBlocks = true;
   /** Sends a mid-conversation `role: 'system'` message, with the inline-tools beta when it changes tools. Live checks had the API take tool removals and definitions by value there (Opus 5.5, Haiku 5.5), system text (Haiku 5.5, Sonnet 5), and a cache marker on each block type (Haiku 5.5). Where the model takes none, its 400 is marked `systemChangeRefused`. */
   readonly sendsSystemChanges = true;
-  /** `stream()` reports a content delta as `'content'`, a silent think's start as `'think'`, and each chunk of the response body as `'alive'`. */
-  readonly reportsProgressPhases = true;
 
   /**
    * Verified live 2026-08-25 (claude-haiku-4-5, 4,650-token cached system
@@ -490,7 +488,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     const fullRequest = { ...anthropicRequest, stream: false as const };
     assertMessagePrefillSupported(fullRequest.model, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
-    options?.onMaxTokens?.(fullRequest.max_tokens);
+    options?.onSend?.({ maxTokens: fullRequest.max_tokens });
 
     const headers = this.betaHeaders(request, anthropicRequest);
     const live = this.liveHeaders(headers, 'complete');
@@ -529,24 +527,28 @@ export class AnthropicAdapter implements ProviderAdapter {
     const fullRequest = { ...anthropicRequest, stream: true };
     assertMessagePrefillSupported(fullRequest.model, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
-    options?.onMaxTokens?.(fullRequest.max_tokens);
+    // This stream reports its phases through onProgress (progressOf below).
+    options?.onSend?.({ maxTokens: fullRequest.max_tokens, reportsPhases: true });
 
     const headers = this.betaHeaders(request, anthropicRequest);
     const live = this.liveHeaders(headers, 'stream');
 
-    // The call's deadlines are Membrane core's (createCallDeadline), on the
-    // signal it passes; this adapter says what it saw. Each chunk of the
-    // response body, the SSE pings the SDK drops before the loop below
-    // included, is the transport alive (observeBodyActivity). A content
-    // delta is content, and a thinking block's start is a silent think
-    // unless the body asks for summarized thinking, which streams deltas.
-    // (Membrane sends Fable and Mythos no thinking config, and they think
-    // silently by default.)
+    // The call's progress and liveness deadlines are Membrane core's
+    // (createCallDeadline), on the signal it passes; this adapter says what
+    // it saw. Each chunk of the response body, the SSE pings the SDK drops
+    // before the loop below included, is the transport alive
+    // (observeBodyActivity). A content delta is content, and so is the start
+    // of any block but a thinking one, a redacted_thinking block included,
+    // which arrives whole. A thinking block's start is a silent think unless
+    // the body asks for summarized thinking, which streams deltas. (Membrane
+    // sends Fable and Mythos no thinking config, and they think silently by
+    // default.)
     const summarized = (fullRequest.thinking as { display?: unknown } | undefined)?.display === 'summarized';
     const progressOf = (event: { type: string; content_block?: { type?: string } }): ProgressSeen | undefined =>
       event.type === 'content_block_delta' ? 'content'
-        : event.type === 'content_block_start' && event.content_block?.type === 'thinking' && !summarized ? 'think'
-          : undefined;
+        : event.type !== 'content_block_start' ? undefined
+          : event.content_block?.type !== 'thinking' ? 'content'
+            : summarized ? undefined : 'think';
     let session: ReturnType<AnthropicAdapter['credentialSession']> | undefined;
 
     try {

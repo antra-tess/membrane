@@ -1,6 +1,6 @@
 import { TimeoutAbortError, errorFromProviderStatus, networkError } from '../types/errors.js';
 import { imageForRequest, urlImageForRequest } from '../utils/image-media.js';
-import type { ProgressSeen } from '../types/provider.js';
+import type { ProgressSeen, SendReport } from '../types/provider.js';
 
 interface StreamErrorFrameFields {
   code?: unknown;
@@ -593,9 +593,10 @@ export function createCombinedSignal(
 }
 
 /**
- * The bound before a call's first content (TTFT), from the send: three times
- * the longest wait before a think began among successful Anthropic calls in
- * a production usage log, 2026-09-29 to 2026-10-12 (128 s). It covers the
+ * The bound before a call's first content (TTFT), from the send: a little
+ * over three times the longest wait before a think began among successful
+ * Anthropic calls in a production usage log, 2026-09-29 to 2026-10-12
+ * (128 s, so 384 s, rounded up). It covers the
  * wait for the first event too, which a large cache miss can stretch: on
  * 2026-07-20, 600,000-token contexts sent only pings for over 120 s before
  * their message_start.
@@ -633,20 +634,23 @@ const positiveMs = (value: unknown): number | undefined =>
   typeof value === 'number' && value > 0 ? value : undefined;
 
 /**
- * The deadlines for one provider call, combined with the caller's signal.
- * Membrane core owns them; adapters say what they saw through
- * `ProviderRequestOptions.onProgress` (`report`) and the output budget the
- * body they sent asks for through `onMaxTokens` (`reportMaxTokens`).
+ * The progress and liveness deadlines for one provider call, combined with
+ * the caller's signal. (A caller's per-request `timeoutMs` stays the
+ * adapter's own.) Membrane core owns them, and the adapter says what it saw:
+ * as it sends the request, what it sent (`ProviderRequestOptions.onSend`,
+ * `reportSend`), and then each event and sign of its transport
+ * (`ProviderRequestOptions.onProgress`, `report`).
  *
  * The progress deadline, by `progressTimeoutMs` (null counts as unset):
- * - Unset, in a call whose adapter reports phases (`phases`): bounds per
- *   phase. Before the first content, BEFORE_CONTENT_MS from the send. A
+ * - Unset, in a call whose adapter reported at the send, before any event,
+ *   that its stream reports phases: bounds per phase. Before the first
+ *   content, BEFORE_CONTENT_MS from the send. A
  *   silent think started before content is allowed its whole output budget
  *   at THINK_TOKENS_PER_SECOND from its start, and the call ends only once
  *   both have run out. After content, BETWEEN_EVENTS_MS between events, or
  *   the larger of that and the allowance after a silent think's start.
- * - Unset, in any other call (a non-streaming call, or an adapter that
- *   reports no phases): BEFORE_CONTENT_MS plus the output budget at
+ * - Unset, in any other call (a non-streaming call, or a stream whose
+ *   adapter reports no phases): BEFORE_CONTENT_MS plus the output budget at
  *   THINK_TOKENS_PER_SECOND, from the send and again from each event, since
  *   such a call can be silent until its whole answer arrives.
  * - A positive number, Infinity included: that many ms from the send and
@@ -658,9 +662,9 @@ const positiveMs = (value: unknown): number | undefined =>
  * `'alive'` report, so only an adapter that can see its transport gets it,
  * and any report renews it, in every phase.
  *
- * The output budget is the one the adapter reports, or else `maxTokens` when
- * it's a positive number, or else DEFAULT_BUDGET_TOKENS. A report that isn't
- * a positive finite number is ignored.
+ * The output budget is the one the adapter reports sending, or else
+ * `maxTokens` when it's a positive number, or else DEFAULT_BUDGET_TOKENS. A
+ * reported budget that isn't a positive finite number is ignored.
  *
  * Expiry aborts with the deadline mark, so every adapter's `isDeadlineAbort`
  * → `deadlineTimeoutError` path turns it into a TimeoutAbortError: a timeout
@@ -675,21 +679,23 @@ const positiveMs = (value: unknown): number | undefined =>
  */
 export function createCallDeadline(
   signal: AbortSignal | undefined,
-  options: { progressTimeoutMs?: number; idleTimeoutMs?: number; phases: boolean; maxTokens?: number },
+  options: { progressTimeoutMs?: number; idleTimeoutMs?: number; maxTokens?: number },
 ): {
   signal?: AbortSignal;
   report: (seen?: ProgressSeen) => void;
-  reportMaxTokens: (maxTokens: number | undefined) => void;
+  reportSend: (send: SendReport) => void;
   cleanup: () => void;
 } {
   const flatMs = positiveMs(options.progressTimeoutMs);
-  const mode: 'phases' | 'whole' | 'flat' | 'off' = options.progressTimeoutMs === undefined || options.progressTimeoutMs === null
-    ? (options.phases ? 'phases' : 'whole')
+  // Unset, the call starts on the bound for an answer that arrives whole,
+  // and takes the phases when its adapter reports them at the send.
+  let mode: 'phases' | 'whole' | 'flat' | 'off' = options.progressTimeoutMs === undefined || options.progressTimeoutMs === null
+    ? 'whole'
     : flatMs !== undefined ? 'flat' : 'off';
   const livenessMs = options.idleTimeoutMs === undefined || options.idleTimeoutMs === null
     ? LIVENESS_MS
     : positiveMs(options.idleTimeoutMs);
-  if (mode === 'off' && livenessMs === undefined) return { signal, report: () => {}, reportMaxTokens: () => {}, cleanup: () => {} };
+  if (mode === 'off' && livenessMs === undefined) return { signal, report: () => {}, reportSend: () => {}, cleanup: () => {} };
 
   const controller = new AbortController();
   const beganAt = Date.now();
@@ -764,7 +770,6 @@ export function createCallDeadline(
   // A report that brings the expiry closer moves the timer; a later one is
   // found when the timer fires early.
   const moved = (): void => {
-    if (over) return;
     const next = due();
     if (next.at < armedAt) arm(next.at);
   };
@@ -809,10 +814,13 @@ export function createCallDeadline(
       }
       moved();
     },
-    reportMaxTokens: (maxTokens) => {
+    reportSend: (send) => {
       if (over) return;
-      if (typeof maxTokens !== 'number' || !(maxTokens > 0) || !Number.isFinite(maxTokens)) return;
-      budget = maxTokens;
+      const maxTokens = send?.maxTokens;
+      if (typeof maxTokens === 'number' && maxTokens > 0 && Number.isFinite(maxTokens)) budget = maxTokens;
+      // Phases are reported at the send; a report after an event would
+      // judge the call by rules its events weren't read under.
+      if (send?.reportsPhases === true && mode === 'whole' && events === 0) mode = 'phases';
       moved();
     },
     cleanup: () => {

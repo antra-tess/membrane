@@ -557,7 +557,7 @@ export class Membrane {
         // unset, its bound is the one for an answer that arrives whole.
         const progress = createCallDeadline(
           receiptGuard ? receiptGuard.signal : options.signal,
-          { progressTimeoutMs: options.progressTimeoutMs, phases: false, maxTokens: finalRequest.maxTokens },
+          { progressTimeoutMs: options.progressTimeoutMs, maxTokens: finalRequest.maxTokens },
         );
         let rawProviderResponse: ProviderResponse;
         try {
@@ -571,7 +571,7 @@ export class Membrane {
             signal: progress.signal,
             timeoutMs: options.timeoutMs,
             onProgress: progress.report,
-            onMaxTokens: progress.reportMaxTokens,
+            onSend: progress.reportSend,
             onRequest: (req) => {
               rawRequest = req;
               if (useWireReceipt) {
@@ -2857,14 +2857,13 @@ export class Membrane {
       const progress = createCallDeadline(observedOptions.signal, {
         progressTimeoutMs,
         idleTimeoutMs,
-        phases: this.adapter.reportsProgressPhases === true,
         maxTokens: finalRequest.maxTokens,
       });
       try {
         const streamCall = this.adapter.stream(
           finalRequest,
           attemptCallbacks,
-          { ...observedOptions, signal: progress.signal, onProgress: progress.report, onMaxTokens: progress.reportMaxTokens },
+          { ...observedOptions, signal: progress.signal, onProgress: progress.report, onSend: progress.reportSend },
         );
         attemptResult = receiptGuard ? await receiptGuard.settle(streamCall) : await streamCall;
       } catch (error) {

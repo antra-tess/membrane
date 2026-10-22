@@ -213,9 +213,9 @@ export interface StreamOptions {
    * The progress deadline, per provider call. On expiry the call aborts as a
    * `TimeoutAbortError` (type `timeout`, aborted reason `'timeout'`).
    *
-   * Unset (the default, `null` included), it's bounded per phase on an
-   * adapter that reports phases (`reportsProgressPhases`: `AnthropicAdapter`,
-   * `BedrockAdapter`):
+   * Unset (the default, `null` included), it's bounded per phase on a
+   * stream whose adapter reports its phases (`AnthropicAdapter`,
+   * `BedrockAdapter`; see SendReport):
    * - before the first content delta, 400 s from the send;
    * - a silent think (thinking whose display isn't `'summarized'`, which
    *   sends nothing while it thinks) is allowed its request's whole

@@ -163,7 +163,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
   ): Promise<ProviderResponse> {
     const completionsRequest = this.buildRequest(request, options);
     options?.onRequest?.(completionsRequest);
-    options?.onMaxTokens?.(completionsRequest.max_tokens);
+    options?.onSend?.({ maxTokens: completionsRequest.max_tokens });
 
     try {
       const response = await this.makeRequest(completionsRequest, options);
@@ -184,7 +184,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
     // frame at all and every streamed call reports 0/0 tokens.
     completionsRequest.stream_options = { include_usage: true };
     options?.onRequest?.(completionsRequest);
-    options?.onMaxTokens?.(completionsRequest.max_tokens);
+    options?.onSend?.({ maxTokens: completionsRequest.max_tokens });
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {

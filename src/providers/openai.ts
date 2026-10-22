@@ -251,7 +251,7 @@ export class OpenAIAdapter implements ProviderAdapter {
     const openAIRequest = this.buildRequest(request);
     assertMessagePrefillSupported(openAIRequest.model, openAIRequest.messages, options, this.name, openAIRequest);
     options?.onRequest?.(openAIRequest);
-    options?.onMaxTokens?.(openAIRequest.max_completion_tokens ?? openAIRequest.max_tokens);
+    options?.onSend?.({ maxTokens: openAIRequest.max_completion_tokens ?? openAIRequest.max_tokens });
 
     try {
       const response = await this.makeRequest(openAIRequest, options);
@@ -272,7 +272,7 @@ export class OpenAIAdapter implements ProviderAdapter {
     openAIRequest.stream_options = { include_usage: true };
     assertMessagePrefillSupported(openAIRequest.model, openAIRequest.messages, options, this.name, openAIRequest);
     options?.onRequest?.(openAIRequest);
-    options?.onMaxTokens?.(openAIRequest.max_completion_tokens ?? openAIRequest.max_tokens);
+    options?.onSend?.({ maxTokens: openAIRequest.max_completion_tokens ?? openAIRequest.max_tokens });
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {

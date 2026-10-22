@@ -58,7 +58,7 @@ describe('stream() deadline forwarding', () => {
   it('forwards timeoutMs on the XML path, and keeps idleTimeoutMs', async () => {
     const adapter = new OptionRecordingAdapter();
     const membrane = new Membrane(adapter);
-    await membrane.stream(REQUEST, { timeoutMs: 1234, idleTimeoutMs: 5678 });
+    await membrane.stream({ ...REQUEST, toolMode: 'xml' }, { timeoutMs: 1234, idleTimeoutMs: 5678 });
     expect(adapter.seenOptions[0]?.timeoutMs).toBe(1234);
     expect(adapter.seenOptions[0] !== undefined && 'idleTimeoutMs' in adapter.seenOptions[0]).toBe(false);
   });

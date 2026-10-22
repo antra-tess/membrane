@@ -24,7 +24,7 @@ import { rawSseResponse } from '../helpers/sse-fixtures.js';
 import { chunkFrame, streamBody } from '../helpers/bedrock-event-stream.js';
 import { createCallDeadline, deadlineTimeoutError, isDeadlineAbort } from '../../src/providers/utils.js';
 import { TimeoutAbortError, isAbortedResponse } from '../../src/types/index.js';
-import type { NormalizedRequest, ProgressSeen } from '../../src/types/index.js';
+import type { NormalizedRequest, ProgressSeen, SendReport } from '../../src/types/index.js';
 import type { ProviderAdapter, ProviderRequest, ProviderRequestOptions, ProviderResponse, StreamCallbacks } from '../../src/types/provider.js';
 
 const S = 1000;
@@ -44,10 +44,13 @@ function expired(deadline: { signal?: AbortSignal }): string | undefined {
   return deadlineTimeoutError(signal.reason).message;
 }
 
-function start(options: Partial<Parameters<typeof createCallDeadline>[1]> = {}) {
+/** A call's deadlines on fake timers, its adapter reporting at the send that the stream reports its phases unless `phases` is false. */
+function start({ phases = true, ...options }: Parameters<typeof createCallDeadline>[1] & { phases?: boolean } = {}) {
   vi.useFakeTimers();
   vi.setSystemTime(new Date(BEGAN));
-  return createCallDeadline(undefined, { phases: true, ...options });
+  const deadline = createCallDeadline(undefined, options);
+  if (phases) deadline.reportSend({ reportsPhases: true });
+  return deadline;
 }
 
 describe('bounds per phase, on an adapter that reports them', () => {
@@ -164,6 +167,66 @@ describe('bounds per phase, on an adapter that reports them', () => {
   });
 });
 
+describe('the report at the send', () => {
+  it("takes the phases only from a report before any event, and stays on the whole-answer bound otherwise", () => {
+    const late = start({ phases: false });
+    late.report(); // message_start
+    late.reportSend({ reportsPhases: true });
+    vi.advanceTimersByTime(517 * S);
+    expect(expired(late)).toBeUndefined();
+    vi.advanceTimersByTime(1 * S);
+    expect(expired(late)).toMatch(/^No provider event within 518s/);
+    late.cleanup();
+
+    const declined = start({ phases: false });
+    declined.reportSend({ reportsPhases: false, maxTokens: 4096 });
+    vi.advanceTimersByTime(400 * S);
+    expect(expired(declined)).toBeUndefined();
+    declined.cleanup();
+  });
+});
+
+describe('the one timer', () => {
+  it('arms no new timer for a report that leaves the expiry where it was or later', () => {
+    const deadline = start();
+    deadline.report('alive');
+    deadline.report('content');
+    const armed = vi.spyOn(globalThis, 'setTimeout');
+    for (let i = 0; i < 1000; i++) {
+      vi.advanceTimersByTime(10);
+      deadline.report(i % 2 ? 'content' : 'alive');
+    }
+    expect(armed).toHaveBeenCalledTimes(0);
+    deadline.cleanup();
+  });
+
+  it('arms no timer at all for a flat bound of Infinity with the liveness bound off', () => {
+    const deadline = start({ progressTimeoutMs: Infinity, idleTimeoutMs: 0 });
+    deadline.report('content');
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(10 * 3600 * S);
+    expect(expired(deadline)).toBeUndefined();
+    deadline.cleanup();
+  });
+
+  it('measures the phases on the monotonic clock, so a step of the system clock moves no expiry', () => {
+    // setSystemTime moves Date alone, as an NTP step or a VM restore does.
+    const forward = start();
+    vi.setSystemTime(new Date('2026-10-22T13:00:00.000Z'));
+    vi.advanceTimersByTime(399 * S);
+    expect(expired(forward)).toBeUndefined();
+    vi.advanceTimersByTime(1 * S);
+    expect(expired(forward)).toMatch(/^No content within 400s of the send: the call began at 2026-10-22T12:00:00\.000Z/);
+    forward.cleanup();
+
+    const backward = start();
+    vi.setSystemTime(new Date('2026-10-22T11:00:00.000Z'));
+    vi.advanceTimersByTime(400 * S);
+    expect(expired(backward)).toMatch(/^No content within 400s of the send/);
+    backward.cleanup();
+  });
+});
+
 describe('the bound for an answer that can arrive whole', () => {
   it('bounds a call without phases at 400 s plus its budget at 35 tokens a second, from the send and from each event', () => {
     // The default budget, 4,096 tokens: ceil(117.03) = 118 s, so 518 s.
@@ -196,14 +259,14 @@ describe('the bound for an answer that can arrive whole', () => {
       return Infinity;
     };
     expect(at(start({ phases: false, maxTokens: 70_000 }))).toBe(2400);
-    for (const none of [0, -5, Number.NaN, undefined]) expect(at(start({ phases: false, maxTokens: none }))).toBe(518);
+    for (const none of [0, -5, Number.NaN, Infinity, undefined]) expect(at(start({ phases: false, maxTokens: none }))).toBe(518);
 
     const reported = start({ phases: false, maxTokens: 70_000 });
-    reported.reportMaxTokens(350);
+    reported.reportSend({ maxTokens: 350 });
     expect(at(reported)).toBe(410);
 
     const ignored = start({ phases: false, maxTokens: 350 });
-    for (const bad of [0, -1, Number.NaN, Infinity, undefined]) ignored.reportMaxTokens(bad);
+    for (const bad of [0, -1, Number.NaN, Infinity, undefined]) ignored.reportSend({ maxTokens: bad });
     expect(at(ignored)).toBe(410);
   });
 
@@ -302,7 +365,7 @@ describe('a deadline that has ended', () => {
     cleaned.cleanup();
     cleaned.report('alive');
     cleaned.report('content');
-    cleaned.reportMaxTokens(100);
+    cleaned.reportSend({ maxTokens: 100, reportsPhases: true });
     expect(vi.getTimerCount()).toBe(0);
 
     const ran = start({ progressTimeoutMs: 1000 });
@@ -314,7 +377,7 @@ describe('a deadline that has ended', () => {
     ran.cleanup();
 
     const caller = new AbortController();
-    const left = createCallDeadline(caller.signal, { phases: true });
+    const left = createCallDeadline(caller.signal, {});
     caller.abort('zz gone');
     expect(left.signal!.reason).toBe('zz gone');
     left.report('alive');
@@ -328,10 +391,11 @@ describe('Membrane core: which bound each call gets', () => {
   class Silent implements ProviderAdapter {
     readonly name = 'zz-silent';
     readonly seen: Array<ProviderRequestOptions | undefined> = [];
-    constructor(readonly reportsProgressPhases: boolean, private readonly onSend?: (options: ProviderRequestOptions) => void) {}
+    constructor(private readonly reportsPhases: boolean, private readonly onSend?: (options: ProviderRequestOptions) => void) {}
     supportsModel(): boolean { return true; }
-    private async attempt(options?: ProviderRequestOptions): Promise<ProviderResponse> {
+    private async attempt(options?: ProviderRequestOptions, streaming = false): Promise<ProviderResponse> {
       this.seen.push(options);
+      if (streaming && this.reportsPhases) options?.onSend?.({ reportsPhases: true });
       this.onSend?.(options!);
       const signal = options!.signal!;
       return await new Promise<never>((_resolve, reject) => {
@@ -339,7 +403,7 @@ describe('Membrane core: which bound each call gets', () => {
       });
     }
     async complete(_request: ProviderRequest, options?: ProviderRequestOptions): Promise<ProviderResponse> { return this.attempt(options); }
-    async stream(_request: ProviderRequest, _callbacks: StreamCallbacks, options?: ProviderRequestOptions): Promise<ProviderResponse> { return this.attempt(options); }
+    async stream(_request: ProviderRequest, _callbacks: StreamCallbacks, options?: ProviderRequestOptions): Promise<ProviderResponse> { return this.attempt(options, true); }
   }
   const REQUEST: NormalizedRequest = {
     messages: [{ participant: 'User', content: [{ type: 'text', text: 'zz hello' }] }],
@@ -374,17 +438,33 @@ describe('Membrane core: which bound each call gets', () => {
     expect(isAbortedResponse(unphased.result)).toBe(true);
   });
 
-  it("sizes a stream's bound from the request's maxTokens when the adapter reports none", async () => {
+  it("sizes the bound from the request's maxTokens when the adapter reports none, on complete() and stream()", async () => {
     vi.useFakeTimers();
     const large = { ...REQUEST, config: { ...REQUEST.config, maxTokens: 70_000 } };
-    const stream = await settlesAfter(new Membrane(new Silent(false)).stream(large));
-    expect(stream.seconds).toBe(2400);
+    expect((await settlesAfter(new Membrane(new Silent(false)).stream(large))).seconds).toBe(2400);
+    expect((await settlesAfter(new Membrane(new Silent(false)).complete(large))).seconds).toBe(2400);
   });
 
-  it("sizes the bound from the budget the adapter reports sending", async () => {
+  it("sizes the bound from the budget the adapter reports sending, on complete() and stream()", async () => {
     vi.useFakeTimers();
-    const reports = await settlesAfter(new Membrane(new Silent(false, (options) => options.onMaxTokens?.(70_000))).complete(REQUEST));
-    expect(reports.seconds).toBe(2400);
+    const reporting = () => new Silent(false, (options) => options.onSend?.({ maxTokens: 70_000 }));
+    expect((await settlesAfter(new Membrane(reporting()).complete(REQUEST))).seconds).toBe(2400);
+    expect((await settlesAfter(new Membrane(reporting()).stream(REQUEST))).seconds).toBe(2400);
+  });
+
+  it("bounds streamYielding per phase on both tool paths, and stream({ streaming: false }) as a whole answer", async () => {
+    vi.useFakeTimers();
+    const tools = [{ name: 'zz_probe', description: 'zz probe', inputSchema: { type: 'object' as const, properties: {} } }];
+    for (const request of [{ ...REQUEST, toolMode: 'native' as const, tools }, { ...REQUEST, toolMode: 'xml' as const }]) {
+      const events: Array<{ type: string; reason?: string }> = [];
+      const ended = await settlesAfter((async () => {
+        for await (const event of new Membrane(new Silent(true)).streamYielding(request)) events.push(event as never);
+      })());
+      expect(ended.seconds).toBe(400);
+      expect(events.find((e) => e.type === 'aborted')).toMatchObject({ reason: 'timeout' });
+    }
+    const fallback = await settlesAfter(new Membrane(new Silent(true)).stream({ ...REQUEST, streaming: false }));
+    expect(fallback.seconds).toBe(518);
   });
 
   it('passes idleTimeoutMs to the liveness bound, and keeps it from the adapter', async () => {
@@ -434,16 +514,17 @@ const anthropicRequest = (extra?: Record<string, unknown>): ProviderRequest => (
 const anthropic = (): AnthropicAdapter => new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
 
 /** Every report one Anthropic stream makes, one chunk of body per frame. */
-async function anthropicReports(frames: string[], request: ProviderRequest): Promise<{ events: Array<ProgressSeen | undefined>; alive: number; maxTokens: Array<number | undefined> }> {
-  stubFetch(() => rawSseResponse(frames));
+async function anthropicReports(frames: string[], request: ProviderRequest): Promise<{ events: Array<ProgressSeen | undefined>; alive: number; sends: SendReport[]; sentBeforeFetch: boolean }> {
   const events: Array<ProgressSeen | undefined> = [];
-  const maxTokens: Array<number | undefined> = [];
+  const sends: SendReport[] = [];
+  let sentBeforeFetch = false;
+  stubFetch(() => { sentBeforeFetch = sends.length === 1; return rawSseResponse(frames); });
   let alive = 0;
   await anthropic().stream(request, { onChunk: () => {} }, {
     onProgress: (seen) => { if (seen === 'alive') alive++; else events.push(seen); },
-    onMaxTokens: (n) => maxTokens.push(n),
+    onSend: (send) => sends.push(send),
   });
-  return { events, alive, maxTokens };
+  return { events, alive, sends, sentBeforeFetch };
 }
 
 describe('AnthropicAdapter reports what it saw', () => {
@@ -452,8 +533,8 @@ describe('AnthropicAdapter reports what it saw', () => {
       thinkThenAnswer({ type: 'thinking', thinking: '', signature: '' }),
       anthropicRequest({ thinking: { type: 'adaptive', display: 'omitted' } }),
     );
-    // message_start, the think, its signature, its stop, the text block, its delta, its stop, message_delta (the terminal event).
-    expect(events).toEqual([undefined, 'think', 'content', undefined, undefined, 'content', undefined, undefined]);
+    // message_start, the think, its signature, its stop, the text block's start and delta, its stop, message_delta (the terminal event).
+    expect(events).toEqual([undefined, 'think', 'content', undefined, 'content', 'content', undefined, undefined]);
     expect(alive).toBeGreaterThan(0);
   });
 
@@ -464,11 +545,18 @@ describe('AnthropicAdapter reports what it saw', () => {
     );
     expect(summarized.events).not.toContain('think');
 
-    const redacted = await anthropicReports(
-      thinkThenAnswer({ type: 'redacted_thinking', data: 'zz-redacted' }),
-      anthropicRequest({ thinking: { type: 'adaptive', display: 'omitted' } }),
-    );
-    expect(redacted.events).not.toContain('think');
+    // A redacted block arrives whole, its think done: it's content, which ends the phase before content.
+    stubFetch(() => rawSseResponse([
+      frame('message_start', { message }),
+      frame('content_block_start', { index: 0, content_block: { type: 'redacted_thinking', data: 'zz-redacted' } }),
+      frame('content_block_stop', { index: 0 }),
+      frame('message_delta', { delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 2 } }),
+    ]));
+    const redacted: Array<ProgressSeen | undefined> = [];
+    await anthropic().stream(anthropicRequest({ thinking: { type: 'adaptive', display: 'omitted' } }), { onChunk: () => {} }, {
+      onProgress: (seen) => { if (seen !== 'alive') redacted.push(seen); },
+    });
+    expect(redacted).toEqual([undefined, 'content', undefined, undefined]);
   });
 
   it("counts a think with no thinking config sent as silent: the models that think without one do so silently", async () => {
@@ -476,18 +564,24 @@ describe('AnthropicAdapter reports what it saw', () => {
     expect(events).toContain('think');
   });
 
-  it('reports the max_tokens it sends, its default and extra included, once per call', async () => {
-    const asked = await anthropicReports(thinkThenAnswer({ type: 'thinking', thinking: '', signature: '' }), anthropicRequest());
-    expect(asked.maxTokens).toEqual([2048]);
-    const byDefault = await anthropicReports(thinkThenAnswer({ type: 'thinking', thinking: '', signature: '' }), { ...anthropicRequest(), maxTokens: 0 });
-    expect(byDefault.maxTokens).toEqual([4096]);
-    const byExtra = await anthropicReports(thinkThenAnswer({ type: 'thinking', thinking: '', signature: '' }), anthropicRequest({ max_tokens: 9000 }));
-    expect(byExtra.maxTokens).toEqual([9000]);
+  it('reports at the send, before the request goes out, the max_tokens it sends (its default and extra included) and that the stream reports phases', async () => {
+    const answer = thinkThenAnswer({ type: 'thinking', thinking: '', signature: '' });
+    const asked = await anthropicReports(answer, anthropicRequest());
+    expect(asked.sends).toEqual([{ maxTokens: 2048, reportsPhases: true }]);
+    expect(asked.sentBeforeFetch).toBe(true);
+    expect((await anthropicReports(answer, { ...anthropicRequest(), maxTokens: 0 })).sends).toEqual([{ maxTokens: 4096, reportsPhases: true }]);
+    expect((await anthropicReports(answer, anthropicRequest({ max_tokens: 9000 }))).sends).toEqual([{ maxTokens: 9000, reportsPhases: true }]);
 
-    stubFetch(() => Response.json({ ...message, content: [{ type: 'text', text: 'zz answer' }], stop_reason: 'end_turn' }));
-    const completeReports: Array<number | undefined> = [];
-    await anthropic().complete(anthropicRequest(), { onMaxTokens: (n) => completeReports.push(n) });
-    expect(completeReports).toEqual([2048]);
+    // complete() reports no phases: its answer arrives whole.
+    const completeSends: SendReport[] = [];
+    let completeSentBeforeFetch = false;
+    stubFetch(() => {
+      completeSentBeforeFetch = completeSends.length === 1;
+      return Response.json({ ...message, content: [{ type: 'text', text: 'zz answer' }], stop_reason: 'end_turn' });
+    });
+    await anthropic().complete(anthropicRequest({ max_tokens: 9000 }), { onSend: (send) => completeSends.push(send) });
+    expect(completeSends).toEqual([{ maxTokens: 9000 }]);
+    expect(completeSentBeforeFetch).toBe(true);
   });
 });
 
@@ -507,28 +601,50 @@ describe('BedrockAdapter reports what it saw', () => {
     ...(thinking ? { thinking } : {}),
   } as never);
 
-  it("reports a ping as alive, a silent think's start as think and a content delta as content, and the max_tokens it sends", async () => {
-    stubFetch(() => new Response(frames({ type: 'thinking', thinking: '' }), { status: 200 }));
+  it("reports each body chunk as alive, a ping as nothing more, a silent think's start as think, a content delta as content, and at the send the max_tokens it sends and its phases", async () => {
+    const sends: SendReport[] = [];
+    let sentBeforeFetch = false;
+    stubFetch(() => { sentBeforeFetch = sends.length === 1; return new Response(frames({ type: 'thinking', thinking: '' }), { status: 200 }); });
     const seen: Array<ProgressSeen | undefined> = [];
-    const maxTokens: Array<number | undefined> = [];
     await bedrock().stream(request({ type: 'adaptive', display: 'omitted' }), { onChunk: () => {} }, {
-      onProgress: (kind) => seen.push(kind), onMaxTokens: (n) => maxTokens.push(n),
+      onProgress: (kind) => seen.push(kind), onSend: (send) => sends.push(send),
     }).catch(() => undefined);
-    expect(seen).toEqual([undefined, 'alive', 'think', 'content', undefined, undefined]);
-    expect(maxTokens).toEqual([3000]);
+    // Six frames, one chunk each: each chunk is alive, then the event it carries (the ping none).
+    expect(seen).toEqual(['alive', undefined, 'alive', 'alive', 'think', 'alive', 'content', 'alive', undefined, 'alive', undefined]);
+    expect(sends).toEqual([{ maxTokens: 3000, reportsPhases: true }]);
+    expect(sentBeforeFetch).toBe(true);
   });
 
-  it('reports no think for a body that asks for summarized thinking', async () => {
+  it('reports no think for a body that asks for summarized thinking, and its events still', async () => {
     stubFetch(() => new Response(frames({ type: 'thinking', thinking: '' }), { status: 200 }));
     const seen: Array<ProgressSeen | undefined> = [];
     await bedrock().stream(request({ type: 'adaptive', display: 'summarized' }), { onChunk: () => {} }, {
       onProgress: (kind) => seen.push(kind),
     }).catch(() => undefined);
-    expect(seen).not.toContain('think');
+    expect(seen.filter((kind) => kind !== 'alive')).toEqual([undefined, undefined, 'content', undefined, undefined]);
+  });
+
+  it('reports the max_tokens it sends on complete(), extra included, and no phases', async () => {
+    const sends: SendReport[] = [];
+    stubFetch(() => Response.json({ type: 'message', content: [], usage: { input_tokens: 1, output_tokens: 1 } }));
+    await bedrock().complete({ ...request(), extra: { max_tokens: 9000 } } as never, { onSend: (send) => sends.push(send) }).catch(() => undefined);
+    expect(sends).toEqual([{ maxTokens: 9000 }]);
   });
 });
 
 describe('every other adapter reports the output budget its body asks for', () => {
+  it('openai: a model sent max_completion_tokens reports that', async () => {
+    stubFetch(() => rawSseResponse(['data: {"zz":1}\n\n']));
+    const reported: SendReport[] = [];
+    let body: Record<string, unknown> | undefined;
+    await new OpenAIAdapter({ apiKey: 'zz-not-a-key' }).complete(
+      { model: 'gpt-5', messages: [{ role: 'user', content: 'zz hello' }], maxTokens: 700 },
+      { onSend: (send) => reported.push(send), onRequest: (req) => { body = req as Record<string, unknown>; } },
+    ).catch(() => undefined);
+    expect(body?.['max_completion_tokens']).toBe(700);
+    expect(reported).toEqual([{ maxTokens: 700 }]);
+  });
+
   const sseBody = ['data: {"zz":1}\n\n'];
   const adapters: Array<[string, () => { stream: (...args: never[]) => Promise<unknown>; complete: (...args: never[]) => Promise<unknown> }]> = [
     ['openai', () => new OpenAIAdapter({ apiKey: 'zz-not-a-key' })],
@@ -539,21 +655,35 @@ describe('every other adapter reports the output budget its body asks for', () =
     ['openai-responses-api', () => new OpenAIResponsesAPIAdapter({ apiKey: 'zz-not-a-key' })],
   ] as never;
 
+  // Each adapter's own field, set through extra over what it built.
+  const extraOf: Record<string, Record<string, unknown>> = {
+    'openai': { max_tokens: 9000 },
+    'gemini': { generationConfig: { maxOutputTokens: 9000 } },
+    'openai-completions': { max_tokens: 9000 },
+    'openai-compatible': { max_tokens: 9000 },
+    'openrouter': { max_tokens: 9000 },
+    'openai-responses-api': { max_output_tokens: 9000 },
+  };
+
   for (const [name, build] of adapters) {
-    it(`${name}: its request's maxTokens, or its default of 4096, on stream() and complete()`, async () => {
-      stubFetch(() => rawSseResponse(sseBody));
-      const reported: Array<number | undefined> = [];
+    it(`${name}: the limit its body asks for, its default and extra included, at the send on stream() and complete(), and no phases`, async () => {
+      const reported: SendReport[] = [];
+      const atFetch: number[] = [];
+      stubFetch(() => { atFetch.push(reported.length); return rawSseResponse(sseBody); });
       const adapter = build() as unknown as {
         stream: (request: unknown, callbacks: unknown, options: ProviderRequestOptions) => Promise<unknown>;
         complete: (request: unknown, options: ProviderRequestOptions) => Promise<unknown>;
       };
-      const options: ProviderRequestOptions = { onMaxTokens: (n) => reported.push(n) };
-      for (const maxTokens of [16, 0]) {
-        const request = { model: 'zz-model', messages: [{ role: 'user', content: 'zz hello' }], maxTokens };
+      const options: ProviderRequestOptions = { onSend: (send) => reported.push(send) };
+      for (const [maxTokens, extra] of [[16, undefined], [0, undefined], [16, extraOf[name]]] as const) {
+        const request = { model: 'zz-model', messages: [{ role: 'user', content: 'zz hello' }], maxTokens, ...(extra ? { extra } : {}) };
         await adapter.stream(request, { onChunk: () => {} }, options).catch(() => undefined);
         await adapter.complete(request, options).catch(() => undefined);
       }
-      expect(reported).toEqual([16, 16, 4096, 4096]);
+      expect(reported.map((send) => send.maxTokens)).toEqual([16, 16, 4096, 4096, 9000, 9000]);
+      expect(reported.some((send) => 'reportsPhases' in send)).toBe(false);
+      // Each report came before the request it describes went out.
+      expect(atFetch).toEqual([1, 2, 3, 4, 5, 6]);
     });
   }
 });
