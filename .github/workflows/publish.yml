@@ -116,5 +116,5 @@ jobs:
             gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
           else
             gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" \
-              --notes-file notes.md --verify-tag
+              --notes-file notes.md --verify-tag --latest=false
           fi
