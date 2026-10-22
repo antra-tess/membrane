@@ -323,6 +323,13 @@ export interface AbortedResponse {
   reason: 'user' | 'timeout' | 'error';
 
   /**
+   * What ended it, when the caller didn't: the error's message. A deadline's
+   * names the bound that ran out and what it was sized from, such as "No
+   * content within 400s of the send: …". Absent for the caller's own cancel.
+   */
+  message?: string;
+
+  /**
    * Raw assistant text accumulated before abort.
    * Use for displaying partial output or as prefill to continue.
    */

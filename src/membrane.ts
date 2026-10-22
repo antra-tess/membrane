@@ -772,13 +772,15 @@ export class Membrane {
         // abort MembraneError) or an adapter's own deadline. Nothing was
         // streamed, so nothing partial is reported.
         if (this.isCancellation(error, options.signal)) {
+          const { reason, message } = this.abortOutcome(error, options.signal);
           return this.buildAbortedResponse(
             '',
             { inputTokens: 0, outputTokens: 0 },
             [],
             [],
-            this.abortReason(error, options.signal),
-            []
+            reason,
+            [],
+            message,
           );
         }
         throw error;
@@ -1581,15 +1583,17 @@ export class Membrane {
         const fullAccumulated = parser.getAccumulated();
         const newContent = fullAccumulated.slice(initialPrefillLength);
 
+        const { reason, message } = this.abortOutcome(error, signal);
         return this.buildAbortedResponse(
           newContent,
           turnUsage.total,
           executedToolCalls,
           executedToolResults,
-          this.abortReason(error, signal),
+          reason,
           xmlToolProtocol
             ? attachSplitResults(parseAccumulatedIntoBlocks(newContent, { tools: request.tools, ...(initialBlockType ? { startInsideBlock: initialBlockType } : {}) }), splitRounds).blocks
-            : streamedThinking.content(newContent, (value, context) => formatter.parseContentBlocks(value, request.tools, context))
+            : streamedThinking.content(newContent, (value, context) => formatter.parseContentBlocks(value, request.tools, context)),
+          message,
         );
       }
       // Re-throw with rawRequest attached for logging
@@ -1875,13 +1879,15 @@ export class Membrane {
     } catch (error) {
       // A cancellation, by the caller's signal or a typed abort.
       if (this.isCancellation(error, signal)) {
+        const { reason, message } = this.abortOutcome(error, signal);
         return this.buildAbortedResponse(
           allTextAccumulated,
           turnUsage.total,
           executedToolCalls,
           executedToolResults,
-          this.abortReason(error, signal),
-          [...allContentBlocks, ...(roundReceived?.() ?? [])]
+          reason,
+          [...allContentBlocks, ...(roundReceived?.() ?? [])],
+          message,
         );
       }
       // Re-throw with rawRequest attached for logging
@@ -3751,6 +3757,16 @@ export class Membrane {
   }
 
   /**
+   * Why a caught abort happened, with what ended it when the caller didn't:
+   * the error's message, which for a deadline names the bound that ran out.
+   */
+  private abortOutcome(error: unknown, signal?: AbortSignal): { reason: 'user' | 'timeout' | 'error'; message?: string } {
+    const reason = this.abortReason(error, signal);
+    const message = reason !== 'user' && error instanceof Error && error.message ? error.message : undefined;
+    return message !== undefined ? { reason, message } : { reason };
+  }
+
+  /**
    * Build an AbortedResponse from current execution state
    */
   private buildAbortedResponse(
@@ -3759,13 +3775,15 @@ export class Membrane {
     toolCalls: ToolCall[],
     toolResults: ToolResult[],
     reason: 'user' | 'timeout' | 'error',
-    blocks: ContentBlock[]
+    blocks: ContentBlock[],
+    message?: string,
   ): AbortedResponse {
     return {
       aborted: true,
       partialContent: blocks.length > 0 ? blocks : undefined,
       partialUsage: usage,
       reason,
+      ...(message !== undefined ? { message } : {}),
       rawAssistantText: accumulated || undefined,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       toolResults: toolResults.length > 0 ? toolResults : undefined,
@@ -4533,7 +4551,7 @@ export class Membrane {
       // Error. Reporting again here would deliver a second aborted.
       if (stream.isCancelled) return;
       if (this.isAbortError(error)) {
-        stream.emit({ type: 'aborted', reason: this.abortReason(error, stream.signal), ...abortedPartial() });
+        stream.emit({ type: 'aborted', ...this.abortOutcome(error, stream.signal), ...abortedPartial() });
       } else {
         throw error;
       }
@@ -4932,7 +4950,7 @@ export class Membrane {
       // As above: a cancelled stream has already reported its abort.
       if (stream.isCancelled) return;
       if (this.isAbortError(error)) {
-        stream.emit({ type: 'aborted', reason: this.abortReason(error, stream.signal), ...abortedPartial() });
+        stream.emit({ type: 'aborted', ...this.abortOutcome(error, stream.signal), ...abortedPartial() });
       } else {
         throw error;
       }

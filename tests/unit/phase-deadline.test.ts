@@ -464,6 +464,8 @@ describe('Membrane core: which bound each call gets', () => {
     expect(phased.seconds).toBe(400);
     expect(isAbortedResponse(phased.result)).toBe(true);
     expect((phased.result as { reason: string }).reason).toBe('timeout');
+    // The aborted result carries the deadline's message, naming the bound that ran out.
+    expect((phased.result as { message?: string }).message).toMatch(/^No content within 400s of the send: /);
 
     const whole = await settlesAfter(new Membrane(new Silent(true)).complete(REQUEST));
     expect(whole.seconds).toBe(518);
@@ -473,6 +475,35 @@ describe('Membrane core: which bound each call gets', () => {
     const unphased = await settlesAfter(new Membrane(new Silent(false)).stream(REQUEST));
     expect(unphased.seconds).toBe(518);
     expect(isAbortedResponse(unphased.result)).toBe(true);
+    expect((unphased.result as { message?: string }).message).toMatch(/^No answer within 518s \(400s plus max_tokens 4096 at 35 tokens a second\): /);
+
+    const xml = await settlesAfter(new Membrane(new Silent(true)).stream({ ...REQUEST, toolMode: 'xml' }));
+    expect(xml.seconds).toBe(400);
+    expect(xml.result).toMatchObject({ aborted: true, reason: 'timeout' });
+    expect((xml.result as { message?: string }).message).toMatch(/^No content within 400s of the send: /);
+  });
+
+  it("gives a cancel by the caller no message, on stream() and streamYielding", async () => {
+    vi.useFakeTimers();
+    const caller = new AbortController();
+    const cancelled = settlesAfter(new Membrane(new Silent(true)).stream(REQUEST, { signal: caller.signal }));
+    await vi.advanceTimersByTimeAsync(10 * S);
+    caller.abort();
+    const { result } = await cancelled;
+    expect(result).toMatchObject({ aborted: true, reason: 'user' });
+    expect('message' in (result as object)).toBe(false);
+
+    const yielding = new AbortController();
+    const events: Array<{ type: string; reason?: string; message?: string }> = [];
+    const ended = settlesAfter((async () => {
+      for await (const event of new Membrane(new Silent(true)).streamYielding(REQUEST, { signal: yielding.signal })) events.push(event as never);
+    })());
+    await vi.advanceTimersByTimeAsync(10 * S);
+    yielding.abort();
+    await ended;
+    const aborted = events.find((e) => e.type === 'aborted');
+    expect(aborted).toMatchObject({ reason: 'user' });
+    expect(aborted && 'message' in aborted).toBe(false);
   });
 
   it("sizes the bound from the request's maxTokens when the adapter reports none, on complete() and stream()", async () => {
@@ -493,15 +524,16 @@ describe('Membrane core: which bound each call gets', () => {
     vi.useFakeTimers();
     const tools = [{ name: 'zz_probe', description: 'zz probe', inputSchema: { type: 'object' as const, properties: {} } }];
     for (const request of [{ ...REQUEST, toolMode: 'native' as const, tools }, { ...REQUEST, toolMode: 'xml' as const }]) {
-      const events: Array<{ type: string; reason?: string }> = [];
+      const events: Array<{ type: string; reason?: string; message?: string }> = [];
       const ended = await settlesAfter((async () => {
         for await (const event of new Membrane(new Silent(true)).streamYielding(request)) events.push(event as never);
       })());
       expect(ended.seconds).toBe(400);
-      expect(events.find((e) => e.type === 'aborted')).toMatchObject({ reason: 'timeout' });
+      expect(events.find((e) => e.type === 'aborted')).toMatchObject({ reason: 'timeout', message: expect.stringMatching(/^No content within 400s of the send: /) });
     }
     const fallback = await settlesAfter(new Membrane(new Silent(true)).stream({ ...REQUEST, streaming: false }));
     expect(fallback.seconds).toBe(518);
+    expect(fallback.result).toMatchObject({ aborted: true, reason: 'timeout', message: expect.stringMatching(/^No answer within 518s/) });
   });
 
   it('passes idleTimeoutMs to the liveness bound, and keeps it from the adapter', async () => {
