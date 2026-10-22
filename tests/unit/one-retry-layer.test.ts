@@ -499,6 +499,49 @@ describe('a deadline on a sent request is the caller’s; a connect timeout is s
       expect(fetch).toHaveBeenCalledTimes(1);
     });
 
+    // A read that fails once content has arrived: the frames, then the failure.
+    const failedReadAfter = (frames: string[], failure: () => Error) => vi.fn(async () => new Response(
+      new ReadableStream({
+        start(controller) {
+          for (const frame of frames) controller.enqueue(new TextEncoder().encode(frame));
+          setTimeout(() => controller.error(failure()), 0);
+        },
+      }),
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    ));
+    const sse = (event: object) => `event: ${(event as { type: string }).type}\ndata: ${JSON.stringify(event)}\n\n`;
+    const contentFrames = [
+      sse({ type: 'message_start', message: { id: 'zz', type: 'message', role: 'assistant', model: 'zz-model', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1 } } }),
+      sse({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }),
+      sse({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'zz partial' } }),
+    ];
+
+    it.each([
+      ['stream', 'undici’s body timeout', bodyTimeout],
+      ['yielding', 'undici’s body timeout', bodyTimeout],
+      ['stream', 'Bun’s fetch timeout', bunTimeout],
+      ['yielding', 'Bun’s fetch timeout', bunTimeout],
+    ] as const)('%s: %s after content ends the call by throwing, not as an aborted result, and is sent once', async (entry, _name, failure) => {
+      const fetch = failedReadAfter(contentFrames, failure);
+      vi.stubGlobal('fetch', fetch);
+      // The content reached the caller before the failure ended the call.
+      let arrived = '';
+      let thrown: unknown;
+      if (entry === 'stream') {
+        thrown = await anthropic().stream(REQUEST, { onChunk: (chunk) => { arrived += chunk; } }).catch((e) => e);
+      } else {
+        const events = await yielding(anthropic());
+        arrived = events.map((e) => (e.type === 'tokens' ? e.content : '')).join('');
+        const last = events.at(-1)!;
+        thrown = last.type === 'error' ? last.error : last;
+      }
+      expect(arrived).toBe('zz partial');
+      expect(isAbortedResponse(thrown)).toBe(false);
+      expect(thrown).toMatchObject({ type: 'timeout', retryable: true });
+      expect(isDeadlineExpiry(thrown)).toBe(true);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
     it.each(['stream', 'yielding'] as const)('%s: Bun’s fetch timeout before any event, wrapped by MessageStream, is sent once', async (entry) => {
       const fetch = failedRead(bunTimeout);
       vi.stubGlobal('fetch', fetch);
