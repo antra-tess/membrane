@@ -19,8 +19,9 @@ export interface RetryConfig {
    * to two retries; 0 or 1 means no retries (default: 3). It covers a 5xx,
    * a provider's 408 and a connection failure, on every entry point and
    * adapter. A deadline that runs out on a request already sent is left to
-   * the caller: AnthropicAdapter's idle and first-event watchdogs, undici's
-   * headers and body timeouts, Bun's fetch timeout, and every timeout
+   * the caller: membrane's own deadlines for the call (`progressTimeoutMs`,
+   * `idleTimeoutMs`), undici's headers and body timeouts, Bun's fetch
+   * timeout, and every timeout
    * AnthropicAdapter's SDK client reports, which include a connect timeout
    * (the SDK reports both the same way). On Node, the other adapters'
    * connect timeouts are sent again like any connection failure. Bun's fetch

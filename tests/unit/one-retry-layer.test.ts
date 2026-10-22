@@ -39,6 +39,7 @@ import {
   serverError,
   timeoutError,
 } from '../../src/types/errors.js';
+import { isAbortedResponse } from '../../src/types/index.js';
 import type {
   NormalizedRequest,
   ProviderAdapter,
@@ -236,23 +237,32 @@ describe('AnthropicAdapter makes one attempt at each request', () => {
   );
 });
 
-describe("AnthropicAdapter's watchdog expiry is a deadline", () => {
-  it('a stream with no first event ends with a timeout that carries the deadline mark', async () => {
+describe("Membrane's own deadline on an Anthropic stream is the caller's", () => {
+  it('a stream with no first event ends at the 400 s bound for first content, sent once, as an abort with reason timeout', async () => {
+    vi.useFakeTimers();
     // Headers arrive, then nothing: the body stays open until the request is aborted.
-    vi.stubGlobal('fetch', vi.fn(async (_url: unknown, init?: { signal?: AbortSignal }) => new Response(
+    const fetch = vi.fn(async (_url: unknown, init?: { signal?: AbortSignal }) => new Response(
       new ReadableStream({
         start(controller) {
           init?.signal?.addEventListener('abort', () => controller.error(new DOMException('aborted', 'AbortError')));
         },
       }),
       { status: 200, headers: { 'content-type': 'text/event-stream' } },
-    )));
-    const adapter = new AnthropicAdapter({ apiKey: 'zz-key', cacheKeepalive: { enabled: false } });
-    const wire: ProviderRequest = { model: 'zz-model', messages: [{ role: 'user', content: 'zz go' }], maxTokens: 16 };
-    const thrown = await adapter.stream(wire, { onChunk() {} }, { firstEventTimeoutMs: 50 }).catch((e) => e);
-
-    expect(thrown).toMatchObject({ type: 'timeout', retryable: true });
-    expect(isDeadlineExpiry(thrown)).toBe(true);
+    ));
+    vi.stubGlobal('fetch', fetch);
+    try {
+      const membrane = new Membrane(new AnthropicAdapter({ apiKey: 'zz-key', cacheKeepalive: { enabled: false } }), FAST);
+      let settled: unknown;
+      void membrane.stream(REQUEST).then((r) => { settled = r; }, (e: unknown) => { settled = e; });
+      await vi.advanceTimersByTimeAsync(399_000);
+      expect(settled).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(isAbortedResponse(settled)).toBe(true);
+      expect((settled as { reason: string }).reason).toBe('timeout');
+      expect(fetch).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

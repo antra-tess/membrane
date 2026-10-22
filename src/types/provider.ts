@@ -265,6 +265,16 @@ export interface ProviderAdapter {
    * reported through onRequest. Decorators must forward this capability. */
   readonly cacheReceiptBasis?: 'provider-request' | 'wire-request';
 
+  /**
+   * Whether `stream()` reports the phases of a call through `onProgress`: a
+   * content delta as `'content'` and a silent think's start as `'think'`.
+   * Membrane core then bounds the call per phase (see StreamOptions.
+   * progressTimeoutMs); a call on an adapter that doesn't declare it, and
+   * every `complete()`, gets the bound for a call whose answer can arrive
+   * whole. Decorators must forward this capability with the callback.
+   */
+  readonly reportsProgressPhases?: boolean;
+
   /** Check if this adapter handles a model */
   supportsModel(modelId: string): boolean;
   
@@ -344,6 +354,23 @@ export interface ProviderRequestContext {
   requiresAssistantPrefill: boolean;
 }
 
+/**
+ * What an adapter saw, reported through `ProviderRequestOptions.onProgress`
+ * for the deadlines Membrane core keeps per provider call (createCallDeadline
+ * in providers/utils.ts). An adapter calls it with nothing for any other
+ * parsed provider event.
+ *
+ * - `'content'`: a content delta of any kind (text, thinking, tool input, a
+ *   signature): the model is producing output.
+ * - `'think'`: a silent think has started: a thinking block began in a call
+ *   whose body doesn't ask for `display: 'summarized'`, so nothing need
+ *   arrive until the think ends.
+ * - `'alive'`: transport only, such as a chunk of the response body or a
+ *   keepalive ping. It proves the connection is up, not that the model is
+ *   making progress, so it renews the liveness bound and nothing else.
+ */
+export type ProgressSeen = 'content' | 'think' | 'alive';
+
 export interface ProviderRequestOptions {
   /** Build/protocol facts for validation against the adapter's final model/body.
    * Not provider JSON. Decorators forward this context with the other options. */
@@ -355,30 +382,33 @@ export interface ProviderRequestOptions {
   promptMessages?: import('./message.js').NormalizedMessage[];
   signal?: AbortSignal;
   timeoutMs?: number;
-  /** Anthropic idle deadline after the first SDK event (default: 600000 ms).
-   * Nonempty Web response-body bytes, including SSE keepalives, refresh it;
-   * other SDK-supported bodies refresh it on SDK events. This does not bound
-   * total duration or generation progress. */
-  idleTimeoutMs?: number;
   /**
-   * Deadline for the FIRST stream event (TTFT). Large contexts on a cache
-   * miss legitimately take minutes before message_start while the SDK
-   * swallows ping keepalives (default: max(idleTimeoutMs, 600000)).
+   * What the adapter saw, for the deadlines Membrane core keeps per provider
+   * call (`progressTimeoutMs`, `idleTimeoutMs`; see ProgressSeen). An adapter
+   * calls it once per parsed provider event: each SDK event, each SSE data
+   * frame that parses to a JSON object, each event-stream message that
+   * decodes to one. Never as an event for a frame that parses to anything
+   * else (`null`, a number, a string, an array), which carries no event, nor
+   * for keepalives (Anthropic's and Bedrock's `ping`), SSE comments or raw
+   * body bytes: those prove the connection is up, not that the model is
+   * making progress, and an adapter that can see them reports them as
+   * `'alive'`. An adapter that declares `reportsProgressPhases` reports a
+   * content delta as `'content'` and a silent think's start as `'think'`;
+   * any other adapter may call it with nothing for every event. Decorators
+   * must forward it with the other options; one that drops it leaves the
+   * call to its bound from the send alone.
    */
-  firstEventTimeoutMs?: number;
+  onProgress?: (seen?: ProgressSeen) => void;
   /**
-   * Stream progress, for the progress deadline Membrane core keeps per
-   * provider call (`progressTimeoutMs`). An adapter calls it once per parsed
-   * provider event: each SDK event, each SSE data frame that parses to a JSON
-   * object, each event-stream message that decodes to one. Never for a frame
-   * that parses to anything else (`null`, a number, a string, an array),
-   * which carries no event, nor for keepalives (Anthropic's and
-   * Bedrock's `ping`), SSE comments or raw body bytes: those prove the
-   * connection is up, not that the model is making progress. Decorators must
-   * forward it with the other options; one that drops it turns the progress
-   * deadline into a total one.
+   * The output-token limit the body this attempt sends asks for (its
+   * `max_tokens`, `max_output_tokens` or equivalent, after any default and
+   * `extra` the adapter applied), reported once per attempt beside
+   * `onRequest`. Membrane core sizes a silent think's allowance and a
+   * non-streaming call's bound from it; without a report it uses the
+   * request's `maxTokens`, or 4096. Decorators forward it with the other
+   * options.
    */
-  onProgress?: () => void;
+  onMaxTokens?: (maxTokens: number | undefined) => void;
   /** Report the final API request body immediately before sending it.
    * Required for adapters declaring cacheReceiptBasis: 'wire-request'.
    * Decorators forward it; raw logging observes each attempt, even when

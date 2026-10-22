@@ -14,6 +14,7 @@ import type {
   ProviderResponse,
   StreamCallbacks,
   ContentBlock,
+  ProgressSeen,
 } from '../types/index.js';
 import {
   MembraneError,
@@ -305,6 +306,8 @@ export class BedrockAdapter implements ProviderAdapter {
    */
   readonly reportsContentAlterations = true;
   readonly cacheReceiptBasis = 'wire-request' as const;
+  /** `stream()` reports a content delta as `'content'`, a silent think's start as `'think'`, and each keepalive ping as `'alive'`. */
+  readonly reportsProgressPhases = true;
 
   /**
    * Bedrock serves Anthropic models over the Anthropic Messages payload shape
@@ -406,6 +409,7 @@ export class BedrockAdapter implements ProviderAdapter {
     const fullRequest = { modelId: bedrockModelId, ...bedrockRequest };
     assertMessagePrefillSupported(bedrockModelId, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
+    options?.onMaxTokens?.(fullRequest.max_tokens);
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
@@ -428,6 +432,7 @@ export class BedrockAdapter implements ProviderAdapter {
     const fullRequest = { modelId: bedrockModelId, ...bedrockRequest, stream: true };
     assertMessagePrefillSupported(bedrockModelId, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
+    options?.onMaxTokens?.(fullRequest.max_tokens);
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
@@ -682,8 +687,12 @@ export class BedrockAdapter implements ProviderAdapter {
     callbacks: StreamCallbacks,
     signal: AbortSignal | undefined,
     rawRequest: unknown,
-    onProgress?: () => void,
+    onProgress?: (seen?: ProgressSeen) => void,
   ): Promise<ProviderResponse> {
+    // What this stream saw, for Membrane core's deadlines: a ping is the
+    // transport alive, a content delta is content, and a thinking block's
+    // start is a silent think unless the body asks for summarized thinking.
+    const summarized = request.thinking?.display === 'summarized';
     const url = new URL(
       `${this.baseURL ?? `https://bedrock-runtime.${this.region}.amazonaws.com`}/model/${encodeURIComponent(modelId)}/invoke-with-response-stream`
     );
@@ -856,7 +865,14 @@ export class BedrockAdapter implements ProviderAdapter {
             if (eventData !== undefined) {
               // A decoded model event is progress; a ping only proves the
               // connection.
-              if ((eventData as { type?: string }).type !== 'ping') onProgress?.();
+              const kind = (eventData as { type?: string }).type;
+              const block = (eventData as { content_block?: { type?: unknown } }).content_block;
+              onProgress?.(
+                kind === 'ping' ? 'alive'
+                  : kind === 'content_block_delta' ? 'content'
+                    : kind === 'content_block_start' && block?.type === 'thinking' && !summarized ? 'think'
+                      : undefined,
+              );
 
               // Check for error events within the stream
               if (eventData.type === 'error') {

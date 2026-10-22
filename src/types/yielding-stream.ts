@@ -414,29 +414,47 @@ export interface YieldingStreamOptions {
   /** Request timeout (per API call, not total) */
   timeoutMs?: number;
 
-  /** Anthropic idle deadline after the first SDK event (default: 600000 ms).
-   * Nonempty Web response-body bytes, including SSE keepalives, refresh it;
-   * other SDK-supported bodies refresh it on SDK events. This does not bound
-   * total duration or generation progress. */
+  /**
+   * The liveness bound, per provider call (default: 180000 ms): no byte of
+   * the response, keepalive pings included, for this long ends the call with
+   * an `aborted` event whose reason is `'timeout'`, carrying what arrived, in
+   * any phase: the connection is taken as gone. It's armed by the first sign
+   * of the transport an adapter can see and report: `AnthropicAdapter`
+   * reports each chunk of the response body, `BedrockAdapter` each keepalive
+   * ping. Any provider event renews it too. A positive number of ms sets it,
+   * `Infinity` included; any other value (0, a negative number, NaN) turns it
+   * off.
+   */
   idleTimeoutMs?: number;
 
   /**
-   * Progress deadline, per provider call (default: off, as for any value
-   * that isn't a positive number of ms). Every parsed provider event renews
-   * it (an SDK event, an SSE data frame that parses to an object);
-   * keepalives, SSE comments and raw bytes don't, so a connection that stays
-   * up while the model sends nothing
-   * still ends. On expiry the stream ends with an `aborted` event whose reason
-   * is `'timeout'`, carrying what arrived. It bounds the wait for the first
-   * event too. Time between provider calls, such as waiting for
-   * `provideToolResults()`, never counts. A stretch with no parsed event
-   * counts as no progress whatever the model is doing: reasoning a provider
-   * doesn't stream, while it sends only keepalives, can expire it, so set it
-   * above the longest such stretch you expect (Anthropic thinking with
-   * `display: "omitted"` sends no deltas while it thinks, which can last
-   * minutes). An adapter that streams no events, such as
-   * `OpenAIResponsesAdapter` (the Images API), can't renew it, so for it the
-   * deadline bounds the whole call.
+   * The progress deadline, per provider call. On expiry the stream ends with
+   * an `aborted` event whose reason is `'timeout'`, carrying what arrived.
+   *
+   * Unset (the default), it's bounded per phase on an adapter that reports
+   * phases (`reportsProgressPhases`: `AnthropicAdapter`, `BedrockAdapter`):
+   * - before the first content delta, 400 s from the send;
+   * - a silent think (thinking whose display isn't `'summarized'`, which
+   *   sends nothing while it thinks) is allowed its request's whole
+   *   `max_tokens` at 35 tokens a second from its start, and before content
+   *   the call ends only once both that and the 400 s have run out;
+   * - after content, 180 s between provider events, or the think's allowance
+   *   after a silent think's start when that's longer.
+   * On any other adapter, whose stream can be silent until its answer comes
+   * (reasoning a provider doesn't stream, or an adapter that streams no
+   * events, such as `OpenAIResponsesAdapter`), the bound is 400 s plus
+   * `max_tokens` at 35 tokens a second, from the send and again from each
+   * provider event. Every parsed provider event counts (an SDK event, an SSE
+   * data frame that parses to an object); keepalives, SSE comments and raw
+   * bytes don't, so a connection that stays up while the model sends nothing
+   * still ends. Time between provider calls, such as waiting for
+   * `provideToolResults()`, never counts.
+   *
+   * A positive number of ms, `Infinity` included, replaces these with one
+   * flat bound: that long from the send and from each provider event,
+   * whatever the phase. Set it above the longest silence you expect, since a
+   * silent think can outlast it. Any other value (0, a negative number, NaN)
+   * turns the progress deadline off.
    */
   progressTimeoutMs?: number;
 

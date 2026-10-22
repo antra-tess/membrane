@@ -1,12 +1,13 @@
 /**
- * The progress deadline (`progressTimeoutMs`, agent-framework #268).
+ * The progress deadline as one flat bound (a positive `progressTimeoutMs`,
+ * agent-framework #268), and what every deadline Membrane core keeps shares.
  *
- * After antra-tess/membrane#94 a body carrying only SSE keepalives renews the
- * Anthropic idle watchdog, so a connection that stays up while the model sends
- * nothing never ends. The progress deadline is renewed only by parsed provider
- * events (`ProviderRequestOptions.onProgress`), one per provider call, so tool
- * waits between calls never count. On expiry the call aborts with the deadline
- * mark and becomes a TimeoutAbortError on every path.
+ * A body carrying only SSE keepalives proves the connection, not progress.
+ * The progress deadline is renewed only by parsed provider events
+ * (`ProviderRequestOptions.onProgress`), one per provider call, so tool waits
+ * between calls never count. On expiry the call aborts with the deadline mark
+ * and becomes a TimeoutAbortError on every path. The bounds per phase that an
+ * unset `progressTimeoutMs` gives are pinned in phase-deadline.test.ts.
  *
  * Timings are scaled fixture inputs: a deadline of PROGRESS_MS, events or
  * keepalives every TICK_MS, and runs of 4x the deadline, wide enough that a
@@ -26,7 +27,7 @@ import { BedrockAdapter } from '../../src/providers/bedrock.js';
 import { MockAdapter } from '../../src/providers/mock.js';
 import { rawSseResponse } from '../helpers/sse-fixtures.js';
 import { chunkFrame, streamBody } from '../helpers/bedrock-event-stream.js';
-import { createCombinedSignal, createProgressDeadline, isDeadlineAbort, deadlineTimeoutError } from '../../src/providers/utils.js';
+import { createCombinedSignal, createCallDeadline, isDeadlineAbort, deadlineTimeoutError } from '../../src/providers/utils.js';
 import { TimeoutAbortError, isAbortedResponse, serverError } from '../../src/types/index.js';
 import type { NormalizedRequest, StreamEvent } from '../../src/types/index.js';
 import type { ProviderAdapter, ProviderRequest, ProviderRequestOptions, ProviderResponse } from '../../src/types/provider.js';
@@ -47,6 +48,12 @@ const NATIVE_REQUEST: NormalizedRequest = {
   toolMode: 'native',
   tools: [{ name: 'zz_probe', description: 'zz probe', inputSchema: { type: 'object', properties: { fld1: { type: 'string' } } } }],
 };
+
+/** A flat progress deadline (`progressTimeoutMs` set): what `progressTimeoutMs` gave before bounds per phase. */
+function createProgressDeadline(signal: AbortSignal | undefined, ms: number | undefined) {
+  const deadline = createCallDeadline(signal, { progressTimeoutMs: ms, idleTimeoutMs: 0, phases: false });
+  return { ...deadline, renew: deadline.report };
+}
 
 // ---------------------------------------------------------------------------
 // A live response body the test scripts over time; records transport teardown.
@@ -264,12 +271,17 @@ describe('createProgressDeadline', () => {
     backward.cleanup();
   });
 
-  it('without a timeout passes the caller signal through and offers no renew', () => {
+  it('with both bounds off passes the caller signal through, and its reports do nothing', () => {
     const caller = new AbortController();
-    const off = createProgressDeadline(caller.signal, undefined);
-    expect(off.signal).toBe(caller.signal);
-    expect(off.renew).toBeUndefined();
-    off.cleanup();
+    // null is off for the progress deadline, as any value that isn't a positive number is, and the default for the liveness bound.
+    for (const [progressTimeoutMs, idleTimeoutMs] of [[0, 0], [-1, -1], [Number.NaN, Number.NaN], [null as unknown as number, 0]]) {
+      const deadline = createCallDeadline(caller.signal, { progressTimeoutMs, idleTimeoutMs, phases: true });
+      expect(deadline.signal).toBe(caller.signal);
+      deadline.report('alive');
+      deadline.report('content');
+      deadline.reportMaxTokens(10);
+      deadline.cleanup();
+    }
   });
 });
 
@@ -356,33 +368,27 @@ describe('Membrane core: one renewable deadline per provider call', () => {
     }
   }
 
-  it('gives the adapter onProgress and a deadline signal only when progressTimeoutMs is set', async () => {
+  it('gives the adapter onProgress, onMaxTokens and a deadline signal on every path, and keeps the options to itself', async () => {
     const on = new RecordingAdapter();
-    await new Membrane(on).stream(XML_REQUEST, { progressTimeoutMs: 60_000 });
-    await new Membrane(on).stream(NATIVE_REQUEST, { progressTimeoutMs: 60_000 });
-    await new Membrane(on).complete(REQUEST, { progressTimeoutMs: 60_000 });
-    for await (const _ of new Membrane(on).streamYielding(XML_REQUEST, { progressTimeoutMs: 60_000 })) { /* drain */ }
-    for await (const _ of new Membrane(on).streamYielding(NATIVE_REQUEST, { progressTimeoutMs: 60_000 })) { /* drain */ }
-    expect(on.seen).toHaveLength(5);
+    const caller = new AbortController();
+    for (const options of [{}, { progressTimeoutMs: 60_000, idleTimeoutMs: 60_000 }]) {
+      await new Membrane(on).stream(XML_REQUEST, { ...options, signal: caller.signal });
+      await new Membrane(on).stream(NATIVE_REQUEST, { ...options, signal: caller.signal });
+      await new Membrane(on).complete(REQUEST, { ...options, signal: caller.signal });
+      for await (const _ of new Membrane(on).streamYielding(XML_REQUEST, { ...options, signal: caller.signal })) { /* drain */ }
+      for await (const _ of new Membrane(on).streamYielding(NATIVE_REQUEST, { ...options, signal: caller.signal })) { /* drain */ }
+    }
+    expect(on.seen).toHaveLength(10);
     for (const options of on.seen) {
       expect(typeof options?.onProgress).toBe('function');
+      expect(typeof options?.onMaxTokens).toBe('function');
       expect(options?.signal).toBeInstanceOf(AbortSignal);
-      // Core keeps the option to itself.
+      expect(options?.signal).not.toBe(caller.signal);
+      // Core keeps the options to itself.
       expect(options !== undefined && 'progressTimeoutMs' in options).toBe(false);
+      expect(options !== undefined && 'idleTimeoutMs' in options).toBe(false);
     }
-
-    const off = new RecordingAdapter();
-    const caller = new AbortController();
-    await new Membrane(off).stream(REQUEST, { signal: caller.signal });
-    await new Membrane(off).complete(REQUEST, { signal: caller.signal });
-    for await (const _ of new Membrane(off).streamYielding(REQUEST, { signal: caller.signal })) { /* drain */ }
-    expect(off.seen).toHaveLength(3);
-    for (const options of off.seen) {
-      expect(options?.onProgress).toBeUndefined();
-      expect(options !== undefined && 'progressTimeoutMs' in options).toBe(false);
-    }
-    expect(off.seen[0]?.signal).toBe(caller.signal);
-    expect(off.seen[1]?.signal).toBe(caller.signal);
+    expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
   });
 
   it('gives each refusal re-issue a deadline of its own, and lets go of the caller as each call returns', async () => {
@@ -584,8 +590,8 @@ describe('Anthropic: the deadline follows SDK events, not keepalives', () => {
       await keepalives(io, ping, 20 * LIVE_MS);
     }));
     const result = await new Membrane(anthropic()).stream(REQUEST, { progressTimeoutMs: PROGRESS_MS });
-    // An aborted response with reason 'timeout' comes only from the deadline's
-    // mark: the idle watchdog throws a retryable timeout instead.
+    // An aborted response with reason 'timeout' comes only from a deadline's
+    // mark: here the flat bound's, since the pings keep the liveness bound open.
     expect(isAbortedResponse(result)).toBe(true);
     expect((result as { reason: string }).reason).toBe('timeout');
     expect(torn[0]).toBe(true);
@@ -688,7 +694,7 @@ describe('every streaming adapter reports progress once per parsed event', () =>
     });
   }
 
-  it('bedrock: decoded events count, pings and an event that decodes to no object do not', async () => {
+  it('bedrock: decoded events count, an event that decodes to no object does not, and pings count only as alive', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     stubFetch(() => new Response(streamBody([
       chunkFrame({ type: 'message_start', message: { usage: { input_tokens: 3 } } }),
@@ -700,15 +706,16 @@ describe('every streaming adapter reports progress once per parsed event', () =>
       chunkFrame(5),
       chunkFrame([{ type: 'message_stop' }]),
     ]), { status: 200 }));
-    let progress = 0;
+    const seen: Array<string | undefined> = [];
     await new BedrockAdapter({ accessKeyId: 'zz-not-a-key-id', secretAccessKey: 'zz-not-a-secret', region: 'zz-region-1' })
       .stream(
         { model: 'anthropic.claude-sonnet-4-6', messages: [{ role: 'user', content: 'zz hello' }], maxTokens: 16 } as never,
         { onChunk: () => {} },
-        { onProgress: () => { progress++; } },
+        { onProgress: (kind) => { seen.push(kind); } },
       )
       .catch(() => undefined);
-    expect(progress).toBe(3);
+    // Three events; each ping is reported as the transport alive, not as an event.
+    expect(seen).toEqual([undefined, 'alive', undefined, 'alive', 'content']);
   });
 });
 

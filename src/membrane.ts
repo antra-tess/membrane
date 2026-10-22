@@ -69,7 +69,7 @@ import {
 import type { BuildResult } from './formatters/types.js';
 import { computeCacheWireReceipt } from './cache-wire-receipt.js';
 import { awaitCallerCode, runCallerCode, isDeadlineExpiry, errorFromThrown, systemChangeRefusedError } from './types/errors.js';
-import { createProgressDeadline, setLongTimeout } from './providers/utils.js';
+import { createCallDeadline, setLongTimeout } from './providers/utils.js';
 import {
   parseToolCalls,
   formatToolResults,
@@ -552,11 +552,12 @@ export class Membrane {
           ? this.wireReceiptGuard(options.signal)
           : undefined;
 
-        // One progress deadline per provider call. A non-streaming call
-        // reports no progress before its response, so this bounds the call.
-        const progress = createProgressDeadline(
+        // The deadlines for this provider call (createCallDeadline). A
+        // non-streaming call reports no progress before its response, so
+        // unset, its bound is the one for an answer that arrives whole.
+        const progress = createCallDeadline(
           receiptGuard ? receiptGuard.signal : options.signal,
-          options.progressTimeoutMs,
+          { progressTimeoutMs: options.progressTimeoutMs, phases: false, maxTokens: finalRequest.maxTokens },
         );
         let rawProviderResponse: ProviderResponse;
         try {
@@ -569,7 +570,8 @@ export class Membrane {
             },
             signal: progress.signal,
             timeoutMs: options.timeoutMs,
-            ...(progress.renew ? { onProgress: progress.renew } : {}),
+            onProgress: progress.report,
+            onMaxTokens: progress.reportMaxTokens,
             onRequest: (req) => {
               rawRequest = req;
               if (useWireReceipt) {
@@ -2671,7 +2673,7 @@ export class Membrane {
       signal?: AbortSignal;
       timeoutMs?: number;
       idleTimeoutMs?: number;
-      /** See StreamOptions.progressTimeoutMs: one renewable deadline per provider call. */
+      /** See StreamOptions.progressTimeoutMs: the deadlines Membrane keeps per provider call. */
       progressTimeoutMs?: number;
       onRequest?: (rawRequest: unknown) => void;
       /** See ProviderRequestOptions.wrapThinkingTags */
@@ -2743,7 +2745,7 @@ export class Membrane {
     // compatibility won't catch the excess field (checked only on object
     // literals, not on variables). Leaving it in would silently leak the
     // normalized form into every adapter's options.
-    const { normalizedRequest, formatterName, requiresAssistantPrefill, refusalRetries, onRetrying, retry, onWireCacheMarkers, progressTimeoutMs, fidelity, ...adapterOptions } = options;
+    const { normalizedRequest, formatterName, requiresAssistantPrefill, refusalRetries, onRetrying, retry, onWireCacheMarkers, progressTimeoutMs, idleTimeoutMs, fidelity, ...adapterOptions } = options;
     // Fingerprint around the hook only when both a hook and a reader exist
     // (the yielding loops pass notes only when they emit usage events, which
     // carry the round report): an observer or a no-op hook keeps fidelity
@@ -2848,16 +2850,21 @@ export class Membrane {
       };
       let attemptResult: ProviderResponse | undefined;
       let failure: { error: unknown } | undefined;
-      // Each attempt gets its own progress deadline, made here and cleaned up
-      // before anything decides whether to send it again: refusal re-issues
-      // and retries each get a new one, and time outside the attempt (the
-      // wait before a retry, tool execution) never counts.
-      const progress = createProgressDeadline(observedOptions.signal, progressTimeoutMs);
+      // Each attempt gets its own deadlines, made here and cleaned up before
+      // anything decides whether to send it again: refusal re-issues and
+      // retries each get new ones, and time outside the attempt (the wait
+      // before a retry, tool execution) never counts.
+      const progress = createCallDeadline(observedOptions.signal, {
+        progressTimeoutMs,
+        idleTimeoutMs,
+        phases: this.adapter.reportsProgressPhases === true,
+        maxTokens: finalRequest.maxTokens,
+      });
       try {
         const streamCall = this.adapter.stream(
           finalRequest,
           attemptCallbacks,
-          progress.renew ? { ...observedOptions, signal: progress.signal, onProgress: progress.renew } : observedOptions,
+          { ...observedOptions, signal: progress.signal, onProgress: progress.report, onMaxTokens: progress.reportMaxTokens },
         );
         attemptResult = receiptGuard ? await receiptGuard.settle(streamCall) : await streamCall;
       } catch (error) {

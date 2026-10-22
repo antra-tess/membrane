@@ -1,15 +1,18 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
-import { createProgressDeadline } from '../../src/providers/utils.js';
-import type { ProviderRequest } from '../../src/types/index.js';
+import { createCallDeadline } from '../../src/providers/utils.js';
+import { TimeoutAbortError } from '../../src/types/index.js';
+import type { ProviderRequest, ProviderRequestOptions, StreamCallbacks } from '../../src/types/index.js';
 
 /**
- * Idle-watchdog regressions through the real SDK SSE parser. The SDK drops
- * `ping` events before the adapter sees them, so a body that only carries
- * keepalives must still count as live transport after the first SDK event. The
- * first-event deadline remains fixed even when pre-event bytes arrive. Timings
- * are scaled fixture inputs only: the ratios (pings every ~IDLE/5, runs of
- * 4x IDLE) are wide so loaded machines do not turn them into races.
+ * The liveness bound (`idleTimeoutMs`) through the real SDK SSE parser. The
+ * SDK drops `ping` events before the adapter sees them, so the adapter reports
+ * each chunk of the response body as the transport alive, and Membrane core's
+ * deadline (createCallDeadline, composed here as Membrane composes it) keeps
+ * a body that only carries keepalives open, in any phase. The progress
+ * deadline is off in these cases, so only the liveness bound can end a call.
+ * Timings are scaled fixture inputs only: the ratios (pings every ~IDLE/5,
+ * runs of 4x IDLE) are wide so loaded machines do not turn them into races.
  */
 const IDLE_MS = 150;
 const PING_MS = 30;
@@ -100,7 +103,22 @@ function stubFetch(respond: (init: RequestInit, call: number) => Response | Prom
 
 const newAdapter = (extra: ConstructorParameters<typeof AnthropicAdapter>[0] = {}): AnthropicAdapter =>
   new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false }, ...extra });
-const timing = { idleTimeoutMs: IDLE_MS, firstEventTimeoutMs: IDLE_MS };
+
+/** One provider call under Membrane core's deadlines, as Membrane makes it: the liveness bound alone unless `deadlines` says more. */
+async function streamWith(
+  adapter: AnthropicAdapter,
+  req: ProviderRequest,
+  callbacks: StreamCallbacks,
+  { signal, ...deadlines }: { signal?: AbortSignal; progressTimeoutMs?: number; idleTimeoutMs?: number } = {},
+) {
+  const deadline = createCallDeadline(signal, { progressTimeoutMs: 0, idleTimeoutMs: IDLE_MS, phases: true, ...deadlines });
+  const options: ProviderRequestOptions = { signal: deadline.signal, onProgress: deadline.report, onMaxTokens: deadline.reportMaxTokens };
+  try {
+    return await adapter.stream(req, callbacks, options);
+  } finally {
+    deadline.cleanup();
+  }
+}
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -109,8 +127,8 @@ afterEach(() => {
   probes.length = 0;
 });
 
-describe('Anthropic stream idle watchdog with live transport', () => {
-  it('does not time out a body carrying only keepalives after message_start', async () => {
+describe('Anthropic liveness with live transport', () => {
+  it('keeps a body carrying only keepalives after message_start open', async () => {
     stubFetch(init => liveResponse(init, async io => {
       io.emit(messageStart());
       await keepalives(io, LIVE_MS);
@@ -118,47 +136,25 @@ describe('Anthropic stream idle watchdog with live transport', () => {
       io.close();
     }));
     const chunks: string[] = [];
-    const result = await newAdapter().stream(request, { onChunk: chunk => chunks.push(chunk) }, timing);
+    const result = await streamWith(newAdapter(), request, { onChunk: chunk => chunks.push(chunk) });
     expect(result.stopReason).toBe('end_turn');
     expect(result.content).toMatchObject([{ type: 'text', text: 'hello back' }]);
     expect(chunks).toEqual(['hello back']);
   });
 
-  it('enforces the fixed first-event deadline while keepalives precede message_start', async () => {
+  it('keeps a body open on keepalives before message_start too', async () => {
+    // A large cache miss can send only pings until its message_start.
     stubFetch(init => liveResponse(init, async io => {
       await keepalives(io, LIVE_MS);
       io.emit(messageStart());
       for (const part of answer()) io.emit(part);
       io.close();
     }));
-    await expect(newAdapter().stream(request, { onChunk: () => {} }, timing)).rejects.toMatchObject({
-      type: 'timeout', retryable: true, message: expect.stringMatching(/first-event timeout/),
-    });
-    expect(probes[0]?.torn).toBe(true);
+    const result = await streamWith(newAdapter(), request, { onChunk: () => {} });
+    expect(result.stopReason).toBe('end_turn');
   });
 
-  it('keeps the first-event deadline fixed with a longer shared progress deadline', async () => {
-    stubFetch(init => liveResponse(init, async io => {
-      await keepalives(io, LIVE_MS);
-      io.emit(messageStart());
-      for (const part of answer()) io.emit(part);
-      io.close();
-    }));
-    const progress = createProgressDeadline(undefined, 2 * LIVE_MS);
-    try {
-      await expect(newAdapter().stream(request, { onChunk: () => {} }, {
-        ...timing, signal: progress.signal, onProgress: progress.renew,
-      })).rejects.toMatchObject({
-        type: 'timeout', retryable: true, message: expect.stringMatching(/first-event timeout/),
-      });
-      expect(progress.signal?.aborted).toBe(false);
-      expect(probes[0]?.torn).toBe(true);
-    } finally {
-      progress.cleanup();
-    }
-  });
-
-  it('enforces the fixed first-event deadline while partial SSE bytes arrive', async () => {
+  it('counts partial SSE bytes as the transport alive', async () => {
     stubFetch(init => liveResponse(init, async io => {
       io.emit('event: message_start\ndata: ');
       for (let elapsed = 0; elapsed < LIVE_MS && !io.isDone(); elapsed += PING_MS) {
@@ -169,13 +165,11 @@ describe('Anthropic stream idle watchdog with live transport', () => {
       for (const part of answer()) io.emit(part);
       io.close();
     }));
-    await expect(newAdapter().stream(request, { onChunk: () => {} }, timing)).rejects.toMatchObject({
-      type: 'timeout', retryable: true, message: expect.stringMatching(/first-event timeout/),
-    });
-    expect(probes[0]?.torn).toBe(true);
+    const result = await streamWith(newAdapter(), request, { onChunk: () => {} });
+    expect(result.stopReason).toBe('end_turn');
   });
 
-  it('allows first pings after the idle interval within the larger first-event deadline', async () => {
+  it('arms the liveness bound at the first byte, so a slow first byte is no stall', async () => {
     stubFetch(init => liveResponse(init, async io => {
       await io.sleep(2 * IDLE_MS);
       await keepalives(io, IDLE_MS);
@@ -183,29 +177,29 @@ describe('Anthropic stream idle watchdog with live transport', () => {
       for (const part of answer()) io.emit(part);
       io.close();
     }));
-    const result = await newAdapter().stream(request, { onChunk: () => {} }, {
-      ...timing, firstEventTimeoutMs: 6 * IDLE_MS,
-    });
+    const result = await streamWith(newAdapter(), request, { onChunk: () => {} });
     expect(result.stopReason).toBe('end_turn');
     expect(result.content).toMatchObject([{ type: 'text', text: 'hello back' }]);
   });
 
-  it('still classifies real silence after message_start as the typed idle timeout', async () => {
+  it('ends a body silent after its first bytes as a timeout naming the liveness bound', async () => {
     stubFetch(init => liveResponse(init, async io => {
       io.emit(messageStart());
       await io.untilDone();
     }));
-    await expect(newAdapter().stream(request, { onChunk: () => {} }, timing)).rejects.toMatchObject({
-      type: 'timeout', retryable: true, message: expect.stringMatching(/idle timeout/),
-    });
+    const failure = await streamWith(newAdapter(), request, { onChunk: () => {} }).catch(error => error);
+    expect(failure).toBeInstanceOf(TimeoutAbortError);
+    expect(failure).toMatchObject({ type: 'timeout', retryable: false });
+    expect(failure.message).toMatch(/^No byte from the provider within 0\.15s, so the connection is taken as gone: the call began at \S+, provider events: 1, the last at \S+$/);
     expect(probes[0]?.torn).toBe(true);
   });
 
-  it('still classifies silence before any byte as the first-event timeout', async () => {
+  it('leaves a body that sends no byte at all to the progress deadline', async () => {
     stubFetch(init => liveResponse(init, io => io.untilDone()));
-    await expect(newAdapter().stream(request, { onChunk: () => {} }, timing)).rejects.toMatchObject({
-      type: 'timeout', retryable: true, message: expect.stringMatching(/first-event timeout/),
-    });
+    const failure = await streamWith(newAdapter(), request, { onChunk: () => {} }, { progressTimeoutMs: 4 * IDLE_MS })
+      .catch(error => error);
+    expect(failure).toBeInstanceOf(TimeoutAbortError);
+    expect(failure.message).toMatch(new RegExp(`^No provider progress within ${4 * IDLE_MS}ms: `));
     expect(probes[0]?.torn).toBe(true);
   });
 
@@ -217,7 +211,7 @@ describe('Anthropic stream idle watchdog with live transport', () => {
       await keepalives(io, LIVE_MS);
       io.close();
     }));
-    await expect(newAdapter().stream(request, { onChunk: () => {} }, timing)).rejects.toMatchObject({
+    await expect(streamWith(newAdapter(), request, { onChunk: () => {} })).rejects.toMatchObject({
       retryable: true, message: expect.stringMatching(/stream ended before a terminal event/),
     });
   });
@@ -228,7 +222,7 @@ describe('Anthropic stream idle watchdog with live transport', () => {
       await keepalives(io, 10 * LIVE_MS);
     }));
     const caller = new AbortController();
-    const pending = newAdapter().stream(request, { onChunk: () => {} }, { ...timing, signal: caller.signal });
+    const pending = streamWith(newAdapter(), request, { onChunk: () => {} }, { signal: caller.signal });
     setTimeout(() => caller.abort(), 2 * IDLE_MS);
     await expect(pending).rejects.toMatchObject({ type: 'abort' });
     expect(probes[0]?.torn).toBe(true);
@@ -249,8 +243,8 @@ describe('Anthropic stream idle watchdog with live transport', () => {
     const aborted = new AbortController();
     const withText = (text: string): ProviderRequest => ({ ...request, messages: [{ role: 'user', content: [{ type: 'text', text }] }] });
     const results = Promise.allSettled([
-      adapter.stream(withText('abort me'), { onChunk: () => {} }, { ...timing, signal: aborted.signal }),
-      adapter.stream(withText('finish'), { onChunk: () => {} }, timing),
+      streamWith(adapter, withText('abort me'), { onChunk: () => {} }, { signal: aborted.signal }),
+      streamWith(adapter, withText('finish'), { onChunk: () => {} }),
     ]);
     setTimeout(() => aborted.abort(), 2 * IDLE_MS);
     const [first, second] = await results;
@@ -273,7 +267,7 @@ describe('Anthropic stream idle watchdog with live transport', () => {
     const adapter = newAdapter({
       credentials: ({ forceRefresh }) => { flags.push(forceRefresh); return { token: forceRefresh ? 'fresh' : 'expired' }; },
     });
-    const result = await adapter.stream(request, { onChunk: () => {} }, timing);
+    const result = await streamWith(adapter, request, { onChunk: () => {} });
     expect(result.stopReason).toBe('end_turn');
     expect(flags).toEqual([false, true]);
     expect(calls).toHaveLength(2);
@@ -283,19 +277,18 @@ describe('Anthropic stream idle watchdog with live transport', () => {
 
 
 describe('Anthropic stream setup and alternate SDK response bodies', () => {
-  it('cleans the watchdog and caller listener when SDK session creation throws', async () => {
+  it('leaves no timer or listener of its own when SDK session creation throws', async () => {
     vi.useFakeTimers();
     const caller = new AbortController();
     const added = vi.spyOn(caller.signal, 'addEventListener');
-    const removed = vi.spyOn(caller.signal, 'removeEventListener');
     const adapter = newAdapter();
     const error = new Error('SDK client setup failed');
     const client = (adapter as unknown as { client: { withOptions: () => unknown } }).client;
     vi.spyOn(client, 'withOptions').mockImplementation(() => { throw error; });
-    const failure = await adapter.stream(request, { onChunk: () => {} }, { signal: caller.signal }).catch(error => error);
+    const failure = await adapter.stream(request, { onChunk: () => {} }, { signal: caller.signal, onProgress: () => {} }).catch(error => error);
+    // The call's deadlines are Membrane core's: the adapter arms none and listens to nothing.
     expect(vi.getTimerCount()).toBe(0);
-    expect(added).toHaveBeenCalledWith('abort', expect.any(Function), { once: true });
-    expect(removed).toHaveBeenCalledWith('abort', added.mock.calls[0]?.[1]);
+    expect(added).not.toHaveBeenCalled();
     expect(failure).toMatchObject({
       type: 'unknown', rawError: { message: error.message }, rawRequest: expect.objectContaining({ stream: true }),
     });
@@ -321,7 +314,7 @@ describe('Anthropic stream setup and alternate SDK response bodies', () => {
       return response;
     });
     const chunks: string[] = [];
-    const result = await newAdapter().stream(request, { onChunk: chunk => chunks.push(chunk) }, timing);
+    const result = await streamWith(newAdapter(), request, { onChunk: chunk => chunks.push(chunk) });
     expect(calls).toHaveLength(1);
     expect(consumed).toBe(bytes.length);
     expect(result).toMatchObject({ stopReason: 'end_turn', content: [{ type: 'text', text: 'hello back' }] });
@@ -332,7 +325,7 @@ describe('Anthropic stream setup and alternate SDK response bodies', () => {
     const calls = stubFetch(() => Response.json({
       type: 'error', error: { type: 'invalid_request_error', message: 'fixture invalid request' },
     }, { status: 400, headers: { 'request-id': 'req_error_fixture' } }));
-    const failure = await newAdapter().stream(request, { onChunk: () => {} }, timing).catch(error => error);
+    const failure = await streamWith(newAdapter(), request, { onChunk: () => {} }).catch(error => error);
     expect(calls).toHaveLength(1);
     expect(failure).toMatchObject({ type: 'invalid_request', retryable: false });
     expect(failure.rawError).toMatchObject({ status: 400, requestID: 'req_error_fixture' });
