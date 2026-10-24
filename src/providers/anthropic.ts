@@ -253,6 +253,21 @@ export function readInputTransformations(
   return { inputTransformations };
 }
 
+/**
+ * A response's refusal category, as ProviderResponse.refusalCategory carries
+ * it: `stop_details.category` when the response stopped with `refusal` and
+ * the category is a non-empty string. Nothing otherwise, including a stop
+ * that isn't a refusal, whatever its `stop_details` says.
+ */
+function readRefusalCategory(
+  stopReason: string | null | undefined,
+  stopDetails: unknown,
+): { refusalCategory?: string } {
+  if (stopReason !== 'refusal' || stopDetails === null || typeof stopDetails !== 'object') return {};
+  const category = (stopDetails as { category?: unknown }).category;
+  return typeof category === 'string' && category !== '' ? { refusalCategory: category } : {};
+}
+
 /** Resolve whether a thinking config is enabled on a request. Thinking can
  *  arrive top-level OR smuggled through `extra` (see the sampling gate in
  *  buildRequest) — both the sampling strip and the beta header must agree on
@@ -1041,6 +1056,7 @@ export class AnthropicAdapter implements ProviderAdapter {
         content: contentBlocks,
         stopReason,
         providerStopReason,
+        ...readRefusalCategory(stopReason, stopDetails),
         stopSequence,
         ...(messageId ? { responseId: messageId } : {}),
         ...(requestId ? { requestId } : {}),
@@ -1370,6 +1386,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       content: response.content,
       stopReason: response.stop_reason ?? 'end_turn',
       providerStopReason: response.stop_reason ?? undefined,
+      ...readRefusalCategory(response.stop_reason, (response as { stop_details?: unknown }).stop_details),
       stopSequence: response.stop_sequence ?? undefined,
       usage: {
         inputTokens: response.usage.input_tokens,

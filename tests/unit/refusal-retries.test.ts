@@ -32,12 +32,17 @@ class RefusingAdapter implements ProviderAdapter {
     private successText = 'GOOD',
   ) {}
 
+  /** A refusal reports its category through ProviderResponse.refusalCategory
+   *  alone, as a custom adapter does: its raw response names no category, so
+   *  the retrying event's can only come from the field. (The real
+   *  AnthropicAdapter's path is in refusal-category.test.ts.) */
   private response(text: string, stopReason: string): ProviderResponse {
     return {
       content: [{ type: 'text', text }],
       stopReason,
+      ...(stopReason === 'refusal' ? { refusalCategory: 'cyber' } : {}),
       usage: { inputTokens: 1, outputTokens: 1 },
-      raw: { response: { stop_reason: stopReason, stop_details: { category: 'cyber' } } },
+      raw: { stop_reason: stopReason },
     } as unknown as ProviderResponse;
   }
 
