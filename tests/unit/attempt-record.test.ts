@@ -524,7 +524,7 @@ describe('times, from the send', () => {
     expect(records[0]!.endMs).toBe(1000);
   });
 
-  it('held text still reaches the caller before an answer with no usage fails the call, as before', async () => {
+  it('an answer with no usage still gets its record, with no counts, and its held text reaches the caller before the call fails, as before', async () => {
     const adapter = new ScriptedAdapter([
       async (call) => {
         sendAs(call);
@@ -538,7 +538,24 @@ describe('times, from the send', () => {
     await expect(membrane.stream({ ...REQUEST, stopSequences: ['STOP'] }, { onChunk: (chunk) => { delivered.push(chunk); } })).rejects.toThrow();
 
     expect(delivered).toEqual(['ST']);
-    expect(records).toEqual([]);
+    expect(records.map((r) => r.ending)).toEqual([{ stopReason: 'end_turn' }]);
+    expect(Object.keys(records[0]!)).not.toContain('usage');
+  });
+
+  it('complete(): an answer with no usage still gets its record, with no counts, before the call fails', async () => {
+    const adapter = new ScriptedAdapter([
+      async (call) => {
+        sendAs(call);
+        return { ...answer(call.request, 'zz'), usage: undefined as never };
+      },
+    ]);
+    const { membrane, records } = recording(adapter);
+
+    await expect(membrane.complete(REQUEST)).rejects.toThrow();
+
+    expect(adapter.calls).toHaveLength(1);
+    expect(records.map((r) => r.ending)).toEqual([{ stopReason: 'end_turn' }]);
+    expect(Object.keys(records[0]!)).not.toContain('usage');
   });
 
   it('a caller callback that throws while held text is delivered leaves the record given', async () => {
@@ -610,13 +627,13 @@ describe('times, from the send', () => {
     expect(Object.keys(records[0]!)).not.toContain('firstContentMs');
   });
 
-  it('the first send report counts: a resend inside the attempt keeps the attempt', async () => {
+  it('the first send report counts, for its time, its limit and its content report: a resend inside the attempt keeps the attempt', async () => {
     vi.useFakeTimers({ now: 0 });
     const adapter = new ScriptedAdapter([
       async (call) => {
         sendAs(call, { maxTokens: 64 });
         vi.advanceTimersByTime(800);
-        sendAs(call, { maxTokens: 64 });
+        sendAs(call, { maxTokens: 333, reportsContent: true });
         return answer(call.request, 'zz');
       },
     ]);
@@ -625,7 +642,7 @@ describe('times, from the send', () => {
     await membrane.complete(REQUEST);
 
     expect(records).toHaveLength(1);
-    expect(records[0]).toMatchObject({ sentAt: 0, endMs: 800 });
+    expect(records[0]).toMatchObject({ sentAt: 0, endMs: 800, maxTokens: 64, reportsContent: false });
   });
 
   it("a send report counts only as what it says: maxTokens as a count, reportsContent as true", async () => {

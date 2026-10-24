@@ -162,16 +162,21 @@ describe('BedrockAdapter', () => {
     }
   });
 
-  it("stream(): reports no category, since AWS's page doesn't document it in the stream's events", async () => {
-    const frames = [
+  it("stream(): reads a refusal's category from its message_delta when it's there, as AnthropicAdapter does (AWS's page doesn't show it in the stream, so it may never come)", async () => {
+    const refusalDelta = (delta: Record<string, unknown>) => [
       EVENTS[0],
-      { type: 'message_delta', delta: { stop_reason: 'refusal', stop_details: { type: 'refusal', category: 'cyber' } }, usage: { output_tokens: 1 } },
+      { type: 'message_delta', delta: { stop_reason: 'refusal', ...delta }, usage: { output_tokens: 1 } },
       { type: 'message_stop' },
     ].map(chunkFrame);
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, body: streamBody(frames) })));
-    const response = await bedrock().stream(REQUEST, { onChunk: () => {} });
 
-    expect(response.stopReason).toBe('refusal');
-    expect(Object.keys(response)).not.toContain('refusalCategory');
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, body: streamBody(refusalDelta({ stop_details: { type: 'refusal', category: 'cyber' } })) })));
+    const withDetails = await bedrock().stream(REQUEST, { onChunk: () => {} });
+    expect(withDetails.stopReason).toBe('refusal');
+    expect(withDetails.refusalCategory).toBe('cyber');
+
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, body: streamBody(refusalDelta({})) })));
+    const without = await bedrock().stream(REQUEST, { onChunk: () => {} });
+    expect(without.stopReason).toBe('refusal');
+    expect(Object.keys(without)).not.toContain('refusalCategory');
   });
 });
