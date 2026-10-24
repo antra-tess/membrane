@@ -111,7 +111,18 @@ export type {
   ProviderInputTransformation,
   StreamCallbacks,
   UsageCacheConvention,
+  ProgressSeen,
+  SendReport,
 } from './provider.js';
+
+// Attempt records
+export type {
+  CallPurpose,
+  AttemptRecord,
+  AttemptEnding,
+  AttemptError,
+  AttemptUsage,
+} from './attempt.js';
 
 // Streaming
 export type {

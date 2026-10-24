@@ -35,8 +35,9 @@ import {
 } from '../types/index.js';
 import { markSystemChangeRefused, runCallerCode, statusForProviderCode, deadlineExpired, isDeadlineExpiry, errorFromThrown } from '../types/errors.js';
 import { flattenRootSchemaUnion } from './anthropic-tool-schema.js';
+import { SYSTEM_CHANGE_REFUSALS } from '../utils/bad-request.js';
 import { isPlainObject } from '../utils/tool-schema.js';
-import { assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, isDeadlineAbort, deadlineTimeoutError, isToolCallBlock, isToolCallArgumentsDelta } from './utils.js';
+import { assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, isDeadlineAbort, deadlineTimeoutError, isToolCallBlock, isToolCallArgumentsDelta, contentOfAnthropicEvent } from './utils.js';
 import { fetchWithCredentials, validateCredential, type CredentialContext, type CredentialResolver } from './credentials.js';
 import { CacheKeepalive, type CacheKeepaliveConfig } from '../cache-keepalive.js';
 
@@ -208,14 +209,6 @@ export function sendsToolChanges(params: { messages?: unknown }): boolean {
     message.content.some((block: { type?: unknown }) => block?.type === 'tool_addition' || block?.type === 'tool_removal'));
 }
 
-/** The API's wordings, in a 400, for a model that takes no mid-conversation
- *  system message or no tool change in one (live runs, Oct 19 2026). */
-const SYSTEM_CHANGE_REFUSALS = [
-  "role 'system' is not supported on this model",
-  'tool_addition/tool_removal requires a model that supports mid-conversation system content',
-  'tool_addition/tool_removal is not supported on this model',
-];
-
 /** Whether a 400's own message is the API refusing the request's system change. */
 export function isSystemChangeRefusal(body: unknown): boolean {
   const message = extractProviderErrorFields(body).message;
@@ -257,9 +250,10 @@ export function readInputTransformations(
  * A response's refusal category, as ProviderResponse.refusalCategory carries
  * it: `stop_details.category` when the provider stopped with `refusal` and
  * the category is a non-empty string. Nothing otherwise, including a stop
- * that isn't a refusal, whatever its `stop_details` says.
+ * that isn't a refusal, whatever its `stop_details` says. Exported for the
+ * Bedrock adapter, whose non-streamed body carries the same field.
  */
-function readRefusalCategory(
+export function readRefusalCategory(
   stopReason: string | null | undefined,
   stopDetails: unknown,
 ): { refusalCategory?: string } {
@@ -608,6 +602,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     const fullRequest = { ...anthropicRequest, stream: false as const };
     assertMessagePrefillSupported(fullRequest.model, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
+    options?.onSend?.({ maxTokens: fullRequest.max_tokens });
 
     const headers = this.betaHeaders(request, anthropicRequest);
     const live = this.liveHeaders(headers, 'complete');
@@ -651,6 +646,8 @@ export class AnthropicAdapter implements ProviderAdapter {
     const fullRequest = { ...anthropicRequest, stream: true };
     assertMessagePrefillSupported(fullRequest.model, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
+    // This stream reports content through onProgress (contentOfAnthropicEvent below).
+    options?.onSend?.({ maxTokens: fullRequest.max_tokens, reportsContent: true });
 
     const headers = this.betaHeaders(request, anthropicRequest);
     const live = this.liveHeaders(headers, 'stream');
@@ -879,7 +876,7 @@ export class AnthropicAdapter implements ProviderAdapter {
           this.cacheKeepalive?.record(fullRequest as unknown as Record<string, unknown>, headers, 'stream', sentAt);
         }
         // Every SDK event is progress; pings never reach this loop.
-        options?.onProgress?.();
+        options?.onProgress?.(contentOfAnthropicEvent(event));
         if (event.type === 'message_start') {
           model = event.message.model;
           messageId = typeof event.message.id === 'string' && event.message.id ? event.message.id : undefined;

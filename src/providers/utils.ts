@@ -618,6 +618,22 @@ export function createCombinedSignal(
 }
 
 /**
+ * Whether an Anthropic-format stream event is content (ProgressSeen), on the
+ * adapters that parse those events: Anthropic's, and Bedrock's, which carries
+ * them. A content delta is content, of any kind, and so is a
+ * `redacted_thinking` block's start, since that block arrives whole once its
+ * think is done. Any other event, a block's start included, is only an event.
+ */
+export function contentOfAnthropicEvent(
+  event: { type?: unknown; content_block?: { type?: unknown } | null },
+): 'content' | undefined {
+  if (event.type === 'content_block_delta') return 'content';
+  return event.type === 'content_block_start' && event.content_block?.type === 'redacted_thinking'
+    ? 'content'
+    : undefined;
+}
+
+/**
  * A deadline that stream progress renews, for one provider call: it aborts
  * when `timeoutMs` passes with no call to `renew`, combined with the caller's
  * signal. Membrane core owns it (`progressTimeoutMs`); adapters renew it

@@ -28,13 +28,14 @@ import {
 import { errorFromThrown } from '../types/errors.js';
 import { stripEmptyTextRequest } from '../utils/empty-text.js';
 import { isUnsignedThinking } from '../utils/thinking-carriers.js';
-import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, streamIndex, isEventObject, isToolCallBlock, isToolCallArgumentsDelta } from './utils.js';
+import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, streamIndex, isEventObject, isToolCallBlock, isToolCallArgumentsDelta, contentOfAnthropicEvent } from './utils.js';
 import {
   INTERLEAVED_THINKING_BETA,
   THINKING_BINDING_BETA,
   THINKING_DISPLAY_UPDATES_BETA,
   needsInterleavedThinkingBeta,
   readInputTransformations,
+  readRefusalCategory,
   sendsBlockBinding,
   sendsDisplayUpdates,
   thinkingEnabled,
@@ -120,6 +121,13 @@ interface BedrockMessageResponse {
   model: string;
   stop_reason: 'end_turn' | 'max_tokens' | 'stop_sequence' | 'tool_use' | null;
   stop_sequence?: string | null;
+  /**
+   * With a refusal, its details, as AWS documents for a non-streamed body
+   * (Claude Messages API on Bedrock): `category`, such as 'cyber', and an
+   * explanation. AWS's page doesn't show it in a stream's events; the stream's
+   * final message carries it when a message_delta did.
+   */
+  stop_details?: unknown;
   usage: {
     input_tokens: number;
     output_tokens: number;
@@ -148,6 +156,8 @@ interface BedrockStreamEvent {
     partial_json?: string;
     stop_reason?: string;
     stop_sequence?: string;
+    /** On a refusal's message_delta, if Bedrock passes it on (see BedrockMessageResponse.stop_details). */
+    stop_details?: unknown;
   };
   message?: BedrockMessageResponse;
   usage?: {
@@ -407,6 +417,7 @@ export class BedrockAdapter implements ProviderAdapter {
     const fullRequest = { modelId: bedrockModelId, ...bedrockRequest };
     assertMessagePrefillSupported(bedrockModelId, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
+    options?.onSend?.({ maxTokens: fullRequest.max_tokens });
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
@@ -429,6 +440,8 @@ export class BedrockAdapter implements ProviderAdapter {
     const fullRequest = { modelId: bedrockModelId, ...bedrockRequest, stream: true };
     assertMessagePrefillSupported(bedrockModelId, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
+    // This stream reports content through onProgress (contentOfAnthropicEvent below).
+    options?.onSend?.({ maxTokens: fullRequest.max_tokens, reportsContent: true });
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
@@ -690,7 +703,7 @@ export class BedrockAdapter implements ProviderAdapter {
     callbacks: StreamCallbacks,
     signal: AbortSignal | undefined,
     rawRequest: unknown,
-    onProgress?: () => void,
+    onProgress?: ProviderRequestOptions['onProgress'],
   ): Promise<ProviderResponse> {
     const url = new URL(
       `${this.baseURL ?? `https://bedrock-runtime.${this.region}.amazonaws.com`}/model/${encodeURIComponent(modelId)}/invoke-with-response-stream`
@@ -768,6 +781,10 @@ export class BedrockAdapter implements ProviderAdapter {
     let cacheCreationTokens: number | undefined;
     let cacheReadTokens: number | undefined;
     let stopReason: string | undefined;
+    // A refusal's details, from its message_delta, as AnthropicAdapter's
+    // stream reads them. AWS's page doesn't show them in the stream, so they
+    // may never come; the reader leaves the category out when they don't.
+    let stopDetails: unknown;
     let sawTerminalEvent = false;
     let stopSequence: string | undefined;
     let fullText = '';
@@ -858,7 +875,8 @@ export class BedrockAdapter implements ProviderAdapter {
             throw new BedrockError(
               BEDROCK_STREAM_EXCEPTION_STATUS.get(exceptionType.toLowerCase()) ?? 500,
               `Bedrock stream error (${exceptionType}): ${errorMessage}`,
-              exceptionType
+              exceptionType,
+              errorMessage === exceptionType ? undefined : { message: errorMessage },
             );
           }
 
@@ -892,7 +910,7 @@ export class BedrockAdapter implements ProviderAdapter {
             if (eventData !== undefined) {
               // A decoded model event is progress; a ping only proves the
               // connection.
-              if ((eventData as { type?: string }).type !== 'ping') onProgress?.();
+              if ((eventData as { type?: string }).type !== 'ping') onProgress?.(contentOfAnthropicEvent(eventData));
 
               // Check for error events within the stream
               if (eventData.type === 'error') {
@@ -904,7 +922,8 @@ export class BedrockAdapter implements ProviderAdapter {
                 throw new BedrockError(
                   undefined,
                   `Bedrock stream error: ${streamError?.message || JSON.stringify(eventData)}`,
-                  typeof streamError?.type === 'string' ? streamError.type : undefined
+                  typeof streamError?.type === 'string' ? streamError.type : undefined,
+                  eventData,
                 );
               }
 
@@ -1035,6 +1054,7 @@ export class BedrockAdapter implements ProviderAdapter {
                 if (eventData.delta?.stop_reason) {
                   stopReason = eventData.delta.stop_reason;
                 }
+                if (eventData.delta?.stop_details !== undefined) stopDetails = eventData.delta.stop_details;
                 // WHICH stop sequence fired, not just that one did. Dropping
                 // this (pre-2026-07-26) broke prefill/XML tool use on
                 // Bedrock entirely: membrane's tool gate matches
@@ -1136,6 +1156,7 @@ export class BedrockAdapter implements ProviderAdapter {
       model: modelId,
       stop_reason: (stopReason ?? 'end_turn') as BedrockMessageResponse['stop_reason'],
       stop_sequence: stopSequence ?? null,
+      ...(stopDetails !== undefined ? { stop_details: stopDetails } : {}),
       usage: {
         input_tokens: inputTokens,
         output_tokens: outputTokens,
@@ -1189,6 +1210,10 @@ export class BedrockAdapter implements ProviderAdapter {
       content,
       stopReason: response.stop_reason ?? 'end_turn',
       providerStopReason: response.stop_reason ?? undefined,
+      // A non-streamed body carries stop_details, as AWS documents. The
+      // stream's final message carries them when a message_delta did, which
+      // AWS's page doesn't show.
+      ...readRefusalCategory(response.stop_reason, response.stop_details),
       stopSequence: response.stop_sequence ?? undefined,
       usage: {
         inputTokens: response.usage.input_tokens,
@@ -1242,7 +1267,13 @@ class BedrockError extends Error {
     public status: number | undefined,
     message: string,
     /** The exception's own type, or an in-band error event's error.type. */
-    public code?: string
+    public code?: string,
+    /**
+     * The provider's error as it came in the stream, as the Anthropic SDK's
+     * APIError keeps its body as `error`: an exception's `{ message }`, or an
+     * in-band error event. The attempt record's 400 kinds read its message.
+     */
+    public error?: unknown,
   ) {
     super(message);
     this.name = 'BedrockError';
