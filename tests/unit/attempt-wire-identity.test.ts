@@ -1,10 +1,12 @@
 /**
  * An attempt record observes; it never changes what's sent. With
- * `onAttempt` set, Membrane core passes each adapter `onProgress` and
- * `onSend`, which it doesn't pass otherwise (with no progress deadline). So
- * for every built-in adapter, on `complete()` and on `stream()`, the request
- * each one puts on the wire is captured at `fetch` with and without
- * `onAttempt`, and they must be the same bytes: URL, method, headers and body.
+ * `onAttempt` set, Membrane core passes each adapter `onSend`, and an
+ * `onProgress` that observes, where without it core passes none, or the
+ * progress deadline's own renew. So for every built-in adapter, on
+ * `complete()`, `stream()` and `streamYielding()`, with no progress deadline
+ * and with one (and a purpose and a requestId), the request each one puts on
+ * the wire is captured at `fetch` with and without `onAttempt`, and they must
+ * be the same bytes: URL, method, headers and body.
  * (Bedrock signs each request with the time, so its signature headers are
  * left out of Bedrock's comparison; the clock is held still for it anyway.)
  */
@@ -62,12 +64,18 @@ function request(model: string): NormalizedRequest {
   };
 }
 
+type Method = 'complete' | 'stream' | 'streamYielding';
+
+/** With a progress deadline, core passes onProgress whether or not it observes, and the call names itself. */
+const DEADLINED = { progressTimeoutMs: 60_000, purpose: 'turn' as const, requestId: 'zz-req-1' };
+
 async function wireOf(
   name: string,
   build: () => ProviderAdapter,
   formatter: () => PrefillFormatter,
   model: string,
-  method: 'complete' | 'stream',
+  method: Method,
+  deadlined: boolean,
   observe: boolean,
 ): Promise<{ wire: Wire[]; records: AttemptRecord[] }> {
   const wire: Wire[] = [];
@@ -83,24 +91,28 @@ async function wireOf(
     formatter: formatter(),
     ...(observe ? { onAttempt: (record: AttemptRecord) => { records.push(record); } } : {}),
   });
-  const call = method === 'complete' ? membrane.complete(request(model)) : membrane.stream(request(model));
-  await call.catch(() => undefined);
+  const options = deadlined ? DEADLINED : {};
+  if (method === 'complete') await membrane.complete(request(model), options).catch(() => undefined);
+  else if (method === 'stream') await membrane.stream(request(model), options).catch(() => undefined);
+  else for await (const _event of membrane.streamYielding(request(model), options)) { /* the 400 ends it as an error event */ }
   return { wire, records };
 }
 
 describe('the wire is the same with and without onAttempt', () => {
   for (const [name, build, model, formatter] of ADAPTERS) {
-    for (const method of ['complete', 'stream'] as const) {
-      it(`${name}, ${method}()`, async () => {
-        vi.useFakeTimers({ now: Date.parse('2026-10-24T12:00:00Z'), toFake: ['Date'] });
-        const without = await wireOf(name, build, formatter, model, method, false);
-        const withRecord = await wireOf(name, build, formatter, model, method, true);
+    for (const method of ['complete', 'stream', 'streamYielding'] as const) {
+      for (const deadlined of [false, true]) {
+        it(`${name}, ${method}()${deadlined ? ', with a progress deadline, a purpose and a requestId' : ''}`, async () => {
+          vi.useFakeTimers({ now: Date.parse('2026-10-24T12:00:00Z'), toFake: ['Date'] });
+          const without = await wireOf(name, build, formatter, model, method, deadlined, false);
+          const withRecord = await wireOf(name, build, formatter, model, method, deadlined, true);
 
-        expect(without.wire.length).toBeGreaterThan(0);
-        expect(withRecord.wire).toEqual(without.wire);
-        // And the observer did observe: one record per request sent.
-        expect(withRecord.records).toHaveLength(withRecord.wire.length);
-      });
+          expect(without.wire.length).toBeGreaterThan(0);
+          expect(withRecord.wire).toEqual(without.wire);
+          // And the observer did observe: one record per request sent.
+          expect(withRecord.records).toHaveLength(withRecord.wire.length);
+        });
+      }
     }
   }
 });
