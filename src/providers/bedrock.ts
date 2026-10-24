@@ -124,7 +124,8 @@ interface BedrockMessageResponse {
   /**
    * With a refusal, its details, as AWS documents for a non-streamed body
    * (Claude Messages API on Bedrock): `category`, such as 'cyber', and an
-   * explanation. AWS's page doesn't document it in a stream's events.
+   * explanation. AWS's page doesn't show it in a stream's events; the stream's
+   * final message carries it when a message_delta did.
    */
   stop_details?: unknown;
   usage: {
@@ -155,6 +156,8 @@ interface BedrockStreamEvent {
     partial_json?: string;
     stop_reason?: string;
     stop_sequence?: string;
+    /** On a refusal's message_delta, if Bedrock passes it on (see BedrockMessageResponse.stop_details). */
+    stop_details?: unknown;
   };
   message?: BedrockMessageResponse;
   usage?: {
@@ -778,6 +781,10 @@ export class BedrockAdapter implements ProviderAdapter {
     let cacheCreationTokens: number | undefined;
     let cacheReadTokens: number | undefined;
     let stopReason: string | undefined;
+    // A refusal's details, from its message_delta, as AnthropicAdapter's
+    // stream reads them. AWS's page doesn't show them in the stream, so they
+    // may never come; the reader leaves the category out when they don't.
+    let stopDetails: unknown;
     let sawTerminalEvent = false;
     let stopSequence: string | undefined;
     let fullText = '';
@@ -1047,6 +1054,7 @@ export class BedrockAdapter implements ProviderAdapter {
                 if (eventData.delta?.stop_reason) {
                   stopReason = eventData.delta.stop_reason;
                 }
+                if (eventData.delta?.stop_details !== undefined) stopDetails = eventData.delta.stop_details;
                 // WHICH stop sequence fired, not just that one did. Dropping
                 // this (pre-2026-07-26) broke prefill/XML tool use on
                 // Bedrock entirely: membrane's tool gate matches
@@ -1148,6 +1156,7 @@ export class BedrockAdapter implements ProviderAdapter {
       model: modelId,
       stop_reason: (stopReason ?? 'end_turn') as BedrockMessageResponse['stop_reason'],
       stop_sequence: stopSequence ?? null,
+      ...(stopDetails !== undefined ? { stop_details: stopDetails } : {}),
       usage: {
         input_tokens: inputTokens,
         output_tokens: outputTokens,
@@ -1201,9 +1210,9 @@ export class BedrockAdapter implements ProviderAdapter {
       content,
       stopReason: response.stop_reason ?? 'end_turn',
       providerStopReason: response.stop_reason ?? undefined,
-      // A non-streamed body carries stop_details, as AWS documents; the
-      // stream's final message is built without it, since AWS's page doesn't
-      // document it in the stream and nothing here has seen one.
+      // A non-streamed body carries stop_details, as AWS documents. The
+      // stream's final message carries them when a message_delta did, which
+      // AWS's page doesn't show.
       ...readRefusalCategory(response.stop_reason, response.stop_details),
       stopSequence: response.stop_sequence ?? undefined,
       usage: {

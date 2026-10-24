@@ -140,7 +140,7 @@ export interface AttemptRecord {
    * AnthropicAdapter and BedrockAdapter of the built-in adapters do.
    */
   maxTokens?: number;
-  /** With a response: its usage. */
+  /** With a response: its usage. Absent when the response carried no usage at all. */
   usage?: AttemptUsage;
   ending: AttemptEnding;
 }

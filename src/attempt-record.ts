@@ -51,6 +51,7 @@ export class AttemptObserver {
   private maxGapAfterContent?: number;
   private maxTokens?: number;
   private reportsContent = false;
+  private sendReported = false;
 
   constructor(private readonly context: AttemptContext) {}
 
@@ -61,8 +62,12 @@ export class AttemptObserver {
     this.sentMono = performance.now();
   }
 
-  /** What the adapter reported as it sent (onSend). */
+  /** What the adapter reported as it sent (onSend). The first report counts. */
   send(report: SendReport | undefined): void {
+    // The first report counts, as the first send does: a record's limit and
+    // content report are never another send's.
+    if (this.sendReported) return;
+    this.sendReported = true;
     if (report === null || typeof report !== 'object') return;
     const maxTokens = nonNegativeCount(report.maxTokens);
     if (maxTokens !== undefined) this.maxTokens = maxTokens;
@@ -96,7 +101,7 @@ export class AttemptObserver {
           stopReason: StopReason;
           providerStopReason?: string;
           refusalCategory?: string;
-          usage: ProviderResponse['usage'];
+          usage?: ProviderResponse['usage'];
           unreportedUsage?: ProviderResponse['unreportedUsage'];
         }
       | { error: unknown; cancelled: boolean },
@@ -120,7 +125,7 @@ export class AttemptObserver {
         ...(outcome.providerStopReason !== undefined ? { providerStopReason: outcome.providerStopReason } : {}),
         ...(outcome.refusalCategory !== undefined ? { refusalCategory: outcome.refusalCategory } : {}),
       };
-      usage = usageOf(outcome.usage, outcome.unreportedUsage);
+      if (outcome.usage !== undefined) usage = usageOf(outcome.usage, outcome.unreportedUsage);
     } else {
       ending = { error: errorOf(outcome.error, outcome.cancelled) };
     }

@@ -594,6 +594,9 @@ export class Membrane {
         } finally {
           progress.cleanup();
         }
+        // The attempt's record goes first, from its own copy of the usage, so
+        // nothing the call does with the response can lose it.
+        this.reportAttempt(() => attempt?.settle(this.attemptResponse(rawProviderResponse)));
         // Restate usage in the one convention before any ratio or price sees it,
         // and the stop token as membrane carries it (see providerReasonFor).
         const providerResponse: ProviderResponse = {
@@ -605,7 +608,6 @@ export class Membrane {
             this.adapter.usageCacheConvention,
           ),
         };
-        this.reportAttempt(() => attempt?.settle(this.attemptResponse(rawProviderResponse, providerResponse.usage)));
 
         // Call onResponse callback with raw response from API
         runCallerCode(() => options.onResponse?.(providerResponse.raw));
@@ -2956,10 +2958,7 @@ export class Membrane {
       // The attempt's record goes before held text is delivered, since that
       // runs the caller's callbacks, which can throw. It takes its own copy
       // of the normalized usage, inside its guard.
-      this.reportAttempt(() => observer?.settle(this.attemptResponse(
-        attemptResult!,
-        normalizeUsageToCacheExcluded(attemptResult!.usage, this.adapter.name, this.adapter.usageCacheConvention),
-      )));
+      this.reportAttempt(() => observer?.settle(this.attemptResponse(attemptResult!)));
       const rawResult = localStops ? localStops.finish(attemptResult!) : attemptResult!;
       // Restate usage in the one convention before any accumulator, ratio or
       // price sees it — this is the only door streamed usage enters the call
@@ -3773,26 +3772,29 @@ export class Membrane {
    * How an attempt that returned a response ended, for its record: membrane's
    * stop reason for the provider's own stop, the provider's token as
    * details.stop.providerReason carries it (providerReasonFor), a refusal's
-   * category read as RetryingEvent's is, and the usage as membrane
-   * normalized it.
+   * category read as RetryingEvent's is, and its own copy of the usage as
+   * membrane normalizes it. A response with no usage object, which only an
+   * adapter outside ProviderResponse's type can give, has no counts here; the
+   * call's own normalization then fails the call, as it would without a
+   * record.
    */
-  private attemptResponse(
-    response: ProviderResponse,
-    usage: ProviderResponse['usage'],
-  ): {
+  private attemptResponse(response: ProviderResponse): {
     stopReason: StopReason;
     providerStopReason?: string;
     refusalCategory?: string;
-    usage: ProviderResponse['usage'];
+    usage?: ProviderResponse['usage'];
     unreportedUsage?: ProviderResponse['unreportedUsage'];
   } {
     const stopReason = this.mapStopReason(response.stopReason);
     const providerStopReason = this.providerReasonFor(response);
+    const usage = response.usage !== null && typeof response.usage === 'object'
+      ? normalizeUsageToCacheExcluded(response.usage, this.adapter.name, this.adapter.usageCacheConvention)
+      : undefined;
     return {
       stopReason,
       ...(providerStopReason !== undefined ? { providerStopReason } : {}),
       ...(stopReason === 'refusal' && isStopToken(response.refusalCategory) ? { refusalCategory: response.refusalCategory } : {}),
-      usage,
+      ...(usage !== undefined ? { usage } : {}),
       ...(response.unreportedUsage ? { unreportedUsage: response.unreportedUsage } : {}),
     };
   }

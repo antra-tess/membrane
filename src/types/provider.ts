@@ -482,10 +482,11 @@ export interface ProviderResponse {
    * The provider's category for a refusal: Anthropic's
    * `stop_details.category`, such as 'cyber'. Set only when the provider
    * stopped with `refusal` and named a category as a non-empty string; absent
-   * otherwise. AnthropicAdapter sets it on stream() and complete(), and
-   * BedrockAdapter on complete(), from the `stop_details` AWS documents on a
-   * non-streamed body; Bedrock's stream reports none, since AWS's page doesn't
-   * document it in a stream's events. No other built-in adapter sets it. Membrane announces it, and nothing read from
+   * otherwise. AnthropicAdapter and BedrockAdapter set it on stream() and
+   * complete(). AWS documents Bedrock's `stop_details` on a non-streamed body;
+   * its page doesn't show them in a stream's events, so on Bedrock's stream
+   * they may never come, and the field is read only if a message_delta
+   * carries them. No other built-in adapter sets it. Membrane announces it, and nothing read from
    * the raw response, on a refusal re-issue's `RetryingEvent.category`.
    * Custom adapters opt in by supplying it, and a decorator that rebuilds the
    * response must carry it. As with providerStopReason, membrane reads a value
