@@ -408,8 +408,11 @@ export interface ProviderRequestOptions {
    * connection is up, not that the model is making progress. An adapter that
    * reports content (SendReport.reportsContent) passes `'content'` for an
    * event that is content (see ProgressSeen), and nothing for any other.
-   * Decorators must forward it, with its argument, beside the other options;
-   * one that drops it turns the progress deadline into a total one.
+   * Decorators must forward it beside the other options: one that drops it
+   * turns the progress deadline into a total one, and one that drops its
+   * argument while forwarding `onSend` reports content that never arrives.
+   * TypeScript doesn't catch the second, since a function of no arguments
+   * fits this type.
    */
   onProgress?: (seen?: ProgressSeen) => void;
   /**
@@ -481,8 +484,8 @@ export interface ProviderResponse {
    * stopped with `refusal` and named a category as a non-empty string; absent
    * otherwise. AnthropicAdapter sets it on stream() and complete(), and
    * BedrockAdapter on complete(), from the `stop_details` AWS documents on a
-   * non-streamed body; Bedrock's stream reports none, since AWS documents none
-   * in its events. No other built-in adapter sets it. Membrane announces it, and nothing read from
+   * non-streamed body; Bedrock's stream reports none, since AWS's page doesn't
+   * document it in a stream's events. No other built-in adapter sets it. Membrane announces it, and nothing read from
    * the raw response, on a refusal re-issue's `RetryingEvent.category`.
    * Custom adapters opt in by supplying it, and a decorator that rebuilds the
    * response must carry it. As with providerStopReason, membrane reads a value

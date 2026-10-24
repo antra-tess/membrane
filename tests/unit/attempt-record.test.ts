@@ -175,21 +175,60 @@ describe('one record per attempt, with what the call says about it', () => {
     expect(inputUnreported.records[0]!.usage).toEqual({ outputTokens: 5 });
   });
 
-  it('usage is normalized: cache reads and writes outside inputTokens', async () => {
+  it('carries only what is what it says: a string requestId, and usage counts that are numbers', async () => {
+    const adapter = new ScriptedAdapter([
+      async (call) => {
+        sendAs(call);
+        return answer(call.request, 'zz', { usage: { inputTokens: 1, outputTokens: 2, cacheReadTokens: '5' as never } });
+      },
+    ]);
+    const { membrane, records } = recording(adapter);
+
+    await membrane.complete(REQUEST, { requestId: 42 as never });
+
+    expect(Object.keys(records[0]!)).not.toContain('callerRequestId');
+    expect(Object.keys(records[0]!.usage!).sort()).toEqual(['inputTokens', 'outputTokens']);
+  });
+
+  it.each(['complete', 'stream'] as const)('usage is normalized, cache reads and writes outside inputTokens, on %s()', async (method) => {
     class InclusiveAdapter extends ScriptedAdapter {
       readonly usageCacheConvention = 'cache-inclusive' as const;
     }
     const adapter = new InclusiveAdapter([
       async (call) => {
         sendAs(call);
+        call.callbacks?.onChunk('zz');
         return answer(call.request, 'zz', { usage: { inputTokens: 100, outputTokens: 5, cacheReadTokens: 60 } });
       },
     ]);
     const { membrane, records } = recording(adapter);
 
-    await membrane.complete(REQUEST);
+    if (method === 'complete') await membrane.complete(REQUEST);
+    else await membrane.stream(REQUEST);
 
     expect(records[0]!.usage).toEqual({ inputTokens: 40, outputTokens: 5, cacheReadTokens: 60 });
+  });
+
+  it("carries the provider's own stop token, so a stop membrane doesn't map isn't read as an ordinary end", async () => {
+    const adapter = new ScriptedAdapter([
+      async (call) => {
+        sendAs(call);
+        return answer(call.request, 'zz', { stopReason: 'model_context_window_exceeded' });
+      },
+      async (call) => {
+        sendAs(call);
+        return answer(call.request, 'zz', { providerStopReason: 'end_turn' });
+      },
+    ]);
+    const { membrane, records } = recording(adapter);
+
+    await membrane.complete(REQUEST);
+    await membrane.complete(REQUEST);
+
+    expect(records.map((r) => r.ending)).toEqual([
+      { stopReason: 'end_turn', providerStopReason: 'model_context_window_exceeded' },
+      { stopReason: 'end_turn', providerStopReason: 'end_turn' },
+    ]);
   });
 
   it('a failed send and its retry are two attempts of the one round', async () => {
@@ -274,6 +313,7 @@ describe('times, from the send', () => {
         vi.advanceTimersByTime(4000); progress('content');   // 5 s: content, after a 4 s gap
         vi.advanceTimersByTime(500); progress();             // 5.5 s
         vi.advanceTimersByTime(1500); progress('content');   // 7 s
+        vi.advanceTimersByTime(200); progress();             // 7.2 s: the last gap is the shortest
         call.callbacks?.onChunk('zz');
         vi.advanceTimersByTime(250);
         return answer(call.request, 'zz');
@@ -291,8 +331,50 @@ describe('times, from the send', () => {
       maxGapMs: 4000,
       // The 4 s gap ended at first content, so it isn't after it.
       maxGapAfterContentMs: 1500,
-      lastEventMs: 7000,
-      endMs: 7250,
+      lastEventMs: 7200,
+      endMs: 7450,
+    });
+  });
+
+  it('on the monotonic clock: a step of the wall clock moves no time but sentAt', async () => {
+    vi.useFakeTimers({ now: Date.parse('2026-10-24T12:00:00Z') });
+    const adapter = new ScriptedAdapter([
+      async (call) => {
+        sendAs(call);
+        vi.advanceTimersByTime(1000); call.options!.onProgress!('content');
+        // The system clock jumps an hour; performance.now() doesn't.
+        vi.setSystemTime(Date.now() + 3_600_000);
+        vi.advanceTimersByTime(1000); call.options!.onProgress!();
+        return answer(call.request, 'zz');
+      },
+    ]);
+    const { membrane, records } = recording(adapter);
+
+    await membrane.stream(REQUEST);
+
+    expect(records[0]).toMatchObject({
+      sentAt: Date.parse('2026-10-24T12:00:00Z'),
+      firstEventMs: 1000, maxGapMs: 1000, lastEventMs: 2000, endMs: 2000,
+    });
+  });
+
+  it('times are whole milliseconds, and an event at the send counts as 0', async () => {
+    vi.useFakeTimers();
+    const adapter = new ScriptedAdapter([
+      async (call) => {
+        sendAs(call);
+        call.options!.onProgress!('content');                // at the send
+        vi.advanceTimersByTime(1.6); call.options!.onProgress!();
+        vi.advanceTimersByTime(0.7);
+        return answer(call.request, 'zz');
+      },
+    ]);
+    const { membrane, records } = recording(adapter);
+
+    await membrane.stream(REQUEST);
+
+    expect(records[0]).toMatchObject({
+      firstEventMs: 0, firstContentMs: 0, maxGapMs: 2, maxGapAfterContentMs: 2, lastEventMs: 2, endMs: 2,
     });
   });
 
@@ -352,12 +434,32 @@ describe('times, from the send', () => {
     ]);
     const { membrane, records } = recording(adapter);
 
+    const delivered: string[] = [];
     await membrane.stream({ ...REQUEST, stopSequences: ['STOP'] }, {
       // The caller's own callback, slow on the clock.
-      onChunk: () => { vi.advanceTimersByTime(5000); },
+      onChunk: (chunk) => { delivered.push(chunk); vi.advanceTimersByTime(5000); },
     }).catch(() => undefined);
 
+    expect(delivered).toEqual(['ST']);
     expect(records[0]!.endMs).toBe(1000);
+  });
+
+  it('a caller callback that throws while held text is delivered leaves the record given', async () => {
+    const adapter = new ScriptedAdapter([
+      async (call) => {
+        sendAs(call);
+        // Held until the adapter returns, then delivered by the local stop's finish.
+        call.callbacks!.onChunk('ST');
+        return answer(call.request, 'ST');
+      },
+    ]);
+    const { membrane, records } = recording(adapter);
+
+    await expect(membrane.stream({ ...REQUEST, stopSequences: ['STOP'] }, {
+      onChunk: () => { throw new Error('zz caller callback'); },
+    })).rejects.toThrow('zz caller callback');
+
+    expect(records.map((r) => r.ending)).toEqual([{ stopReason: 'end_turn' }]);
   });
 
   it('one event: no gap; no events: no event times at all', async () => {
@@ -377,6 +479,7 @@ describe('times, from the send', () => {
     await membrane.stream(REQUEST);
     await membrane.stream(REQUEST);
 
+    expect(records[0]!.firstEventMs).toBeTypeOf('number');
     expect(records[0]!.firstEventMs).toBe(records[0]!.lastEventMs);
     for (const key of ['maxGapMs', 'maxGapAfterContentMs', 'firstContentMs']) {
       expect(Object.keys(records[0]!)).not.toContain(key);
@@ -431,7 +534,7 @@ describe('times, from the send', () => {
   it("a send report counts only as what it says: maxTokens as a count, reportsContent as true", async () => {
     const reports: unknown[] = [
       { maxTokens: -1, reportsContent: 'yes' }, { maxTokens: Number.NaN, reportsContent: 1 },
-      { maxTokens: '64' }, { maxTokens: null }, undefined, null,
+      { maxTokens: Number.POSITIVE_INFINITY }, { maxTokens: '64' }, { maxTokens: null }, undefined, null,
     ];
     const adapter = new ScriptedAdapter(
       reports.map((report) => async (call: Call) => {
@@ -449,6 +552,11 @@ describe('times, from the send', () => {
       expect(Object.keys(record)).not.toContain('maxTokens');
       expect(record.reportsContent).toBe(false);
     }
+
+    // A limit of 0 is a count, as a replay that asks for no output sends.
+    const zero = recording(new ScriptedAdapter([async (call) => { sendAs(call, { maxTokens: 0 }); return answer(call.request, ''); }]));
+    await zero.membrane.complete(REQUEST);
+    expect(zero.records[0]!.maxTokens).toBe(0);
   });
 
   it("the model membrane asked the adapter for, or '' where a hook left something else there", async () => {
@@ -463,6 +571,17 @@ describe('times, from the send', () => {
 
     expect(records[0]!.model).toBe('');
     expect(plainRecord.records[0]!.model).toBe('zz-model-1');
+  });
+
+  it.each(['complete', 'stream'] as const)('the model a beforeRequest hook rewrote, on %s()', async (method) => {
+    const { membrane, records } = recording(new ScriptedAdapter([plain()]), {
+      hooks: { beforeRequest: (_request, provider) => ({ ...(provider as object), model: 'zz-model-2' }) },
+    });
+
+    if (method === 'complete') await membrane.complete(REQUEST);
+    else await membrane.stream(REQUEST);
+
+    expect(records[0]!.model).toBe('zz-model-2');
   });
 });
 
@@ -577,7 +696,7 @@ describe('how an attempt ended', () => {
     expect(records[0]!.ending).toEqual({ error: { type: 'abort', cancelled: true, deadline: false } });
   });
 
-  it('the progress deadline', async () => {
+  it.each(['complete', 'stream'] as const)('the progress deadline, on %s()', async (method) => {
     vi.useFakeTimers();
     const adapter = new ScriptedAdapter([
       // Waits for its signal, and types a deadline's abort as every built-in adapter does.
@@ -591,12 +710,40 @@ describe('how an attempt ended', () => {
     ]);
     const { membrane, records } = recording(adapter);
 
-    const done = membrane.complete(REQUEST, { progressTimeoutMs: 1000 }).catch((error: unknown) => error);
+    const done = (method === 'complete'
+      ? membrane.complete(REQUEST, { progressTimeoutMs: 1000 })
+      : membrane.stream(REQUEST, { progressTimeoutMs: 1000 })
+    ).catch((error: unknown) => error);
     await vi.advanceTimersByTimeAsync(1000);
     await done;
 
     expect(records[0]!.ending).toMatchObject({ error: { cancelled: false, deadline: true } });
     expect(records[0]!.endMs).toBe(1000);
+  });
+
+  it.each(['complete', 'stream'] as const)('observed, events still renew the progress deadline, on %s()', async (method) => {
+    vi.useFakeTimers();
+    const adapter = new ScriptedAdapter([
+      async (call) => {
+        sendAs(call);
+        // Three events 600 ms apart outlast a 1000 ms deadline only if each renews it.
+        for (let i = 0; i < 3; i++) {
+          await vi.advanceTimersByTimeAsync(600);
+          if (call.options!.signal?.aborted) throw call.options!.signal.reason;
+          call.options!.onProgress!();
+        }
+        call.callbacks?.onChunk('zz');
+        return answer(call.request, 'zz');
+      },
+    ]);
+    const { membrane, records } = recording(adapter);
+
+    const response = method === 'complete'
+      ? await membrane.complete(REQUEST, { progressTimeoutMs: 1000 })
+      : await membrane.stream(REQUEST, { progressTimeoutMs: 1000 });
+
+    expect((response as NormalizedResponse).stopReason).toBe('end_turn');
+    expect(records[0]!.ending).toEqual({ stopReason: 'end_turn' });
   });
 
   it('a deadline on a request already sent', async () => {
@@ -697,6 +844,17 @@ describe('no record where nothing was sent', () => {
     expect(records).toEqual([]);
   });
 
+  it("stream(): the caller's onRequest still hears the request, and one that throws means no send", async () => {
+    const heard: unknown[] = [];
+    const { membrane, records } = recording(new ScriptedAdapter([plain(), plain()]));
+
+    await membrane.stream(REQUEST, { onRequest: (body) => { heard.push(body); } });
+    await expect(membrane.stream(REQUEST, { onRequest: () => { throw new Error('zz logger'); } })).rejects.toThrow('zz logger');
+
+    expect(heard).toHaveLength(1);
+    expect(records).toHaveLength(1);
+  });
+
   it("the caller's onRequest that throws: the adapter doesn't send", async () => {
     const adapter = new ScriptedAdapter([
       async (call) => {
@@ -739,19 +897,41 @@ describe('an observer that fails changes nothing', () => {
     const listener = (reason: unknown) => { unhandled.push(reason); };
     process.on('unhandledRejection', listener);
     try {
+      let called = 0;
       const adapter = new ScriptedAdapter([plain()]);
       const membrane = new Membrane(adapter, {
         formatter: new NativeFormatter(),
-        onAttempt: async () => { throw new Error('zz async observer'); },
+        onAttempt: async () => { called++; throw new Error('zz async observer'); },
       });
 
       await membrane.stream(REQUEST);
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      // Node reports an unhandled rejection once the microtasks have run,
+      // before the next turn of the event loop's check phase.
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
 
+      expect(called).toBe(1);
       expect(unhandled).toEqual([]);
     } finally {
       process.off('unhandledRejection', listener);
     }
+  });
+
+  it("building a record that can't be built changes nothing about the call", async () => {
+    // A refusal whose category can't be read: membrane's own path doesn't read
+    // it on complete() without re-issues, and the record's does.
+    const response = (request: ProviderRequest): ProviderResponse => Object.defineProperty(
+      answer(request, '', { stopReason: 'refusal' }),
+      'refusalCategory',
+      { get: () => { throw new Error('zz unreadable'); }, enumerable: false },
+    );
+    const adapter = new ScriptedAdapter([async (call) => { sendAs(call); return response(call.request); }]);
+    const { membrane, records } = recording(adapter);
+
+    const result = await membrane.complete(REQUEST);
+
+    expect(result.stopReason).toBe('refusal');
+    expect(records).toEqual([]);
   });
 });
 
@@ -766,5 +946,16 @@ describe('without onAttempt, nothing is observed', () => {
 
     expect(adapter.calls.map((c) => [c.options?.onSend, c.options?.onProgress].map((f) => typeof f)))
       .toEqual([['undefined', 'undefined'], ['undefined', 'undefined'], ['undefined', 'function']]);
+  });
+
+  it("an adapter never sees the call's record details among its options, observed or not", async () => {
+    const adapter = new ScriptedAdapter([plain(), plain()]);
+    await new Membrane(adapter, { formatter: new NativeFormatter() }).stream(REQUEST, { purpose: 'turn' });
+    await recording(adapter).membrane.stream(REQUEST, { purpose: 'turn' });
+
+    for (const call of adapter.calls) {
+      expect(Object.keys(call.options!)).not.toContain('record');
+      expect(Object.keys(call.options!)).not.toContain('purpose');
+    }
   });
 });

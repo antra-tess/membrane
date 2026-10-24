@@ -100,6 +100,7 @@ export class AttemptObserver {
     outcome:
       | {
           stopReason: StopReason;
+          providerStopReason?: string;
           refusalCategory?: string;
           usage: ProviderResponse['usage'];
           unreportedUsage?: ProviderResponse['unreportedUsage'];
@@ -121,6 +122,7 @@ export class AttemptObserver {
     if ('stopReason' in outcome) {
       ending = {
         stopReason: outcome.stopReason,
+        ...(outcome.providerStopReason !== undefined ? { providerStopReason: outcome.providerStopReason } : {}),
         ...(outcome.refusalCategory !== undefined ? { refusalCategory: outcome.refusalCategory } : {}),
       };
       usage = usageOf(outcome.usage, outcome.unreportedUsage);

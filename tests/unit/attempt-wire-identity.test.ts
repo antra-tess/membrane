@@ -6,7 +6,7 @@
  * each one puts on the wire is captured at `fetch` with and without
  * `onAttempt`, and they must be the same bytes: URL, method, headers and body.
  * (Bedrock signs each request with the time, so its signature headers are
- * left out of the comparison; the clock is held still for it anyway.)
+ * left out of Bedrock's comparison; the clock is held still for it anyway.)
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
@@ -31,12 +31,13 @@ afterEach(() => {
 
 interface Wire { url: string; method: string; headers: Record<string, string>; body: string }
 
+/** Bedrock's SigV4 headers, which sign each request with its time; left out for Bedrock alone. */
 const SIGNED = new Set(['authorization', 'x-amz-date', 'x-amz-content-sha256', 'x-amz-security-token']);
 
-async function capture(input: unknown, init?: RequestInit): Promise<Wire> {
+async function capture(input: unknown, init: RequestInit | undefined, signed: boolean): Promise<Wire> {
   const request = new Request(input as RequestInfo, init);
   const headers: Record<string, string> = {};
-  request.headers.forEach((value, key) => { if (!SIGNED.has(key)) headers[key] = value; });
+  request.headers.forEach((value, key) => { if (!(signed && SIGNED.has(key))) headers[key] = value; });
   return { url: request.url, method: request.method, headers, body: await request.text() };
 }
 
@@ -62,6 +63,7 @@ function request(model: string): NormalizedRequest {
 }
 
 async function wireOf(
+  name: string,
   build: () => ProviderAdapter,
   formatter: () => PrefillFormatter,
   model: string,
@@ -71,7 +73,7 @@ async function wireOf(
   const wire: Wire[] = [];
   // The provider refuses every request: only what was sent matters here.
   vi.stubGlobal('fetch', vi.fn(async (input: unknown, init?: RequestInit) => {
-    wire.push(await capture(input, init));
+    wire.push(await capture(input, init, name === 'bedrock'));
     return new Response(JSON.stringify({ error: { type: 'invalid_request_error', message: 'zz refused' } }), {
       status: 400, headers: { 'content-type': 'application/json' },
     });
@@ -91,8 +93,8 @@ describe('the wire is the same with and without onAttempt', () => {
     for (const method of ['complete', 'stream'] as const) {
       it(`${name}, ${method}()`, async () => {
         vi.useFakeTimers({ now: Date.parse('2026-10-24T12:00:00Z'), toFake: ['Date'] });
-        const without = await wireOf(build, formatter, model, method, false);
-        const withRecord = await wireOf(build, formatter, model, method, true);
+        const without = await wireOf(name, build, formatter, model, method, false);
+        const withRecord = await wireOf(name, build, formatter, model, method, true);
 
         expect(without.wire.length).toBeGreaterThan(0);
         expect(withRecord.wire).toEqual(without.wire);

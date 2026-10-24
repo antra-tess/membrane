@@ -142,17 +142,24 @@ export function classifyBadRequest(message: string): { template?: string; fieldP
 /**
  * The provider's own message on an error membrane typed, from its raw error:
  * the body an SDK error carries as `error` (Anthropic's), or the body a fetch
- * adapter keeps as the raw error itself, parsed or as text (Bedrock's).
- * Another Error carries none: its own message is the error's rendering, not
- * the provider's words.
+ * adapter keeps as the raw error itself, parsed or as text (Bedrock's). Behind
+ * a router that wraps the provider's error (OpenRouter's `metadata.raw`), it's
+ * the provider's message, not the router's. Another Error carries none: its
+ * own message is the error's rendering, not the provider's words. So an
+ * exception inside a Bedrock stream, which BedrockAdapter keeps only in such
+ * a rendering, has no message here, and its 400 no template or path.
  */
 export function providerMessageOf(rawError: unknown): string | undefined {
   if (rawError !== null && typeof rawError === 'object') {
     const raw = rawError as Record<string, unknown>;
     // A serialized Error (serializeError keeps its name and message).
     if (typeof raw.name === 'string' && typeof raw.message === 'string') {
-      return extractProviderErrorFields(raw.error).message;
+      return ownMessage(extractProviderErrorFields(raw.error));
     }
   }
-  return extractProviderErrorFields(rawError).message;
+  return ownMessage(extractProviderErrorFields(rawError));
+}
+
+function ownMessage(fields: ReturnType<typeof extractProviderErrorFields>): string | undefined {
+  return fields.upstreamMessage ?? fields.message;
 }

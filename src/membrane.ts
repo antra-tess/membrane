@@ -554,11 +554,12 @@ export class Membrane {
           receiptGuard ? receiptGuard.signal : options.signal,
           options.progressTimeoutMs,
         );
-        // This pass's attempt record, only when someone reads it.
+        // This pass's attempt record, only when someone reads it. Without
+        // one, the adapter gets the deadline's renew itself, as it always has.
         const attempt = this.observeAttempt(options, 'complete', attempts - 1, finalRequest);
-        const onProgress = progress.renew || attempt
-          ? (seen?: ProgressSeen) => { attempt?.event(seen); progress.renew?.(); }
-          : undefined;
+        const onProgress = attempt
+          ? (seen?: ProgressSeen) => { attempt.event(seen); progress.renew?.(); }
+          : progress.renew;
         let rawProviderResponse: ProviderResponse;
         try {
           const adapterCall = this.adapter.complete(finalRequest, {
@@ -588,7 +589,7 @@ export class Membrane {
           });
           rawProviderResponse = receiptGuard ? await receiptGuard.settle(adapterCall) : await adapterCall;
         } catch (error) {
-          this.reportAttempt(attempt?.settle({ error, cancelled: options.signal?.aborted === true }));
+          this.reportAttempt(() => attempt?.settle({ error, cancelled: options.signal?.aborted === true }));
           throw error;
         } finally {
           attempt?.ended();
@@ -605,7 +606,7 @@ export class Membrane {
             this.adapter.usageCacheConvention,
           ),
         };
-        this.reportAttempt(attempt?.settle(this.attemptResponse(rawProviderResponse, providerResponse.usage)));
+        this.reportAttempt(() => attempt?.settle(this.attemptResponse(rawProviderResponse, providerResponse.usage)));
 
         // Call onResponse callback with raw response from API
         runCallerCode(() => options.onResponse?.(providerResponse.raw));
@@ -2890,7 +2891,9 @@ export class Membrane {
             ? {
                 ...observedOptions,
                 ...(progress.renew ? { signal: progress.signal } : {}),
-                onProgress: (seen?: ProgressSeen) => { observer?.event(seen); progress.renew?.(); },
+                onProgress: observer
+                  ? (seen?: ProgressSeen) => { observer.event(seen); progress.renew?.(); }
+                  : progress.renew,
                 ...(observer
                   ? {
                       onSend: (send: SendReport) => observer.send(send),
@@ -2923,7 +2926,7 @@ export class Membrane {
         // MembraneError yet is typed by errorFromThrown, so the retry is
         // decided on the type that is thrown.
         const typed = errorFromThrown(failure.error);
-        this.reportAttempt(observer?.settle({ error: typed, cancelled: adapterOptions.signal?.aborted === true }));
+        this.reportAttempt(() => observer?.settle({ error: typed, cancelled: adapterOptions.signal?.aborted === true }));
         // A call that delivered anything can't be sent again.
         if (delivered) throw typed;
         // The call's signal first, as complete() reads the caller's: a
@@ -2952,17 +2955,21 @@ export class Membrane {
         await this.sleep(delayMs, adapterOptions.signal);
         continue;
       }
-      const rawResult = localStops ? localStops.finish(attemptResult!) : attemptResult!;
       // Restate usage in the one convention before any accumulator, ratio or
       // price sees it — this is the only door streamed usage enters through.
+      // A local stop sequence's cut keeps the provider's usage.
+      const usage = normalizeUsageToCacheExcluded(attemptResult!.usage, this.adapter.name, this.adapter.usageCacheConvention);
+      // The attempt's record goes before held text is delivered, since that
+      // runs the caller's callbacks, which can throw.
+      this.reportAttempt(() => observer?.settle(this.attemptResponse(attemptResult!, usage)));
+      const rawResult = localStops ? localStops.finish(attemptResult!) : attemptResult!;
       // The stop token is settled here too, from the adapter's own stop, before
       // a local stop sequence, or the XML loop's, replaces its stopReason.
       const result: ProviderResponse = {
         ...rawResult,
         providerStopReason: this.providerReasonFor(attemptResult!),
-        usage: normalizeUsageToCacheExcluded(rawResult.usage, this.adapter.name, this.adapter.usageCacheConvention),
+        usage,
       };
-      this.reportAttempt(observer?.settle(this.attemptResponse(attemptResult!, result.usage)));
       if (result.stopReason !== 'refusal' || retried >= maxAttempts) {
         for (const block of attemptAlterations) fidelity?.alterBlock(block);
         return {
@@ -3764,16 +3771,26 @@ export class Membrane {
 
   /**
    * How an attempt that returned a response ended, for its record: membrane's
-   * stop reason for the provider's own stop, with a refusal's category read
-   * as RetryingEvent's is, and the usage as membrane normalized it.
+   * stop reason for the provider's own stop, the provider's token as
+   * details.stop.providerReason carries it (providerReasonFor), a refusal's
+   * category read as RetryingEvent's is, and the usage as membrane
+   * normalized it.
    */
   private attemptResponse(
     response: ProviderResponse,
     usage: ProviderResponse['usage'],
-  ): { stopReason: StopReason; refusalCategory?: string; usage: ProviderResponse['usage']; unreportedUsage?: ProviderResponse['unreportedUsage'] } {
+  ): {
+    stopReason: StopReason;
+    providerStopReason?: string;
+    refusalCategory?: string;
+    usage: ProviderResponse['usage'];
+    unreportedUsage?: ProviderResponse['unreportedUsage'];
+  } {
     const stopReason = this.mapStopReason(response.stopReason);
+    const providerStopReason = this.providerReasonFor(response);
     return {
       stopReason,
+      ...(providerStopReason !== undefined ? { providerStopReason } : {}),
       ...(stopReason === 'refusal' && isStopToken(response.refusalCategory) ? { refusalCategory: response.refusalCategory } : {}),
       usage,
       ...(response.unreportedUsage ? { unreportedUsage: response.unreportedUsage } : {}),
@@ -3781,15 +3798,17 @@ export class Membrane {
   }
 
   /**
-   * Give an attempt's record to `onAttempt`, as keepalive's `onCall` is given
-   * its receipts: what it throws, and a promise it returns that rejects, is
-   * ignored, so an observer can't end or change a call.
+   * Build an attempt's record and give it to `onAttempt`, as keepalive's
+   * `onCall` is given its receipts. What building it throws, what `onAttempt`
+   * throws, and a promise it returns that rejects, are all ignored, so
+   * observing can't end or change a call.
    */
-  private reportAttempt(record: AttemptRecord | undefined): void {
+  private reportAttempt(build: () => AttemptRecord | undefined): void {
     const onAttempt = this.config.onAttempt;
-    if (!record || !onAttempt) return;
+    if (!onAttempt) return;
     try {
-      void Promise.resolve(onAttempt(record)).catch(() => {});
+      const record = build();
+      if (record) void Promise.resolve(onAttempt(record)).catch(() => {});
     } catch {
       // An observer that throws is ignored, as one that rejects is.
     }

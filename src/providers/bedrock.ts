@@ -124,7 +124,7 @@ interface BedrockMessageResponse {
   /**
    * With a refusal, its details, as AWS documents for a non-streamed body
    * (Claude Messages API on Bedrock): `category`, such as 'cyber', and an
-   * explanation. AWS shows none in a stream's events.
+   * explanation. AWS's page doesn't document it in a stream's events.
    */
   stop_details?: unknown;
   usage: {
@@ -1200,8 +1200,8 @@ export class BedrockAdapter implements ProviderAdapter {
       stopReason: response.stop_reason ?? 'end_turn',
       providerStopReason: response.stop_reason ?? undefined,
       // A non-streamed body carries stop_details, as AWS documents; the
-      // stream's final message is built without it, since AWS documents none
-      // in the stream and nothing here has seen one.
+      // stream's final message is built without it, since AWS's page doesn't
+      // document it in the stream and nothing here has seen one.
       ...readRefusalCategory(response.stop_reason, response.stop_details),
       stopSequence: response.stop_sequence ?? undefined,
       usage: {

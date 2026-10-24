@@ -52,16 +52,21 @@ function observed() {
   return { options, sends, seen, body: () => body };
 }
 
-function anthropicStreaming(events: unknown[]) {
+/**
+ * A real AnthropicAdapter over a stubbed SDK client. `sends`, when given, is
+ * read as the SDK is called, into `reportsAtSend`, so a test can tell the
+ * send report came first.
+ */
+function anthropicStreaming(events: unknown[], sends?: SendReport[], reportsAtSend: number[] = []) {
   const adapter = new AnthropicAdapter({ apiKey: 'zz-key', cacheKeepalive: { enabled: false } });
   (adapter as any).client = {
     withOptions() { return this; },
     messages: {
-      stream: async () => ({
+      stream: async () => (reportsAtSend.push(sends?.length ?? -1), {
         controller: { abort() {} },
         async *[Symbol.asyncIterator]() { yield* events; },
       }),
-      create: async () => ({
+      create: async () => (reportsAtSend.push(sends?.length ?? -1), {
         id: 'msg_zz', type: 'message', role: 'assistant', model: 'claude-zz',
         content: [{ type: 'text', text: 'zz' }], stop_reason: 'end_turn', stop_sequence: null,
         usage: { input_tokens: 10, output_tokens: 5 },
@@ -76,19 +81,23 @@ function bedrock() {
 }
 
 describe('AnthropicAdapter', () => {
-  it('stream(): reports the body\'s max_tokens and that it reports content, then each content event', async () => {
+  it('stream(): reports the body\'s max_tokens and that it reports content before the send, then each content event', async () => {
     const o = observed();
-    await anthropicStreaming(EVENTS).stream(REQUEST, { onChunk: () => {} }, o.options);
+    const atSend: number[] = [];
+    await anthropicStreaming(EVENTS, o.sends, atSend).stream(REQUEST, { onChunk: () => {} }, o.options);
 
+    expect(atSend).toEqual([1]);
     expect(o.body()!.max_tokens).toBe(333);
     expect(o.sends).toEqual([{ maxTokens: 333, reportsContent: true }]);
     expect(o.seen).toEqual(SEEN);
   });
 
-  it('complete(): reports the body\'s max_tokens, and no content', async () => {
+  it('complete(): reports the body\'s max_tokens before the send, and no content', async () => {
     const o = observed();
-    await anthropicStreaming([]).complete(REQUEST, o.options);
+    const atSend: number[] = [];
+    await anthropicStreaming([], o.sends, atSend).complete(REQUEST, o.options);
 
+    expect(atSend).toEqual([1]);
     expect(o.sends).toEqual([{ maxTokens: 333 }]);
     expect(o.seen).toEqual([]);
   });
@@ -111,11 +120,13 @@ describe('AnthropicAdapter', () => {
 });
 
 describe('BedrockAdapter', () => {
-  it('stream(): reports the body\'s max_tokens and that it reports content, then each content event', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, body: streamBody([...EVENTS, { type: 'message_stop' }].map(chunkFrame)) })));
+  it('stream(): reports the body\'s max_tokens and that it reports content before the send, then each content event', async () => {
     const o = observed();
+    const atSend: number[] = [];
+    vi.stubGlobal('fetch', vi.fn(async () => (atSend.push(o.sends.length), { ok: true, status: 200, body: streamBody([...EVENTS, { type: 'message_stop' }].map(chunkFrame)) })));
     await bedrock().stream(REQUEST, { onChunk: () => {} }, o.options);
 
+    expect(atSend).toEqual([1]);
     expect(o.body()!.max_tokens).toBe(333);
     expect(o.sends).toEqual([{ maxTokens: 333, reportsContent: true }]);
     // Reading stops at message_delta, so message_stop is never an event.
@@ -149,7 +160,7 @@ describe('BedrockAdapter', () => {
     }
   });
 
-  it("stream(): reports no category, since AWS documents none in the stream's events", async () => {
+  it("stream(): reports no category, since AWS's page doesn't document it in the stream's events", async () => {
     const frames = [
       EVENTS[0],
       { type: 'message_delta', delta: { stop_reason: 'refusal', stop_details: { type: 'refusal', category: 'cyber' } }, usage: { output_tokens: 1 } },

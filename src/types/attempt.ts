@@ -60,6 +60,13 @@ export type AttemptEnding =
        * stop sequence or the XML loop's parser cuts the round.
        */
       stopReason: StopReason;
+      /**
+       * The provider's own token, as the round's `details.stop.providerReason`
+       * carries it: the adapter's `providerStopReason`, or else a stop reason
+       * membrane doesn't map. A token outside StopReason is a stop membrane
+       * reads as `end_turn`.
+       */
+      providerStopReason?: string;
       /** With a `refusal`: the provider's category, when it named one (ProviderResponse.refusalCategory). */
       refusalCategory?: string;
     }
@@ -67,12 +74,15 @@ export type AttemptEnding =
 
 /**
  * One provider attempt: one request membrane had its adapter send, whether a
- * call's first send, a retry after a failure, or a refusal re-issue. A
- * credential resolver's resend after an HTTP 401 is part of the attempt it
- * follows. An attempt is recorded once its adapter has reported its request
- * through `ProviderRequestOptions.onRequest`, which every built-in adapter
- * does before sending; one that fails before that, or an adapter that never
- * reports one, gives no record.
+ * call's first send, a retry after a failure, or a refusal re-issue. An
+ * attempt is recorded once its adapter has reported its request through
+ * `ProviderRequestOptions.onRequest`, which every built-in adapter does
+ * before sending; one that fails before that, or an adapter that never
+ * reports one, gives no record. What an adapter does after reporting its
+ * request is the attempt's: a credential resolver's refresh before the send,
+ * whose failure ends the attempt, and its resend after an HTTP 401, which
+ * reports no request of its own, so the attempt's times then include the
+ * refused send and the refresh.
  *
  * Times after `sentAt` are milliseconds from it on the monotonic clock,
  * rounded. An event is a call to `ProviderRequestOptions.onProgress`: one per
@@ -91,8 +101,10 @@ export interface AttemptRecord {
   /** The call's round, from 0: each tool round or resumption is a new one. `complete()` has one. */
   round: number;
   /**
-   * Earlier sends of this round's request in this call, from 0: retries after
-   * a failure and refusal re-issues alike.
+   * Earlier tries of this round's request in this call, from 0, a try being
+   * membrane's call to its adapter: retries after a failure and refusal
+   * re-issues alike. A try that failed before its adapter reported its
+   * request has no record, so the numbers can skip one.
    */
   attempt: number;
   /** The adapter's `name`. */
@@ -119,7 +131,11 @@ export interface AttemptRecord {
   lastEventMs?: number;
   /** When the adapter's call settled, with its response or its error. */
   endMs: number;
-  /** The output-token limit the request asked for, as its adapter reported it (`SendReport.maxTokens`). */
+  /**
+   * The output-token limit the request asked for, as its adapter reported it
+   * (`SendReport.maxTokens`). Absent when the adapter reported none, as only
+   * AnthropicAdapter and BedrockAdapter of the built-in adapters do.
+   */
   maxTokens?: number;
   /** With a response: its usage. */
   usage?: AttemptUsage;

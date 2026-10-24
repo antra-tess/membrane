@@ -7,7 +7,9 @@
  * transport, to the attempt record.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { BAD_REQUEST_TEMPLATES, classifyBadRequest, REQUEST_FIELD_NAMES } from '../../src/utils/bad-request.js';
+import { BAD_REQUEST_TEMPLATES, classifyBadRequest, providerMessageOf, REQUEST_FIELD_NAMES } from '../../src/utils/bad-request.js';
+import { serializeError } from '../../src/types/errors.js';
+import { OpenRouterAdapter } from '../../src/providers/openrouter.js';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import { BedrockAdapter } from '../../src/providers/bedrock.js';
 import { OpenAIAdapter } from '../../src/providers/openai.js';
@@ -23,8 +25,13 @@ afterEach(() => {
 const MESSAGES: Array<[string, string]> = [
   ['prefill_unsupported', 'This model does not support assistant message prefill. The conversation must end with a user message.'],
   ['sampling_parameter_deprecated', '`top_k` is deprecated for this model.'],
+  ['sampling_parameter_deprecated', '`temperature` is deprecated for this model.'],
+  ['sampling_parameter_deprecated', '`top_p` is deprecated for this model.'],
   ['system_change_unsupported', 'tool_addition/tool_removal requires a model that supports mid-conversation system content; this model does not'],
+  ['system_change_unsupported', 'tool_addition/tool_removal is not supported on this model'],
+  ['system_change_unsupported', "role 'system' is not supported on this model"],
   ['thinking_type_unsupported', '"thinking.type.enabled" is not supported for this model. Use "thinking.type.adaptive" and "output_config.effort" to control thinking behavior.'],
+  ['thinking_type_unsupported', 'adaptive thinking is not supported on this model'],
   ['effort_unsupported', 'output_config.effort requires a model that supports per-turn effort; this model does not'],
   ['tool_choice_unsupported', 'tool_choice: type "tool" and "any" are not supported for this model.'],
   ['max_tokens_not_above_thinking_budget', '`max_tokens` must be greater than `thinking.budget_tokens`. Please consult our documentation.'],
@@ -39,6 +46,7 @@ const MESSAGES: Array<[string, string]> = [
   ['server_tool_use_without_result', 'messages.4: `mcp_tool_use` with id `mcptoolu_01` was found without a corresponding `mcp_tool_result` block'],
   ['tool_result_without_use', 'messages.2.content.0: unexpected `tool_use_id` found in `tool_result` blocks: toolu_01. Each `tool_result` block must have a corresponding `tool_use` block in the previous message.'],
   ['tool_use_ids_duplicate', 'messages.1.content.2: `tool_use` ids must be unique'],
+  ['tool_use_ids_duplicate', 'messages.1.content.2: `server_tool_use` ids must be unique per assistant turn'],
   ['tool_result_error_empty', 'messages.2.content.0.tool_result: content cannot be empty if `is_error` is true'],
   ['tool_result_error_not_text', 'messages.2.content.0.tool_result: all content must be type `text` if `is_error` is true'],
   ['tool_names_not_unique', 'tools: Tool names must be unique.'],
@@ -78,6 +86,12 @@ describe('BAD_REQUEST_TEMPLATES', () => {
     expect(classifyBadRequest('zz an error no one has seen before')).toEqual({});
     expect(classifyBadRequest('')).toEqual({});
   });
+
+  it("a wording or a path later in a message isn't its opening", () => {
+    expect(classifyBadRequest('zz an upstream said: Field required')).toEqual({});
+    expect(classifyBadRequest('zz the provider says messages.1.content.0: Field required')).toEqual({});
+    expect(classifyBadRequest('zz before Invalid `signature` in `thinking` block')).toEqual({});
+  });
 });
 
 describe('the field path', () => {
@@ -111,6 +125,34 @@ describe('the field path', () => {
 
   it('the field names are names only', () => {
     for (const name of REQUEST_FIELD_NAMES) expect(name).toMatch(/^[a-z][a-z0-9_]*$/);
+  });
+});
+
+describe('providerMessageOf', () => {
+  it("reads a serialized SDK error's body, not the error's rendering", () => {
+    const sdkError = Object.assign(new Error('400 {"zz":"rendered"}'), {
+      error: { type: 'error', error: { type: 'invalid_request_error', message: 'messages.0: Field required' } },
+    });
+    expect(providerMessageOf(serializeError(sdkError))).toBe('messages.0: Field required');
+  });
+
+  it("finds nothing in an Error with no body, whatever its own message says", () => {
+    expect(providerMessageOf(serializeError(new Error('messages.0: Field required')))).toBeUndefined();
+  });
+
+  it("reads a parsed body's message, and a body's text", () => {
+    expect(providerMessageOf({ message: 'messages.0: Field required' })).toBe('messages.0: Field required');
+    expect(providerMessageOf('{"message":"messages.0: Field required"}')).toBe('messages.0: Field required');
+  });
+
+  it("reads the provider's message behind a router's wrapper", () => {
+    const wrapped = {
+      error: {
+        message: 'Provider returned error', code: 400,
+        metadata: { raw: JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'prompt is too long: 210000 tokens > 200000 maximum' } }) },
+      },
+    };
+    expect(providerMessageOf(wrapped)).toBe('prompt is too long: 210000 tokens > 200000 maximum');
   });
 });
 
@@ -153,6 +195,51 @@ describe("the provider's message, as each adapter carries it, reaches the record
     const adapter = new BedrockAdapter({ accessKeyId: 'zz-key', secretAccessKey: 'zz-secret', region: 'us-east-1' });
     const record = await recordOf(adapter, method);
     expect(record.ending).toMatchObject({ error: expected });
+  });
+
+  it.each(['complete', 'stream'] as const)("OpenRouter (the upstream provider's message inside the router's), %s()", async (method) => {
+    const body = {
+      error: {
+        message: 'Provider returned error', code: 400,
+        metadata: { raw: JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'prompt is too long: 210000 tokens > 200000 maximum' } }) },
+      },
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(body), {
+      status: 400, headers: { 'content-type': 'application/json' },
+    })));
+    const records: AttemptRecord[] = [];
+    const membrane = new Membrane(new OpenRouterAdapter({ apiKey: 'zz-key' }), { formatter: new NativeFormatter(), onAttempt: (r) => { records.push(r); } });
+    const request = { ...REQUEST, config: { ...REQUEST.config, model: 'anthropic/claude-sonnet-4.5' } };
+    if (method === 'complete') await membrane.complete(request).catch(() => undefined);
+    else await membrane.stream(request).catch(() => undefined);
+    expect(records).toHaveLength(1);
+    expect(records[0]!.ending).toMatchObject({ error: { httpStatus: 400, template: 'prompt_too_long' } });
+  });
+
+  it('Bedrock, an exception inside the stream: a 400 with no template or path, since the adapter keeps its message only in its rendering', async () => {
+    const exceptionFrame = (exceptionType: string, message: string): Uint8Array => {
+      const header = (name: string, value: string) => {
+        const n = Buffer.from(name), v = Buffer.from(value);
+        const out = Buffer.alloc(1 + n.length + 1 + 2 + v.length);
+        out[0] = n.length; n.copy(out, 1);
+        out[1 + n.length] = 7;
+        out.writeUInt16BE(v.length, 2 + n.length);
+        v.copy(out, 4 + n.length);
+        return out;
+      };
+      const headers = Buffer.concat([header(':exception-type', exceptionType), header(':message-type', 'exception')]);
+      const payload = Buffer.from(JSON.stringify({ message }));
+      const frame = Buffer.alloc(16 + headers.length + payload.length);
+      frame.writeUInt32BE(frame.length, 0); frame.writeUInt32BE(headers.length, 4);
+      headers.copy(frame, 12); payload.copy(frame, 12 + headers.length);
+      return frame;
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream({
+      start(controller) { controller.enqueue(exceptionFrame('validationException', TAIL)); controller.close(); },
+    }), { status: 200 })));
+    const adapter = new BedrockAdapter({ accessKeyId: 'zz-key', secretAccessKey: 'zz-secret', region: 'us-east-1' });
+    const record = await recordOf(adapter, 'stream');
+    expect(record.ending).toEqual({ error: { type: 'invalid_request', httpStatus: 400, providerErrorCode: 'validationException', cancelled: false, deadline: false } });
   });
 
   it.each(['complete', 'stream'] as const)('OpenAI (the parsed body as the raw error), %s()', async (method) => {
