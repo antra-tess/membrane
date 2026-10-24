@@ -245,7 +245,12 @@ export interface RetryingEvent {
   maxAttempts: number;
   /** Always 'refusal' today; widened only if other retryable stops appear. */
   reason: 'refusal';
-  /** Provider's refusal category when it supplies one (e.g. 'cyber'). */
+  /**
+   * The refused attempt's category, as its adapter reports it in
+   * `ProviderResponse.refusalCategory` (AnthropicAdapter reports Anthropic's
+   * `stop_details.category`, such as 'cyber'). Absent when the adapter
+   * reports none.
+   */
   category?: string;
 }
 

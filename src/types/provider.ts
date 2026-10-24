@@ -435,6 +435,19 @@ export interface ProviderResponse {
    * otherwise. A value that isn't a non-empty string counts as none.
    */
   providerStopReason?: string;
+
+  /**
+   * The provider's category for a refusal: Anthropic's
+   * `stop_details.category`, such as 'cyber'. Set only when the provider
+   * stopped with `refusal` and named a category as a non-empty string; absent
+   * otherwise. AnthropicAdapter sets it on stream() and complete(), and no
+   * other built-in adapter does. Membrane announces it, and nothing read from
+   * the raw response, on a refusal re-issue's `RetryingEvent.category`.
+   * Custom adapters opt in by supplying it, and a decorator that rebuilds the
+   * response must carry it. As with providerStopReason, membrane reads a value
+   * that isn't a non-empty string as none.
+   */
+  refusalCategory?: string;
   
   /** Which stop sequence triggered */
   stopSequence?: string;
