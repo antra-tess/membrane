@@ -160,8 +160,11 @@ function usageOf(usage: ProviderResponse['usage'], unreported: ProviderResponse[
 }
 
 function errorOf(error: unknown, cancelled: boolean): AttemptError {
-  // Typed as the call goes on to type it, without marking the error itself:
-  // a MembraneError comes back as it is, and anything else as a new one.
+  // Typed by errorFromThrown, as each path types a failure before deciding on
+  // it, without marking the error itself: a MembraneError comes back as it
+  // is, and anything else as a new one. A caller's cancellation is
+  // `cancelled`, whatever the type; complete() goes on to report it as an
+  // `abort`.
   const typed = errorFromThrown(error);
   const badRequest = typed.httpStatus === 400
     ? classifyBadRequest(providerMessageOf(typed.rawError) ?? '')

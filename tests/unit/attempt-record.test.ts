@@ -542,11 +542,27 @@ describe('times, from the send', () => {
     expect(Object.keys(records[0]!)).not.toContain('usage');
   });
 
-  it('complete(): an answer with no usage still gets its record, with no counts, before the call fails', async () => {
+  it('the first send report counts even when it says nothing: a later one adds no limit or content report', async () => {
+    const adapter = new ScriptedAdapter([
+      async (call) => {
+        sendAs(call, {});
+        call.options?.onSend?.({ maxTokens: 333, reportsContent: true });
+        return answer(call.request, 'zz');
+      },
+    ]);
+    const { membrane, records } = recording(adapter);
+
+    await membrane.complete(REQUEST);
+
+    expect(Object.keys(records[0]!)).not.toContain('maxTokens');
+    expect(records[0]!.reportsContent).toBe(false);
+  });
+
+  it.each([undefined, null])('complete(): an answer with usage %s still gets its record, with no counts, before the call fails', async (missing) => {
     const adapter = new ScriptedAdapter([
       async (call) => {
         sendAs(call);
-        return { ...answer(call.request, 'zz'), usage: undefined as never };
+        return { ...answer(call.request, 'zz'), usage: missing as never };
       },
     ]);
     const { membrane, records } = recording(adapter);
@@ -627,7 +643,7 @@ describe('times, from the send', () => {
     expect(Object.keys(records[0]!)).not.toContain('firstContentMs');
   });
 
-  it('the first send report counts, for its time, its limit and its content report: a resend inside the attempt keeps the attempt', async () => {
+  it('the first send counts, for its time, its limit and its content report: a resend inside the attempt keeps the attempt', async () => {
     vi.useFakeTimers({ now: 0 });
     const adapter = new ScriptedAdapter([
       async (call) => {

@@ -29,7 +29,11 @@ export interface AttemptUsage {
 
 /** How an attempt that failed failed, from the error membrane typed it as. */
 export interface AttemptError {
-  /** The error's `MembraneError.type`. */
+  /**
+   * The error's `MembraneError.type`, as errorFromThrown types it. When the
+   * caller cancelled, `cancelled` says so whatever the type, and complete()
+   * goes on to report the cancellation as an `abort`.
+   */
   type: MembraneErrorType;
   httpStatus?: number;
   providerErrorCode?: string;

@@ -3773,10 +3773,11 @@ export class Membrane {
    * stop reason for the provider's own stop, the provider's token as
    * details.stop.providerReason carries it (providerReasonFor), a refusal's
    * category read as RetryingEvent's is, and its own copy of the usage as
-   * membrane normalizes it. A response with no usage object, which only an
-   * adapter outside ProviderResponse's type can give, has no counts here; the
-   * call's own normalization then fails the call, as it would without a
-   * record.
+   * membrane normalizes it. A response whose usage isn't an object, which only
+   * an adapter outside ProviderResponse's type can give, has no counts here.
+   * With no usage at all, the call's own normalization then fails the call, as
+   * it would without a record, and the record still says how the provider
+   * answered.
    */
   private attemptResponse(response: ProviderResponse): {
     stopReason: StopReason;

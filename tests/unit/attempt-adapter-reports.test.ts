@@ -173,10 +173,13 @@ describe('BedrockAdapter', () => {
     const withDetails = await bedrock().stream(REQUEST, { onChunk: () => {} });
     expect(withDetails.stopReason).toBe('refusal');
     expect(withDetails.refusalCategory).toBe('cyber');
+    // The final message, the raw response, carries them as the delta did.
+    expect((withDetails.raw as { stop_details?: unknown }).stop_details).toEqual({ type: 'refusal', category: 'cyber' });
 
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, body: streamBody(refusalDelta({})) })));
     const without = await bedrock().stream(REQUEST, { onChunk: () => {} });
     expect(without.stopReason).toBe('refusal');
     expect(Object.keys(without)).not.toContain('refusalCategory');
+    expect(Object.keys(without.raw as object)).not.toContain('stop_details');
   });
 });
