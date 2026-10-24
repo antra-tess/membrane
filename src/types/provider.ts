@@ -438,12 +438,13 @@ export interface ProviderResponse {
 
   /**
    * The provider's category for a refusal: Anthropic's
-   * `stop_details.category`, such as 'cyber'. Set only when the response
-   * stopped with `refusal` and the provider named a category as a non-empty
-   * string; absent otherwise. AnthropicAdapter sets it on stream() and
-   * complete(), and no other built-in adapter does. Membrane announces it on
-   * a refusal re-issue's `RetryingEvent.category`. Custom adapters opt in by
-   * supplying it, and a decorator that rebuilds the response must carry it.
+   * `stop_details.category`, such as 'cyber'. Set only when the provider
+   * stopped with `refusal` and named a category as a non-empty string; absent
+   * otherwise. AnthropicAdapter sets it on stream() and complete(), and no
+   * other built-in adapter does. Membrane announces it, and nothing read from
+   * the raw response, on a refusal re-issue's `RetryingEvent.category`.
+   * Custom adapters opt in by supplying it, and a decorator that rebuilds the
+   * response must carry it.
    */
   refusalCategory?: string;
   

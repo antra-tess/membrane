@@ -30,19 +30,27 @@ class RefusingAdapter implements ProviderAdapter {
     private refusals: number,
     private refusalText = 'PARTIAL-REFUSED',
     private successText = 'GOOD',
+    /** false: a refusal reports no category in the field, while its raw
+     *  response carries one in every shape a raw read could look at. */
+    private reportsCategory = true,
   ) {}
 
-  /** A refusal reports its category through ProviderResponse.refusalCategory
-   *  alone, as a custom adapter does: its raw response names no category, so
-   *  the retrying event's can only come from the field. (The real
+  /** By default a refusal reports its category through
+   *  ProviderResponse.refusalCategory alone, as a custom adapter does: its raw
+   *  response names no category, so the retrying event's can only come from
+   *  the field. With reportsCategory false it's the other way round. (The real
    *  AnthropicAdapter's path is in refusal-category.test.ts.) */
   private response(text: string, stopReason: string): ProviderResponse {
+    const refused = stopReason === 'refusal';
+    const stopDetails = { type: 'refusal', category: 'cyber' };
     return {
       content: [{ type: 'text', text }],
       stopReason,
-      ...(stopReason === 'refusal' ? { refusalCategory: 'cyber' } : {}),
+      ...(refused && this.reportsCategory ? { refusalCategory: 'cyber' } : {}),
       usage: { inputTokens: 1, outputTokens: 1 },
-      raw: { stop_reason: stopReason },
+      raw: refused && !this.reportsCategory
+        ? { stop_reason: stopReason, stop_details: stopDetails, response: { stop_details: stopDetails } }
+        : { stop_reason: stopReason },
     } as unknown as ProviderResponse;
   }
 
@@ -134,6 +142,18 @@ describe('refusalRetries — streamYielding()', () => {
     const text = JSON.stringify((complete as { response: unknown }).response);
     expect(text).toContain('GOOD');
     expect(text).not.toContain('PARTIAL-REFUSED');
+  });
+
+  it('announces no category when the adapter reports none, whatever its raw response holds', async () => {
+    const adapter = new RefusingAdapter(1, 'PARTIAL-REFUSED', 'GOOD', false);
+    const events = await collect(
+      new Membrane(adapter).streamYielding(createRequest(), { refusalRetries: 1 }),
+    );
+
+    const retrying = events.filter((e) => e.type === 'retrying');
+    expect(retrying).toEqual([{ type: 'retrying', attempt: 1, maxAttempts: 1, reason: 'refusal' }]);
+    // toEqual reads a key holding undefined as absent; the event has no key at all.
+    expect(Object.keys(retrying[0]!)).not.toContain('category');
   });
 
   it('emits the retrying event BEFORE the tokens it invalidates are superseded', async () => {

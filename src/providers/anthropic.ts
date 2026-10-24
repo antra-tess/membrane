@@ -255,7 +255,7 @@ export function readInputTransformations(
 
 /**
  * A response's refusal category, as ProviderResponse.refusalCategory carries
- * it: `stop_details.category` when the response stopped with `refusal` and
+ * it: `stop_details.category` when the provider stopped with `refusal` and
  * the category is a non-empty string. Nothing otherwise, including a stop
  * that isn't a refusal, whatever its `stop_details` says.
  */

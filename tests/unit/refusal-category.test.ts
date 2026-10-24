@@ -134,7 +134,10 @@ describe('refusal category: AnthropicAdapter.complete()', () => {
   it.each([
     ['a refusal with a category', REFUSED_CYBER, 'cyber'],
     ['a refusal whose stop_details is null', { stop_reason: 'refusal', stop_details: null }, undefined],
+    ['a refusal with no stop_details', { stop_reason: 'refusal' }, undefined],
+    ['a refusal whose stop_details has no category', { stop_reason: 'refusal', stop_details: { type: 'refusal' } }, undefined],
     ['a refusal whose category is not a string', { stop_reason: 'refusal', stop_details: { category: ['cyber'] } }, undefined],
+    ['a refusal whose category is empty', { stop_reason: 'refusal', stop_details: { type: 'refusal', category: '' } }, undefined],
     ['another stop that carries a category', { stop_reason: 'end_turn', stop_details: { type: 'refusal', category: 'cyber' } }, undefined],
   ])('%s', async (_name, stop, expected) => {
     const response = await scriptedCreate(message(stop)).complete(providerRequest());
