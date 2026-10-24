@@ -8,7 +8,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BAD_REQUEST_TEMPLATES, classifyBadRequest, providerMessageOf, REQUEST_FIELD_NAMES } from '../../src/utils/bad-request.js';
-import { serializeError } from '../../src/types/errors.js';
+import { MembraneError, serializeError } from '../../src/types/errors.js';
 import { OpenRouterAdapter } from '../../src/providers/openrouter.js';
 import { chunkFrame, streamBody } from '../helpers/bedrock-event-stream.js';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
@@ -129,6 +129,25 @@ describe('the field path', () => {
   });
 });
 
+/** A Bedrock event-stream exception frame carrying `payload` as its JSON. */
+function exceptionFrame(exceptionType: string, payload: object): Uint8Array {
+  const header = (name: string, value: string) => {
+    const n = Buffer.from(name), v = Buffer.from(value);
+    const out = Buffer.alloc(1 + n.length + 1 + 2 + v.length);
+    out[0] = n.length; n.copy(out, 1);
+    out[1 + n.length] = 7;
+    out.writeUInt16BE(v.length, 2 + n.length);
+    v.copy(out, 4 + n.length);
+    return out;
+  };
+  const headers = Buffer.concat([header(':exception-type', exceptionType), header(':message-type', 'exception')]);
+  const body = Buffer.from(JSON.stringify(payload));
+  const frame = Buffer.alloc(16 + headers.length + body.length);
+  frame.writeUInt32BE(frame.length, 0); frame.writeUInt32BE(headers.length, 4);
+  headers.copy(frame, 12); body.copy(frame, 12 + headers.length);
+  return frame;
+}
+
 describe('providerMessageOf', () => {
   it("reads a serialized SDK error's body, not the error's rendering", () => {
     const sdkError = Object.assign(new Error('400 {"zz":"rendered"}'), {
@@ -157,9 +176,18 @@ describe('providerMessageOf', () => {
       .toBe('prompt is too long: 210000 tokens > 200000 maximum');
   });
 
-  it("reads an error frame's error on its first choice, as throwOnStreamErrorFrame does", () => {
-    expect(providerMessageOf({ choices: [{ error: { code: 400, message: 'messages.0: Field required' }, finish_reason: 'error' }] }))
-      .toBe('messages.0: Field required');
+  it("reads an error frame's error on its first choice, as throwOnStreamErrorFrame does, beside a top-level error that's null or empty", () => {
+    const choices = [{ error: { code: 400, message: 'messages.0: Field required' }, finish_reason: 'error' }];
+    expect(providerMessageOf({ choices })).toBe('messages.0: Field required');
+    expect(providerMessageOf({ error: null, choices })).toBe('messages.0: Field required');
+    expect(providerMessageOf({ error: '', choices })).toBe('messages.0: Field required');
+  });
+
+  it("reads a frame's top-level error over its first choice's, as throwOnStreamErrorFrame does", () => {
+    expect(providerMessageOf({
+      error: { message: 'prompt is too long: 210000 tokens > 200000 maximum' },
+      choices: [{ error: { message: 'messages.0: Field required' } }],
+    })).toBe('prompt is too long: 210000 tokens > 200000 maximum');
   });
 
   it("reads the provider's message behind a router's wrapper", () => {
@@ -236,29 +264,22 @@ describe("the provider's message, as each adapter carries it, reaches the record
   });
 
   it('Bedrock, an exception inside the stream: its message, kept as the error\'s body, gives the template and path', async () => {
-    const exceptionFrame = (exceptionType: string, message: string): Uint8Array => {
-      const header = (name: string, value: string) => {
-        const n = Buffer.from(name), v = Buffer.from(value);
-        const out = Buffer.alloc(1 + n.length + 1 + 2 + v.length);
-        out[0] = n.length; n.copy(out, 1);
-        out[1 + n.length] = 7;
-        out.writeUInt16BE(v.length, 2 + n.length);
-        v.copy(out, 4 + n.length);
-        return out;
-      };
-      const headers = Buffer.concat([header(':exception-type', exceptionType), header(':message-type', 'exception')]);
-      const payload = Buffer.from(JSON.stringify({ message }));
-      const frame = Buffer.alloc(16 + headers.length + payload.length);
-      frame.writeUInt32BE(frame.length, 0); frame.writeUInt32BE(headers.length, 4);
-      headers.copy(frame, 12); payload.copy(frame, 12 + headers.length);
-      return frame;
-    };
     vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream({
-      start(controller) { controller.enqueue(exceptionFrame('validationException', TAIL)); controller.close(); },
+      start(controller) { controller.enqueue(exceptionFrame('validationException', { message: TAIL })); controller.close(); },
     }), { status: 200 })));
     const adapter = new BedrockAdapter({ accessKeyId: 'zz-key', secretAccessKey: 'zz-secret', region: 'us-east-1' });
     const record = await recordOf(adapter, 'stream');
     expect(record.ending).toEqual({ error: { ...expected, providerErrorCode: 'validationException' } });
+  });
+
+  it("Bedrock, an exception inside the stream with no message: the error keeps no body, since the provider sent no words", async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream({
+      start(controller) { controller.enqueue(exceptionFrame('validationException', {})); controller.close(); },
+    }), { status: 200 })));
+    const membrane = new Membrane(new BedrockAdapter({ accessKeyId: 'zz-key', secretAccessKey: 'zz-secret', region: 'us-east-1' }), { formatter: new NativeFormatter() });
+    const error = await membrane.stream(REQUEST).then(() => undefined, (e: unknown) => e);
+    expect(error).toBeInstanceOf(MembraneError);
+    expect(((error as MembraneError).rawError as { error?: unknown }).error).toBeUndefined();
   });
 
   it('Bedrock, an Anthropic error event inside the stream: its message gives the template and path', async () => {

@@ -7,8 +7,8 @@
  * and with one (and a purpose and a requestId), the request each one puts on
  * the wire is captured at `fetch` with and without `onAttempt`, and they must
  * be the same bytes: URL, method, headers and body.
- * (Bedrock signs each request with the time, so its signature headers are
- * left out of Bedrock's comparison; the clock is held still for it anyway.)
+ * (Bedrock signs each request with the time, so the clock is held still and
+ * its signature is compared with the rest.)
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
@@ -33,13 +33,10 @@ afterEach(() => {
 
 interface Wire { url: string; method: string; headers: Record<string, string>; body: string }
 
-/** Bedrock's SigV4 headers, which sign each request with its time; left out for Bedrock alone. */
-const SIGNED = new Set(['authorization', 'x-amz-date', 'x-amz-content-sha256', 'x-amz-security-token']);
-
-async function capture(input: unknown, init: RequestInit | undefined, signed: boolean): Promise<Wire> {
+async function capture(input: unknown, init: RequestInit | undefined): Promise<Wire> {
   const request = new Request(input as RequestInfo, init);
   const headers: Record<string, string> = {};
-  request.headers.forEach((value, key) => { if (!(signed && SIGNED.has(key))) headers[key] = value; });
+  request.headers.forEach((value, key) => { headers[key] = value; });
   return { url: request.url, method: request.method, headers, body: await request.text() };
 }
 
@@ -70,7 +67,6 @@ type Method = 'complete' | 'stream' | 'streamYielding';
 const DEADLINED = { progressTimeoutMs: 60_000, purpose: 'turn' as const, requestId: 'zz-req-1' };
 
 async function wireOf(
-  name: string,
   build: () => ProviderAdapter,
   formatter: () => PrefillFormatter,
   model: string,
@@ -81,7 +77,7 @@ async function wireOf(
   const wire: Wire[] = [];
   // The provider refuses every request: only what was sent matters here.
   vi.stubGlobal('fetch', vi.fn(async (input: unknown, init?: RequestInit) => {
-    wire.push(await capture(input, init, name === 'bedrock'));
+    wire.push(await capture(input, init));
     return new Response(JSON.stringify({ error: { type: 'invalid_request_error', message: 'zz refused' } }), {
       status: 400, headers: { 'content-type': 'application/json' },
     });
@@ -104,10 +100,12 @@ describe('the wire is the same with and without onAttempt', () => {
       for (const deadlined of [false, true]) {
         it(`${name}, ${method}()${deadlined ? ', with a progress deadline, a purpose and a requestId' : ''}`, async () => {
           vi.useFakeTimers({ now: Date.parse('2026-10-24T12:00:00Z'), toFake: ['Date'] });
-          const without = await wireOf(name, build, formatter, model, method, deadlined, false);
-          const withRecord = await wireOf(name, build, formatter, model, method, deadlined, true);
+          const without = await wireOf(build, formatter, model, method, deadlined, false);
+          const withRecord = await wireOf(build, formatter, model, method, deadlined, true);
 
           expect(without.wire.length).toBeGreaterThan(0);
+          // Bedrock's comparison covers its signature, which signs the rest.
+          if (name === 'bedrock') expect(without.wire[0]!.headers.authorization).toMatch(/^AWS4-HMAC-SHA256 /);
           expect(withRecord.wire).toEqual(without.wire);
           // And the observer did observe: one record per request sent.
           expect(withRecord.records).toHaveLength(withRecord.wire.length);

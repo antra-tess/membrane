@@ -158,10 +158,11 @@ export function providerMessageOf(rawError: unknown): string | undefined {
     if (typeof raw.name === 'string' && typeof raw.message === 'string') {
       return ownMessage(extractProviderErrorFields(raw.error));
     }
-    // A stream's error frame that names its error on its first choice, as
-    // throwOnStreamErrorFrame reads it.
+    // A stream's error frame whose error is on its first choice, read as
+    // throwOnStreamErrorFrame reads it: the top-level error when it's truthy,
+    // else the choice's.
     const choice = Array.isArray(raw.choices) ? raw.choices[0] as { error?: unknown } | null | undefined : undefined;
-    if (raw.error === undefined && choice?.error !== undefined) {
+    if (!raw.error && choice?.error) {
       return ownMessage(extractProviderErrorFields({ error: choice.error }));
     }
   }

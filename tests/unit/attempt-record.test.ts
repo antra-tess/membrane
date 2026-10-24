@@ -203,10 +203,11 @@ describe('one record per attempt, with what the call says about it', () => {
     ]);
     const { membrane, records } = recording(adapter);
 
-    if (method === 'complete') await membrane.complete(REQUEST);
-    else await membrane.stream(REQUEST);
+    const response = method === 'complete' ? await membrane.complete(REQUEST) : await membrane.stream(REQUEST);
 
     expect(records[0]!.usage).toEqual({ inputTokens: 40, outputTokens: 5, cacheReadTokens: 60 });
+    // The record's copy leaves the call's own usage as normalized once.
+    expect((response as NormalizedResponse).usage).toMatchObject({ inputTokens: 40, outputTokens: 5 });
   });
 
   it.each(['complete', 'stream'] as const)("carries the provider's own stop token, so a stop membrane doesn't map isn't read as an ordinary end, on %s()", async (method) => {

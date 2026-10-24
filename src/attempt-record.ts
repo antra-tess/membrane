@@ -44,7 +44,6 @@ const nonNegativeCount = (value: unknown): number | undefined =>
 export class AttemptObserver {
   private sentAt?: number;
   private sentMono?: number;
-  private endMono?: number;
   private firstEvent?: number;
   private firstContent?: number;
   private lastEvent?: number;
@@ -68,11 +67,6 @@ export class AttemptObserver {
     const maxTokens = nonNegativeCount(report.maxTokens);
     if (maxTokens !== undefined) this.maxTokens = maxTokens;
     if (report.reportsContent === true) this.reportsContent = true;
-  }
-
-  /** The adapter's call settled: the attempt's end. The first call counts. */
-  ended(): void {
-    if (this.endMono === undefined) this.endMono = performance.now();
   }
 
   /** A parsed provider event (onProgress), with what it was when the adapter says. */
@@ -107,9 +101,10 @@ export class AttemptObserver {
         }
       | { error: unknown; cancelled: boolean },
   ): AttemptRecord | undefined {
-    this.ended();
     if (this.sentAt === undefined || this.sentMono === undefined) return undefined;
-    const endMs = Math.round(this.endMono! - this.sentMono);
+    // Core settles an attempt as its adapter's call settles, before any caller
+    // code runs, so now is the attempt's end.
+    const endMs = Math.round(performance.now() - this.sentMono);
     const timing: Partial<AttemptRecord> = {};
     if (this.firstEvent !== undefined) timing.firstEventMs = Math.round(this.firstEvent);
     if (this.firstContent !== undefined) timing.firstContentMs = Math.round(this.firstContent);

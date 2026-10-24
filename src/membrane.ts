@@ -592,7 +592,6 @@ export class Membrane {
           this.reportAttempt(() => attempt?.settle({ error, cancelled: options.signal?.aborted === true }));
           throw error;
         } finally {
-          attempt?.ended();
           progress.cleanup();
         }
         // Restate usage in the one convention before any ratio or price sees it,
@@ -2910,14 +2909,13 @@ export class Membrane {
         attemptResult = receiptGuard ? await receiptGuard.settle(streamCall) : await streamCall;
       } catch (error) {
         // The attempt's record goes before held text is delivered, since that
-        // runs the caller's callbacks, so the record's end is the adapter's.
+        // runs the caller's callbacks, so its end is the adapter's.
         this.reportAttempt(() => observer?.settle({ error, cancelled: adapterOptions.signal?.aborted === true }));
         // Held text was received: deliver it so partialContent keeps it. The
         // attempt's own error is the one to report, whatever delivery does.
         try { localStops?.release(); } catch { /* keep the original error */ }
         failure = { error };
       } finally {
-        observer?.ended();
         progress.cleanup();
       }
       // Whether to send the call again is decided once the send is over, so
@@ -2964,8 +2962,8 @@ export class Membrane {
       )));
       const rawResult = localStops ? localStops.finish(attemptResult!) : attemptResult!;
       // Restate usage in the one convention before any accumulator, ratio or
-      // price sees it — this is the only door streamed usage enters through.
-      // The stop token is settled here too, from the adapter's own stop, before
+      // price sees it — this is the only door streamed usage enters the call
+      // through (the record above normalized a copy of its own). The stop token is settled here too, from the adapter's own stop, before
       // a local stop sequence, or the XML loop's, replaces its stopReason.
       const result: ProviderResponse = {
         ...rawResult,
