@@ -141,13 +141,15 @@ export function classifyBadRequest(message: string): { template?: string; fieldP
 
 /**
  * The provider's own message on an error membrane typed, from its raw error:
- * the body an SDK error carries as `error` (Anthropic's), or the body a fetch
- * adapter keeps as the raw error itself, parsed or as text (Bedrock's). Behind
- * a router that wraps the provider's error (OpenRouter's `metadata.raw`), it's
- * the provider's message, not the router's. Another Error carries none: its
- * own message is the error's rendering, not the provider's words. So an
- * exception inside a Bedrock stream, which BedrockAdapter keeps only in such
- * a rendering, has no message here, and its 400 no template or path.
+ * the body an error carries as `error` (the Anthropic SDK's APIError, and
+ * BedrockAdapter's error for an exception or error event inside its stream),
+ * or the body a fetch adapter keeps as the raw error itself, parsed or as
+ * text, including an error frame inside an OpenAI-format stream, whose error
+ * is top-level or on its first choice. Behind a router that wraps the
+ * provider's error (OpenRouter's `metadata.raw`), it's the provider's
+ * message, not the router's, since the router's says only that the provider
+ * refused. An Error with no body carries none: its own message is the
+ * error's rendering, not the provider's words.
  */
 export function providerMessageOf(rawError: unknown): string | undefined {
   if (rawError !== null && typeof rawError === 'object') {
@@ -155,6 +157,12 @@ export function providerMessageOf(rawError: unknown): string | undefined {
     // A serialized Error (serializeError keeps its name and message).
     if (typeof raw.name === 'string' && typeof raw.message === 'string') {
       return ownMessage(extractProviderErrorFields(raw.error));
+    }
+    // A stream's error frame that names its error on its first choice, as
+    // throwOnStreamErrorFrame reads it.
+    const choice = Array.isArray(raw.choices) ? raw.choices[0] as { error?: unknown } | null | undefined : undefined;
+    if (raw.error === undefined && choice?.error !== undefined) {
+      return ownMessage(extractProviderErrorFields({ error: choice.error }));
     }
   }
   return ownMessage(extractProviderErrorFields(rawError));

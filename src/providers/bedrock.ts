@@ -868,7 +868,8 @@ export class BedrockAdapter implements ProviderAdapter {
             throw new BedrockError(
               BEDROCK_STREAM_EXCEPTION_STATUS.get(exceptionType.toLowerCase()) ?? 500,
               `Bedrock stream error (${exceptionType}): ${errorMessage}`,
-              exceptionType
+              exceptionType,
+              errorMessage === exceptionType ? undefined : { message: errorMessage },
             );
           }
 
@@ -914,7 +915,8 @@ export class BedrockAdapter implements ProviderAdapter {
                 throw new BedrockError(
                   undefined,
                   `Bedrock stream error: ${streamError?.message || JSON.stringify(eventData)}`,
-                  typeof streamError?.type === 'string' ? streamError.type : undefined
+                  typeof streamError?.type === 'string' ? streamError.type : undefined,
+                  eventData,
                 );
               }
 
@@ -1256,7 +1258,13 @@ class BedrockError extends Error {
     public status: number | undefined,
     message: string,
     /** The exception's own type, or an in-band error event's error.type. */
-    public code?: string
+    public code?: string,
+    /**
+     * The provider's error as it came in the stream, as the Anthropic SDK's
+     * APIError keeps its body as `error`: an exception's `{ message }`, or an
+     * in-band error event. The attempt record's 400 kinds read its message.
+     */
+    public error?: unknown,
   ) {
     super(message);
     this.name = 'BedrockError';

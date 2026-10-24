@@ -209,7 +209,7 @@ describe('one record per attempt, with what the call says about it', () => {
     expect(records[0]!.usage).toEqual({ inputTokens: 40, outputTokens: 5, cacheReadTokens: 60 });
   });
 
-  it("carries the provider's own stop token, so a stop membrane doesn't map isn't read as an ordinary end", async () => {
+  it.each(['complete', 'stream'] as const)("carries the provider's own stop token, so a stop membrane doesn't map isn't read as an ordinary end, on %s()", async (method) => {
     const adapter = new ScriptedAdapter([
       async (call) => {
         sendAs(call);
@@ -222,8 +222,10 @@ describe('one record per attempt, with what the call says about it', () => {
     ]);
     const { membrane, records } = recording(adapter);
 
-    await membrane.complete(REQUEST);
-    await membrane.complete(REQUEST);
+    for (let i = 0; i < 2; i++) {
+      if (method === 'complete') await membrane.complete(REQUEST);
+      else await membrane.stream(REQUEST);
+    }
 
     expect(records.map((r) => r.ending)).toEqual([
       { stopReason: 'end_turn', providerStopReason: 'model_context_window_exceeded' },
@@ -248,6 +250,20 @@ describe('one record per attempt, with what the call says about it', () => {
       error: { type: 'server', httpStatus: 500, cancelled: false, deadline: false },
     });
     expect(records[1]!.ending).toEqual({ stopReason: 'end_turn' });
+  });
+
+  it.each(['complete', 'stream'] as const)('a try that fails before reporting its request leaves its number unrecorded, on %s()', async (method) => {
+    const adapter = new ScriptedAdapter([
+      async () => { throw new MembraneError({ type: 'network', message: 'zz before the send', retryable: true, rawError: null }); },
+      plain(),
+    ]);
+    const { membrane, records } = recording(adapter);
+
+    if (method === 'complete') await membrane.complete(REQUEST);
+    else await membrane.stream(REQUEST);
+
+    expect(adapter.calls).toHaveLength(2);
+    expect(records.map((r) => r.attempt)).toEqual([1]);
   });
 
   it('a refusal and its re-issue are two attempts, the first with its category', async () => {
@@ -358,13 +374,31 @@ describe('times, from the send', () => {
     });
   });
 
+  it('the first event and first content are rounded, and a later content event moves neither', async () => {
+    vi.useFakeTimers();
+    const adapter = new ScriptedAdapter([
+      async (call) => {
+        sendAs(call, { reportsContent: true });
+        vi.advanceTimersByTime(0.6); call.options!.onProgress!();          // 0.6 ms
+        vi.advanceTimersByTime(1.8); call.options!.onProgress!('content'); // 2.4 ms
+        vi.advanceTimersByTime(5); call.options!.onProgress!('content');   // 7.4 ms
+        return answer(call.request, 'zz');
+      },
+    ]);
+    const { membrane, records } = recording(adapter);
+
+    await membrane.stream(REQUEST);
+
+    expect(records[0]).toMatchObject({ firstEventMs: 1, firstContentMs: 2, lastEventMs: 7 });
+  });
+
   it('times are whole milliseconds, and an event at the send counts as 0', async () => {
     vi.useFakeTimers();
     const adapter = new ScriptedAdapter([
       async (call) => {
         sendAs(call);
         call.options!.onProgress!('content');                // at the send
-        vi.advanceTimersByTime(1.6); call.options!.onProgress!();
+        vi.advanceTimersByTime(1.6); call.options!.onProgress!('content'); // later content moves nothing
         vi.advanceTimersByTime(0.7);
         return answer(call.request, 'zz');
       },
@@ -434,14 +468,31 @@ describe('times, from the send', () => {
     ]);
     const { membrane, records } = recording(adapter);
 
-    const delivered: string[] = [];
+    const delivered: Array<[string, number]> = [];
     await membrane.stream({ ...REQUEST, stopSequences: ['STOP'] }, {
-      // The caller's own callback, slow on the clock.
-      onChunk: (chunk) => { delivered.push(chunk); vi.advanceTimersByTime(5000); },
+      // The caller's own callback, slow on the clock; it notes how many records were given by then.
+      onChunk: (chunk) => { delivered.push([chunk, records.length]); vi.advanceTimersByTime(5000); },
     }).catch(() => undefined);
 
-    expect(delivered).toEqual(['ST']);
+    expect(delivered).toEqual([['ST', 1]]);
     expect(records[0]!.endMs).toBe(1000);
+  });
+
+  it('held text still reaches the caller before an answer with no usage fails the call, as before', async () => {
+    const adapter = new ScriptedAdapter([
+      async (call) => {
+        sendAs(call);
+        call.callbacks!.onChunk('ST');
+        return { ...answer(call.request, 'ST'), usage: undefined as never };
+      },
+    ]);
+    const { membrane, records } = recording(adapter);
+    const delivered: string[] = [];
+
+    await expect(membrane.stream({ ...REQUEST, stopSequences: ['STOP'] }, { onChunk: (chunk) => { delivered.push(chunk); } })).rejects.toThrow();
+
+    expect(delivered).toEqual(['ST']);
+    expect(records).toEqual([]);
   });
 
   it('a caller callback that throws while held text is delivered leaves the record given', async () => {
@@ -915,6 +966,35 @@ describe('an observer that fails changes nothing', () => {
     } finally {
       process.off('unhandledRejection', listener);
     }
+  });
+
+  it.each(['complete', 'stream'] as const)("an error whose body can't be read while the record is built reaches the caller as it is, on %s()", async (method) => {
+    // Only the record reads a 400's raw body; the call's own path doesn't.
+    const body = Object.defineProperty({}, 'error', { get: () => { throw new Error('zz unreadable'); }, enumerable: true });
+    const thrown = new MembraneError({ type: 'invalid_request', message: 'zz bad request', retryable: false, httpStatus: 400, rawError: body });
+    const adapter = new ScriptedAdapter([async (call) => { sendAs(call); throw thrown; }]);
+    const { membrane, records } = recording(adapter);
+
+    const call = method === 'complete' ? membrane.complete(REQUEST) : membrane.stream(REQUEST);
+
+    await expect(call).rejects.toBe(thrown);
+    expect(records).toEqual([]);
+  });
+
+  it("building a record that can't be built changes nothing about the call, on stream()", async () => {
+    const adapter = new ScriptedAdapter([async (call) => {
+      sendAs(call);
+      call.callbacks?.onChunk('zz');
+      return Object.defineProperty(answer(call.request, 'zz', { stopReason: 'refusal' }), 'refusalCategory', {
+        get: () => { throw new Error('zz unreadable'); }, enumerable: false,
+      });
+    }]);
+    const { membrane, records } = recording(adapter);
+
+    const result = await membrane.stream(REQUEST);
+
+    expect((result as NormalizedResponse).stopReason).toBe('refusal');
+    expect(records).toEqual([]);
   });
 
   it("building a record that can't be built changes nothing about the call", async () => {

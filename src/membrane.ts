@@ -2909,8 +2909,9 @@ export class Membrane {
         );
         attemptResult = receiptGuard ? await receiptGuard.settle(streamCall) : await streamCall;
       } catch (error) {
-        // The attempt ends with the adapter's call, before held text is delivered.
-        observer?.ended();
+        // The attempt's record goes before held text is delivered, since that
+        // runs the caller's callbacks, so the record's end is the adapter's.
+        this.reportAttempt(() => observer?.settle({ error, cancelled: adapterOptions.signal?.aborted === true }));
         // Held text was received: deliver it so partialContent keeps it. The
         // attempt's own error is the one to report, whatever delivery does.
         try { localStops?.release(); } catch { /* keep the original error */ }
@@ -2926,7 +2927,6 @@ export class Membrane {
         // MembraneError yet is typed by errorFromThrown, so the retry is
         // decided on the type that is thrown.
         const typed = errorFromThrown(failure.error);
-        this.reportAttempt(() => observer?.settle({ error: typed, cancelled: adapterOptions.signal?.aborted === true }));
         // A call that delivered anything can't be sent again.
         if (delivered) throw typed;
         // The call's signal first, as complete() reads the caller's: a
@@ -2955,20 +2955,22 @@ export class Membrane {
         await this.sleep(delayMs, adapterOptions.signal);
         continue;
       }
+      // The attempt's record goes before held text is delivered, since that
+      // runs the caller's callbacks, which can throw. It takes its own copy
+      // of the normalized usage, inside its guard.
+      this.reportAttempt(() => observer?.settle(this.attemptResponse(
+        attemptResult!,
+        normalizeUsageToCacheExcluded(attemptResult!.usage, this.adapter.name, this.adapter.usageCacheConvention),
+      )));
+      const rawResult = localStops ? localStops.finish(attemptResult!) : attemptResult!;
       // Restate usage in the one convention before any accumulator, ratio or
       // price sees it — this is the only door streamed usage enters through.
-      // A local stop sequence's cut keeps the provider's usage.
-      const usage = normalizeUsageToCacheExcluded(attemptResult!.usage, this.adapter.name, this.adapter.usageCacheConvention);
-      // The attempt's record goes before held text is delivered, since that
-      // runs the caller's callbacks, which can throw.
-      this.reportAttempt(() => observer?.settle(this.attemptResponse(attemptResult!, usage)));
-      const rawResult = localStops ? localStops.finish(attemptResult!) : attemptResult!;
       // The stop token is settled here too, from the adapter's own stop, before
       // a local stop sequence, or the XML loop's, replaces its stopReason.
       const result: ProviderResponse = {
         ...rawResult,
         providerStopReason: this.providerReasonFor(attemptResult!),
-        usage,
+        usage: normalizeUsageToCacheExcluded(rawResult.usage, this.adapter.name, this.adapter.usageCacheConvention),
       };
       if (result.stopReason !== 'refusal' || retried >= maxAttempts) {
         for (const block of attemptAlterations) fidelity?.alterBlock(block);

@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BAD_REQUEST_TEMPLATES, classifyBadRequest, providerMessageOf, REQUEST_FIELD_NAMES } from '../../src/utils/bad-request.js';
 import { serializeError } from '../../src/types/errors.js';
 import { OpenRouterAdapter } from '../../src/providers/openrouter.js';
+import { chunkFrame, streamBody } from '../helpers/bedrock-event-stream.js';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import { BedrockAdapter } from '../../src/providers/bedrock.js';
 import { OpenAIAdapter } from '../../src/providers/openai.js';
@@ -145,6 +146,22 @@ describe('providerMessageOf', () => {
     expect(providerMessageOf('{"message":"messages.0: Field required"}')).toBe('messages.0: Field required');
   });
 
+  it("reads the provider's message behind a router's wrapper, in a serialized SDK error's body too", () => {
+    const wrapped = {
+      error: {
+        message: 'Provider returned error', code: 400,
+        metadata: { raw: JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'prompt is too long: 210000 tokens > 200000 maximum' } }) },
+      },
+    };
+    expect(providerMessageOf(serializeError(Object.assign(new Error('400 rendered'), { error: wrapped }))))
+      .toBe('prompt is too long: 210000 tokens > 200000 maximum');
+  });
+
+  it("reads an error frame's error on its first choice, as throwOnStreamErrorFrame does", () => {
+    expect(providerMessageOf({ choices: [{ error: { code: 400, message: 'messages.0: Field required' }, finish_reason: 'error' }] }))
+      .toBe('messages.0: Field required');
+  });
+
   it("reads the provider's message behind a router's wrapper", () => {
     const wrapped = {
       error: {
@@ -188,13 +205,15 @@ describe("the provider's message, as each adapter carries it, reaches the record
     expect(record.ending).toEqual({ error: { ...expected, providerErrorCode: 'invalid_request_error' } });
   });
 
-  it.each(['complete', 'stream'] as const)('Bedrock (the body text on its error), %s()', async (method) => {
+  it.each(['complete', 'stream'] as const)('Bedrock (the body text on its error), %s(), with the limit it reported', async (method) => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ message: TAIL }), {
       status: 400, headers: { 'content-type': 'application/json', 'x-amzn-errortype': 'ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/' },
     })));
     const adapter = new BedrockAdapter({ accessKeyId: 'zz-key', secretAccessKey: 'zz-secret', region: 'us-east-1' });
     const record = await recordOf(adapter, method);
     expect(record.ending).toMatchObject({ error: expected });
+    // The limit was reported before the send, so a failed attempt keeps it.
+    expect(record.maxTokens).toBe(64);
   });
 
   it.each(['complete', 'stream'] as const)("OpenRouter (the upstream provider's message inside the router's), %s()", async (method) => {
@@ -216,7 +235,7 @@ describe("the provider's message, as each adapter carries it, reaches the record
     expect(records[0]!.ending).toMatchObject({ error: { httpStatus: 400, template: 'prompt_too_long' } });
   });
 
-  it('Bedrock, an exception inside the stream: a 400 with no template or path, since the adapter keeps its message only in its rendering', async () => {
+  it('Bedrock, an exception inside the stream: its message, kept as the error\'s body, gives the template and path', async () => {
     const exceptionFrame = (exceptionType: string, message: string): Uint8Array => {
       const header = (name: string, value: string) => {
         const n = Buffer.from(name), v = Buffer.from(value);
@@ -239,7 +258,27 @@ describe("the provider's message, as each adapter carries it, reaches the record
     }), { status: 200 })));
     const adapter = new BedrockAdapter({ accessKeyId: 'zz-key', secretAccessKey: 'zz-secret', region: 'us-east-1' });
     const record = await recordOf(adapter, 'stream');
-    expect(record.ending).toEqual({ error: { type: 'invalid_request', httpStatus: 400, providerErrorCode: 'validationException', cancelled: false, deadline: false } });
+    expect(record.ending).toEqual({ error: { ...expected, providerErrorCode: 'validationException' } });
+  });
+
+  it('Bedrock, an Anthropic error event inside the stream: its message gives the template and path', async () => {
+    const event = { type: 'error', error: { type: 'invalid_request_error', message: TAIL } };
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, body: streamBody([chunkFrame(event)]) })));
+    const adapter = new BedrockAdapter({ accessKeyId: 'zz-key', secretAccessKey: 'zz-secret', region: 'us-east-1' });
+    const record = await recordOf(adapter, 'stream');
+    expect(record.ending).toEqual({ error: { ...expected, providerErrorCode: 'invalid_request_error' } });
+  });
+
+  it("OpenRouter, an error frame inside the stream on its first choice: the template and path", async () => {
+    const frame = { choices: [{ index: 0, delta: {}, finish_reason: 'error', error: { code: 400, message: TAIL } }] };
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(`data: ${JSON.stringify(frame)}\n\n`, {
+      status: 200, headers: { 'content-type': 'text/event-stream' },
+    })));
+    const records: AttemptRecord[] = [];
+    const membrane = new Membrane(new OpenRouterAdapter({ apiKey: 'zz-key' }), { formatter: new NativeFormatter(), onAttempt: (r) => { records.push(r); } });
+    await membrane.stream({ ...REQUEST, config: { ...REQUEST.config, model: 'anthropic/claude-sonnet-4.5' } }).catch(() => undefined);
+    expect(records).toHaveLength(1);
+    expect(records[0]!.ending).toMatchObject({ error: { httpStatus: 400, template: 'field_required', fieldPath: 'messages.N.content.N.thinking.signature' } });
   });
 
   it.each(['complete', 'stream'] as const)('OpenAI (the parsed body as the raw error), %s()', async (method) => {

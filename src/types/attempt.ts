@@ -16,8 +16,9 @@ export type CallPurpose = 'turn' | 'compression';
 
 /**
  * Token counts of an attempt that returned a response, normalized as membrane
- * normalizes usage everywhere (cache reads and writes outside `inputTokens`).
- * A count the provider didn't report is left out.
+ * normalizes usage everywhere (cache reads and writes outside `inputTokens`),
+ * and kept as a round report keeps them: each that's a number, leaving out a
+ * count the provider didn't report.
  */
 export interface AttemptUsage {
   inputTokens?: number;
@@ -63,8 +64,10 @@ export type AttemptEnding =
       /**
        * The provider's own token, as the round's `details.stop.providerReason`
        * carries it: the adapter's `providerStopReason`, or else a stop reason
-       * membrane doesn't map. A token outside StopReason is a stop membrane
-       * reads as `end_turn`.
+       * membrane doesn't map. An adapter may already have mapped the token to
+       * one of membrane's (OpenAI's `length` arrives as `max_tokens`), and
+       * membrane reads a stop reason it doesn't map as `end_turn`, so this is
+       * what tells such a stop from the stop it was read as.
        */
       providerStopReason?: string;
       /** With a `refusal`: the provider's category, when it named one (ProviderResponse.refusalCategory). */

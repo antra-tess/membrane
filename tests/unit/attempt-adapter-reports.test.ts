@@ -141,11 +141,13 @@ describe('BedrockAdapter', () => {
     usage: { input_tokens: 106, output_tokens: 1 },
   };
 
-  it("complete(): reports the body's max_tokens, and the refusal's category as AWS documents the body (our reading of AWS's page, not a live response)", async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(refusedBody), { status: 200, headers: { 'content-type': 'application/json' } })));
+  it("complete(): reports the body's max_tokens before the send, and the refusal's category as AWS documents the body (our reading of AWS's page, not a live response)", async () => {
     const o = observed();
+    const atSend: number[] = [];
+    vi.stubGlobal('fetch', vi.fn(async () => (atSend.push(o.sends.length), new Response(JSON.stringify(refusedBody), { status: 200, headers: { 'content-type': 'application/json' } }))));
     const response = await bedrock().complete(REQUEST, o.options);
 
+    expect(atSend).toEqual([1]);
     expect(o.sends).toEqual([{ maxTokens: 333 }]);
     expect(response.stopReason).toBe('refusal');
     expect(response.refusalCategory).toBe('cyber');
