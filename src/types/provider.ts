@@ -444,7 +444,8 @@ export interface ProviderResponse {
    * other built-in adapter does. Membrane announces it, and nothing read from
    * the raw response, on a refusal re-issue's `RetryingEvent.category`.
    * Custom adapters opt in by supplying it, and a decorator that rebuilds the
-   * response must carry it.
+   * response must carry it. As with providerStopReason, membrane reads a value
+   * that isn't a non-empty string as none.
    */
   refusalCategory?: string;
   

@@ -21,6 +21,9 @@ import type {
 } from '../../src/types/provider.js';
 import type { NormalizedRequest, StreamEvent } from '../../src/types/index.js';
 
+/** A refusal reports no ProviderResponse.refusalCategory at all. */
+const NO_FIELD = Symbol('no refusalCategory');
+
 /** Adapter that refuses its first `refusals` attempts, then succeeds. */
 class RefusingAdapter implements ProviderAdapter {
   readonly name = 'refusing';
@@ -30,25 +33,27 @@ class RefusingAdapter implements ProviderAdapter {
     private refusals: number,
     private refusalText = 'PARTIAL-REFUSED',
     private successText = 'GOOD',
-    /** false: a refusal reports no category in the field, while its raw
-     *  response carries one in every shape a raw read could look at. */
-    private reportsCategory = true,
+    /** What a refusal puts in ProviderResponse.refusalCategory. With
+     *  NO_FIELD, a refusal reports no field, while its raw response carries a
+     *  category in every shape a raw read could look at. */
+    private fieldCategory: unknown = 'cyber',
   ) {}
 
   /** By default a refusal reports its category through
    *  ProviderResponse.refusalCategory alone, as a custom adapter does: its raw
    *  response names no category, so the retrying event's can only come from
-   *  the field. With reportsCategory false it's the other way round. (The real
+   *  the field. With no field it's the other way round. (The real
    *  AnthropicAdapter's path is in refusal-category.test.ts.) */
   private response(text: string, stopReason: string): ProviderResponse {
     const refused = stopReason === 'refusal';
+    const reports = this.fieldCategory !== NO_FIELD;
     const stopDetails = { type: 'refusal', category: 'cyber' };
     return {
       content: [{ type: 'text', text }],
       stopReason,
-      ...(refused && this.reportsCategory ? { refusalCategory: 'cyber' } : {}),
+      ...(refused && reports ? { refusalCategory: this.fieldCategory } : {}),
       usage: { inputTokens: 1, outputTokens: 1 },
-      raw: refused && !this.reportsCategory
+      raw: refused && !reports
         ? { stop_reason: stopReason, stop_details: stopDetails, response: { stop_details: stopDetails } }
         : { stop_reason: stopReason },
     } as unknown as ProviderResponse;
@@ -145,7 +150,7 @@ describe('refusalRetries — streamYielding()', () => {
   });
 
   it('announces no category when the adapter reports none, whatever its raw response holds', async () => {
-    const adapter = new RefusingAdapter(1, 'PARTIAL-REFUSED', 'GOOD', false);
+    const adapter = new RefusingAdapter(1, 'PARTIAL-REFUSED', 'GOOD', NO_FIELD);
     const events = await collect(
       new Membrane(adapter).streamYielding(createRequest(), { refusalRetries: 1 }),
     );
@@ -153,6 +158,21 @@ describe('refusalRetries — streamYielding()', () => {
     const retrying = events.filter((e) => e.type === 'retrying');
     expect(retrying).toEqual([{ type: 'retrying', attempt: 1, maxAttempts: 1, reason: 'refusal' }]);
     // toEqual reads a key holding undefined as absent; the event has no key at all.
+    expect(Object.keys(retrying[0]!)).not.toContain('category');
+  });
+
+  it.each([
+    ['a number', 7],
+    ['an empty string', ''],
+    ['an array', ['cyber']],
+  ])('announces no category when an untyped adapter reports %s as one', async (_name, value) => {
+    const adapter = new RefusingAdapter(1, 'PARTIAL-REFUSED', 'GOOD', value);
+    const events = await collect(
+      new Membrane(adapter).streamYielding(createRequest(), { refusalRetries: 1 }),
+    );
+
+    const retrying = events.filter((e) => e.type === 'retrying');
+    expect(retrying).toEqual([{ type: 'retrying', attempt: 1, maxAttempts: 1, reason: 'refusal' }]);
     expect(Object.keys(retrying[0]!)).not.toContain('category');
   });
 

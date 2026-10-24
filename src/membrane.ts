@@ -2931,7 +2931,11 @@ export class Membrane {
         discardedUsage,
         this.discardedAttemptFrom(result.usage)
       );
-      onRetrying!({ attempt: retried, maxAttempts, category: result.refusalCategory });
+      onRetrying!({
+        attempt: retried,
+        maxAttempts,
+        category: isStopToken(result.refusalCategory) ? result.refusalCategory : undefined,
+      });
     }
   }
 
