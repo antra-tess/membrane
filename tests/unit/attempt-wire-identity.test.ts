@@ -104,8 +104,16 @@ describe('the wire is the same with and without onAttempt', () => {
           const withRecord = await wireOf(build, formatter, model, method, deadlined, true);
 
           expect(without.wire.length).toBeGreaterThan(0);
-          // Bedrock's comparison covers its signature, which signs the rest.
-          if (name === 'bedrock') expect(without.wire[0]!.headers.authorization).toMatch(/^AWS4-HMAC-SHA256 /);
+          // Bedrock's comparison covers its signature and the headers it signs.
+          if (name === 'bedrock') {
+            expect(without.wire[0]!.headers.authorization).toMatch(/^AWS4-HMAC-SHA256 /);
+            expect(Object.keys(without.wire[0]!.headers)).toContain('x-amz-date');
+          }
+          // The limit a record carries is the one on the wire, for the adapters that report one.
+          if (name === 'anthropic' || name === 'bedrock') {
+            expect(withRecord.records.map((r) => r.maxTokens)).toEqual(withRecord.wire.map((w) => JSON.parse(w.body).max_tokens));
+            expect(withRecord.records.every((r) => typeof r.maxTokens === 'number')).toBe(true);
+          }
           expect(withRecord.wire).toEqual(without.wire);
           // And the observer did observe: one record per request sent.
           expect(withRecord.records).toHaveLength(withRecord.wire.length);

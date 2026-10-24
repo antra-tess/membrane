@@ -293,13 +293,16 @@ describe('one record per attempt, with what the call says about it', () => {
         sendAs(call);
         return answer(call.request, '', { stopReason: 'refusal', refusalCategory: '' });
       },
+      async (call) => {
+        sendAs(call);
+        return answer(call.request, '', { stopReason: 'refusal', refusalCategory: 7 as never });
+      },
     ]);
     const { membrane, records } = recording(adapter);
 
-    await membrane.complete(REQUEST);
-    await membrane.complete(REQUEST);
+    for (let i = 0; i < 3; i++) await membrane.complete(REQUEST);
 
-    expect(records.map((r) => r.ending)).toEqual([{ stopReason: 'end_turn' }, { stopReason: 'refusal' }]);
+    expect(records.map((r) => r.ending)).toEqual([{ stopReason: 'end_turn' }, { stopReason: 'refusal' }, { stopReason: 'refusal' }]);
   });
 
   it("carries the provider's own stop, not the round's after a local stop sequence cut it", async () => {
@@ -454,6 +457,48 @@ describe('times, from the send', () => {
     await membrane.complete(REQUEST);
 
     expect(records[0]).toMatchObject({ method: 'complete', firstEventMs: 300, lastEventMs: 500, maxGapMs: 200 });
+  });
+
+  it("a successful stream ends with the adapter's call, before held text goes to the caller", async () => {
+    vi.useFakeTimers();
+    const adapter = new ScriptedAdapter([
+      async (call) => {
+        sendAs(call);
+        vi.advanceTimersByTime(1000);
+        // Held until the adapter returns, then delivered by the local stop's finish.
+        call.callbacks!.onChunk('ST');
+        return answer(call.request, 'ST');
+      },
+    ]);
+    const { membrane, records } = recording(adapter);
+
+    const delivered: Array<[string, number]> = [];
+    await membrane.stream({ ...REQUEST, stopSequences: ['STOP'] }, {
+      onChunk: (chunk) => { delivered.push([chunk, records.length]); vi.advanceTimersByTime(5000); },
+    });
+
+    expect(delivered).toEqual([['ST', 1]]);
+    expect(records[0]!.endMs).toBe(1000);
+  });
+
+  it("a successful complete() ends with the adapter's call, before onResponse runs", async () => {
+    vi.useFakeTimers();
+    const adapter = new ScriptedAdapter([
+      async (call) => {
+        sendAs(call);
+        vi.advanceTimersByTime(1000);
+        return answer(call.request, 'zz');
+      },
+    ]);
+    const { membrane, records } = recording(adapter);
+    const given: number[] = [];
+
+    await membrane.complete(REQUEST, {
+      onResponse: () => { given.push(records.length); vi.advanceTimersByTime(5000); },
+    });
+
+    expect(given).toEqual([1]);
+    expect(records[0]!.endMs).toBe(1000);
   });
 
   it("ends with the adapter's call, before held text goes to the caller", async () => {

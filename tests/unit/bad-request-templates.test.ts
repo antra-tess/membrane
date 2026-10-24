@@ -276,10 +276,18 @@ describe("the provider's message, as each adapter carries it, reaches the record
     vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream({
       start(controller) { controller.enqueue(exceptionFrame('validationException', {})); controller.close(); },
     }), { status: 200 })));
-    const membrane = new Membrane(new BedrockAdapter({ accessKeyId: 'zz-key', secretAccessKey: 'zz-secret', region: 'us-east-1' }), { formatter: new NativeFormatter() });
+    const records: AttemptRecord[] = [];
+    const membrane = new Membrane(new BedrockAdapter({ accessKeyId: 'zz-key', secretAccessKey: 'zz-secret', region: 'us-east-1' }), {
+      formatter: new NativeFormatter(), onAttempt: (r) => { records.push(r); },
+    });
     const error = await membrane.stream(REQUEST).then(() => undefined, (e: unknown) => e);
     expect(error).toBeInstanceOf(MembraneError);
+    expect((error as MembraneError).message).toContain('Bedrock stream error (validationException)');
     expect(((error as MembraneError).rawError as { error?: unknown }).error).toBeUndefined();
+    // A 400 with no words of the provider's has no template or path.
+    expect(records.map((r) => r.ending)).toEqual([{
+      error: { type: 'invalid_request', httpStatus: 400, providerErrorCode: 'validationException', cancelled: false, deadline: false },
+    }]);
   });
 
   it('Bedrock, an Anthropic error event inside the stream: its message gives the template and path', async () => {
