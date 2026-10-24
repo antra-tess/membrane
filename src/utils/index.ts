@@ -18,3 +18,10 @@ export {
 
 export { calculateCost } from './cost.js';
 export type { CostableUsage } from './cost.js';
+
+export {
+  BAD_REQUEST_TEMPLATES,
+  REQUEST_FIELD_NAMES,
+  classifyBadRequest,
+  type BadRequestTemplate,
+} from './bad-request.js';

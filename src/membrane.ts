@@ -70,6 +70,9 @@ import type { BuildResult } from './formatters/types.js';
 import { computeCacheWireReceipt } from './cache-wire-receipt.js';
 import { awaitCallerCode, runCallerCode, isDeadlineExpiry, errorFromThrown, systemChangeRefusedError } from './types/errors.js';
 import { createProgressDeadline, setLongTimeout } from './providers/utils.js';
+import { AttemptObserver, purposeOf, callerRequestIdOf } from './attempt-record.js';
+import type { AttemptRecord, CallPurpose } from './types/attempt.js';
+import type { ProgressSeen, SendReport } from './types/provider.js';
 import {
   parseToolCalls,
   formatToolResults,
@@ -551,6 +554,11 @@ export class Membrane {
           receiptGuard ? receiptGuard.signal : options.signal,
           options.progressTimeoutMs,
         );
+        // This pass's attempt record, only when someone reads it.
+        const attempt = this.observeAttempt(options, 'complete', attempts - 1, finalRequest);
+        const onProgress = progress.renew || attempt
+          ? (seen?: ProgressSeen) => { attempt?.event(seen); progress.renew?.(); }
+          : undefined;
         let rawProviderResponse: ProviderResponse;
         try {
           const adapterCall = this.adapter.complete(finalRequest, {
@@ -562,7 +570,8 @@ export class Membrane {
             },
             signal: progress.signal,
             timeoutMs: options.timeoutMs,
-            ...(progress.renew ? { onProgress: progress.renew } : {}),
+            ...(onProgress ? { onProgress } : {}),
+            ...(attempt ? { onSend: (send: SendReport) => attempt.send(send) } : {}),
             onRequest: (req) => {
               rawRequest = req;
               if (useWireReceipt) {
@@ -573,10 +582,16 @@ export class Membrane {
                 }
               }
               runCallerCode(() => options.onRequest?.(req));
+              // Sent once nothing above refused it: the adapter sends next.
+              attempt?.sent();
             },
           });
           rawProviderResponse = receiptGuard ? await receiptGuard.settle(adapterCall) : await adapterCall;
+        } catch (error) {
+          this.reportAttempt(attempt?.settle({ error, cancelled: options.signal?.aborted === true }));
+          throw error;
         } finally {
+          attempt?.ended();
           progress.cleanup();
         }
         // Restate usage in the one convention before any ratio or price sees it,
@@ -590,6 +605,7 @@ export class Membrane {
             this.adapter.usageCacheConvention,
           ),
         };
+        this.reportAttempt(attempt?.settle(this.attemptResponse(rawProviderResponse, providerResponse.usage)));
 
         // Call onResponse callback with raw response from API
         runCallerCode(() => options.onResponse?.(providerResponse.raw));
@@ -1143,6 +1159,7 @@ export class Membrane {
             progressTimeoutMs,
             retry,
             normalizedRequest: request,
+            record: { purpose: options.purpose, requestId: options.requestId, round: rounds },
             formatterName: formatter.name,
             requiresAssistantPrefill: true,
             // The tag-based parser tracks thinking via <thinking> tags — ask the
@@ -1702,6 +1719,7 @@ export class Membrane {
             progressTimeoutMs,
             retry,
             normalizedRequest: request,
+            record: { purpose: options.purpose, requestId: options.requestId, round: rounds },
             formatterName: activeFormatter.name,
             requiresAssistantPrefill: false,
             promptMessages: messages,
@@ -2731,6 +2749,12 @@ export class Membrane {
        * them uninstrumented.
        */
       fidelity?: FidelityNotes;
+      /**
+       * What each attempt record of this round carries from its call
+       * (MembraneConfig.onAttempt): the call's purpose and requestId, and the
+       * round's index.
+       */
+      record: { purpose?: CallPurpose; requestId?: string; round: number };
     }
   ): Promise<
     import('./types/provider.js').ProviderResponse & {
@@ -2746,7 +2770,7 @@ export class Membrane {
     // compatibility won't catch the excess field (checked only on object
     // literals, not on variables). Leaving it in would silently leak the
     // normalized form into every adapter's options.
-    const { normalizedRequest, formatterName, requiresAssistantPrefill, refusalRetries, onRetrying, retry, onWireCacheMarkers, progressTimeoutMs, fidelity, ...adapterOptions } = options;
+    const { normalizedRequest, formatterName, requiresAssistantPrefill, refusalRetries, onRetrying, retry, onWireCacheMarkers, progressTimeoutMs, fidelity, record, ...adapterOptions } = options;
     // Fingerprint around the hook only when both a hook and a reader exist
     // (the yielding loops pass notes only when they emit usage events, which
     // carry the round report): an observer or a no-op hook keeps fidelity
@@ -2856,19 +2880,40 @@ export class Membrane {
       // and retries each get a new one, and time outside the attempt (the
       // wait before a retry, tool execution) never counts.
       const progress = createProgressDeadline(observedOptions.signal, progressTimeoutMs);
+      // This attempt's record, only when someone reads it.
+      const observer = this.observeAttempt(record, 'stream', providerCalls - 1, finalRequest);
       try {
         const streamCall = this.adapter.stream(
           finalRequest,
           attemptCallbacks,
-          progress.renew ? { ...observedOptions, signal: progress.signal, onProgress: progress.renew } : observedOptions,
+          progress.renew || observer
+            ? {
+                ...observedOptions,
+                ...(progress.renew ? { signal: progress.signal } : {}),
+                onProgress: (seen?: ProgressSeen) => { observer?.event(seen); progress.renew?.(); },
+                ...(observer
+                  ? {
+                      onSend: (send: SendReport) => observer.send(send),
+                      onRequest: (wireRequest: unknown) => {
+                        observedOptions.onRequest(wireRequest);
+                        // Sent once nothing above refused it: the adapter sends next.
+                        observer.sent();
+                      },
+                    }
+                  : {}),
+              }
+            : observedOptions,
         );
         attemptResult = receiptGuard ? await receiptGuard.settle(streamCall) : await streamCall;
       } catch (error) {
+        // The attempt ends with the adapter's call, before held text is delivered.
+        observer?.ended();
         // Held text was received: deliver it so partialContent keeps it. The
         // attempt's own error is the one to report, whatever delivery does.
         try { localStops?.release(); } catch { /* keep the original error */ }
         failure = { error };
       } finally {
+        observer?.ended();
         progress.cleanup();
       }
       // Whether to send the call again is decided once the send is over, so
@@ -2878,6 +2923,7 @@ export class Membrane {
         // MembraneError yet is typed by errorFromThrown, so the retry is
         // decided on the type that is thrown.
         const typed = errorFromThrown(failure.error);
+        this.reportAttempt(observer?.settle({ error: typed, cancelled: adapterOptions.signal?.aborted === true }));
         // A call that delivered anything can't be sent again.
         if (delivered) throw typed;
         // The call's signal first, as complete() reads the caller's: a
@@ -2916,6 +2962,7 @@ export class Membrane {
         providerStopReason: this.providerReasonFor(attemptResult!),
         usage: normalizeUsageToCacheExcluded(rawResult.usage, this.adapter.name, this.adapter.usageCacheConvention),
       };
+      this.reportAttempt(observer?.settle(this.attemptResponse(attemptResult!, result.usage)));
       if (result.stopReason !== 'refusal' || retried >= maxAttempts) {
         for (const block of attemptAlterations) fidelity?.alterBlock(block);
         return {
@@ -3691,6 +3738,63 @@ export class Membrane {
     return decision.retry ? decision : { retry: false };
   }
 
+  /**
+   * An attempt's observer, when `onAttempt` is set: the call's purpose and
+   * requestId, and where the attempt falls in it.
+   */
+  private observeAttempt(
+    call: { purpose?: CallPurpose; requestId?: string; round?: number } | undefined,
+    method: 'complete' | 'stream',
+    attempt: number,
+    providerRequest: unknown,
+  ): AttemptObserver | undefined {
+    if (!this.config.onAttempt) return undefined;
+    const model = (providerRequest as { model?: unknown } | null | undefined)?.model;
+    return new AttemptObserver({
+      purpose: purposeOf(call?.purpose),
+      callerRequestId: callerRequestIdOf(call?.requestId),
+      method,
+      // complete() makes one round; its options name none.
+      round: call?.round ?? 0,
+      attempt,
+      provider: this.adapter.name,
+      model: typeof model === 'string' ? model : '',
+    });
+  }
+
+  /**
+   * How an attempt that returned a response ended, for its record: membrane's
+   * stop reason for the provider's own stop, with a refusal's category read
+   * as RetryingEvent's is, and the usage as membrane normalized it.
+   */
+  private attemptResponse(
+    response: ProviderResponse,
+    usage: ProviderResponse['usage'],
+  ): { stopReason: StopReason; refusalCategory?: string; usage: ProviderResponse['usage']; unreportedUsage?: ProviderResponse['unreportedUsage'] } {
+    const stopReason = this.mapStopReason(response.stopReason);
+    return {
+      stopReason,
+      ...(stopReason === 'refusal' && isStopToken(response.refusalCategory) ? { refusalCategory: response.refusalCategory } : {}),
+      usage,
+      ...(response.unreportedUsage ? { unreportedUsage: response.unreportedUsage } : {}),
+    };
+  }
+
+  /**
+   * Give an attempt's record to `onAttempt`, as keepalive's `onCall` is given
+   * its receipts: what it throws, and a promise it returns that rejects, is
+   * ignored, so an observer can't end or change a call.
+   */
+  private reportAttempt(record: AttemptRecord | undefined): void {
+    const onAttempt = this.config.onAttempt;
+    if (!record || !onAttempt) return;
+    try {
+      void Promise.resolve(onAttempt(record)).catch(() => {});
+    } catch {
+      // An observer that throws is ignored, as one that rejects is.
+    }
+  }
+
   private attachRawRequest(error: unknown, rawRequest: unknown): MembraneError {
     // A build refusal (the formatter reported not ready, or the normalizer
     // refused the history; native streaming builds through the shared
@@ -4104,6 +4208,7 @@ export class Membrane {
             progressTimeoutMs: options.progressTimeoutMs,
             retry: options.retry,
             normalizedRequest: request,
+            record: { purpose: options.purpose, requestId: options.requestId, round: rounds },
             formatterName: formatter.name,
             requiresAssistantPrefill: true,
             // The tag-based parser tracks thinking via <thinking> tags — ask
@@ -4714,6 +4819,7 @@ export class Membrane {
             progressTimeoutMs: options.progressTimeoutMs,
             retry: options.retry,
             normalizedRequest: request,
+            record: { purpose: options.purpose, requestId: options.requestId, round: rounds },
             formatterName: activeFormatter.name,
             requiresAssistantPrefill: false,
             promptMessages: messages,

@@ -344,6 +344,36 @@ export interface ProviderRequestContext {
   requiresAssistantPrefill: boolean;
 }
 
+/**
+ * What a parsed provider event is, as an adapter that reports content says
+ * through `ProviderRequestOptions.onProgress`. `'content'`: a content delta of
+ * any kind (text, thinking, tool input, a signature), or a `redacted_thinking`
+ * block's start, since that block arrives whole once its think is done. Any
+ * other block's start is only an event: a text or tool block's content
+ * follows as deltas, and a server tool's result block, which arrives whole
+ * too, follows its call's input deltas, so content has begun by then.
+ */
+export type ProgressSeen = 'content';
+
+/**
+ * What an adapter tells Membrane core about one attempt as it sends it,
+ * through `ProviderRequestOptions.onSend`.
+ */
+export interface SendReport {
+  /**
+   * The output-token limit the body asks for (its `max_tokens` or
+   * equivalent), after any default and passthrough parameter the adapter
+   * applied.
+   */
+  maxTokens?: number;
+  /**
+   * Whether this attempt reports content through `onProgress('content')`.
+   * Membrane can then tell a stream whose content never began from one whose
+   * content isn't reported.
+   */
+  reportsContent?: boolean;
+}
+
 export interface ProviderRequestOptions {
   /** Build/protocol facts for validation against the adapter's final model/body.
    * Not provider JSON. Decorators forward this context with the other options. */
@@ -368,17 +398,26 @@ export interface ProviderRequestOptions {
   firstEventTimeoutMs?: number;
   /**
    * Stream progress, for the progress deadline Membrane core keeps per
-   * provider call (`progressTimeoutMs`). An adapter calls it once per parsed
+   * provider call (`progressTimeoutMs`) and for the attempt record
+   * (`MembraneConfig.onAttempt`). An adapter calls it once per parsed
    * provider event: each SDK event, each SSE data frame that parses to a JSON
    * object, each event-stream message that decodes to one. Never for a frame
    * that parses to anything else (`null`, a number, a string, an array),
    * which carries no event, nor for keepalives (Anthropic's and
    * Bedrock's `ping`), SSE comments or raw body bytes: those prove the
-   * connection is up, not that the model is making progress. Decorators must
-   * forward it with the other options; one that drops it turns the progress
-   * deadline into a total one.
+   * connection is up, not that the model is making progress. An adapter that
+   * reports content (SendReport.reportsContent) passes `'content'` for an
+   * event that is content (see ProgressSeen), and nothing for any other.
+   * Decorators must forward it, with its argument, beside the other options;
+   * one that drops it turns the progress deadline into a total one.
    */
-  onProgress?: () => void;
+  onProgress?: (seen?: ProgressSeen) => void;
+  /**
+   * What this attempt sends (see SendReport), reported once per attempt
+   * beside `onRequest`, before the request goes out. Decorators forward it
+   * with the other options, so a router reports for the adapter it picked.
+   */
+  onSend?: (send: SendReport) => void;
   /** Report the final API request body immediately before sending it.
    * Required for adapters declaring cacheReceiptBasis: 'wire-request'.
    * Decorators forward it; raw logging observes each attempt, even when
@@ -440,8 +479,10 @@ export interface ProviderResponse {
    * The provider's category for a refusal: Anthropic's
    * `stop_details.category`, such as 'cyber'. Set only when the provider
    * stopped with `refusal` and named a category as a non-empty string; absent
-   * otherwise. AnthropicAdapter sets it on stream() and complete(), and no
-   * other built-in adapter does. Membrane announces it, and nothing read from
+   * otherwise. AnthropicAdapter sets it on stream() and complete(), and
+   * BedrockAdapter on complete(), from the `stop_details` AWS documents on a
+   * non-streamed body; Bedrock's stream reports none, since AWS documents none
+   * in its events. No other built-in adapter sets it. Membrane announces it, and nothing read from
    * the raw response, on a refusal re-issue's `RetryingEvent.category`.
    * Custom adapters opt in by supplying it, and a decorator that rebuilds the
    * response must carry it. As with providerStopReason, membrane reads a value

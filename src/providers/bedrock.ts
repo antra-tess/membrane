@@ -28,13 +28,14 @@ import {
 import { errorFromThrown } from '../types/errors.js';
 import { stripEmptyTextRequest } from '../utils/empty-text.js';
 import { isUnsignedThinking } from '../utils/thinking-carriers.js';
-import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, streamIndex, isEventObject, isToolCallBlock, isToolCallArgumentsDelta } from './utils.js';
+import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, streamIndex, isEventObject, isToolCallBlock, isToolCallArgumentsDelta, contentOfAnthropicEvent } from './utils.js';
 import {
   INTERLEAVED_THINKING_BETA,
   THINKING_BINDING_BETA,
   THINKING_DISPLAY_UPDATES_BETA,
   needsInterleavedThinkingBeta,
   readInputTransformations,
+  readRefusalCategory,
   sendsBlockBinding,
   sendsDisplayUpdates,
   thinkingEnabled,
@@ -120,6 +121,12 @@ interface BedrockMessageResponse {
   model: string;
   stop_reason: 'end_turn' | 'max_tokens' | 'stop_sequence' | 'tool_use' | null;
   stop_sequence?: string | null;
+  /**
+   * With a refusal, its details, as AWS documents for a non-streamed body
+   * (Claude Messages API on Bedrock): `category`, such as 'cyber', and an
+   * explanation. AWS shows none in a stream's events.
+   */
+  stop_details?: unknown;
   usage: {
     input_tokens: number;
     output_tokens: number;
@@ -407,6 +414,7 @@ export class BedrockAdapter implements ProviderAdapter {
     const fullRequest = { modelId: bedrockModelId, ...bedrockRequest };
     assertMessagePrefillSupported(bedrockModelId, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
+    options?.onSend?.({ maxTokens: fullRequest.max_tokens });
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
@@ -429,6 +437,8 @@ export class BedrockAdapter implements ProviderAdapter {
     const fullRequest = { modelId: bedrockModelId, ...bedrockRequest, stream: true };
     assertMessagePrefillSupported(bedrockModelId, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
+    // This stream reports content through onProgress (contentOfAnthropicEvent below).
+    options?.onSend?.({ maxTokens: fullRequest.max_tokens, reportsContent: true });
 
     const { signal: combinedSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
@@ -690,7 +700,7 @@ export class BedrockAdapter implements ProviderAdapter {
     callbacks: StreamCallbacks,
     signal: AbortSignal | undefined,
     rawRequest: unknown,
-    onProgress?: () => void,
+    onProgress?: ProviderRequestOptions['onProgress'],
   ): Promise<ProviderResponse> {
     const url = new URL(
       `${this.baseURL ?? `https://bedrock-runtime.${this.region}.amazonaws.com`}/model/${encodeURIComponent(modelId)}/invoke-with-response-stream`
@@ -892,7 +902,7 @@ export class BedrockAdapter implements ProviderAdapter {
             if (eventData !== undefined) {
               // A decoded model event is progress; a ping only proves the
               // connection.
-              if ((eventData as { type?: string }).type !== 'ping') onProgress?.();
+              if ((eventData as { type?: string }).type !== 'ping') onProgress?.(contentOfAnthropicEvent(eventData));
 
               // Check for error events within the stream
               if (eventData.type === 'error') {
@@ -1189,6 +1199,10 @@ export class BedrockAdapter implements ProviderAdapter {
       content,
       stopReason: response.stop_reason ?? 'end_turn',
       providerStopReason: response.stop_reason ?? undefined,
+      // A non-streamed body carries stop_details, as AWS documents; the
+      // stream's final message is built without it, since AWS documents none
+      // in the stream and nothing here has seen one.
+      ...readRefusalCategory(response.stop_reason, response.stop_details),
       stopSequence: response.stop_sequence ?? undefined,
       usage: {
         inputTokens: response.usage.input_tokens,

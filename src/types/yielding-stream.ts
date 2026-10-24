@@ -13,6 +13,7 @@ import type { NormalizedMessage } from './message.js';
 import type { ToolCall, ToolResult, ToolContext } from './tools.js';
 import type { DetailedUsage, NormalizedResponse, StopReason } from './response.js';
 import type { ChunkMeta, BlockEvent } from './streaming.js';
+import type { CallPurpose } from './attempt.js';
 
 // ============================================================================
 // Stream Events
@@ -445,7 +446,15 @@ export interface YieldingStreamOptions {
    */
   progressTimeoutMs?: number;
 
-  /** Request ID for correlation/logging */
+  /**
+   * What the call is for, carried onto each of its attempt records
+   * (MembraneConfig.onAttempt): `'turn'` for an agent's own turn,
+   * `'compression'` for a call that summarizes context. Membrane reads
+   * nothing else into it.
+   */
+  purpose?: CallPurpose;
+
+  /** Request ID for correlation/logging, carried onto each attempt record as `callerRequestId`. */
   requestId?: string;
 
   /**

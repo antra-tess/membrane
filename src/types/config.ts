@@ -7,6 +7,7 @@ import type { ErrorInfo } from './errors.js';
 import type { NormalizedRequest } from './request.js';
 import type { NormalizedResponse } from './response.js';
 import type { NormalizeEvent, PrefillFormatter } from '../formatters/types.js';
+import type { AttemptRecord } from './attempt.js';
 
 // ============================================================================
 // Retry Config
@@ -273,6 +274,15 @@ export interface MembraneConfig {
 
   /** Lifecycle hooks */
   hooks?: MembraneHooks;
+
+  /**
+   * Called with one record per provider attempt (see AttemptRecord), on every
+   * entry point, once the attempt's adapter call settles and before membrane
+   * decides whether to send the request again. It's an observer: what it
+   * throws, and a promise it returns that rejects, is ignored, so it can't end
+   * or change a call. Without it membrane keeps no record.
+   */
+  onAttempt?: (record: AttemptRecord) => void | Promise<void>;
 
   /** Logger instance */
   logger?: MembraneLogger;
