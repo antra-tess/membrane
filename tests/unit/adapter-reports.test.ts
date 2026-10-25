@@ -1,17 +1,8 @@
-/**
- * What the Anthropic and Bedrock adapters report for the attempt record: as
- * they send, the `max_tokens` the body carries and whether the stream reports
- * content (`onSend`); then, per parsed event, whether it was content
- * (`onProgress('content')`). And Bedrock's refusal category, which AWS
- * documents on a non-streamed body only.
- */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import { BedrockAdapter } from '../../src/providers/bedrock.js';
-import { Membrane } from '../../src/membrane.js';
-import { NativeFormatter } from '../../src/formatters/native.js';
 import { chunkFrame, streamBody } from '../helpers/bedrock-event-stream.js';
-import type { AttemptRecord, ProviderRequest, ProviderRequestOptions, SendReport } from '../../src/types/index.js';
+import type { ProviderRequest, ProviderRequestOptions, SendReport } from '../../src/types/index.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -100,22 +91,6 @@ describe('AnthropicAdapter', () => {
     expect(atSend).toEqual([1]);
     expect(o.sends).toEqual([{ maxTokens: 333 }]);
     expect(o.seen).toEqual([]);
-  });
-
-  it('through Membrane, the record has its first content and its limit', async () => {
-    const records: AttemptRecord[] = [];
-    const membrane = new Membrane(anthropicStreaming(EVENTS), { formatter: new NativeFormatter(), onAttempt: (r) => { records.push(r); } });
-
-    await membrane.stream({
-      messages: [{ participant: 'User', content: [{ type: 'text', text: 'zz hello' }] }],
-      config: { model: 'claude-sonnet-4-5', maxTokens: 64 },
-      toolMode: 'native',
-    });
-
-    expect(records).toHaveLength(1);
-    expect(records[0]).toMatchObject({ provider: 'anthropic', model: 'claude-sonnet-4-5', reportsContent: true, maxTokens: 64 });
-    expect(records[0]!.firstContentMs).toBeTypeOf('number');
-    expect(records[0]!.firstEventMs).toBeLessThanOrEqual(records[0]!.firstContentMs!);
   });
 });
 

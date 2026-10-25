@@ -6,7 +6,6 @@ import type { ContentBlock } from './content.js';
 import type { ToolCall, ToolResult, ToolContext } from './tools.js';
 import type { BasicUsage } from './response.js';
 import type { PrefillFormatter } from '../formatters/types.js';
-import type { CallPurpose } from './attempt.js';
 
 // ============================================================================
 // Membrane Block Types (logical content regions, not API types)
@@ -240,15 +239,7 @@ export interface StreamOptions {
    */
   retry?: boolean;
 
-  /**
-   * What the call is for, carried onto each of its attempt records
-   * (MembraneConfig.onAttempt): `'turn'` for an agent's own turn,
-   * `'compression'` for a call that summarizes context. Membrane reads
-   * nothing else into it.
-   */
-  purpose?: CallPurpose;
-
-  /** Request ID for correlation, carried onto each attempt record as `callerRequestId`. */
+  /** Request ID for correlation */
   requestId?: string;
   
   // ---- Callbacks ----
@@ -361,15 +352,7 @@ export interface CompleteOptions {
    */
   progressTimeoutMs?: number;
 
-  /**
-   * What the call is for, carried onto each of its attempt records
-   * (MembraneConfig.onAttempt): `'turn'` for an agent's own turn,
-   * `'compression'` for a call that summarizes context. Membrane reads
-   * nothing else into it.
-   */
-  purpose?: CallPurpose;
-
-  /** Request ID for correlation, carried onto each attempt record as `callerRequestId`. */
+  /** Request ID for correlation */
   requestId?: string;
 
   /**

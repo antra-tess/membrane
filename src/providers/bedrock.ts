@@ -1271,7 +1271,7 @@ class BedrockError extends Error {
     /**
      * The provider's error as it came in the stream, as the Anthropic SDK's
      * APIError keeps its body as `error`: an exception's `{ message }`, or an
-     * in-band error event. The attempt record's 400 kinds read its message.
+     * in-band error event.
      */
     public error?: unknown,
   ) {
