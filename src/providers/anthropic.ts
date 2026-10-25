@@ -35,7 +35,6 @@ import {
 } from '../types/index.js';
 import { markSystemChangeRefused, runCallerCode, statusForProviderCode, deadlineExpired, isDeadlineExpiry, errorFromThrown } from '../types/errors.js';
 import { flattenRootSchemaUnion } from './anthropic-tool-schema.js';
-import { SYSTEM_CHANGE_REFUSALS } from '../utils/bad-request.js';
 import { isPlainObject } from '../utils/tool-schema.js';
 import { assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, isDeadlineAbort, deadlineTimeoutError, isToolCallBlock, isToolCallArgumentsDelta, contentOfAnthropicEvent } from './utils.js';
 import { fetchWithCredentials, validateCredential, type CredentialContext, type CredentialResolver } from './credentials.js';
@@ -208,6 +207,14 @@ export function sendsToolChanges(params: { messages?: unknown }): boolean {
     message?.role === 'system' && Array.isArray(message.content) &&
     message.content.some((block: { type?: unknown }) => block?.type === 'tool_addition' || block?.type === 'tool_removal'));
 }
+
+/** The API's wordings, in a 400, for a model that takes no mid-conversation
+ *  system message or no tool change in one (live runs, Oct 19 2026). */
+const SYSTEM_CHANGE_REFUSALS = [
+  "role 'system' is not supported on this model",
+  'tool_addition/tool_removal requires a model that supports mid-conversation system content',
+  'tool_addition/tool_removal is not supported on this model',
+];
 
 /** Whether a 400's own message is the API refusing the request's system change. */
 export function isSystemChangeRefusal(body: unknown): boolean {

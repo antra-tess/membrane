@@ -356,8 +356,8 @@ export interface ProviderRequestContext {
 export type ProgressSeen = 'content';
 
 /**
- * What an adapter tells Membrane core about one attempt as it sends it,
- * through `ProviderRequestOptions.onSend`.
+ * What an adapter reports about one attempt as it sends it, through
+ * `ProviderRequestOptions.onSend`.
  */
 export interface SendReport {
   /**
@@ -367,9 +367,9 @@ export interface SendReport {
    */
   maxTokens?: number;
   /**
-   * Whether this attempt reports content through `onProgress('content')`.
-   * Membrane can then tell a stream whose content never began from one whose
-   * content isn't reported.
+   * Whether this attempt reports content through `onProgress('content')`, so
+   * a stream whose content never began can be told from one whose content
+   * isn't reported.
    */
   reportsContent?: boolean;
 }
@@ -398,8 +398,7 @@ export interface ProviderRequestOptions {
   firstEventTimeoutMs?: number;
   /**
    * Stream progress, for the progress deadline Membrane core keeps per
-   * provider call (`progressTimeoutMs`) and for the attempt record
-   * (`MembraneConfig.onAttempt`). An adapter calls it once per parsed
+   * provider call (`progressTimeoutMs`). An adapter calls it once per parsed
    * provider event: each SDK event, each SSE data frame that parses to a JSON
    * object, each event-stream message that decodes to one. Never for a frame
    * that parses to anything else (`null`, a number, a string, an array),

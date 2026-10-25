@@ -115,15 +115,6 @@ export type {
   SendReport,
 } from './provider.js';
 
-// Attempt records
-export type {
-  CallPurpose,
-  AttemptRecord,
-  AttemptEnding,
-  AttemptError,
-  AttemptUsage,
-} from './attempt.js';
-
 // Streaming
 export type {
   StreamState,
