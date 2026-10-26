@@ -105,6 +105,24 @@ describe("every adapter's error names the host it tried and what happened", () =
     expect(error.message).toBe('Credential resolution failed: fetch failed');
   });
 
+  it("a call aborted while its credential is resolved, or before, keeps the abort reason's own text and names no host", async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}')));
+    const reason = () => Object.assign(new Error('zz caller gave up'), { code: 'ECONNRESET' });
+    const rejected = (adapter: ProviderAdapter, signal: AbortSignal) =>
+      adapter.complete(request, { signal }).then(() => { throw new Error('expected the call to reject'); }, (error: unknown) => error as MembraneError);
+    const during = new AbortController();
+    const resolving = new OpenAIResponsesAPIAdapter({
+      baseURL: BASE,
+      credentials: () => { setTimeout(() => during.abort(reason()), 0); return new Promise<never>(() => {}); },
+    });
+    expect((await rejected(resolving, during.signal)).message).toBe('zz caller gave up');
+    const before = new AbortController();
+    before.abort(reason());
+    const resolved = new OpenAIResponsesAPIAdapter({ baseURL: BASE, credentials: async () => ({ token: 'zz-token' }) });
+    expect((await rejected(resolved, before.signal)).message).toBe('zz caller gave up');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("a credential resolver's rejection that isn't an object stays what it was", async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}')));
     const adapter = new OpenAIResponsesAPIAdapter({ baseURL: BASE, credentials: () => Promise.reject('zz-resolver-refused') });
@@ -331,7 +349,9 @@ describe('through real sockets on this runtime', () => {
     const refused = await failure(make(`http://127.0.0.1:${refusedPort}/v1`), 'complete');
     expect(refused.message).toBe(`The request to 127.0.0.1:${refusedPort} failed: the connection was refused (ECONNREFUSED).`);
     const reset = await failure(make(`http://127.0.0.1:${resetPort}/v1`), 'complete');
-    expect(reset.message).toBe(`The request to 127.0.0.1:${resetPort} failed: the connection was reset (ECONNRESET).`);
+    expect(reset.type).toBe('network');
+    const resetWords = 'the connection was (reset \\(ECONNRESET\\)|closed \\((EPIPE|UND_ERR_SOCKET)\\))';
+    expect(reset.message).toMatch(new RegExp(`^The request to 127\\.0\\.0\\.1:${resetPort} failed: ${resetWords}(; ${resetWords})*\\.$`));
   });
 });
 
