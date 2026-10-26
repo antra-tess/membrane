@@ -1,17 +1,3 @@
-/**
- * Timeout identity through the REAL fetch-based adapters.
- *
- * The abort-lifecycle work pinned `reason: 'timeout'` with a mock adapter that
- * throws createCombinedSignal's DOMException directly. Every real
- * createCombinedSignal-based adapter catches that DOMException in its own
- * handleError and replaces it with abortError() — type 'abort', message
- * "Request was aborted" — so the timeout identity died inside the adapter and
- * Membrane's caller-signal > timeout > error ladder never saw it. These tests
- * drive the actual adapters with a fetch stub that behaves like the platform's
- * (rejecting with `signal.reason`, measured identity-preserving on both the
- * pre-headers and body-read paths).
- */
-
 import { describe, it, expect, afterEach, afterAll } from 'vitest';
 import http from 'node:http';
 import type { Socket } from 'node:net';
@@ -127,9 +113,6 @@ describe('deadline aborts keep their timeout identity through the real adapters'
   });
 
   it('an abort that is neither the caller nor a deadline still reports error', async () => {
-    // A stray AbortError with no caller signal and no deadline behind it: the
-    // bottom rung of the ladder, and the guard against mapping every abort to
-    // a timeout.
     globalThis.fetch = (() =>
       Promise.reject(new DOMException('Request was aborted', 'AbortError'))) as unknown as typeof fetch;
     const membrane = new Membrane(new OpenAIAdapter({ apiKey: 'zz-not-a-key' }));
@@ -177,14 +160,10 @@ describe('the deadline mark createCombinedSignal puts on its own abort', () => {
 });
 
 describe('the mark survives the platform fetch', () => {
-  // The whole mechanism rests on fetch rejecting with the signal's own reason
-  // object rather than a substitute. Pinned against a real loopback server so
-  // a runtime that stops doing that is a red here, not a silent regression to
-  // reason: 'error' in production.
   const sockets = new Set<Socket>();
   const server = http.createServer((_req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
-    res.write('data: {"zz":1}\n\n'); // headers land, body never finishes
+    res.write('data: {"zz":1}\n\n');
   });
   server.on('connection', (socket) => {
     sockets.add(socket);
@@ -224,11 +203,6 @@ describe('the mark survives the platform fetch', () => {
 });
 
 describe('every createCombinedSignal-based adapter maps its own deadline', () => {
-  // The end-to-end tests above drive two adapters through Membrane. The arm
-  // that maps a marked abort lives in each adapter's own handleError, so the
-  // family fact is pinned here directly: given a wedged connection and a
-  // deadline, each adapter rejects with the typed timeout rather than with a
-  // generic abort.
   const adapters: [string, () => { stream: (...args: never[]) => Promise<unknown> }][] = [
     ['openai', () => new OpenAIAdapter({ apiKey: 'zz-not-a-key' })],
     ['gemini', () => new GeminiAdapter({ apiKey: 'zz-not-a-key' })],

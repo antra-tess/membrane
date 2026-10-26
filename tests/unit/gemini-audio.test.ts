@@ -1,16 +1,6 @@
-/**
- * Unit coverage for audio input in the Gemini provider.
- *
- * The provider routes `audio` blocks via inlineData (same mechanism as images).
- * This is provider-level plumbing only — which models actually accept/understand
- * audio is the caller's concern, not membrane's. These assert that an `audio`
- * block becomes an inlineData part in the outgoing request, captured via the
- * `onRequest` hook so no network call is made. Image path checked as a regression.
- */
 import { describe, it, expect } from 'vitest';
 import { GeminiAdapter } from '../../src/providers/gemini.js';
 
-/** Build the outgoing Gemini request for `content`, captured before fetch. */
 async function buildRequest(content: unknown[]): Promise<any> {
   const adapter = new GeminiAdapter({ apiKey: 'test-key-not-used' });
   let captured: any;

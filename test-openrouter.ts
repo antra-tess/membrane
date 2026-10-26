@@ -1,9 +1,3 @@
-/**
- * Test OpenRouter API
- * 
- * Run with: npx tsx test-openrouter.ts
- */
-
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const BASE_URL = 'https://openrouter.ai/api/v1';
 
@@ -108,7 +102,6 @@ async function testToolUse() {
   console.log('Finish reason:', response.choices?.[0]?.finish_reason);
   console.log('Message:', JSON.stringify(response.choices?.[0]?.message, null, 2));
   
-  // Check for tool calls
   const toolCalls = response.choices?.[0]?.message?.tool_calls;
   if (toolCalls && toolCalls.length > 0) {
     console.log('\nTool calls found:');
@@ -116,11 +109,9 @@ async function testToolUse() {
       console.log('  -', call.function?.name, call.function?.arguments);
     }
     
-    // Execute and continue
     const result = eval(JSON.parse(toolCalls[0].function.arguments).expression);
     console.log('\nTool result:', result);
     
-    // Continue conversation
     const response2 = await callOpenRouter('openai/gpt-4o-mini', [
       { role: 'user', content: 'What is 123 * 456? Use the calculate tool.' },
       response.choices[0].message,
@@ -222,7 +213,6 @@ async function testStreaming() {
           process.stdout.write(content);
         }
       } catch (e) {
-        // Ignore parse errors
       }
     }
   }

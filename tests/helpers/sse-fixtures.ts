@@ -1,9 +1,3 @@
-/**
- * Shared SSE fixtures for provider-adapter stream tests.
- *
- * Each entry of `dataLines` becomes one `data: <line>\n\n` SSE event, which is
- * the wire shape every OpenAI-family and Gemini adapter parses.
- */
 import { vi } from 'vitest';
 
 export function sseResponse(dataLines: string[]): Response {
@@ -25,11 +19,6 @@ export function stubFetchWithSseLines(dataLines: string[]): ReturnType<typeof vi
   return fetchMock;
 }
 
-/**
- * A body emitted verbatim, one stream chunk per entry. `sseResponse` always
- * terminates its last event with `\n\n`; this one expresses wire shapes it
- * cannot, notably a body that ends mid-line.
- */
 export function rawSseResponse(bodyChunks: string[]): Response {
   const encoder = new TextEncoder();
   const body = new ReadableStream<Uint8Array>({
@@ -50,16 +39,14 @@ export function stubFetchWithRawSse(bodyChunks: string[]): ReturnType<typeof vi.
 }
 
 /**
- * The same `data: <line>` events as `sseResponse`, except the FINAL one is left
- * without its trailing newline — the tolerated shape a server or proxy produces
- * when it closes the connection right after writing the last event.
+ * A server or proxy that closes the connection right after writing the last
+ * event can leave that event without its trailing newline.
  */
 export function sseBodyWithUnterminatedTail(dataLines: string[]): string {
   const terminatedHead = dataLines.slice(0, -1).map((line) => `data: ${line}\n\n`).join('');
   return `${terminatedHead}data: ${dataLines[dataLines.length - 1]}`;
 }
 
-/** The single request body the stubbed fetch received, parsed. */
 export function capturedRequestBody(fetchMock: ReturnType<typeof vi.fn>): Record<string, unknown> {
   const init = fetchMock.mock.calls[0]?.[1] as { body?: string } | undefined;
   return JSON.parse(init?.body ?? '{}');

@@ -1,15 +1,3 @@
-/**
- * Unit tests for opt-in refusal retries (refusalRetries).
- *
- * The contract under test:
- *  - default OFF, so existing callers are untouched;
- *  - complete() retries invisibly (nothing was emitted yet);
- *  - streamYielding() announces each retry with a `retrying` event, and the
- *    tokens of the abandoned attempt must NOT survive into the final text.
- *    That discard is the whole reason the event exists — a silent retry
- *    would concatenate two attempts in any consumer that renders tokens.
- */
-
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import type {
@@ -21,7 +9,8 @@ import type {
 } from '../../src/types/provider.js';
 import type { NormalizedRequest, StreamEvent } from '../../src/types/index.js';
 
-/** Adapter that refuses its first `refusals` attempts, then succeeds. */
+const NO_FIELD = Symbol('no refusalCategory');
+
 class RefusingAdapter implements ProviderAdapter {
   readonly name = 'refusing';
   calls = 0;
@@ -30,14 +19,21 @@ class RefusingAdapter implements ProviderAdapter {
     private refusals: number,
     private refusalText = 'PARTIAL-REFUSED',
     private successText = 'GOOD',
+    private fieldCategory: unknown = 'cyber',
   ) {}
 
   private response(text: string, stopReason: string): ProviderResponse {
+    const refused = stopReason === 'refusal';
+    const reports = this.fieldCategory !== NO_FIELD;
+    const stopDetails = { type: 'refusal', category: 'cyber' };
     return {
       content: [{ type: 'text', text }],
       stopReason,
+      ...(refused && reports ? { refusalCategory: this.fieldCategory } : {}),
       usage: { inputTokens: 1, outputTokens: 1 },
-      raw: { response: { stop_reason: stopReason, stop_details: { category: 'cyber' } } },
+      raw: refused && !reports
+        ? { stop_reason: stopReason, stop_details: stopDetails, response: { stop_details: stopDetails } }
+        : { stop_reason: stopReason },
     } as unknown as ProviderResponse;
   }
 
@@ -56,8 +52,6 @@ class RefusingAdapter implements ProviderAdapter {
     this.calls++;
     const refusing = this.calls <= this.refusals;
     const text = refusing ? this.refusalText : this.successText;
-    // Emit the text as the provider would, BEFORE the refusal verdict lands —
-    // this is what a consumer would have rendered and must discard.
     callbacks.onChunk?.(text);
     return this.response(text, refusing ? 'refusal' : 'end_turn');
   }
@@ -66,8 +60,6 @@ class RefusingAdapter implements ProviderAdapter {
 function createRequest(): NormalizedRequest {
   return {
     messages: [{ participant: 'User', content: [{ type: 'text', text: 'Hello' }] }],
-    // Native tool mode: what Connectome runs, and the only mode in which
-    // refusalRetries is supported (see the XML-mode guard in streamYielding).
     toolMode: 'native',
     tools: [{ name: 'noop', description: 'no-op', inputSchema: { type: 'object', properties: {} } }],
     config: { model: 'test-model', maxTokens: 100 },
@@ -86,7 +78,7 @@ describe('refusalRetries — complete()', () => {
     const adapter = new RefusingAdapter(2);
     const response = await new Membrane(adapter).complete(createRequest(), { refusalRetries: 2 });
     expect(response.stopReason).toBe('end_turn');
-    expect(adapter.calls).toBe(3); // original + 2 retries
+    expect(adapter.calls).toBe(3);
   });
 
   it('gives up after the budget and surfaces the refusal rather than hiding it', async () => {
@@ -121,14 +113,38 @@ describe('refusalRetries — streamYielding()', () => {
     expect(retrying).toHaveLength(1);
     expect(retrying[0]).toMatchObject({ attempt: 1, maxAttempts: 1, reason: 'refusal', category: 'cyber' });
 
-    // Both attempts' tokens were emitted, so a consumer needs the event to
-    // know which to drop — but the accumulated assistant text must contain
-    // only the surviving attempt.
     const complete = events.find((e) => e.type === 'complete');
     expect(complete).toBeDefined();
     const text = JSON.stringify((complete as { response: unknown }).response);
     expect(text).toContain('GOOD');
     expect(text).not.toContain('PARTIAL-REFUSED');
+  });
+
+  it('announces no category when the adapter reports none, whatever its raw response holds', async () => {
+    const adapter = new RefusingAdapter(1, 'PARTIAL-REFUSED', 'GOOD', NO_FIELD);
+    const events = await collect(
+      new Membrane(adapter).streamYielding(createRequest(), { refusalRetries: 1 }),
+    );
+
+    const retrying = events.filter((e) => e.type === 'retrying');
+    expect(retrying).toEqual([{ type: 'retrying', attempt: 1, maxAttempts: 1, reason: 'refusal' }]);
+    // toEqual reads a key holding undefined as absent.
+    expect(Object.keys(retrying[0]!)).not.toContain('category');
+  });
+
+  it.each([
+    ['a number', 7],
+    ['an empty string', ''],
+    ['an array', ['cyber']],
+  ])('announces no category when an untyped adapter reports %s as one', async (_name, value) => {
+    const adapter = new RefusingAdapter(1, 'PARTIAL-REFUSED', 'GOOD', value);
+    const events = await collect(
+      new Membrane(adapter).streamYielding(createRequest(), { refusalRetries: 1 }),
+    );
+
+    const retrying = events.filter((e) => e.type === 'retrying');
+    expect(retrying).toEqual([{ type: 'retrying', attempt: 1, maxAttempts: 1, reason: 'refusal' }]);
+    expect(Object.keys(retrying[0]!)).not.toContain('category');
   });
 
   it('emits the retrying event BEFORE the tokens it invalidates are superseded', async () => {

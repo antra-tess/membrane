@@ -10,14 +10,12 @@ import { imageForRequest, GEMINI_IMAGE_TYPES } from '../../src/utils/image-media
 import { openAIImagePart } from '../../src/providers/utils.js';
 import type { ContentBlock, NormalizedMessage, NormalizedRequest, ProviderAdapter } from '../../src/types/index.js';
 
-// Real 1x1 PNG; other signature tests only exercise header recognition.
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==';
 const base64 = (bytes: number[] | string) => Buffer.from(bytes as any).toString('base64');
 const image = (mediaType = 'image/webp', data = PNG): ContentBlock => ({
   type: 'image', source: { type: 'base64', data, mediaType },
 });
 const options = { participantMode: 'simple' as const, assistantParticipant: 'Claude', humanParticipant: 'User' };
-// A text file renamed notes.png: labelled as an accepted type, but no image.
 const NOT_AN_IMAGE = base64('notes: buy milk, call Sam');
 
 function imagesIn(value: any): any[] {
@@ -236,7 +234,7 @@ describe('native streaming and XML split-turn request builders', () => {
       tools: [{ name: 'shot', description: 'Take a screenshot', inputSchema: { type: 'object' } }],
     };
     if (method === 'stream') await membrane.stream(request, { onChunk: () => {} });
-    else for await (const _event of membrane.streamYielding(request)) { /* drain */ }
+    else for await (const _event of membrane.streamYielding(request)) { }
     expect(sent).toHaveLength(1);
     expect(imagesIn(sent[0])[0].source).toEqual({ type: 'base64', media_type: 'image/png', data: PNG });
   });

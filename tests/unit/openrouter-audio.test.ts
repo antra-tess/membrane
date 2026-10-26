@@ -1,17 +1,6 @@
-/**
- * Unit coverage for audio input in the OpenRouter provider.
- *
- * The provider routes `audio` blocks to OpenAI-style `input_audio` content parts
- * (sibling to the Gemini inlineData path). This is provider-level plumbing only —
- * which models actually accept/understand audio (and which formats) is the
- * caller's concern, not membrane's. These assert that an `audio` block becomes an
- * `input_audio` part in the outgoing request, captured via the `onRequest` hook so
- * no network call is made. Image path checked as a regression.
- */
 import { describe, it, expect, vi } from 'vitest';
 import { OpenRouterAdapter } from '../../src/providers/openrouter.js';
 
-/** Build the outgoing OpenRouter request for `content`, captured before fetch. */
 async function buildRequest(content: unknown[]): Promise<any> {
   const adapter = new OpenRouterAdapter({ apiKey: 'test-key-not-used' });
   let captured: any;
@@ -97,10 +86,8 @@ describe('OpenRouterAdapter audio input', () => {
       { type: 'audio', source: { type: 'base64', data: 'QUJDRA==', mediaType: 'audio/weird' } },
       { type: 'text', text: 'hello' },
     ]);
-    // No input_audio part emitted for the unmappable block...
     const parts = Array.isArray(req.messages[0].content) ? req.messages[0].content : [];
     expect(parts.some((p: any) => p.type === 'input_audio')).toBe(false);
-    // ...and the text is preserved (as string or in the blocks array).
     const content = req.messages[0].content;
     if (typeof content === 'string') {
       expect(content).toContain('hello');

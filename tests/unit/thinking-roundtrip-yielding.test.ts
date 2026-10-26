@@ -1,18 +1,3 @@
-/**
- * Regression tests: signed thinking blocks must round-trip on the YIELDING
- * stream paths, not just streamWithXmlTools.
- *
- * Background: 0.5.63 added provider-thinking capture + signature merge to
- * streamWithXmlTools only. Agent frameworks drive inference through
- * streamYielding() → runXmlToolsYielding, which dropped signatures entirely
- * (and never asked the provider to wrap native thinking deltas). These tests
- * pin the yielding path:
- *   - native thinking deltas are requested wrapped (<thinking> tags)
- *   - signatures from provider blocks merge into parser-derived blocks
- *   - signature-only thinking (display:'omitted') is prepended
- *   - redacted_thinking blocks pass through verbatim, `data` intact
- */
-
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { toAnthropicContent, fromAnthropicContent } from '../../src/providers/anthropic.js';
@@ -27,14 +12,8 @@ import type {
   ContentBlock,
 } from '../../src/types/index.js';
 
-// ---------------------------------------------------------------------------
-// Fake adapter: scripts chunks + a final ProviderResponse with native blocks
-// ---------------------------------------------------------------------------
-
 interface ScriptedTurn {
-  /** Text chunks fed to onChunk (the wrapped/text view of the stream) */
   chunks: string[];
-  /** Final provider response content (native blocks, signatures included) */
   content: ProviderResponse['content'];
 }
 
@@ -79,8 +58,6 @@ function request(): NormalizedRequest {
   return {
     messages: [{ participant: 'User', content: [{ type: 'text', text: 'hi' }] }],
     config: { model: 'test-model', maxTokens: 1000, thinking: { enabled: true, budgetTokens: 1024 } },
-    // runXmlToolsYielding is the subject here; native is the default tool
-    // mode now, so the XML path is an explicit opt-in.
     toolMode: 'xml',
   };
 }
@@ -96,10 +73,6 @@ async function runYielding(membrane: Membrane): Promise<ContentBlock[]> {
   return complete.response.content as ContentBlock[];
 }
 
-// ---------------------------------------------------------------------------
-// Yielding XML path
-// ---------------------------------------------------------------------------
-
 describe('runXmlToolsYielding: signed thinking round-trip', () => {
   it('asks the provider to wrap native thinking deltas', async () => {
     const adapter = new ScriptedAdapter([
@@ -113,8 +86,6 @@ describe('runXmlToolsYielding: signed thinking round-trip', () => {
   it('merges provider signatures into parser-derived thinking blocks', async () => {
     const adapter = new ScriptedAdapter([
       {
-        // Provider wraps thinking deltas (wrapThinkingTags) so the parser
-        // sees tags; the native block carries the signature.
         chunks: ['<thinking>let me reason</thinking>', 'Answer'],
         content: [
           { type: 'thinking', thinking: 'let me reason', signature: 'sig_abc' },
@@ -171,10 +142,6 @@ describe('runXmlToolsYielding: signed thinking round-trip', () => {
     expect(redacted.data).toBe('ENCRYPTED_PAYLOAD');
   });
 });
-
-// ---------------------------------------------------------------------------
-// Anthropic converters: redacted_thinking payload preservation
-// ---------------------------------------------------------------------------
 
 describe('Anthropic converters: redacted_thinking data', () => {
   it('fromAnthropicContent preserves the encrypted data field', () => {

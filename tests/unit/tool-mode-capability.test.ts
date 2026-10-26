@@ -1,12 +1,3 @@
-/**
- * Tool-mode resolution against measured model capability.
- *
- * The default tool mode is native wherever the target can carry native tools;
- * XML/prefill is an explicit opt-in or the fallback for a native-less
- * formatter. A prefill build aimed at a model that refuses assistant prefill
- * fails here, typed, instead of surfacing a provider 400.
- */
-
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { OpenRouterAdapter } from '../../src/providers/openrouter.js';
 afterEach(() => vi.unstubAllGlobals());
@@ -45,9 +36,8 @@ describe('supportsAssistantPrefill', () => {
     expect(supportsAssistantPrefill('claude-fable-5')).toBe(false);
   });
 
-  it('reports refusal for claude-haiku-5-5 and claude-sonnet-5-5, measured 2026-10-19', () => {
+  it('reports refusal for claude-haiku-5-5 and claude-sonnet-5-5 (through the claude-sonnet-5 prefix)', () => {
     expect(supportsAssistantPrefill('claude-haiku-5-5')).toBe(false);
-    // Listed through its family's prefix, claude-sonnet-5.
     expect(supportsAssistantPrefill('claude-sonnet-5-5')).toBe(false);
   });
 
@@ -79,8 +69,6 @@ describe('resolveToolMode default', () => {
       config: { model: 'claude-sonnet-4-6', maxTokens: 100 },
     };
 
-    // The default path now reaches a prefill-refusing model at all: native
-    // tools build through buildNativeToolRequest, which ends on the user turn.
     await membrane.stream(request);
 
     const lastRequest = adapter.getLastRequest()!;
@@ -119,11 +107,10 @@ describe('resolveToolMode default', () => {
 });
 
 describe('formatter tool-carrier declarations', () => {
-  it('declares XML tools only for the formatter that encodes them', () => {
+  it('declares XML tools only for the formatter that encodes them, while both prefill formatters set usesPrefill', () => {
     expect(new AnthropicXmlFormatter().supportsXmlTools).toBe(true);
     expect(new CompletionsFormatter().supportsXmlTools).toBe(false);
     expect(new NativeFormatter().supportsXmlTools).toBe(false);
-    // usesPrefill does NOT discriminate: both prefill formatters set it.
     expect(new AnthropicXmlFormatter().usesPrefill).toBe(true);
     expect(new CompletionsFormatter().usesPrefill).toBe(true);
   });

@@ -1,34 +1,19 @@
 /**
- * The Anthropic adapter's cache keepalive records a request only once the
- * provider has its prefix: in the stream lane at `message_start`, and in the
- * complete lane once the response has arrived.
- *
- * Recorded before the send, a request whose call then failed was replayed
- * through its day, though the provider wasn't known to have cached it, and
- * one the provider refused for what its prefix holds had its replays refused
- * too. Three refusals in a row stop the keepalive for every lineage, so one
- * refused request could turn it off for the process. Now a call that fails
- * before the provider is known to have the prefix leaves its lineage's
- * earlier snapshot, and that snapshot's window, as they were. A failure is
- * made where the real SDK makes it: a refused or undelivered stream fails at
- * its iterator's first event, after messages.stream() has returned.
- *
- * The SDK client is a stub, so nothing leaves the process, and the clock is
- * faked.
+ * The real SDK fails a refused or undelivered stream at its iterator's first
+ * event, after messages.stream() has returned. The provider's cache clock
+ * starts at a request's send.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import Anthropic from '@anthropic-ai/sdk';
 import { AnthropicAdapter, INTERLEAVED_THINKING_BETA } from '../../src/providers/anthropic.js';
 import type { CacheKeepaliveConfig, KeepaliveEvent } from '../../src/cache-keepalive.js';
 import { MembraneError } from '../../src/types/index.js';
+import { Membrane } from '../../src/membrane.js';
+import { NativeFormatter } from '../../src/formatters/native.js';
 
 const START = Date.parse('2026-10-19T00:00:00Z');
 const timing = { refreshAfterMs: 100, checkIntervalMs: 100, maxIdleMs: 10_000 };
 
-/**
- * A request whose one-hour cache markers make it one the keepalive holds. Its last message carries one,
- * as a host's last compiled message does, so a refresh replays every message, and a test can tell one
- * snapshot from another by how many turns it has.
- */
 function request(system: string, turns = 1) {
   const hour = { type: 'ephemeral', ttl: '1h' };
   return {
@@ -55,10 +40,9 @@ const rest = [
   { type: 'message_stop' },
 ];
 
-/** An SDK stream that yields `events`, then throws `failure` if one is given. */
 function sdkStream(events: unknown[], failure?: Error) {
   return {
-    controller: { abort() { /* the stub has nothing to abort */ } },
+    controller: { abort() { } },
     [Symbol.asyncIterator]() {
       let index = 0;
       return {
@@ -72,20 +56,17 @@ function sdkStream(events: unknown[], failure?: Error) {
   };
 }
 
-/** A promise and the function that settles it. */
 function held() {
   let release!: (value: unknown) => void;
   const promise = new Promise((resolve) => { release = resolve; });
   return { promise, release };
 }
 
-/** An SDK stream whose first event waits for `gate`, as a call waits for the
- *  provider's first event. */
 function heldStream(gate: Promise<unknown>, events: unknown[]) {
   const inner = sdkStream(events)[Symbol.asyncIterator]();
   let waited = false;
   return {
-    controller: { abort() { /* the stub has nothing to abort */ } },
+    controller: { abort() { } },
     [Symbol.asyncIterator]() {
       return {
         async next() {
@@ -98,8 +79,6 @@ function heldStream(gate: Promise<unknown>, events: unknown[]) {
 }
 
 const adapters: AnthropicAdapter[] = [];
-/** An adapter whose SDK client is a stub. `create` answers both a complete()
- *  call and each keepalive replay, which the keepalive sends through it. */
 function adapter(config: CacheKeepaliveConfig, create: (wire: any) => unknown, stream?: (wire: any) => unknown) {
   const events: KeepaliveEvent[] = [];
   const a = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { ...timing, ...config, onEvent: e => { events.push(e); } } });
@@ -139,15 +118,11 @@ describe('the stream lane records a request at message_start', () => {
     expect(client.messages.stream).toHaveBeenCalledTimes(2);
     const [lineage, ...others] = a.cacheKeepalive!.getStatus();
     expect(others).toEqual([]);
-    // Both the touch and the window still run from the call that reached the provider.
     expect(lineage!.idleMs).toBe(50);
     expect(lineage!.realIdleMs).toBe(50);
-    // So the first refresh falls due refreshAfterMs after the earlier call, not after the failed one.
     await vi.advanceTimersByTimeAsync(50);
     expect(replays()).toHaveLength(1);
-    // What's replayed is the request the provider had: one turn, not two.
     for (const wire of replays()) expect(wire.messages).toHaveLength(1);
-    // And the day ends maxIdleMs after the earlier call.
     await vi.advanceTimersByTimeAsync(timing.maxIdleMs - 100);
     expect(a.cacheKeepalive!.getStatus()).toEqual([]);
     expect(events.filter(e => e.type === 'expired').map(e => (e as { idleMs: number }).idleMs)).toEqual([timing.maxIdleMs]);
@@ -185,7 +160,6 @@ describe('the stream lane records a request at message_start', () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(events.filter(e => e.type === 'error' || e.type === 'disabled')).toEqual([]);
     expect(replays().filter(isRefused)).toEqual([]);
-    // More healthy refreshes than the breaker's limit of three failures.
     expect(events.filter(e => e.type === 'refreshed').length).toBeGreaterThan(3);
     expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
   });
@@ -195,21 +169,14 @@ describe('the stream lane records a request at message_start', () => {
     const { a, replays } = adapter({}, () => ({ ...answer, content: [], stop_reason: 'max_tokens', usage: readUsage }),
       () => first ? heldStream(first.promise, [messageStart, ...rest]) : sdkStream([messageStart, ...rest]));
     await a.stream(request('Resident system G'), noCallbacks);
-    // The lineage's next call is sent 50 ms later and waits for its first
-    // event through two refreshes' worth of time. Nothing touches the lineage
-    // at its send, so the refreshes at 100 ms and 200 ms both fall due and
-    // replay the earlier snapshot; a touch at the send would have put the
-    // first one off to 200 ms.
     await vi.advanceTimersByTimeAsync(50);
     first = held();
     const call = a.stream(request('Resident system G', 2), noCallbacks);
     await vi.advanceTimersByTimeAsync(200);
     expect(replays().map(wire => wire.messages.length)).toEqual([1, 1]);
-    // Once it has its first event, the call's request is the one held, and
-    // the next refresh due replays it.
     first.release(undefined);
     await call;
-    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(50);
     expect(replays().map(wire => wire.messages.length)).toEqual([1, 1, 2]);
   });
 
@@ -231,18 +198,155 @@ describe('the stream lane records a request at message_start', () => {
     const record = vi.fn();
     (a as any).cacheKeepalive = { record };
     await a.stream({ ...request('Resident system I'), thinking: { type: 'adaptive' } }, noCallbacks);
-    // The call carries the request's beta header and the live stamp…
     expect((stream.mock.calls[0] as any[])[1].headers).toEqual({ 'anthropic-beta': INTERLEAVED_THINKING_BETA, 'x-gate-debt-chunks': '42' });
-    // …and the record the beta header alone.
     expect(record).toHaveBeenCalledTimes(1);
     expect(record.mock.calls[0]![1]).toEqual({ 'anthropic-beta': INTERLEAVED_THINKING_BETA });
     expect(record.mock.calls[0]![2]).toBe('stream');
   });
 });
 
+describe('the touch counts from the send', () => {
+  const fine = { checkIntervalMs: 10 };
+  const replayAnswer = () => ({ ...answer, content: [], stop_reason: 'max_tokens', usage: readUsage });
+
+  it('stream lane: a call whose first event comes 50 ms after its send', async () => {
+    const first = held();
+    const { a, replays } = adapter(fine, replayAnswer, () => heldStream(first.promise, [messageStart, ...rest]));
+    const call = a.stream(request('Resident system S'), noCallbacks);
+    await vi.advanceTimersByTimeAsync(50);
+    first.release(undefined);
+    await call;
+    const [lineage] = a.cacheKeepalive!.getStatus();
+    expect(lineage!.idleMs).toBe(50);
+    expect(lineage!.realIdleMs).toBe(50);
+    await vi.advanceTimersByTimeAsync(60);
+    expect(replays()).toHaveLength(1);
+  });
+
+  it('complete lane: a call whose answer comes 50 ms after its send', async () => {
+    const first = held();
+    let waited = false;
+    const { a, replays } = adapter({ ...fine, lanes: ['complete'] }, async wire => {
+      if (wire.max_tokens === 0) return replayAnswer();
+      if (!waited) { waited = true; await first.promise; }
+      return answer;
+    });
+    const call = a.complete(request('Resident system T'));
+    await vi.advanceTimersByTimeAsync(50);
+    first.release(undefined);
+    await call;
+    const [lineage] = a.cacheKeepalive!.getStatus();
+    expect(lineage!.idleMs).toBe(50);
+    expect(lineage!.realIdleMs).toBe(50);
+    await vi.advanceTimersByTimeAsync(60);
+    expect(replays()).toHaveLength(1);
+  });
+
+  it('through Membrane, a retried call counts from the send of the attempt that got its answer, not the first', async () => {
+    const sends: number[] = [];
+    const second = held();
+    const overloaded = new Anthropic.APIError(529, { error: { type: 'overloaded_error', message: 'zz overloaded' } }, undefined, new Headers({}));
+    const { a } = adapter(fine, replayAnswer, () => {
+      sends.push(Date.now());
+      return sends.length === 1 ? sdkStream([], overloaded) : heldStream(second.promise, [messageStart, ...rest]);
+    });
+    const membrane = new Membrane(a, { formatter: new NativeFormatter() });
+    const call = membrane.stream({
+      messages: [{ participant: 'User', content: [{ type: 'text', text: 'hello' }] }],
+      system: 'Resident system U',
+      config: { model: 'claude-opus-4-1', maxTokens: 1024 },
+      promptCaching: true, cacheTtl: '1h', toolMode: 'native',
+    } as any, { onChunk: () => {} } as any);
+    for (let i = 0; i < 600 && sends.length < 2; i++) await vi.advanceTimersByTimeAsync(1_000);
+    expect(sends).toHaveLength(2);
+    expect(sends[1]! - sends[0]!).toBeGreaterThan(0);
+    await vi.advanceTimersByTimeAsync(30);
+    second.release(undefined);
+    await call;
+    const [lineage] = a.cacheKeepalive!.getStatus();
+    expect(lineage!.idleMs).toBe(Date.now() - sends[1]!);
+    expect(lineage!.idleMs).toBeLessThan(Date.now() - sends[0]!);
+    expect(lineage!.idleMs).toBeGreaterThanOrEqual(30);
+  });
+
+  it('a refresh whose answer comes 40 ms after its send counts from its send', async () => {
+    let hold: ReturnType<typeof held> | undefined;
+    const { a, replays } = adapter(fine, async wire => {
+      if (wire.max_tokens === 0 && hold) await hold.promise;
+      return wire.max_tokens === 0 ? replayAnswer() : answer;
+    }, () => sdkStream([messageStart, ...rest]));
+    await a.stream(request('Resident system V'), noCallbacks);
+    hold = held();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(replays()).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(40);
+    hold.release(undefined);
+    await vi.advanceTimersByTimeAsync(0);
+    const [lineage] = a.cacheKeepalive!.getStatus();
+    expect(lineage!.idleMs).toBe(40);
+    hold = undefined;
+    await vi.advanceTimersByTimeAsync(70);
+    expect(replays()).toHaveLength(2);
+  });
+
+  it('an ineffective refresh whose answer comes 40 ms after its send counts from its send too', async () => {
+    let hold: ReturnType<typeof held> | undefined;
+    const { a, events, replays } = adapter(fine, async wire => {
+      if (wire.max_tokens === 0 && hold) await hold.promise;
+      // A write, not a read: the entry's clock started again at the poke's send.
+      return wire.max_tokens === 0 ? { ...replayAnswer(), usage: { ...readUsage, cache_read_input_tokens: 0, cache_creation_input_tokens: 1000 } } : answer;
+    }, () => sdkStream([messageStart, ...rest]));
+    await a.stream(request('Resident system W'), noCallbacks);
+    hold = held();
+    await vi.advanceTimersByTimeAsync(140);
+    hold.release(undefined);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events.filter(e => e.type === 'ineffective')).toHaveLength(1);
+    const [lineage] = a.cacheKeepalive!.getStatus();
+    expect(lineage!.idleMs).toBe(40);
+    hold = undefined;
+    await vi.advanceTimersByTimeAsync(70);
+    expect(replays()).toHaveLength(2);
+  });
+
+  it('a refresh that fails 40 ms after its send backs off from the failure, not its send', async () => {
+    let hold: ReturnType<typeof held> | undefined;
+    const { a, events } = adapter(fine, async wire => {
+      if (wire.max_tokens === 0 && hold) {
+        await hold.promise;
+        throw Object.assign(new Error('zz poke failed'), { status: 500 });
+      }
+      return wire.max_tokens === 0 ? replayAnswer() : answer;
+    }, () => sdkStream([messageStart, ...rest]));
+    await a.stream(request('Resident system Y'), noCallbacks);
+    hold = held();
+    await vi.advanceTimersByTimeAsync(140);
+    hold.release(undefined);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events.filter(e => e.type === 'error')).toHaveLength(1);
+    const [lineage] = a.cacheKeepalive!.getStatus();
+    expect(lineage!.idleMs).toBe(0);
+  });
+
+  it('a call sent before another on its lineage but recorded after it: its touch is its own send, its window the later call\'s', async () => {
+    const first = held();
+    let calls = 0;
+    const { a } = adapter(fine, replayAnswer,
+      () => ++calls === 1 ? heldStream(first.promise, [messageStart, ...rest]) : sdkStream([messageStart, ...rest]));
+    const older = a.stream(request('Resident system X', 2), noCallbacks);
+    await vi.advanceTimersByTimeAsync(80);
+    await a.stream(request('Resident system X'), noCallbacks);
+    await vi.advanceTimersByTimeAsync(10);
+    first.release(undefined);
+    await older;
+    const [lineage, ...others] = a.cacheKeepalive!.getStatus();
+    expect(others).toEqual([]);
+    expect(lineage!.idleMs).toBe(90);
+    expect(lineage!.realIdleMs).toBe(10);
+  });
+});
+
 describe('a refresh acts only on the snapshot it replayed', () => {
-  // Recording at message_start, a real call no longer touches its lineage at
-  // the send, so a refresh can be out while the call records a newer request.
   const noRead = { input_tokens: 5, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
   const replyWith = (usage: object) => ({ ...answer, content: [], stop_reason: 'max_tokens', usage });
 
@@ -254,11 +358,8 @@ describe('a refresh acts only on the snapshot it replayed', () => {
       return replyWith(replays().length === 1 ? noRead : readUsage);
     }, () => sdkStream([messageStart, ...rest]));
     await a.stream(request('Resident system M'), noCallbacks);
-    // The first refresh reads nothing: one ineffective refresh, of the two
-    // after which the keepalive drops a lineage.
     await vi.advanceTimersByTimeAsync(100);
     expect(events.filter(e => e.type === 'ineffective')).toHaveLength(1);
-    // The second is out when a real call records the lineage's next request.
     hold = held();
     await vi.advanceTimersByTimeAsync(100);
     expect(replays()).toHaveLength(2);
@@ -268,11 +369,9 @@ describe('a refresh acts only on the snapshot it replayed', () => {
     replay.release(replyWith(noRead));
     await vi.advanceTimersByTimeAsync(0);
     expect(events.filter(e => e.type === 'ineffective')).toHaveLength(2);
-    // The newer request is still held, touched when it was recorded…
     const [lineage, ...others] = a.cacheKeepalive!.getStatus();
     expect(others).toEqual([]);
     expect(lineage!.idleMs).toBe(0);
-    // …and it's what the next refresh replays.
     await vi.advanceTimersByTimeAsync(100);
     expect(replays()).toHaveLength(3);
     expect(replays()[2].messages).toHaveLength(2);
@@ -288,8 +387,6 @@ describe('a refresh acts only on the snapshot it replayed', () => {
     }, () => sdkStream([messageStart, ...rest]));
     await a.stream(request('Resident system N'), noCallbacks);
     await a.stream(request('Resident system P'), noCallbacks);
-    // Both fall due in one tick, N first; N's refresh is out when P's next
-    // request is recorded.
     hold = held();
     await vi.advanceTimersByTimeAsync(100);
     expect(replays().map(isP)).toEqual([false]);
@@ -298,12 +395,8 @@ describe('a refresh acts only on the snapshot it replayed', () => {
     hold = undefined;
     replay.release(replyWith(readUsage));
     await vi.advanceTimersByTimeAsync(0);
-    // N's refresh has answered, so the tick has gone on to P, with the
-    // snapshot it had copied, which a real call had touched since: nothing
-    // to refresh.
     expect(events.filter(e => e.type === 'refreshed')).toHaveLength(1);
     expect(replays().filter(isP)).toEqual([]);
-    // The next tick replays P's newer request.
     await vi.advanceTimersByTimeAsync(100);
     expect(replays().filter(isP).map(wire => wire.messages.length)).toEqual([2]);
   });
@@ -318,9 +411,6 @@ describe('a refresh acts only on the snapshot it replayed', () => {
     }, () => sdkStream([messageStart, ...rest]));
     await a.stream(request('Resident system O'), noCallbacks);
     await a.stream(request('Resident system Q'), noCallbacks);
-    // Both fall due in one tick, O first. While O's refresh is out, a call
-    // under Q's key whose shape can't be replayed (a legacy thinking budget)
-    // drops Q's lineage.
     hold = held();
     await vi.advanceTimersByTimeAsync(100);
     expect(replays().map(isQ)).toEqual([false]);
@@ -330,8 +420,6 @@ describe('a refresh acts only on the snapshot it replayed', () => {
     hold = undefined;
     replay.release(replyWith(readUsage));
     await vi.advanceTimersByTimeAsync(0);
-    // O's refresh has answered, and the tick went on past Q's copied
-    // snapshot, which the keepalive no longer holds.
     expect(events.filter(e => e.type === 'refreshed')).toHaveLength(1);
     expect(replays().filter(isQ)).toEqual([]);
     expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);

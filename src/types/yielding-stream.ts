@@ -1,25 +1,14 @@
-/**
- * Yielding stream types for membrane
- *
- * This module defines the interface for a streaming API that yields control
- * back to the caller when tool calls are detected, rather than handling them
- * internally via callbacks.
- *
- * @see agent-framework/docs/yielding-stream-architecture.md
- */
-
 import type { ContentBlock } from './content.js';
 import type { NormalizedMessage } from './message.js';
 import type { ToolCall, ToolResult, ToolContext } from './tools.js';
 import type { DetailedUsage, NormalizedResponse, StopReason } from './response.js';
 import type { ChunkMeta, BlockEvent } from './streaming.js';
-
-// ============================================================================
-// Stream Events
-// ============================================================================
+import type { ProgressBounds } from '../progress-bounds.js';
 
 /**
- * Token/chunk event - raw text as it arrives from the LLM.
+ * Token/chunk event - raw text as it arrives from the LLM, and in XML tool
+ * mode each tool result's content as it joins the continuation
+ * (`meta.type: 'tool_result'`).
  */
 export interface TokensEvent {
   type: 'tokens';
@@ -66,8 +55,7 @@ export interface UsageEvent {
 /**
  * A round's token counts, each present only when the provider reported it (a
  * reported 0 is 0). Counts only: accounting's estimates (estimatedCost) are
- * not part of the evidence, since a default-derived count would price to a
- * claimed zero.
+ * not part of the evidence.
  */
 export interface RoundUsage {
   inputTokens?: number;
@@ -100,13 +88,13 @@ export interface RoundReport {
   /**
    * This round's own usage, only what the provider reported: a count it did
    * not report is absent, not 0 (even where accounting keeps a 0 default),
-   * and a reported 0 is 0. An adapter that declares its cache convention has
-   * its counts in membrane's one convention: `inputTokens` excludes the cached
-   * span, so a cache-inclusive provider's input count is restated without its
-   * cache reads and writes (`normalizeUsageToCacheExcluded`), and
+   * and a reported 0 is 0. Counts whose convention is known, the response's
+   * own `cacheConvention` or else its adapter's, are in membrane's one
+   * convention: `inputTokens` excludes the cached span, so a cache-inclusive
+   * provider's input count is restated without its cache reads and writes, and
    * `inputTokens + cacheCreationTokens + cacheReadTokens` is the prompt the
-   * provider counted. An adapter whose convention is `'unknown'` passes its
-   * counts through as the provider gave them.
+   * provider counted. Counts whose convention is `'unknown'` pass through as
+   * the provider gave them.
    */
   usage: RoundUsage;
   /**
@@ -128,7 +116,7 @@ export interface RoundReport {
    * Responses API adapter, a `redacted_thinking` block's reasoning
    * `rawItem`; on the XML prefill path, `rawXml`), "verbatim" means that raw
    * form: content a consumer edited without dropping its raw form isn't
-   * named, because the edit never reaches the wire (utils/fidelity.ts). A
+   * named, because the edit never reaches the wire. A
    * zero-width carrier (`''` text holding an object `rawItem`) that a path
    * leaves out is named. Membrane's own messages (each assistant round, and
    * the tool_result envelopes it builds from `provideToolResults`) aren't the
@@ -186,8 +174,7 @@ export interface ThinkingBindingEntry {
   reason: string;
   /**
    * Where it was in the request the provider received,
-   * `messages.{i}.content.{j}`. Membrane's build merges and adds messages,
-   * so these are the request's coordinates, not the consumer's.
+   * `messages.{i}.content.{j}`: the request's coordinates, not the consumer's.
    */
   path: string;
   /** The consumer message it came from, in `altered.messages`' coordinates, when membrane can say. */
@@ -209,7 +196,8 @@ export interface CompleteEvent {
 }
 
 /**
- * Error event - something went wrong.
+ * Error event - something went wrong. When a provider call failed, the error
+ * is a MembraneError.
  */
 export interface ErrorEvent {
   type: 'error';
@@ -221,17 +209,14 @@ export interface ErrorEvent {
  * `stop_reason: 'refusal'` and membrane is re-issuing it (opt-in via
  * `refusalRetries`).
  *
- * **The consumer MUST discard everything this call has emitted so far**:
- * `tokens`, `block`, and any partially built assistant content belong to an
- * attempt that no longer exists. A fresh sequence follows. Consumers that
- * have already shown those tokens to a human (a TUI, a chat surface) must
- * retract or overwrite them.
- *
- * Why this exists: near the classifier threshold a refusal is probabilistic
- * rather than a property of the payload — the same bytes pass and refuse
- * minutes apart — so re-asking is the cheapest correct response. Retrying
- * silently would corrupt any consumer that already rendered the discarded
- * attempt, which is why it is opt-in and announced rather than invisible.
+ * **The consumer MUST discard what the refused attempt emitted**: the
+ * `tokens` and `block` events of the round it belongs to, since the stream
+ * began or since the `tool-calls` event whose results began that round, and
+ * any partially built assistant content from them. They belong to an attempt
+ * that no longer exists, and a fresh sequence follows. Earlier rounds stand:
+ * the call's text (`rawAssistantText`) keeps what they produced. Consumers
+ * that have already shown the refused attempt's tokens to a human (a TUI, a
+ * chat surface) must retract or overwrite them.
  */
 export interface RetryingEvent {
   type: 'retrying';
@@ -239,9 +224,13 @@ export interface RetryingEvent {
   attempt: number;
   /** Configured maximum number of retries. */
   maxAttempts: number;
-  /** Always 'refusal' today; widened only if other retryable stops appear. */
   reason: 'refusal';
-  /** Provider's refusal category when it supplies one (e.g. 'cyber'). */
+  /**
+   * The refused attempt's category, as its adapter reports it in
+   * `ProviderResponse.refusalCategory` (AnthropicAdapter reports Anthropic's
+   * `stop_details.category`, such as 'cyber'). Absent when the adapter
+   * reports none.
+   */
   category?: string;
 }
 
@@ -255,6 +244,8 @@ export interface RetryingEvent {
 export interface AbortedEvent {
   type: 'aborted';
   reason: 'user' | 'timeout' | 'error';
+  /** What ended it, when the caller didn't: a deadline's names the bound that ran out. */
+  message?: string;
   partialContent?: ContentBlock[];
   rawAssistantText?: string;
   toolCalls?: ToolCall[];
@@ -274,36 +265,6 @@ export type StreamEvent =
   | ErrorEvent
   | AbortedEvent;
 
-// ============================================================================
-// Yielding Stream Interface
-// ============================================================================
-
-/**
- * A streaming inference that yields control to the caller for tool execution.
- *
- * Usage:
- * ```typescript
- * const stream = membrane.streamYielding(request, options);
- *
- * for await (const event of stream) {
- *   switch (event.type) {
- *     case 'tokens':
- *       process.stdout.write(event.content);
- *       break;
- *     case 'tool-calls':
- *       const results = await executeTools(event.calls);
- *       stream.provideToolResults(results);
- *       break;
- *     case 'complete':
- *       console.log('Done:', event.response);
- *       break;
- *     case 'error':
- *       console.error('Error:', event.error);
- *       break;
- *   }
- * }
- * ```
- */
 /**
  * A user-side message injected into the conversation between tool rounds.
  *
@@ -314,12 +275,11 @@ export type StreamEvent =
  * tool_result envelope.
  *
  * Placement guarantee: injected messages always land after the round's
- * tool_results (the wire normalizer additionally enforces results-first
- * ordering inside a merged envelope), so they never break the
+ * tool_results, so they never break the
  * tool_use → tool_result adjacency or signed-thinking constraints.
  *
- * Shape: NormalizedMessage minus cacheBreakpoint (breakpoints are the
- * request compiler's concern), with `participant` optional — it defaults to
+ * Shape: NormalizedMessage minus cacheBreakpoint, with `participant`
+ * optional — it defaults to
  * the generic user participant. Non-assistant participants get the standard
  * "Name: " text prefix when rendered to the provider. Content must be
  * user-side blocks only (text/image); tool blocks are stripped with a
@@ -346,8 +306,7 @@ export interface ProvideToolResultsOptions {
    * inference round sees them.
    *
    * Supported in native tool mode (Anthropic Messages, OpenAI Responses,
-   * OpenRouter). The XML prefill path currently ignores these (the
-   * continuation is an assistant prefill, not a message array) — callers
+   * OpenRouter). The XML prefill path currently ignores these — callers
    * on XML-mode models should deliver mid-turn events on the next turn
    * instead.
    */
@@ -395,14 +354,7 @@ export interface YieldingStream extends AsyncIterable<StreamEvent> {
   readonly toolDepth: number;
 }
 
-// ============================================================================
-// Yielding Stream Options
-// ============================================================================
-
-/**
- * Options for streamYielding().
- * Simpler than StreamOptions since tool execution is handled externally.
- */
+/** Options for streamYielding(). */
 export interface YieldingStreamOptions {
   /** Abort signal for cancellation */
   signal?: AbortSignal;
@@ -436,31 +388,51 @@ export interface YieldingStreamOptions {
    */
   progressTimeoutMs?: number;
 
+  /**
+   * Progress bounds per provider call (default: off); see
+   * StreamOptions.progressBounds. On expiry the stream ends with an `aborted`
+   * event whose reason is `'timeout'` and whose `message` names the bound
+   * that ran out. Time between provider calls, such as waiting for
+   * `provideToolResults()`, never counts.
+   */
+  progressBounds?: boolean | Partial<ProgressBounds>;
+
   /** Request ID for correlation/logging */
   requestId?: string;
 
   /**
    * Re-issue an attempt that ends with `stop_reason: 'refusal'`, up to this
-   * many times. Default 0 (off).
+   * many times. Default 0 (off); a value that isn't a finite number of at
+   * least 0 asks for none. Native tool mode only: in XML tool mode it's
+   * ignored, with a warning, and the refusal stands.
    *
    * Enabling it means the stream can emit `RetryingEvent` — **consumers MUST
-   * handle it and discard what they have received for the call**, or two
-   * attempts will be concatenated. That is why it is off by default and why
-   * turning it on is a per-call decision by a consumer that has been updated.
-   *
-   * Rationale: near the content-policy threshold a refusal is probabilistic,
-   * not a property of the payload — identical bytes pass and refuse minutes
-   * apart. Re-asking is cheaper and less invasive than rewriting the
-   * conversation, and the replay is cache-warm, so only the discarded output
-   * tokens are real spend.
+   * handle it and discard what the refused attempt emitted** (its round's
+   * tokens and blocks; see RetryingEvent), or two attempts will be
+   * concatenated.
    */
   refusalRetries?: number;
 
   /**
+   * Whether membrane retries the stream's failed provider calls itself.
+   * Default true: a call that fails with a retryable error before it
+   * delivered anything is sent again, in any round, on the `retry` config's
+   * schedules. With `false`, membrane retries none of the call's failed
+   * requests, whatever the error and whatever the config says: the failure
+   * ends the stream with an `error` event, carrying the provider's advice
+   * (`retryable`, and a stated wait on `retryAfterMs`), and `hooks.onError`,
+   * which is asked before each retry, isn't asked. A deadline of the call's
+   * own ends it with an `aborted` event whose reason is `'timeout'`, with
+   * retries on or off. Two sends stay: a refusal re-issue, which a call in
+   * native tool mode asks for with `refusalRetries`, and the one resend with
+   * refreshed credentials that an adapter with a credential resolver makes
+   * after an HTTP 401.
+   */
+  retry?: boolean;
+
+  /**
    * Maximum tool execution depth. Default: unlimited.
    *
-   * The yielding stream's caller (typically an agent framework) is expected
-   * to budget its own work, so we don't impose a per-stream cap by default.
    * Pass a non-negative integer to enforce one. `-1` is accepted as an
    * explicit "unlimited" sentinel; any other negative value is taken at
    * face value as the cap (which would terminate the stream immediately),
@@ -471,19 +443,14 @@ export interface YieldingStreamOptions {
   /**
    * Cap on AUTOMATIC false-positive stop-sequence resumptions per turn —
    * membrane's own re-streams, not the caller's tool work. Tool rounds are
-   * deliberately NOT counted: this path's uncapped-by-default tool-loop
-   * contract stands (the caller budgets its own work via maxToolDepth).
-   * What this bounds is membrane's own failure surface — how many times a
-   * turn may re-send its full context on membrane's initiative; an
-   * unlimited resumption bound is how the 43-round Ash spin happened
-   * (issue #39). Exceeding it ends the turn with stopReason 'round_limit'.
+   * not counted (the caller budgets its own work via maxToolDepth).
+   * Exceeding it ends the turn with stopReason 'round_limit'.
    * Default: 24. `-1` for unlimited, at your own risk.
    */
   maxResumptionRounds?: number;
 
   /**
    * Whether to emit 'tokens' events.
-   * Set to false if you only care about tool calls and final response.
    * Default: true
    */
   emitTokens?: boolean;
@@ -500,10 +467,6 @@ export interface YieldingStreamOptions {
    */
   emitUsage?: boolean;
 }
-
-// ============================================================================
-// Type Guards
-// ============================================================================
 
 export function isTokensEvent(event: StreamEvent): event is TokensEvent {
   return event.type === 'tokens';

@@ -1,15 +1,4 @@
-/**
- * The default pricing table is a fallback that callers bill against, so a
- * stale row is a wrong number rather than a missing one. Its header claimed
- * "Last updated: 2025-07" while carrying rows for models that did not exist
- * then, there was no machine-readable freshness signal, and an unpriced model
- * was indistinguishable from a free one — `getDefaultPricing` returned
- * undefined and `estimateCost` quietly omitted the cost.
- *
- * The expectations below were read off the providers' public price pages on
- * 2026-08-25, and those in the Anthropic 5.x block off Anthropic's on
- * 2026-10-19; each is a row the table got wrong or was missing.
- */
+/** The expected prices below are the providers' published list prices. */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { calculateCost } from '../../src/utils/cost.js';
@@ -75,8 +64,6 @@ describe('default pricing rows match the published price pages (2026-08-25)', ()
 });
 
 describe('Anthropic 5.x rows match the published price page (2026-10-19)', () => {
-  // Opus 5.5, Sonnet 5.5 and Fable 5.1 had matched their family's shorter
-  // prefix and taken its rate; Mythos 5, Mythos 5.1 and Haiku 5.5 had none.
   const usd = (input: number, output: number, cacheWrite: number, cacheRead: number) => ({
     inputPerMillion: input, outputPerMillion: output, cacheWritePerMillion: cacheWrite,
     cacheReadPerMillion: cacheRead, currency: 'USD', asOf: ANTHROPIC_PRICING_LAST_VERIFIED,
@@ -87,10 +74,8 @@ describe('Anthropic 5.x rows match the published price page (2026-10-19)', () =>
     ['claude-fable-5-1', usd(10, 50, 12.50, 0.25)],
     ['claude-mythos-5-1', usd(10, 50, 12.50, 0.25)],
     ['claude-mythos-5', usd(10, 50, 12.50, 1)],
-    // Its rate for prompts up to 100,000 tokens, whatever the prompt's length:
-    // the table has no field for the higher rate above that.
+    // Its price-page rate for prompts up to 100,000 tokens; the table has no field for the higher rate above that.
     ['claude-haiku-5-5', usd(0.10, 0.50, 0.125, 0.01)],
-    // The family rows beside them keep their own rates.
     ['claude-opus-5', usd(5, 25, 6.25, 0.50)],
     ['claude-sonnet-5', usd(2, 10, 2.50, 0.20)],
     ['claude-fable-5', usd(10, 50, 12.50, 1)],
@@ -124,10 +109,7 @@ describe('pricing freshness is machine-readable', () => {
   });
 
   it('dates a retired row to when its rate was last published, not to today', () => {
-    // Claude 3.5 Sonnet is off the price page entirely; 3/15 is the last rate
-    // it was published at. Stamping it with the sweep date would claim that
-    // number was verified against a page that no longer lists it. `asOf` is a
-    // PER-ROW date for exactly this reason.
+    // Claude 3.5 Sonnet is off the price page; $3/$15 per million is the last rate it was published at.
     const retired = getDefaultPricing('claude-3-5-sonnet');
 
     expect(retired?.asOf).toBe('2025-07-01');
@@ -180,7 +162,7 @@ const zzRequestFor = (model: string) => ({
 
 describe('an unpriced model is distinguishable from a free one', () => {
   it('omits the cost and warns once naming the model', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { });
     const membrane = new Membrane(zzAdapter());
 
     const response = await membrane.complete(zzRequestFor('zz-unpriced-model-1'));
@@ -192,7 +174,7 @@ describe('an unpriced model is distinguishable from a free one', () => {
   });
 
   it('stays silent for a model the table prices', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { });
     const membrane = new Membrane(zzAdapter());
 
     const response = await membrane.complete(zzRequestFor('claude-sonnet-4-6'));

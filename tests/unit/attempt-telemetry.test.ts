@@ -1,13 +1,3 @@
-/**
- * Honest provider-call telemetry on stitched turns (A3 MINOR-1).
- *
- * A turn that made several provider calls — tool rounds, automatic
- * resumptions, refusal re-issues — reported `details.timing.attempts: 1`,
- * because every streaming path passed the literal 1. Nothing else in the
- * response carries a round count either, so a stitched multi-call turn was
- * indistinguishable from a single-shot one in durable logs.
- */
-
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import type { NormalizedRequest, NormalizedResponse, StreamEvent } from '../../src/types/index.js';
@@ -22,7 +12,6 @@ import type { StreamCallbacks } from '../../src/types/streaming.js';
 const CALL_XML =
   '<function_calls>\n<invoke name="zz_probe">\n<parameter name="fld1">ite1</parameter>\n</invoke>';
 
-/** Two XML tool rounds, then a natural finish. */
 class TwoRoundXmlAdapter implements ProviderAdapter {
   readonly name = 'zz-two-round';
   streamCalls = 0;
@@ -56,7 +45,6 @@ class TwoRoundXmlAdapter implements ProviderAdapter {
   }
 }
 
-/** Native tool mode: one tool round, then a text answer. */
 class NativeToolAdapter implements ProviderAdapter {
   readonly name = 'zz-native-two-round';
   streamCalls = 0;
@@ -238,7 +226,6 @@ describe('details.timing counts real provider calls', () => {
     );
 
     expect(adapter.calls).toBe(2);
-    // Two provider calls, one continuation round.
     expect(response.details.timing.attempts).toBe(2);
     expect(response.details.timing.rounds).toBe(1);
   });

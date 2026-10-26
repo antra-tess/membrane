@@ -1,24 +1,30 @@
-/**
- * Configuration types for membrane
- */
-
 import type { ModelRegistry } from './provider.js';
 import type { ErrorInfo } from './errors.js';
 import type { NormalizedRequest } from './request.js';
 import type { NormalizedResponse } from './response.js';
 import type { NormalizeEvent, PrefillFormatter } from '../formatters/types.js';
 
-// ============================================================================
-// Retry Config
-// ============================================================================
-
 export interface RetryConfig {
   /**
-   * Bound on TOTAL attempts for a retryable error, the first included: 3
-   * means one try and up to two retries; 0 or 1 means no retries
-   * (default: 0). A retryable rate limit (429) gets at least 5 attempts
-   * whatever this says, and a provider capacity error (529) gets the larger
-   * of this and `overloaded.maxRetries`, on the `overloaded` schedule.
+   * Bound on TOTAL attempts for a retryable error that ends a provider call
+   * before it delivered anything, the first included: 3 means one try and up
+   * to two retries; 0 or 1 means no retries (default: 3). It covers a 5xx,
+   * a provider's 408 and a connection failure, on every entry point and
+   * adapter. A deadline that runs out on a request already sent is left to
+   * the caller: AnthropicAdapter's idle and first-event watchdogs, undici's
+   * headers and body timeouts, Bun's fetch timeout, and every timeout
+   * AnthropicAdapter's SDK client reports, which include a connect timeout
+   * (the SDK reports both the same way). On Node, the other adapters'
+   * connect timeouts are sent again like any connection failure. Bun's fetch
+   * timeout doesn't say which stage ran out, so on Bun a stalled connect is
+   * left to the caller too. A retryable rate limit (429) gets at least 5
+   * attempts whatever this says, and a provider capacity error (529) gets
+   * the larger of this and `overloaded.maxRetries`, on the `overloaded`
+   * schedule. Membrane is the only layer that retries a call's requests:
+   * AnthropicAdapter turns its SDK client's own retries off for them, and
+   * only the cache keepalive's background replays keep the SDK's. A caller
+   * whose own layer retries passes `retry: false` on the call, which turns
+   * off every retry this config schedules for it, these floors included.
    */
   maxRetries: number;
 
@@ -28,20 +34,22 @@ export interface RetryConfig {
   /** Backoff multiplier (default: 2) */
   backoffMultiplier: number;
 
-  /** Maximum retry delay (default: 30000) */
+  /**
+   * Longest wait of membrane's own backoff (default: 30000). A provider's
+   * stated wait (`retry-after`) is waited out up to a minute, or up to this
+   * where it's longer; a longer one goes to the caller, on `retryAfterMs`.
+   */
   maxRetryDelayMs: number;
 
   /**
    * Separate, longer schedule for provider capacity errors (529
-   * overloaded_error). Capacity storms last minutes, not seconds — the
-   * standard schedule's 30s ceiling turns one into a dead turn. Overloaded
-   * retries are always attempted (mirroring the forced 429 retries), with
-   * jitter so a fleet backing off doesn't re-create the stampede in sync.
+   * overloaded_error). Overloaded retries are attempted whatever the base
+   * maxRetries says (mirroring the forced 429 retries), unless the call
+   * passes `retry: false`, with jitter.
    *
    * maxRetries: 0 here disables this dedicated policy entirely: 529s then
-   * follow the base retry config like any other retryable server error
-   * (no forced retries, base schedule, no stream-path retry) — the exact
-   * pre-policy behavior.
+   * follow the base retry config like any other retryable server error, on
+   * every path (the base schedule, within the base maxRetries).
    */
   overloaded: OverloadedRetryConfig;
 }
@@ -58,7 +66,10 @@ export interface OverloadedRetryConfig {
   /** Backoff multiplier (default: 2) */
   backoffMultiplier: number;
 
-  /** Maximum overloaded retry delay (default: 300000 — 5 minutes) */
+  /**
+   * Longest overloaded retry delay (default: 300000 — 5 minutes). A stated
+   * wait is waited out up to this, or up to a minute where that's longer.
+   */
   maxRetryDelayMs: number;
 }
 
@@ -67,10 +78,6 @@ export interface OverloadedRetryConfig {
 export type RetryConfigInput = Partial<Omit<RetryConfig, 'overloaded'>> & {
   overloaded?: Partial<OverloadedRetryConfig>;
 };
-
-// ============================================================================
-// Media Processing Config
-// ============================================================================
 
 export interface MediaConfig {
   images: {
@@ -105,10 +112,6 @@ export interface MediaConfig {
     maxDurationSec: number;
   };
 }
-
-// ============================================================================
-// Hooks
-// ============================================================================
 
 /**
  * Each hook is the caller's code, run beside the call: what one throws ends
@@ -151,8 +154,16 @@ export interface MembraneHooks {
   ) => NormalizedResponse | Promise<NormalizedResponse>;
   
   /**
-   * Called on error, before retry decision
-   * Return 'retry' to retry, 'abort' to stop
+   * Called before each retry the `retry` config schedules: return 'retry' to
+   * let it, or 'abort' to end the call with that error. Not called for an
+   * error membrane won't retry, or when the call passes `retry: false`. The
+   * retry's wait, a stated wait on `error.retryAfterMs` included, is decided
+   * before it's asked, so a change it makes to `error` doesn't change the
+   * wait.
+   * `attempt` counts membrane's attempts at the failing request since its
+   * last refusal re-issue, as the retry budget does: 1 after its first
+   * failure. A credential resolver's resend after a 401 is part of the
+   * attempt it follows.
    */
   onError?: (
     error: ErrorInfo,
@@ -164,20 +175,17 @@ export interface MembraneHooks {
    * while building a request (see `NormalizeEvent`), including a stray or
    * duplicate tool result turned into text, whose `recoveredChars` says how
    * much of it the model now reads as text. It runs synchronously inside the
-   * build, once per event of every build: each attempt and each tool-loop
-   * round rebuilds, so a repair the history keeps needing is reported each
-   * time. A hook that throws fails the build, before anything is sent. A
-   * promise it returns isn't awaited, so its rejection is the caller's to
-   * handle. Only NativeFormatter's builds normalize, AnthropicXmlFormatter's
-   * native mode included; the XML, completions and Responses builds report
-   * none.
+   * build, once per event of every build: each tool-loop round rebuilds, and
+   * so does each attempt of `complete()`, so a repair the history keeps
+   * needing is reported each time. A streaming path's retry sends the round's
+   * request as built, with no new build. A hook that throws fails the build,
+   * before anything is sent. A promise it returns isn't awaited, so its
+   * rejection is the caller's to handle. Only NativeFormatter's builds
+   * normalize, AnthropicXmlFormatter's native mode included; the XML,
+   * completions and Responses builds report none.
    */
   onNormalize?: (event: NormalizeEvent) => void;
 }
-
-// ============================================================================
-// Logger Interface
-// ============================================================================
 
 export interface MembraneLogger {
   debug(message: string, data?: Record<string, unknown>): void;
@@ -185,10 +193,6 @@ export interface MembraneLogger {
   warn(message: string, data?: Record<string, unknown>): void;
   error(message: string, data?: Record<string, unknown>): void;
 }
-
-// ============================================================================
-// Membrane Config
-// ============================================================================
 
 export interface MembraneConfig {
   /** Model registry for capability lookup */
@@ -216,9 +220,9 @@ export interface MembraneConfig {
 
   /**
    * Default for request.promptCaching when the request doesn't set it.
-   * Historical default is true (Anthropic API). Set false for transports
-   * that reject cache_control (e.g. Bedrock legacy Claude models, which 400
-   * with "your request did not allow prompt caching").
+   * Default: true. Set false for transports that reject cache_control (e.g.
+   * Bedrock legacy Claude models, which 400 with "your request did not allow
+   * prompt caching").
    */
   defaultPromptCaching?: boolean;
 
@@ -251,17 +255,11 @@ export interface MembraneConfig {
   debug?: boolean;
 }
 
-// ============================================================================
-// Default Config
-// ============================================================================
-
 export const DEFAULT_RETRY_CONFIG: RetryConfig = {
-  maxRetries: 0,
+  maxRetries: 3,
   retryDelayMs: 1000,
   backoffMultiplier: 2,
   maxRetryDelayMs: 30000,
-  // 7 attempts = 6 waits: 10s → 20s → 40s → 80s → 160s → 300s, ~10 minutes
-  // of patience in total — the scale capacity storms actually resolve on.
   overloaded: {
     maxRetries: 7,
     retryDelayMs: 10_000,
@@ -272,7 +270,7 @@ export const DEFAULT_RETRY_CONFIG: RetryConfig = {
 
 export const DEFAULT_MEDIA_CONFIG: MediaConfig = {
   images: {
-    maxSizeBytes: 5 * 1024 * 1024, // 5MB (Anthropic limit)
+    maxSizeBytes: 5 * 1024 * 1024,
     autoResize: true,
     resizeQuality: 85,
     relocateInPrefillMode: true,

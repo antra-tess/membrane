@@ -30,9 +30,12 @@ Each SDK operation gets an isolated client with Membrane's shared resolver
 seam at its HTTP boundary. It resolves for
 each network attempt, including cache-keepalive replay, refreshes once after an
 HTTP 401, and never replays an accepted stream in response to an in-stream auth
-error. The refresh bound is per SDK fetch attempt. Other SDK retry behavior remains
-unchanged: for example, an exhausted HTTP 401 with `x-should-retry: true` can
-cause another SDK attempt and another bounded refresh. Resolver failures are
+error. The refresh bound is per SDK fetch attempt. The SDK makes one attempt for
+each request a call makes, since membrane is the one layer that retries those.
+The refresh's resend is part of that attempt, `retry: false` included. A 401
+that still fails after the refresh, with `x-should-retry: true`, is retried
+under membrane's `retry` config as a new attempt, with a refresh of its own,
+unless the call passes `retry: false`. Only a cache-keepalive replay keeps the SDK's own retries. Resolver failures are
 separate: they abort that SDK operation before connection retries can run and
 surface the original MembraneError (or an auth error for an untyped failure).
 Empty/non-string tokens fail the same way, before HTTP. The SDK request signal also

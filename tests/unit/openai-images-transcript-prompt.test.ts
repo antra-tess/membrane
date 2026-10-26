@@ -6,8 +6,6 @@ import {
 import type { ProviderRequest } from '../../src/types/index.js';
 
 const PNG = 'iVBORw0KGgo=';
-/** Distinct data per tag that still starts with a PNG signature: the adapter
- *  attaches only data that is an image. */
 const png = (tag: string) =>
   Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from(tag)]).toString('base64');
 
@@ -57,8 +55,6 @@ afterEach(() => {
 describe('OpenAIResponsesAdapter promptFormat', () => {
   const conversation = [
     { role: 'user', content: [{ type: 'text', text: 'alice: draw a red teapot' }] },
-    // A previous generation: image-only assistant message, exactly what the
-    // bot's own posted image looks like when history is rebuilt.
     { role: 'assistant', content: [img(png('A'))] },
     { role: 'user', content: [{ type: 'text', text: 'bob: make it blue' }, img(png('B'))] },
   ];
@@ -139,7 +135,6 @@ describe('OpenAIResponsesAdapter promptFormat', () => {
   it('attaches and references a prior output carried forward as a generated_image block', async () => {
     const messages = [
       { role: 'user', content: [{ type: 'text', text: 'alice: draw a red teapot' }] },
-      // This adapter's own earlier ProviderResponse content, kept verbatim.
       { role: 'assistant', content: [{ type: 'generated_image', data: png('G'), mimeType: 'image/png' }] },
       { role: 'user', content: [{ type: 'text', text: 'bob: make it blue' }] },
     ];

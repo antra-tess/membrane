@@ -1,7 +1,3 @@
-/**
- * Context processing - main entry point
- */
-
 import type { Membrane } from '../membrane.js';
 import type { NormalizedMessage, NormalizedRequest } from '../types/index.js';
 import type {
@@ -19,27 +15,10 @@ import {
   DEFAULT_CONTEXT_CONFIG,
   MembraneContextIdentityError,
 } from './types.js';
+import { MAX_CACHE_BREAKPOINTS } from '../utils/cache-marker-budget.js';
 
-/**
- * Ceiling on markers this module places, regardless of `cache.points`.
- *
- * Anthropic accepts at most 4 `cache_control` blocks per request, and the
- * request builders spend from that same budget (a system/tools fallback
- * block, a `contextPrefix` block when that option is set, the floating
- * tool-loop marker). Nothing reconciles those spends against
- * `cache.points`, so the module keeps one slot free rather than risk a 400
- * on the explicit XML path, which marks the system block. A caller
- * combining this module with MORE than one formatter spend (e.g. system
- * prompt AND `contextPrefix`) can still exceed the provider budget: the
- * module cannot see the formatter's choices from here, which is why the
- * request-side wire clamp (the cache-marker budget PR) is the layer that
- * makes the ceiling safe by construction rather than by convention.
- */
-const MAX_MODULE_CACHE_POINTS = 3;
-
-// ============================================================================
-// Main Entry Point
-// ============================================================================
+const CACHE_CONTROL_SLOTS_LEFT_TO_REQUEST_BUILDERS = 1;
+const MAX_MODULE_CACHE_POINTS = MAX_CACHE_BREAKPOINTS - CACHE_CONTROL_SLOTS_LEFT_TO_REQUEST_BUILDERS;
 
 /**
  * Process context and stream LLM response.
@@ -62,24 +41,18 @@ export async function processContext(
   state: ContextState | null,
   options?: ContextStreamOptions
 ): Promise<ContextOutput> {
-  // Merge config with defaults
   const contextConfig = mergeConfig(input.context);
   const tokenEstimator = contextConfig.tokenEstimator ?? defaultTokenEstimator;
   
-  // Stable identity is a precondition, not a nicety: without it every call
-  // looks like a new conversation and rolling/caching silently stop working.
   assertStableMessageIds(input.messages);
   
-  // Initialize or continue state
   let currentState = state ?? createInitialState();
   
-  // Detect discontinuity (new conversation or branch switch)
   const isDiscontinuous = detectDiscontinuity(input.messages, currentState);
   if (isDiscontinuous) {
     currentState = createInitialState();
   }
   
-  // Calculate tokens for all messages
   const messageTokens = input.messages.map(m => ({
     message: m,
     tokens: tokenEstimator(m),
@@ -89,7 +62,6 @@ export async function processContext(
   const totalTokens = messageTokens.reduce((sum, m) => sum + m.tokens, 0);
   const totalCharacters = calculateCharacters(input.messages);
   
-  // Determine if we should roll
   const rollDecision = shouldRoll(
     currentState,
     input.messages.length,
@@ -98,7 +70,6 @@ export async function processContext(
     contextConfig
   );
   
-  // Apply rolling/truncation if needed
   let keptMessages = input.messages;
   let messagesDropped = 0;
   let didRoll = false;
@@ -115,14 +86,10 @@ export async function processContext(
     
     keptMessages = truncateResult.kept.map(m => m.message);
     messagesDropped = truncateResult.dropped;
-    // A roll that dropped nothing is not a roll: reporting it as one both
-    // lies to the caller and resets the roll counters every call, which is
-    // exactly when threshold rolling is needed most.
     didRoll = messagesDropped > 0;
     hardLimitHit = rollDecision.reason === 'hard_limit';
   }
   
-  // Recalculate tokens after truncation
   const keptTokens = keptMessages.map(m => ({
     message: m,
     tokens: tokenEstimator(m),
@@ -130,16 +97,12 @@ export async function processContext(
   }));
   const keptTotalTokens = keptTokens.reduce((sum, m) => sum + m.tokens, 0);
   
-  // Re-assert the hard limits against the truncated window. The window is
-  // floored at one message, so a single oversize message survives every
-  // truncation - the caller is told rather than handed an empty array.
   const residualOverflow = measureResidualOverflow(
     keptMessages,
     keptTotalTokens,
     contextConfig
   );
   
-  // Place cache markers
   const cacheMarkers = placeCacheMarkers(
     keptMessages,
     keptTokens,
@@ -148,15 +111,12 @@ export async function processContext(
     contextConfig
   );
   
-  // Apply cache markers to messages
   const messagesWithCache = applyCacheMarkers(keptMessages, cacheMarkers);
   
-  // Calculate cached/uncached tokens
   const lastMarker = cacheMarkers[cacheMarkers.length - 1];
   const cachedTokens = lastMarker?.tokenEstimate ?? 0;
   const uncachedTokens = keptTotalTokens - cachedTokens;
   
-  // Build request
   const request: NormalizedRequest = {
     messages: messagesWithCache,
     system: input.system,
@@ -164,7 +124,6 @@ export async function processContext(
     config: input.config,
   };
   
-  // Stream response - pass through all options
   const response = await membrane.stream(request, {
     onChunk: options?.onChunk,
     signal: options?.signal,
@@ -174,14 +133,10 @@ export async function processContext(
     maxToolDepth: options?.maxToolDepth,
   });
   
-  // Determine cachedStartMessageId
-  // - On roll: use first message ID after truncation (anchor for stable fetches)
-  // - No roll: keep existing (maintains fetch window stability)
   const cachedStartMessageId = didRoll
     ? (keptMessages.length > 0 ? getMessageId(keptMessages[0]!) : undefined)
     : currentState.cachedStartMessageId;
   
-  // Update state
   const newState: ContextState = {
     cacheMarkers,
     windowMessageIds: keptMessages.map(m => getMessageId(m)),
@@ -192,7 +147,6 @@ export async function processContext(
     cachedStartMessageId,
   };
   
-  // Build info
   const info: ContextInfo = {
     didRoll,
     messagesDropped,
@@ -209,16 +163,7 @@ export async function processContext(
   return { response, state: newState, info };
 }
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
 function mergeConfig(config: ContextConfig): ContextConfig {
-  // The caller's config is the base, so a top-level field is carried through
-  // by default and only the three sub-objects that have defaults are merged.
-  // Enumerating the survivors instead silently dropped assistantParticipant:
-  // every helper test passed a config straight in, so the loss was invisible
-  // until an end-to-end call classified the configured assistant as a user.
   return {
     ...config,
     rolling: {
@@ -300,13 +245,12 @@ function detectDiscontinuity(
   state: ContextState
 ): boolean {
   if (state.windowMessageIds.length === 0) {
-    return false; // First call, not a discontinuity
+    return false;
   }
   
   const currentIds = new Set(messages.map(m => getMessageId(m)));
   const overlap = state.windowMessageIds.filter(id => currentIds.has(id));
   
-  // If less than 50% overlap, consider it a new conversation
   return overlap.length < state.windowMessageIds.length * 0.5;
 }
 
@@ -322,7 +266,6 @@ export function calculateCharacters(messages: NormalizedMessage[]): number {
           : JSON.stringify(block.content);
         chars += content.length;
       }
-      // Images not counted for character limits
     }
   }
   return chars;
@@ -333,7 +276,7 @@ export interface RollDecision {
   reason?: 'threshold' | 'grace_exceeded' | 'hard_limit';
   targetTokens?: number;
   targetMessages?: number;
-  /** Character budget the kept window must fit (set by the maxCharacters limit). */
+  /** Character budget the kept window is truncated toward (the maxCharacters limit). */
   targetCharacters?: number;
   enteredGrace: boolean;
 }
@@ -352,7 +295,6 @@ export function shouldRoll(
   const grace = rolling.grace ?? 0;
   const maxThreshold = threshold + grace;
   
-  // Check hard limits first (always enforced)
   if (limits?.maxCharacters && totalCharacters > limits.maxCharacters) {
     return {
       shouldRoll: true,
@@ -386,14 +328,9 @@ export function shouldRoll(
     };
   }
   
-  // Check rolling threshold against the MEASURED window. state.messagesSinceRoll
-  // counts calls (not messages) and state.tokensSinceRoll re-adds the whole
-  // window every call, so both cross any threshold as a function of call count
-  // alone; they stay as telemetry and no longer decide the roll.
   const current = unit === 'messages' ? messageCount : totalTokens;
   
   if (current >= maxThreshold) {
-    // Exceeded grace, must roll
     return {
       shouldRoll: true,
       reason: 'grace_exceeded',
@@ -404,7 +341,6 @@ export function shouldRoll(
   }
   
   if (!state.inGracePeriod && current >= threshold) {
-    // Just entered grace period
     return {
       shouldRoll: false,
       enteredGrace: true,
@@ -430,10 +366,6 @@ export function truncateMessages(
   config?: ContextConfig,
   targetCharacters?: number
 ): { kept: MessageWithTokens[]; dropped: number } {
-  // Truncate from the beginning, keeping most recent.
-  // Every supplied target contributes a candidate start index; the window has
-  // to satisfy all of them, so the deepest cut wins.
-  
   if (messages.length === 0) {
     return { kept: messages, dropped: 0 };
   }
@@ -457,7 +389,6 @@ export function truncateMessages(
   }
   
   if (candidateStartIndices.length === 0) {
-    // Default: use buffer from config
     const buffer = config?.rolling.buffer ?? 20;
     const unit = config?.rolling.unit ?? 'messages';
     
@@ -481,11 +412,6 @@ export function truncateMessages(
   };
 }
 
-/**
- * Walk backwards from the newest message, accumulating cost, and return the
- * first index whose window fits the budget. Mirrors the original token walk:
- * the message that tips the sum past the budget is excluded.
- */
 function startIndexForBudget(
   messages: MessageWithTokens[],
   budget: number,
@@ -505,20 +431,6 @@ function startIndexForBudget(
   return startIdx;
 }
 
-/**
- * Resolve the index the kept window actually starts at: the deepest cut at or
- * after the requested one whose window is both non-empty and free of
- * tool_results whose tool_use was dropped.
- *
- * Snapping forward and flooring at one message used to be two independent
- * steps that could undo each other. When the newest message is a tool_result,
- * the forward snap runs off the end of the array and the floor pulls the index
- * back onto that same orphan - so truncating a final tool cycle to one message
- * kept exactly the result, which is what the snap exists to prevent. A cut that
- * cannot go forward now walks BACKWARD to the call that opens the final cycle:
- * the window overshoots the requested size (reported through
- * ContextInfo.residualOverflow) rather than shipping a corrupt transcript.
- */
 function resolveWindowStart(
   messages: MessageWithTokens[],
   desiredStartIdx: number
@@ -544,18 +456,9 @@ function resolveWindowStart(
     }
   }
   
-  // No clean boundary exists anywhere: the supplied history itself carries a
-  // tool_result whose tool_use is not in it. Dropping messages cannot repair
-  // that, so the requested cut stands, floored at one message.
   return cappedStartIdx;
 }
 
-/**
- * For every index, whether the window starting there contains no tool_result
- * whose tool_use is missing from it. A result is matched by a tool_use in an
- * earlier message or earlier in its own message, so one backward pass carrying
- * the still-unmatched result ids answers every index in linear time.
- */
 function markCleanWindowStarts(messages: MessageWithTokens[]): boolean[] {
   const windowIsCleanAt = new Array<boolean>(messages.length).fill(false);
   const resultIdsAwaitingTheirCall = new Set<string>();
@@ -604,25 +507,15 @@ export function placeCacheMarkers(
   
   const totalTokens = messageTokens.reduce((sum, m) => sum + m.tokens, 0);
   
-  // Not enough tokens for caching
   if (totalTokens < minTokens) {
     return [];
   }
   
-  // If we didn't roll, try to keep existing markers stable
   if (!didRoll && state.cacheMarkers.length > 0) {
     const currentIds = new Set(messages.map(m => getMessageId(m)));
     const validMarkers = state.cacheMarkers.filter(m => currentIds.has(m.messageId));
     
     if (validMarkers.length > 0) {
-      // Recalculate token estimates for valid markers, then apply the same cap
-      // fresh placement obeys. The cap is a property of the REQUEST (Anthropic
-      // accepts four cache_control blocks and the builders spend from the same
-      // budget), so honouring it only on the fresh path let a state written
-      // before the cap existed - or by a caller that asked for four points -
-      // keep re-spending four slots on every subsequent call, which is where
-      // the builders' own marker turns the request into a 400. The deepest
-      // markers cover the longest prefixes, so those are the ones kept.
       const retainedMarkers = validMarkers
         .map(marker => {
           const idx = messages.findIndex(m => getMessageId(m) === marker.messageId);
@@ -642,23 +535,19 @@ export function placeCacheMarkers(
     }
   }
   
-  // Place new markers using arithmetic positioning
   const markers: CacheMarker[] = [];
   const buffer = config.rolling.buffer ?? 20;
   
-  // For single point: place at (length - buffer)
-  // For multiple points: distribute evenly in cacheable portion
   const cacheableEnd = Math.max(0, messages.length - buffer);
   
   if (cacheableEnd === 0) {
-    return []; // Nothing to cache
+    return [];
   }
   
-  // Calculate step size for multiple cache points
   const step = Math.floor(cacheableEnd / numPoints);
   
   if (step === 0) {
-    return []; // Not enough messages for requested cache points
+    return [];
   }
   
   let runningTokens = 0;
@@ -667,7 +556,6 @@ export function placeCacheMarkers(
   for (let point = 1; point <= numPoints; point++) {
     const targetIdx = Math.min(point * step - 1, cacheableEnd - 1);
     
-    // Accumulate tokens up to target
     while (currentIdx <= targetIdx && currentIdx < messageTokens.length) {
       runningTokens += messageTokens[currentIdx]!.tokens;
       currentIdx++;
@@ -676,7 +564,6 @@ export function placeCacheMarkers(
     let markerIdx = targetIdx;
     let markerTokens = runningTokens;
     
-    // Adjust to user message if preferred
     if (preferUser) {
       const adjusted = findNearestUserMessage(
         messages,
@@ -690,12 +577,10 @@ export function placeCacheMarkers(
       }
     }
     
-    // Skip if below minimum
     if (markerTokens < minTokens) {
       continue;
     }
     
-    // Skip if duplicate
     if (markers.some(m => m.messageIndex === markerIdx)) {
       continue;
     }
@@ -710,7 +595,6 @@ export function placeCacheMarkers(
   return markers;
 }
 
-/** Assistant names assumed when the deployment configures none. */
 const LEGACY_ASSISTANT_PARTICIPANTS = ['claude', 'assistant', 'bot', 'ai'];
 
 function findNearestUserMessage(
@@ -719,11 +603,8 @@ function findNearestUserMessage(
   messageTokens: MessageWithTokens[],
   assistantParticipant?: string
 ): { index: number; tokens: number } | null {
-  // Search backwards for a user message (non-assistant participant)
   const maxSearch = 5;
   
-  // A deployment whose assistant is named anything else (Sol, a persona name)
-  // had every assistant turn classified as a user turn by the legacy list.
   const assistantNames = assistantParticipant
     ? [assistantParticipant.toLowerCase()]
     : LEGACY_ASSISTANT_PARTICIPANTS;
@@ -732,9 +613,6 @@ function findNearestUserMessage(
   
   for (let i = startIdx; i >= Math.max(0, startIdx - maxSearch); i--) {
     const msg = messages[i]!;
-    // Heuristic: if participant isn't a known assistant name, it's probably a
-    // user. A message with no participant at all (role-shaped producers) falls
-    // through the same way rather than crashing the whole call.
     const participant = typeof msg.participant === 'string'
       ? msg.participant.toLowerCase()
       : '';
@@ -764,9 +642,6 @@ export function applyCacheMarkers(
     if (markerIndices.has(idx)) {
       return {
         ...msg,
-        // cacheBreakpoint is the field every request builder reads; the
-        // metadata.cacheControl write has no reader inside membrane and is
-        // kept only for external consumers that may already read it.
         cacheBreakpoint: true,
         metadata: {
           ...msg.metadata,

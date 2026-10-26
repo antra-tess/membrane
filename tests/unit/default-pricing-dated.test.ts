@@ -1,18 +1,13 @@
 /**
- * membrane #121. Google publishes some Gemini rates together with the date
- * they change: gemini-4-argon at 2/10 "through November 30, 2026" and 4/20
- * "starting December 1, 2026", the 3.6 and 3.8 Flash models at 0.75/3.75
- * through December 31 and 1.50/7.50 from January 1, 2027. A table edited at
- * each date would stay wrong for every caller still running the version
- * before the edit, so a row carries each published change and the table
- * prices at the moment it is asked.
+ * Google publishes some Gemini rates together with the date they change:
+ * gemini-4-argon at 2/10 "through November 30, 2026" and 4/20 "starting
+ * December 1, 2026", the 3.6 and 3.8 Flash models at 0.75/3.75 through
+ * December 31 and 1.50/7.50 from January 1, 2027. Some Gemini ids that a text
+ * model's row matches by prefix are image or speech models, whose output a
+ * text rate underprices.
  *
- * Some Gemini ids that a text model's row matched by prefix are image or
- * speech models, whose output a text rate underprices. A row with no price
- * now says so, and those ids read as unpriced.
- *
- * Every rate below was read off https://ai.google.dev/gemini-api/docs/pricing
- * (Standard, paid tier) on 2026-10-14.
+ * Every rate below is from https://ai.google.dev/gemini-api/docs/pricing
+ * (Standard, paid tier).
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
@@ -39,9 +34,7 @@ afterEach(() => {
   resetUnpricedModelWarnings();
 });
 
-// Google names no time zone; the table takes Pacific midnight, UTC-8 on both
-// dates. Each pair is the last millisecond before a change and its first, in
-// epoch milliseconds, as membrane's clock (Date.now) gives them.
+// Google names no time zone; the table takes Pacific midnight, UTC-8 on both dates.
 const BEFORE_DEC_1 = Date.parse('2026-12-01T07:59:59.999Z');
 const FROM_DEC_1 = Date.parse('2026-12-01T08:00:00.000Z');
 const BEFORE_JAN_1 = Date.parse('2027-01-01T07:59:59.999Z');
@@ -61,19 +54,17 @@ describe('every row of the table', () => {
     const dated = PRICING_TABLE.flatMap((row) => (
       row.pricing !== null && row.changes?.length ? [{ prefix: row.prefix, pricing: row.pricing, changes: row.changes }] : []
     ));
-    // The rows with changes today, so that a table with none can't pass.
     expect(dated.map((row) => row.prefix)).toEqual(expect.arrayContaining(['gemini-4-argon', 'gemini-3.8-flash', 'gemini-3.6-flash']));
     for (const row of dated) {
       const read = row.pricing.asOf ?? '';
       expect(read, `${row.prefix}: a dated row says when it was read`).toMatch(/^\d{4}-\d{2}-\d{2}$/);
       let previous = Date.parse(read);
       for (const change of row.changes) {
-        // An offset or Z, so the instant doesn't depend on the host's zone.
+        // With an offset or Z, Date parses the same instant in any host time zone.
         expect(change.from, row.prefix).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/);
         const from = Date.parse(change.from);
         expect(from, `${row.prefix}: ${change.from} comes after what precedes it`).toBeGreaterThan(previous);
         expect(change.pricing.currency, row.prefix).toBe(row.pricing.currency);
-        // A change can be read later than its row's own rate, never earlier.
         expect((change.pricing.asOf ?? '') >= read, `${row.prefix}: ${change.from} was read on ${change.pricing.asOf}`).toBe(true);
         previous = from;
       }
@@ -145,9 +136,6 @@ describe("Google's dated rates", () => {
 });
 
 describe('image, speech and audio models', () => {
-  // The seven a text model's row would match by prefix, each with its own
-  // no-price row, and two image models no row matches, so that a later row
-  // whose prefix reaches them shows up here.
   const unpriced = [
     'gemini-3.8-flash-tts',
     'gemini-3.8-flash-lite-tts',
@@ -171,20 +159,11 @@ describe('image, speech and audio models', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Through Membrane: the rate in force when membrane prices the response.
-// ---------------------------------------------------------------------------
-
-/** 1M input, 100k output and 500k cache-read tokens per round. */
 const ZZ_USAGE = { inputTokens: 1_000_000, outputTokens: 100_000, cacheReadTokens: 500_000 };
-/** ZZ_USAGE at gemini-4-argon's introductory rate: 2 + 1 + 0.05. */
-const ARGON_INTRO_TOTAL = 3.05;
-/** ZZ_USAGE at gemini-4-argon's rate from December 1: 4 + 2 + 0.10. */
-const ARGON_LATER_TOTAL = 6.10;
-/** ZZ_USAGE at the 3.8 and 3.6 Flash introductory rate: 0.75 + 0.375 + 0.0375. */
-const FLASH_INTRO_TOTAL = 1.1625;
-/** ZZ_USAGE at their rate from January 1: 1.50 + 0.75 + 0.075. */
-const FLASH_LATER_TOTAL = 2.325;
+const ARGON_INTRO_TOTAL = 2 + 1 + 0.05;
+const ARGON_LATER_TOTAL = 4 + 2 + 0.10;
+const FLASH_INTRO_TOTAL = 0.75 + 0.375 + 0.0375;
+const FLASH_LATER_TOTAL = 1.50 + 0.75 + 0.075;
 
 const zzTool: ToolDefinition = {
   name: 'zz-noop',
@@ -195,11 +174,6 @@ const zzTool: ToolDefinition = {
 const ZZ_XML_CALL = 'zz-prose\n<function_calls><invoke name="zz-noop">'
   + '<parameter name="p">1</parameter></invoke></function_calls>';
 
-/**
- * Answers every call with ZZ_USAGE, naming `served` (or the requested id) as
- * the model that served it. With `rounds`, the first round asks for a tool, in
- * `mode`'s form, and each round first moves the clock to its own instant.
- */
 function zzAdapter(options: { served?: string; rounds?: number[]; mode?: 'xml' | 'native' } = {}): ProviderAdapter {
   let round = 0;
   const mode = options.mode ?? 'native';
@@ -247,7 +221,6 @@ const paths: Array<[string, (membrane: Membrane, request: NormalizedRequest) => 
   ['stream()', async (membrane, request) => await membrane.stream(request) as NormalizedResponse],
 ];
 
-/** A two-round turn through one of membrane's four tool loops. */
 async function driveTurn(membrane: Membrane, request: NormalizedRequest, yielding: boolean): Promise<NormalizedResponse> {
   if (!yielding) {
     return await membrane.stream(request, { onToolCalls: async (calls) => zzResults(calls) }) as NormalizedResponse;
@@ -303,7 +276,7 @@ describe('through Membrane, on each side of each change', () => {
     });
 
     it(`omits the cost of an image model a text row used to price, and says so once, on ${label}`, async () => {
-      const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => { });
       const response = await call(new Membrane(zzAdapter()), zzRequest('gemini-2.5-flash-image'));
 
       expect(response.details.usage.estimatedCost).toBeUndefined();
@@ -323,7 +296,6 @@ describe('through Membrane, on each side of each change', () => {
       };
       const response = await call(new Membrane(zzAdapter(), { registry }), zzRequest('gemini-2.5-flash-image'));
 
-      // 1M input at 0.30 and 100k output at 30.
       expect(response.details.usage.estimatedCost?.total).toBeCloseTo(3.30, 9);
     });
   }

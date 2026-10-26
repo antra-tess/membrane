@@ -1,20 +1,10 @@
-/**
- * Content block types for normalized messages
- */
-
-// ============================================================================
-// Cache Control (Anthropic prompt caching)
-// ============================================================================
+import type { ToolDefinition } from './tools.js';
 
 export interface CacheControl {
   type: 'ephemeral';
   /** TTL for cache - '5m' (default) or '1h' for extended caching */
   ttl?: '5m' | '1h';
 }
-
-// ============================================================================
-// Media Source
-// ============================================================================
 
 export interface Base64Source {
   type: 'base64';
@@ -29,10 +19,6 @@ export interface UrlSource {
 
 export type MediaSource = Base64Source | UrlSource;
 
-// ============================================================================
-// Text Content
-// ============================================================================
-
 export interface TextContent {
   type: 'text';
   text: string;
@@ -46,7 +32,7 @@ export interface TextContent {
    * equivalent. Membrane's build for an adapter that declares
    * `replaysAnthropicServerBlocks` (AnthropicAdapter) sends one holding an
    * Anthropic server-tool block as that block, in the assistant turn that
-   * produced it (`utils/anthropic-server-blocks.ts`), unless the block can't
+   * produced it, unless the block can't
    * go alone there: a server call with no result after it in its turn, or a
    * result with no call before it, is left out and its message reported, and
    * the request's final message, if it's the assistant's, keeps its lone
@@ -59,15 +45,11 @@ export interface TextContent {
    * which are not read: a consumer that changes the block's content
    * (compression, redaction) must drop or replace `rawItem` too, or the
    * change won't reach the provider, and round reports count the block as
-   * carried when its item is (utils/fidelity.ts). A path that leaves out a
+   * carried when its item is. A path that leaves out a
    * zero-width carrier reports its message altered.
    */
   rawItem?: unknown;
 }
-
-// ============================================================================
-// Media Input Content
-// ============================================================================
 
 export interface ImageContent {
   type: 'image';
@@ -105,10 +87,6 @@ export interface VideoContent {
   rawItem?: unknown;
 }
 
-// ============================================================================
-// Media Output Content (Generated)
-// ============================================================================
-
 export interface GeneratedImageContent {
   type: 'generated_image';
   data: string;
@@ -117,10 +95,6 @@ export interface GeneratedImageContent {
   /** See {@link TextContent.rawItem}. */
   rawItem?: unknown;
 }
-
-// ============================================================================
-// Tool Content
-// ============================================================================
 
 export interface ToolUseContent {
   type: 'tool_use';
@@ -131,17 +105,14 @@ export interface ToolUseContent {
    * Verbatim document text this call was parsed from in prefill/XML mode:
    * the full `<function_calls>…</function_calls>` block, shared by every
    * invoke parsed from that block. Prefill formatters replay it exactly
-   * instead of synthesizing a rendering — in prefill mode the context IS
-   * the document the agent authored, and a paraphrase of its own action
-   * both corrupts the record and teaches the model a syntax the parser
-   * does not accept (membrane#36). Analogous to `signature` on a thinking
-   * block. Absent on native-tools blocks and on legacy stored blocks.
+   * instead of synthesizing a rendering. Absent on native-tools blocks and on
+   * legacy stored blocks.
    *
    * Replayed in place of the block's other fields (`name`, `input`), which
    * the prefill path then doesn't read: a consumer that changes the call
    * (truncating its input, say) must drop or replace `rawXml` too, or the
    * change won't reach the provider, and round reports count the block as
-   * carried when its raw text is (utils/fidelity.ts).
+   * carried when its raw text is.
    */
   rawXml?: string;
   /**
@@ -155,9 +126,18 @@ export interface ToolUseContent {
    * arguments, even nothing: then it is the empty string. A call truncated by
    * max_tokens is the usual cause. Where arguments come as a value rather
    * than text (Gemini's, or an `input` that isn't an object), it holds that
-   * value as JSON. `input` is then `{}`, or for a streamed Anthropic or
-   * Bedrock call whatever its content_block_start carried: a wire-valid tool
-   * call with empty arguments, indistinguishable from a genuine no-arg call
+   * value as JSON. It is also set on every tool_use block of a streamed
+   * Anthropic or Bedrock response whose block events broke the API's order
+   * (a block started while another was open or out of index order, a delta
+   * or stop while no block was open or for a block other than the open one,
+   * or a delta a tool call can't take), holding the arguments the
+   * call had, as JSON when they had parsed: such a stream can't vouch for
+   * which call any arguments belong to, so none of its calls is taken as
+   * complete. (In Bedrock a start above the next index fails the call
+   * instead, over the block it skipped.)
+   * `input` is then `{}`, or for a streamed Anthropic or Bedrock call
+   * whatever its content_block_start carried: a wire-valid tool call with
+   * empty arguments, indistinguishable from a genuine no-arg call
    * once it is written to durable history. Presence of this field, the empty
    * string included, means `input` is NOT the model's arguments, so a
    * consumer can refuse the block (or attempt its own repair) instead of
@@ -174,10 +154,7 @@ export interface ToolUseContent {
 export interface ToolResultContent {
   type: 'tool_result';
   toolUseId: string;
-  /**
-   * Tool name, persisted so XML replay can reconstruct the legacy
-   * `<tool_name>` element byte-identically to the live injection.
-   */
+  /** Tool name; XML replay renders it as the `<tool_name>` element. */
   toolName?: string;
   content: string | ContentBlock[];
   isError?: boolean;
@@ -185,13 +162,13 @@ export interface ToolResultContent {
    * Verbatim document text this result was parsed from in prefill/XML mode:
    * the full `<function_results>…</function_results>` block as the harness
    * originally placed it in the document, shared by every result parsed
-   * from that block. Replayed exactly on the prefill path (membrane#36), in
+   * from that block. Replayed exactly on the prefill path, in
    * place of the block's other fields (`content`, `toolName`, `isError`): a
    * consumer that changes the result (truncating it, say) must drop or
    * replace `rawXml` too, or the change won't reach the provider, and round
-   * reports count the block as carried when its raw text is
-   * (utils/fidelity.ts). Where `rawXmlImagesAt` is set, the replay can also
-   * send the images the turn sent, from `content`, at that place (see there).
+   * reports count the block as carried when its raw text is. Where
+   * `rawXmlImagesAt` is set, the replay can also send the images the turn
+   * sent, from `content`, at that place (see there).
    */
   rawXml?: string;
   /**
@@ -214,18 +191,12 @@ export interface ToolResultContent {
    * Results with the same `rawXml` replay as one block, its text sent once,
    * for as many results as the parser reads from that text; more results
    * with the same text are another round's, and replay as a block of their
-   * own, as does a second result with this mark. The count is the parser's
-   * reading today, so it holds while the parser reads the text as the turn's
-   * parse did.
+   * own, as does a second result with this mark.
    */
   rawXmlImagesAt?: number;
   /** See {@link TextContent.rawItem}. */
   rawItem?: unknown;
 }
-
-// ============================================================================
-// Thinking Content
-// ============================================================================
 
 export interface ThinkingContent {
   type: 'thinking';
@@ -247,30 +218,62 @@ export interface RedactedThinkingContent {
   rawItem?: unknown;
 }
 
-// ============================================================================
-// Union Type
-// ============================================================================
+/**
+ * A change, from this point in the conversation on, to the tools the model is
+ * offered and to its system text, made without editing the request's `tools`
+ * or `system`, so the prompt cache before it still holds.
+ *
+ * A message holding one holds nothing else; NativeFormatter refuses a message
+ * that mixes it with other blocks. Its participant isn't read: the block's
+ * type decides how it goes out.
+ *
+ * NativeFormatter sends each such message, through AnthropicAdapter, as a
+ * mid-conversation `role: 'system'` message: each of `removeTools` as a
+ * `tool_removal` naming the tool, then each of `defineTools` as a
+ * `tool_addition` carrying its full definition, then each of `addSystem` that
+ * isn't only whitespace as a text block (one that is is left out and the
+ * message reported altered): that order within each block, and the blocks in the message's
+ * order, so a removal in a later block withdraws a tool an earlier one
+ * defined. A tool a change defines can be called like one in `tools`, and a
+ * call to it comes back under its name. It goes at the first
+ * point at or after its place where the API accepts one: after a user turn,
+ * a tool-result turn included, and before an assistant turn or at the end,
+ * reading the turns as the adapter's empty-text cleanup leaves them.
+ * With no such point, as after a final assistant message, the request is
+ * refused before sending. Through any other formatter or adapter, Membrane
+ * refuses a request that carries one before sending. Both refusals, and the
+ * API's own refusal on a model without mid-conversation system messages, are
+ * MembraneErrors with `systemChangeRefused: true`. Through NativeFormatter and
+ * AnthropicAdapter, a malformed change, mixed with other blocks or defining a
+ * tool whose wire name another holds, is refused as unsupported, without the
+ * flag. Through anything else the refusal for the formatter or adapter comes
+ * first, with it, unless the formatter can't carry the request's tools at all
+ * (`tools` as the request's changes leave them, definitions added and
+ * removals taken away): that refusal comes before
+ * it, without the flag, since making the change in `tools` would meet it too.
+ */
+export interface SystemChangeContent {
+  type: 'system_change';
+  /** Tools withdrawn from here on, by name. */
+  removeTools?: string[];
+  /** Tools offered from here on, each by its full definition: a new tool, or a redefinition of one by its name. */
+  defineTools?: ToolDefinition[];
+  /** System text added from here on, one text block each; only whitespace is left out. */
+  addSystem?: string[];
+}
 
 export type ContentBlock =
-  // Text
   | TextContent
-  // Media Input
   | ImageContent
   | DocumentContent
   | AudioContent
   | VideoContent
-  // Media Output
   | GeneratedImageContent
-  // Tools
   | ToolUseContent
   | ToolResultContent
-  // Thinking
   | ThinkingContent
-  | RedactedThinkingContent;
-
-// ============================================================================
-// Type Guards
-// ============================================================================
+  | RedactedThinkingContent
+  | SystemChangeContent;
 
 export function isTextContent(block: ContentBlock): block is TextContent {
   return block.type === 'text';
@@ -310,6 +313,10 @@ export function isThinkingContent(block: ContentBlock): block is ThinkingContent
 
 export function isRedactedThinkingContent(block: ContentBlock): block is RedactedThinkingContent {
   return block.type === 'redacted_thinking';
+}
+
+export function isSystemChangeContent(block: ContentBlock): block is SystemChangeContent {
+  return block.type === 'system_change';
 }
 
 export function isMediaContent(

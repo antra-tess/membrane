@@ -71,7 +71,7 @@ describe('OpenRouter image normalization', () => {
 });
 
 describe('OpenRouter complete transport', () => {
-  it.each(['content', 'images'])('returns images from %s beside text with usage and model intact', async where => {
+  it.each(['content', 'images'])('returns images from %s beside text with usage and model intact, without fetching a remote image', async where => {
     const message = where === 'content'
       ? { role: 'assistant', content: [text('Here'), imagePart(dataUrl), imagePart(remoteUrl)] }
       : { role: 'assistant', content: 'Here', images: [{ image_url: { url: dataUrl } }, { image_url: { url: remoteUrl } }] };
@@ -81,7 +81,7 @@ describe('OpenRouter complete transport', () => {
     expect(result.content).toEqual([text('Here'), image, remoteImage]);
     expect(result.usage).toMatchObject({ inputTokens: 7, outputTokens: 3 });
     expect(result.model).toBe('served/image-model');
-    expect(fetchMock).toHaveBeenCalledTimes(1); // URL images are references, never fetched.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 

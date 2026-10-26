@@ -1,17 +1,3 @@
-/**
- * Completions Formatter
- *
- * Formatter for base/completion models that use single-prompt input.
- * Serializes conversations to "Participant: content<eot>" format.
- *
- * Key features:
- * - Converts multi-turn conversations to single prompt string
- * - Adds configurable end-of-turn tokens
- * - Generates stop sequences from participant names
- * - Strips images (not supported in completion models)
- * - No XML block parsing (passthrough mode)
- */
-
 import type {
   NormalizedMessage,
   ContentBlock,
@@ -33,10 +19,6 @@ import type {
   StreamEmission,
 } from './types.js';
 import { holdsContent, isRawItemCarrier } from '../utils/fidelity.js';
-
-// ============================================================================
-// Configuration
-// ============================================================================
 
 export interface CompletionsFormatterConfig extends FormatterConfig {
   /**
@@ -67,8 +49,6 @@ export interface CompletionsFormatterConfig extends FormatterConfig {
 
   /**
    * Add lowercased variants of participant stop sequences.
-   * Useful for models whose tokenizer doesn't normalize casing,
-   * allowing simmed names with different casing to still trigger stops.
    * Default: false
    */
   caseInsensitiveStops?: boolean;
@@ -80,14 +60,6 @@ export interface CompletionsFormatterConfig extends FormatterConfig {
   warnOnImageStrip?: boolean;
 }
 
-// ============================================================================
-// Passthrough Stream Parser (same as NativeFormatter)
-// ============================================================================
-
-/**
- * Simple pass-through parser for base models.
- * No XML tracking - just accumulates content.
- */
 class CompletionsStreamParser implements StreamParser {
   private accumulated = '';
   private blockIndex = 0;
@@ -104,7 +76,6 @@ class CompletionsStreamParser implements StreamParser {
     const emissions: StreamEmission[] = [];
     const blockEvents: BlockEvent[] = [];
 
-    // Emit block_start on first chunk
     if (!this.blockStarted) {
       const startEvent: BlockEvent = {
         event: 'block_start',
@@ -174,13 +145,8 @@ class CompletionsStreamParser implements StreamParser {
   }
 
   resetForNewIteration(): void {
-    // No special reset needed
   }
 }
-
-// ============================================================================
-// Completions Formatter
-// ============================================================================
 
 export class CompletionsFormatter implements PrefillFormatter {
   /** buildMessages records every consumer message it doesn't carry verbatim (utils/fidelity.ts). */
@@ -193,7 +159,7 @@ export class CompletionsFormatter implements PrefillFormatter {
   readonly supportsXmlTools = false;
 
   private config: Required<Omit<CompletionsFormatterConfig, 'unsupportedMedia' | 'warnOnStrip'>> & {
-    unsupportedMedia: 'strip'; // Always strip for completions
+    unsupportedMedia: 'strip';
     warnOnStrip: boolean;
   };
 
@@ -205,15 +171,11 @@ export class CompletionsFormatter implements PrefillFormatter {
       maxParticipantsForStop: config.maxParticipantsForStop ?? 10,
       caseInsensitiveStops: config.caseInsensitiveStops ?? false,
       warnOnImageStrip: config.warnOnImageStrip ?? true,
-      // Completions models don't support images - always strip
+      // Base models take no images.
       unsupportedMedia: 'strip',
       warnOnStrip: config.warnOnStrip ?? true,
     };
   }
-
-  // ==========================================================================
-  // REQUEST BUILDING
-  // ==========================================================================
 
   buildMessages(messages: NormalizedMessage[], options: BuildOptions): BuildResult {
     const {
@@ -228,7 +190,6 @@ export class CompletionsFormatter implements PrefillFormatter {
     const participants = new Set<string>();
     let hasStrippedImages = false;
 
-    // Add system prompt as first part if present
     if (systemPrompt) {
       const systemText = typeof systemPrompt === 'string'
         ? systemPrompt
@@ -242,13 +203,11 @@ export class CompletionsFormatter implements PrefillFormatter {
       }
     }
 
-    // Add context prefix after system prompt (for simulacrum seeding)
     if (contextPrefix) {
       const assistantPrefix = this.config.nameFormat.replace('{name}', () => assistantParticipant);
       parts.push(`${assistantPrefix}${contextPrefix}${this.config.eotToken}`);
     }
 
-    // Serialize each message
     for (let index = 0; index < messages.length; index++) {
       const message = messages[index]!;
       participants.add(message.participant);
@@ -257,38 +216,28 @@ export class CompletionsFormatter implements PrefillFormatter {
       if (hadImages) {
         hasStrippedImages = true;
       }
-      // Base models carry text only: every image, tool carrier and thinking
-      // block is left out, which alters the consumer message.
+      // Base models carry text only.
       if (leftOut) options.fidelity?.alter(index);
 
-      // Skip empty messages.
-      // Whitespace-only text is content: skipping it is an alteration. Only
-      // exactly empty '' blocks with no raw form carry nothing (joined, two
-      // of them read '\n').
       if (!text.trim()) {
         if (holdsContent(message.content)) options.fidelity?.alter(index);
         continue;
       }
 
-      // Format: "Participant: content<eot>"
       const prefix = this.config.nameFormat.replace('{name}', () => message.participant);
       const eot = this.config.eotToken;
       parts.push(`${prefix}${text}${eot}`);
     }
 
-    // Warn about stripped images
     if (hasStrippedImages && this.config.warnOnImageStrip) {
       console.warn('[CompletionsFormatter] Images were stripped from context (not supported in completions mode)');
     }
 
-    // Add final assistant prefix (no EOT - model generates this)
     const assistantPrefix = this.config.nameFormat.replace('{name}', () => assistantParticipant);
-    parts.push(assistantPrefix.trimEnd()); // Remove trailing space for cleaner completion
+    parts.push(assistantPrefix.trimEnd());
 
-    // Join all parts into single prompt
     const prompt = parts.join(this.config.messageSeparator);
 
-    // Build stop sequences from participants
     const stopSequences = this.buildStopSequences(
       participants,
       assistantParticipant,
@@ -296,8 +245,6 @@ export class CompletionsFormatter implements PrefillFormatter {
       additionalStopSequences
     );
 
-    // Return as single assistant message with prompt as content
-    // The provider adapter will extract this as the prompt
     const providerMessages: ProviderMessage[] = [
       { role: 'assistant', content: prompt },
     ];
@@ -310,8 +257,6 @@ export class CompletionsFormatter implements PrefillFormatter {
   }
 
   formatToolResults(results: ToolResult[], options?: { thinking?: boolean }): string {
-    // Completions mode typically doesn't support tools
-    // But format them as simple text if needed
     const parts = results.map(r => {
       const content = typeof r.content === 'string' ? r.content : JSON.stringify(r.content);
       return `[Tool Result: ${content}]`;
@@ -319,27 +264,20 @@ export class CompletionsFormatter implements PrefillFormatter {
     return parts.join('\n');
   }
 
-  // ==========================================================================
-  // RESPONSE PARSING
-  // ==========================================================================
-
   createStreamParser(): StreamParser {
     return new CompletionsStreamParser();
   }
 
   parseToolCalls(content: string): ToolCall[] {
-    // Base models don't have structured tool output
+    // Base models have no structured tool output.
     return [];
   }
 
   hasToolUse(content: string): boolean {
-    // Base models determine completion via stop sequences
     return false;
   }
 
   parseContentBlocks(content: string, _tools?: ToolDefinition[], context?: ContentParseContext): ContentBlock[] {
-    // Prefix trimming belongs to the whole visible response. A thinking
-    // boundary does not turn an internal space/newline into a new prefix.
     const atResponseStart = !context || !/\S/.test(context.visibleText.slice(0, context.offset));
     const trimmed = atResponseStart ? content.replace(/^\s+/, '') : content;
 
@@ -350,10 +288,6 @@ export class CompletionsFormatter implements PrefillFormatter {
     return [{ type: 'text', text: trimmed }];
   }
 
-  // ==========================================================================
-  // PRIVATE HELPERS
-  // ==========================================================================
-
   private extractTextContent(content: ContentBlock[]): { text: string; hadImages: boolean; leftOut: boolean } {
     const textParts: string[] = [];
     let hadImages = false;
@@ -361,10 +295,6 @@ export class CompletionsFormatter implements PrefillFormatter {
 
     for (const block of content) {
       if (block.type === 'text') {
-        // A zero-width carrier (a provider item with no normalized form, such
-        // as an Anthropic server-tool block) has no text: an empty part would
-        // only add a line to the prompt. Its item is its content, and the
-        // prompt can't carry it.
         if (isRawItemCarrier(block)) {
           leftOut = true;
           continue;
@@ -372,7 +302,6 @@ export class CompletionsFormatter implements PrefillFormatter {
         textParts.push(block.text);
       } else {
         if (block.type === 'image') hadImages = true;
-        // Skip tool_use, tool_result, thinking and media blocks for base models
         leftOut = true;
       }
     }
@@ -392,18 +321,15 @@ export class CompletionsFormatter implements PrefillFormatter {
   ): string[] {
     const stops: string[] = [];
 
-    // Get recent participants (excluding assistant)
     let count = 0;
     for (const participant of participants) {
       if (participant === assistantParticipant) continue;
       if (count >= maxParticipants) break;
 
-      // Add both "\n\nName:" and "\nName:" variants
       const prefix = this.config.nameFormat.replace('{name}', () => participant).trimEnd();
       stops.push(`\n\n${prefix}`);
       stops.push(`\n${prefix}`);
 
-      // Add lowercased variants if casing differs (for models that generate mixed-case names)
       if (this.config.caseInsensitiveStops) {
         const lower = this.config.nameFormat.replace('{name}', () => participant.toLowerCase()).trimEnd();
         if (lower !== prefix) {
@@ -415,12 +341,10 @@ export class CompletionsFormatter implements PrefillFormatter {
       count++;
     }
 
-    // Add EOT token as stop sequence if configured
     if (this.config.eotToken) {
       stops.push(this.config.eotToken);
     }
 
-    // Add any additional stop sequences
     if (additionalStopSequences?.length) {
       stops.push(...additionalStopSequences);
     }

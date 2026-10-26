@@ -1,10 +1,6 @@
 /**
- * A prompt Gemini blocks BEFORE generation reaches the streaming endpoint as
- * frames carrying promptFeedback.blockReason with no candidates at all. The
- * stream loop tracked candidate.finishReason only (initialised 'STOP'), so that
- * empty safety refusal surfaced to callers as a clean end_turn: the blocked-
- * prompt handling landed in parseResponse(), which covers complete() and not
- * stream().
+ * A prompt Gemini blocks before generation reaches the streaming endpoint as
+ * frames carrying promptFeedback.blockReason with no candidates at all.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GeminiAdapter } from '../../src/providers/gemini.js';
@@ -111,9 +107,7 @@ describe('gemini streaming surfaces a prompt blocked before generation', () => {
   });
 });
 
-// Gemini's API speaks proto3's JSON mapping, where a null field is unset. A
-// null blockReason blocks nothing, and a candidate whose content and
-// finishReason are null or absent carries no data, on either path.
+// Gemini's API speaks proto3's JSON mapping, where a null field is unset.
 describe('gemini reads a null blockReason and a candidate with no data as unset', () => {
   it('complete(): a null blockReason with no candidates is no block, so the empty response ends end_turn', async () => {
     const response = await completePayload({ promptFeedback: { blockReason: null }, usageMetadata: { promptTokenCount: 4 } });

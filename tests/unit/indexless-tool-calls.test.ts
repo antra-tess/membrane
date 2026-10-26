@@ -1,21 +1,7 @@
 /**
- * Streamed tool calls whose `tool_calls` entries carry no `index`
- * (antra-tess/membrane#159, part 2).
- *
- * OpenAI's API spec requires `index` on every entry; some OpenAI-compatible
- * servers are reported to leave it out. Every entry without one (absent or
- * `null`) used to go to slot 0, so two calls became one: the second's id and
- * name replaced the first's, and their argument strings ran together. Now such
- * an entry never takes a slot. It joins the call that has its id, or failing
- * that the current call (the one the last entry went to), unless it carries a
- * name and a new id while that call has an id. Entries with an index go to
- * their slots as on main, which stream-callback-errors.test.ts covers. What
- * this change adds for them is tested here: in a slot a piece continues the
- * latest call with its id, or else the last, a call that began without an index
- * moves into its slot by its id, and a slot can hold calls of different tools.
- * On every path, an entry that carries nothing is dropped, a piece that names a
- * tool other than its call's starts a call of its own, a call keeps the first
- * id a piece gives it, and every call comes back under an id of its own.
+ * OpenAI's API spec requires `index` on every `tool_calls` entry of a streamed
+ * delta; some OpenAI-compatible servers are reported to leave it out
+ * (antra-tess/membrane#159).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OpenAIAdapter } from '../../src/providers/openai.js';
@@ -28,14 +14,12 @@ afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 const wire: ProviderRequest = { model: 'zz-review-model', messages: [{ role: 'user', content: 'go' }], maxTokens: 16 };
 
-/** One SSE frame per delta's `tool_calls`, then the finish and `[DONE]`. */
 function sse(deltas: unknown[][]): Response {
   const frames = [...deltas.map(tool_calls => ({ choices: [{ delta: { tool_calls } }] })), { choices: [{ delta: {}, finish_reason: 'tool_calls' }] }];
   const text = frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join('') + 'data: [DONE]\n\n';
   return new Response(text, { headers: { 'content-type': 'text/event-stream' } });
 }
 
-/** An entry with no index: its id and name only when given, as a later piece of a call often carries neither. */
 const piece = (id: string | undefined, name: string | undefined, args: string) =>
   ({ ...(id ? { id, type: 'function' } : {}), function: { ...(name ? { name } : {}), arguments: args } });
 
@@ -56,7 +40,6 @@ for (const [name, make] of adapters) {
     };
     const a = { id: 'call_a', name: 'zz_a', input: { x: 1 } };
     const b = { id: 'call_b', name: 'zz_b', input: { y: 2 } };
-    /** The warnings that name the new ids the assembler gave, apart from any other warning. */
     const newIds = (warn: { mock: { calls: unknown[][] } }) => warn.mock.calls.map((args) => String(args[0])).filter((line) => line.includes('new ids'));
 
     it('calls with different ids and names stay separate calls, in one delta or across deltas', async () => {
@@ -109,8 +92,7 @@ for (const [name, make] of adapters) {
       expect((await calls([[piece('x', 'zz_a', '{"a":1}')], [piece('x', 'zz_b', '{"b":2}')], [piece('x_2', 'zz_c', '{"c":3}')]])).map((c: { id: string }) => c.id)).toEqual(['x', 'x_3', 'x_2']);
     });
 
-    it('an index of null counts as none', async () => {
-      // Two calls of one tool: in one slot they would be one call, while with no index each id starts its own.
+    it('an index of null counts as none, so two calls of one tool stay two', async () => {
       const nullIndex = (id: string, args: string) => ({ index: null, ...piece(id, 'zz_read', args) });
       expect(await calls([[nullIndex('call_a', '{"x":1}')], [nullIndex('call_b', '{"y":2}')]])).toEqual([
         { id: 'call_a', name: 'zz_read', input: { x: 1 } },
@@ -178,7 +160,6 @@ for (const [name, make] of adapters) {
       const large = { index: 100_000_000, ...piece('call_z', 'zz_z', '{}') };
       const started = performance.now();
       const placed = await calls([[large], [piece('call_a', 'zz_a', '{"x":1}')]]);
-      // With a scan of the index slots in place of the Map lookup, this stream took about 8 s; placing takes well under 1 s.
       expect(performance.now() - started).toBeLessThan(1000);
       expect(placed).toEqual([{ id: 'call_z', name: 'zz_z', input: {} }, a]);
     });

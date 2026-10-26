@@ -1,15 +1,4 @@
 import { MembraneNotReadyError, TimeoutAbortError } from '../../src/types/errors.js';
-/**
- * Abort lifecycle honesty (A3 MAJOR-7 and the reason: 'user' hardcoding).
- *
- * Two defects on an otherwise sound abort core:
- *  - an abort landing during the overloaded (529) backoff sleep rejected out
- *    of the retry loop instead of being handled, so whether a cancellation is
- *    a return value or a throw depended on which millisecond it landed in;
- *  - all four catch sites reported reason: 'user' regardless of cause, so an
- *    adapter-side request timeout was told to the caller as a human
- *    cancellation.
- */
 
 import { describe, it, expect, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
@@ -25,7 +14,8 @@ import type {
 } from '../../src/types/provider.js';
 import type { StreamCallbacks } from '../../src/types/streaming.js';
 
-/** Always 529s, so the turn spends its life in the backoff window. */
+const slowConsumerPause = () => new Promise((resolve) => setTimeout(resolve, 20));
+
 class OverloadedAdapter implements ProviderAdapter {
   readonly name = 'zz-overloaded';
   calls = 0;
@@ -45,7 +35,6 @@ class OverloadedAdapter implements ProviderAdapter {
   }
 }
 
-/** Mirrors the typed timeout an adapter returns after its deadline expires. */
 class TimingOutAdapter implements ProviderAdapter {
   readonly name = 'zz-timing-out';
 
@@ -70,7 +59,6 @@ class TimingOutAdapter implements ProviderAdapter {
 class SignalReasonAdapter implements ProviderAdapter {
   readonly name = 'zz-signal-reason';
   calls = 0;
-  /** Resolves once a provider call is under way. */
   readonly entered: Promise<void>;
   private markEntered!: () => void;
 
@@ -107,7 +95,6 @@ class SignalReasonAdapter implements ProviderAdapter {
   }
 }
 
-/** One native tool round, then (if asked) a final answer. */
 class ToolRoundAdapter implements ProviderAdapter {
   readonly name = 'zz-tool-round';
   calls = 0;
@@ -136,10 +123,6 @@ class ToolRoundAdapter implements ProviderAdapter {
   }
 }
 
-/**
- * Every round stops on a stop sequence inside a block the model opened, so
- * the XML loop resumes round after round until something stops it.
- */
 class ResumingXmlAdapter implements ProviderAdapter {
   readonly name = 'zz-resuming-xml';
   calls = 0;
@@ -170,7 +153,6 @@ class ResumingXmlAdapter implements ProviderAdapter {
   }
 }
 
-/** A formatter whose build reports an unfinished tool cycle. */
 class ZzNotReadyFormatter extends NativeFormatter {
   buildMessages(messages: NormalizedMessage[], options: BuildOptions): BuildResult {
     return { ...super.buildMessages(messages, options), ready: false };
@@ -182,11 +164,6 @@ const REQUEST: NormalizedRequest = {
   config: { model: 'zz-model', maxTokens: 100 },
 };
 
-/**
- * The XML path, selected explicitly: on the default formatter, a request
- * without `toolMode` resolves native (resolveToolMode), so REQUEST alone
- * never reaches streamWithXmlTools or runXmlToolsYielding.
- */
 const XML_REQUEST: NormalizedRequest = { ...REQUEST, toolMode: 'xml' };
 
 const NATIVE_REQUEST: NormalizedRequest = {
@@ -195,7 +172,6 @@ const NATIVE_REQUEST: NormalizedRequest = {
   tools: [{ name: 'zz_noop', description: 'zz no-op', inputSchema: { type: 'object', properties: {} } }],
 };
 
-/** Long enough that an abort 10ms in lands inside the sleep. */
 const SLOW_BACKOFF = {
   retry: { overloaded: { maxRetries: 5, retryDelayMs: 400, maxRetryDelayMs: 400 } },
 };
@@ -212,7 +188,6 @@ describe('abort during the overloaded backoff window', () => {
 
     expect(isAbortedResponse(result)).toBe(true);
     expect((result as { reason: string }).reason).toBe('user');
-    // One attempt ran, so the abort landed in the sleep after it.
     expect(adapter.calls).toBe(1);
   });
 
@@ -236,8 +211,6 @@ describe('abort during the overloaded backoff window', () => {
 });
 
 describe('abort during a retry sleep, whatever the signal was aborted with', () => {
-  // AbortController.abort(reason) rejects the sleep with that reason itself:
-  // a plain Error or a string is still the caller's cancellation.
   for (const [label, reason] of [
     ['a plain Error', new Error('aborted by caller')],
     ['a string', 'stream error'],
@@ -306,7 +279,6 @@ describe('abort reason reflects the cause', () => {
   });
 });
 
-/** A caller's signal aborted at 10ms with a string reason, as agent-framework's abortInference(reason) aborts when its caller gives one. */
 function abortedWithString(): AbortSignal {
   const controller = new AbortController();
   setTimeout(() => controller.abort('cancelled by agent'), 10);
@@ -314,11 +286,6 @@ function abortedWithString(): AbortSignal {
 }
 
 describe("a caller's own signal is a cancellation on every path, whatever it was aborted with", () => {
-  // The caller's signal is authoritative. fetch rejects with the signal's
-  // reason: AbortSignal.timeout() gives a TimeoutError, and abort(reason)
-  // gives the reason itself (agent-framework passes its caller's reason, a
-  // string, when one is given). Judging either by its type would be
-  // classification by name, one layer up from classification by text.
   it('premise: the fake rejects as fetch does, with a TimeoutError named for the caller’s own deadline', async () => {
     const signal = AbortSignal.timeout(10);
     const reason = await new SignalReasonAdapter().complete({} as ProviderRequest, { signal }).then(
@@ -363,10 +330,6 @@ describe("a caller's own signal is a cancellation on every path, whatever it was
 });
 
 describe('a cancelled yielding stream reports one abort', () => {
-  // cancel() emits aborted itself, and then the work it cancelled fails: a
-  // pending tool wait rejects with a plain Error, and an in-flight provider
-  // call rejects with its signal's AbortError. The catch must not report the
-  // same cancellation again.
   it('streamYielding() emits exactly one aborted when the consumer cancels at the tool wait', async () => {
     const stream = new Membrane(new ToolRoundAdapter()).streamYielding(NATIVE_REQUEST, {});
     const events: StreamEvent[] = [];
@@ -385,8 +348,6 @@ describe('a cancelled yielding stream reports one abort', () => {
     const events: StreamEvent[] = [];
     for await (const event of stream) events.push(event);
     const aborted = events.filter((e) => e.type === 'aborted');
-    // The deadline found the stream waiting on its tools: the abort follows
-    // the tool calls, with nothing between them.
     expect(events.map((e) => e.type).slice(-2)).toEqual(['tool-calls', 'aborted']);
     expect(aborted).toHaveLength(1);
     expect((aborted[0] as { reason: string }).reason).toBe('user');
@@ -396,14 +357,11 @@ describe('a cancelled yielding stream reports one abort', () => {
     it(`streamYielding() emits exactly one aborted when the consumer cancels mid-request (${label} path)`, async () => {
       const adapter = new SignalReasonAdapter();
       const stream = new Membrane(adapter).streamYielding(request, {});
-      // Cancel once the provider call is under way, so its rejection follows.
       void adapter.entered.then(() => stream.cancel());
       const events: StreamEvent[] = [];
-      // A consumer that takes its time with each event, as an agent loop
-      // does, is still reading when the provider's rejection arrives.
       for await (const event of stream) {
         events.push(event);
-        await new Promise((resolve) => setTimeout(resolve, 20));
+        await slowConsumerPause();
       }
       const aborted = events.filter((e) => e.type === 'aborted');
       expect(aborted).toHaveLength(1);
@@ -423,8 +381,7 @@ describe('a cancelled yielding stream reports one abort', () => {
         stream.provideToolResults(event.calls.map((call) => ({ toolUseId: call.id, content: 'zz ok' })));
         stream.cancel();
       }
-      // Still reading when the loop comes round again after the results.
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await slowConsumerPause();
     }
     expect(events.filter((e) => e.type === 'aborted')).toHaveLength(1);
     expect(adapter.calls).toBe(1);
@@ -491,7 +448,7 @@ describe('stream() with streaming: false reports a cancellation as its streaming
   });
 
   it('still throws a failure that is not a cancellation', async () => {
-    const membrane = new Membrane(new OverloadedAdapter(), { retry: { overloaded: { maxRetries: 0 } } });
+    const membrane = new Membrane(new OverloadedAdapter(), { retry: { maxRetries: 1, overloaded: { maxRetries: 0 } } });
     await expect(membrane.stream(NON_STREAMING, {})).rejects.toMatchObject({ type: 'server', httpStatus: 529 });
   });
 });

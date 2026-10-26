@@ -1,17 +1,4 @@
-/**
- * Thinking-carrier pairing: provider-native thinking blocks carry the
- * signatures; parser-derived blocks carry the text. Merging them by INDEX
- * (the pre-fix behaviour) crosses the two lists the moment their shapes
- * differ, and the mispaired carrier is exported to the consumer's stored
- * history and shipped back next turn, where the API validates a signature
- * against content that never produced it.
- *
- * Three reachable shape differences, one test each:
- *   1. a signature-only (display:'omitted') block beside a visible one
- *   2. an XML-visible thinking block that no provider block produced
- *   3. a continuation split: two provider fragments, one spanning parsed
- *      block (parseAccumulatedIntoBlocks sees the CONCATENATED accumulation)
- */
+/** Anthropic validates a thinking block's signature against the content that produced it, so a signature on other text fails on the next turn. */
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import type { ContentBlock } from '../../src/types/index.js';
@@ -27,7 +14,6 @@ const thinking = (text: string, signature?: string): ContentBlock =>
 
 const answer = (text: string): ContentBlock => ({ type: 'text', text }) as ContentBlock;
 
-/** Every thinking block as [text, signature] pairs, in wire order. */
 function carriers(content: ContentBlock[]): Array<[string, string | undefined]> {
   return content
     .filter((b) => b.type === 'thinking')
@@ -43,7 +29,6 @@ describe('mergeProviderThinkingBlocks: identity pairing', () => {
     const content = [thinking('zz reasoning one'), answer('zz visible tail')];
     merge(content, [thinking('', 'zzsig-omitted'), thinking('zz reasoning one', 'zzsig-real')]);
 
-    // The visible text wears the signature that produced it, exactly once.
     expect(carriers(content)).toEqual([
       ['', 'zzsig-omitted'],
       ['zz reasoning one', 'zzsig-real'],
@@ -60,9 +45,6 @@ describe('mergeProviderThinkingBlocks: identity pairing', () => {
   });
 
   it('leaves an XML-visible thinking block unsigned when no provider block matches it', () => {
-    // anthropic-xml prefills the literal "Claude: <thinking>" turn prefix, so
-    // the parser emits a thinking block made of VISIBLE XML TEXT. Stamping a
-    // native signature on it exports an unverifiable carrier.
     const merge = merger();
     const content = [thinking('zz xml-visible reasoning'), answer('zz visible tail')];
     merge(content, [thinking('zz native reasoning', 'zzNativeSig')]);
@@ -82,9 +64,6 @@ describe('mergeProviderThinkingBlocks: identity pairing', () => {
   });
 
   it('splits a spanning parsed block back into the provider fragments that produced it', () => {
-    // Continuation across a max_tokens boundary: capture runs per round and
-    // collects two provider blocks, while the parser sees one concatenated
-    // block. The spanning block must NOT wear the round-1 signature.
     const merge = merger();
     const content = [
       thinking('zz part one of the thought and part two after the length stop'),

@@ -1,9 +1,3 @@
-/**
- * A yielding stream ends at its terminal event. After cancel(), the consumer
- * sees one aborted event and nothing after it, a loop that resumes anyway
- * finishes instead of parking on a tool wait, and a cancel that comes after
- * the loop's own terminal event adds no event of its own.
- */
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { YieldingStreamImpl } from '../../src/yielding-stream.js';
@@ -19,7 +13,6 @@ const respond = (request: ProviderRequest, content: unknown[], stopReason: strin
   content, stopReason, usage: { inputTokens: 10, outputTokens: 5 }, model: request.model, rawRequest: request, raw: {},
 }) as never;
 
-/** One round that makes a tool call. A second call isn't expected and fails. */
 class ToolRoundAdapter implements ProviderAdapter {
   readonly name = 'zz-tool-round';
   calls = 0;
@@ -38,12 +31,6 @@ class ToolRoundAdapter implements ProviderAdapter {
   }
 }
 
-/**
- * A response that had already come when the cancel arrived: the round streams
- * its text (and, for a tool call on the XML path, the call), waits for the
- * abort, then resolves anyway, as a provider whose last bytes crossed the
- * cancel would. `late` says what it resolves with: a tool call, or text only.
- */
 class LateAdapter implements ProviderAdapter {
   readonly name = 'zz-late';
   calls = 0;
@@ -77,10 +64,9 @@ const BASE: NormalizedRequest = {
 };
 const requestFor = (mode: Mode): NormalizedRequest => ({ ...BASE, toolMode: mode });
 
-/** One turn of the event loop: enough for a loop resuming from a settled wait to run to its end, since it awaits nothing on the way. */
+/** setImmediate runs after every pending microtask, so one turn lets a loop resuming from a settled wait run to its end when it awaits nothing on the way. */
 const turn = () => new Promise((resolve) => setImmediate(resolve));
 
-/** The loop's builder as the stream holds it. markDone() releases it, so its absence shows the loop finished. */
 const builderOf = (stream: unknown): unknown => (stream as { abortSnapshot?: unknown }).abortSnapshot;
 
 describe('a yielding stream ends at its terminal event', () => {
@@ -96,7 +82,6 @@ describe('a yielding stream ends at its terminal event', () => {
           stream.provideToolResults(event.calls.map((call) => ({ toolUseId: call.id, content: 'zz ok' })));
           stream.cancel();
         }
-        // Reading on while the loop resumes and runs to its next check.
         await turn();
       }
       await turn();
@@ -123,10 +108,7 @@ describe('a yielding stream ends at its terminal event', () => {
 
         expect(events.map((event) => event.type).filter((type) => type === 'aborted')).toHaveLength(1);
         expect(events[events.length - 1].type).toBe('aborted');
-        // A late call was recorded after the event was built, so the event
-        // doesn't gain it.
         expect((events[events.length - 1] as { toolCalls?: unknown[] }).toolCalls).toEqual([]);
-        // The loop finished: it isn't parked on a tool wait, and markDone() ran.
         expect(stream.isWaitingForTools).toBe(false);
         expect(builderOf(stream)).toBeUndefined();
         expect(adapter.calls).toBe(1);

@@ -1,20 +1,3 @@
-/**
- * ToolContext.roundPreamble — per-round delta text in XML tool mode.
- *
- * Regression for the Evander 2026-08-08 scaffold-leak pyramid: consumers
- * persisting per-round assistant text used `preamble`, which is CUMULATIVE
- * in XML mode (the whole turn so far, including harness-injected
- * <function_results> XML). A 3-call turn therefore stored round-1's text 3×,
- * round-2's 2×, and re-persisted injected results as the agent's own words —
- * which the formatter then replayed to the model as scaffold-in-its-own-voice.
- *
- * `roundPreamble` must contain exactly THIS round's model-authored text:
- *   - never earlier rounds' text,
- *   - never injected <function_results> / result content,
- *   - never the assistant prefill document (the #40 class),
- * while `preamble` keeps its documented cumulative shape for compatibility.
- */
-
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { MockAdapter } from '../../src/providers/mock.js';
@@ -40,8 +23,6 @@ function makeRequest(): NormalizedRequest {
     ],
     config: { model: 'test-model', maxTokens: 1000 },
     tools: [noopTool],
-    // The per-round preamble delta is an XML-path contract; native is the
-    // default tool mode now, so the XML path is an explicit opt-in.
     toolMode: 'xml',
   };
 }
@@ -106,17 +87,18 @@ async function driveCallback(
   return contexts;
 }
 
-function assertDeltaShape(contexts: ToolContext[]) {
-  expect(contexts).toHaveLength(3);
+const ROUNDS = 3;
 
-  for (let n = 1; n <= 3; n++) {
+function assertDeltaShape(contexts: ToolContext[]) {
+  expect(contexts).toHaveLength(ROUNDS);
+
+  for (let n = 1; n <= ROUNDS; n++) {
     const ctx = contexts[n - 1]!;
     const delta = ctx.roundPreamble;
     expect(delta, `round ${n} roundPreamble present`).toBeDefined();
 
-    // This round's own prose, and only this round's.
     expect(delta).toContain(`ROUND_${n}_PROSE`);
-    for (let m = 1; m <= 3; m++) {
+    for (let m = 1; m <= ROUNDS; m++) {
       if (m !== n) {
         expect(delta, `round ${n} delta must not contain round ${m} text`).not.toContain(
           `ROUND_${m}_PROSE`,
@@ -124,34 +106,29 @@ function assertDeltaShape(contexts: ToolContext[]) {
       }
     }
 
-    // Never injected results, never the prefill document.
     expect(delta).not.toContain('<function_results');
     expect(delta).not.toContain(RESULT_MARKER);
     expect(delta).not.toContain('PREFILL_DOC_MARKER');
   }
 
-  // The pyramid, quantified: across per-round deltas each round's text
-  // appears exactly once…
   const allDeltas = contexts.map((c) => c.roundPreamble ?? '').join('\n');
   expect(allDeltas.split('ROUND_1_PROSE').length - 1).toBe(1);
 
-  // …while the legacy cumulative field still repeats it (compatibility —
-  // and the measured shape of the bug: r1 in rounds 1, 2 and 3 = 3 copies).
   const allPreambles = contexts.map((c) => c.preamble).join('\n');
-  expect(allPreambles.split('ROUND_1_PROSE').length - 1).toBe(3);
+  expect(allPreambles.split('ROUND_1_PROSE').length - 1).toBe(ROUNDS);
   expect(contexts[2]!.preamble).toContain('ROUND_1_PROSE');
   expect(contexts[2]!.preamble).toContain('<function_results');
 }
 
 describe('ToolContext.roundPreamble (XML per-round delta)', () => {
   it('yielding path: delta contains exactly this round, no injected results, no prefill', async () => {
-    const membrane = new Membrane(makeAdapter(3));
+    const membrane = new Membrane(makeAdapter(ROUNDS));
     const contexts = await driveYielding(membrane, makeRequest());
     assertDeltaShape(contexts);
   });
 
   it('callback path (streamWithXmlTools): same delta contract', async () => {
-    const membrane = new Membrane(makeAdapter(3));
+    const membrane = new Membrane(makeAdapter(ROUNDS));
     const contexts = await driveCallback(membrane, makeRequest());
     assertDeltaShape(contexts);
   });

@@ -1,7 +1,3 @@
-// Black-box coverage of scripts/release-changelog.mjs: each case runs the
-// real script in a throwaway directory, so assembly, validation, and the
-// deletion of consumed fragments are all exercised exactly as `npm version`
-// would run them.
 import { test } from "vitest";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";

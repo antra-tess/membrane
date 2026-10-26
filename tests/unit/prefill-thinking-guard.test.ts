@@ -1,9 +1,4 @@
-/**
- * XML prefill carries thinking as literal text rather than a second API channel.
- * Strip both the top-level and extra copies, preserving the caller's input.
- * The provider's acceptance of thinking plus prefill is model-dependent:
- * the original and maintainer probes found haiku-4-5 accepts the combination.
- */
+/** Whether the API accepts thinking beside an assistant prefill depends on the model: Haiku 4.5 accepts the combination. */
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { thinkingEnabled } from '../../src/providers/anthropic.js';
@@ -34,7 +29,6 @@ describe('prefill guard: thinking is stripped from BOTH channels', () => {
     expect(prefillResult.assistantPrefill).toBeDefined();
     expect(providerRequest.thinking).toBeUndefined();
     expect(providerRequest.extra?.thinking).toBeUndefined();
-    // The resolver the adapter's sampling gate and beta header share.
     expect(thinkingEnabled(providerRequest)).toBe(false);
   });
 
@@ -80,7 +74,6 @@ describe('prefill guard: thinking is stripped from BOTH channels', () => {
   });
 
   it('keeps a caller-supplied extra.thinking when the build is NOT a prefill', () => {
-    // Native/chat-shaped builds legitimately combine thinking with the request.
     const membrane = new Membrane({ name: 'zz-fake-adapter' } as any);
     const request = requestWithSmuggledThinking();
     const providerRequest = (membrane as any).buildNativeToolRequest(request, request.messages, false);

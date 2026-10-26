@@ -1,33 +1,3 @@
-/**
- * Round reports (UsageEvent.round) and ToolContext.supportsInjectedMessages.
- *
- * A consumer that needs to know what a round's request actually carried —
- * agent-framework's receipt clocks are the first — reads one report per
- * provider round whose response stands. The contract:
- *
- *   - `altered` names consumer messages the request did not carry verbatim,
- *     in the consumer's coordinates: `NormalizedRequest.messages` indices,
- *     and `[batch, index]` for injected messages, for every batch still
- *     retained in the request, resolved before role merging.
- *   - `fidelity` is 'unknown' whenever an empty list would prove nothing:
- *     an uninstrumented path, opt-in image shedding, a beforeRequest hook
- *     that changed either of its arguments (and every round after one that
- *     changed one in place), an adapter alteration that could not be
- *     attributed.
- *   - `injectedBatch.applied` is the ordered prefix of the newest batch's
- *     supplied positions the round accounts for: its whole supplied size
- *     natively, and 0 on the XML prefill path. With established fidelity, a
- *     position not carried verbatim is in `altered` (even one whose stripped
- *     tool blocks left nothing to send).
- *   - `usage` is the round's own; an unreported field is absent, a reported
- *     0 is 0.
- *   - where a path sends a provider-native raw form (`rawItem`,
- *     `openaiResponsesItems`, `rawXml`) in place of the fields it stands in
- *     for, verbatim is measured against the raw form; a zero-width carrier
- *     (`''` text holding an object `rawItem`) that a path leaves out alters
- *     its message.
- */
-
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { MockAdapter } from '../../src/providers/mock.js';
@@ -64,14 +34,6 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-/**
- * The two image-shedding tests need a request over the byte cap that shedding
- * answers to. They lower that cap through `MEMBRANE_MAX_REQUEST_BYTES`, its
- * documented override, so eight copies of a 96 KiB image are over it. Against
- * the default 28 MiB cap each request carried eight copies of a 6 MiB image,
- * about 64 MiB of base64, and on a loaded host the test outlasted vitest's 5 s
- * default. request-byte-cap.test.ts holds the default itself.
- */
 const SHEDDING_CAP_BYTES = 256 * 1024;
 const SHEDDING_IMAGE_BYTES = 96 * 1024;
 
@@ -81,7 +43,7 @@ const noopTool: ToolDefinition = {
   inputSchema: { type: 'object', properties: {} },
 };
 
-/** An image no provider accepts: every builder substitutes a placeholder. */
+/** An SVG image, which no provider accepts. */
 const svgImage: ContentBlock = {
   type: 'image',
   source: { type: 'base64', mediaType: 'image/svg+xml', data: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>').toString('base64') },
@@ -91,11 +53,9 @@ interface ScriptedTurn {
   content: unknown[];
   stopReason: string;
   usage?: ProviderResponse['usage'];
-  /** Call options.onContentAltered while serving this turn. */
   alterContent?: boolean;
 }
 
-/** Native-mode adapter that plays a script and records what it was sent. */
 class ScriptedAdapter implements ProviderAdapter {
   readonly name = 'scripted';
   readonly reportsContentAlterations: boolean;
@@ -161,7 +121,6 @@ interface Driven {
   events: StreamEvent[];
 }
 
-/** Drive a yielding stream; `inject[n]` is supplied with the n-th tool round's results. */
 async function drive(
   membrane: Membrane,
   request: NormalizedRequest,
@@ -210,7 +169,6 @@ describe('native yielding rounds', () => {
       { participant: 'Alice', content: [{ type: 'text', text: 'first, intact' }] },
       { participant: 'Bob', content: [{ type: 'text', text: 'second, with a picture' }, svgImage] },
     ]));
-    // Both are user-role and travel in one merged provider message.
     expect(adapter.requests[0]!.messages).toHaveLength(1);
     expect(rounds[0]!.altered).toEqual({ messages: [1], injected: [] });
     expect(rounds[0]!.fidelity).toBe('established');
@@ -230,7 +188,6 @@ describe('native yielding rounds', () => {
     expect(rounds[0]!.injectedBatch).toBeUndefined();
     expect(rounds[1]!.injectedBatch).toEqual({ batch: 0, applied: 1 });
     expect(rounds[1]!.altered).toEqual({ messages: [], injected: [[0, 0]] });
-    // The second batch is the newest now; the first is still in the request and still altered.
     expect(rounds[2]!.injectedBatch).toEqual({ batch: 1, applied: 2 });
     expect(rounds[2]!.altered).toEqual({ messages: [], injected: [[0, 0]] });
   });
@@ -442,7 +399,7 @@ describe('usage at the adapter boundary: a reported 0 is 0, an unreported count 
     const request = { model: 'gemini-zz', maxTokens: 16, messages: [{ role: 'user', content: 'hi' }] } as any;
     vi.stubGlobal('fetch', respond({ promptTokenCount: 40, candidatesTokenCount: 2, totalTokenCount: 42, cachedContentTokenCount: 0 }));
     expect((await adapter.complete(request)).usage.cacheReadTokens).toBe(0);
-    // The shape real no-cache-hit calls return: the field is omitted.
+    // Gemini omits `cachedContentTokenCount` on a call with no cache hit.
     vi.stubGlobal('fetch', respond({ promptTokenCount: 40, candidatesTokenCount: 2, totalTokenCount: 42 }));
     const omitted = await adapter.complete(request);
     expect(omitted.usage.cacheReadTokens).toBe(0);
@@ -451,13 +408,11 @@ describe('usage at the adapter boundary: a reported 0 is 0, an unreported count 
     const unreported = await adapter.complete(request);
     expect('cacheReadTokens' in unreported.usage).toBe(false);
     expect(unreported.unreportedUsage).toEqual(['inputTokens', 'outputTokens']);
-    // Streamed: the usageMetadata on the last chunk is read the same way.
     stubFetchWithSseLines([
       '{"candidates":[{"content":{"parts":[{"text":"o"}]}}]}',
       '{"candidates":[{"content":{"parts":[{"text":"k"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":40,"candidatesTokenCount":2,"totalTokenCount":42}}',
     ]);
     expect((await adapter.stream(request, { onChunk: () => {} } as any)).usage.cacheReadTokens).toBe(0);
-    // A stream that never carries usageMetadata reports nothing.
     stubFetchWithSseLines([
       '{"candidates":[{"content":{"parts":[{"text":"o"}]}}]}',
       '{"candidates":[{"content":{"parts":[{"text":"k"}]},"finishReason":"STOP"}]}',
@@ -500,7 +455,6 @@ describe('adapters report the content they leave out', () => {
   });
 });
 
-/** The real Anthropic request builder; only the network response is scripted. */
 class ScriptedAnthropic extends AnthropicAdapter {
   sent: any[] = [];
   constructor(private turns: Array<{ content: unknown[]; stopReason: string; usage?: Record<string, unknown> }>) {
@@ -542,6 +496,20 @@ describe('producer-boundary losses', () => {
     });
     expect(sent.every((m) => m.includes('CHANGED'))).toBe(true);
     expect(rounds.map((r) => r.fidelity)).toEqual(['unknown', 'unknown']);
+  });
+
+  it('names the message whose thinking block with no signature was left out (#191)', async () => {
+    const adapter = new ScriptedAnthropic([{ content: [{ type: 'text', text: 'done' }], stopReason: 'end_turn' }]);
+    const { rounds } = await drive(new Membrane(adapter), nativeAnthropicRequest({
+      messages: [
+        { participant: 'User', content: [{ type: 'text', text: 'hello' }] },
+        { participant: 'Claude', content: [{ type: 'thinking', thinking: 'reasoning from another provider' }, { type: 'text', text: 'hi' }] },
+        { participant: 'User', content: [{ type: 'text', text: 'again' }] },
+      ],
+    }));
+    expect(adapter.sent[0].messages[1].content).toEqual([{ type: 'text', text: 'hi' }]);
+    expect(rounds[0]!.altered).toEqual({ messages: [1], injected: [] });
+    expect(rounds[0]!.fidelity).toBe('established');
   });
 
   it('a passthrough that replaces the built messages makes the round unknown (Anthropic, Bedrock)', async () => {
@@ -623,7 +591,6 @@ describe('producer-boundary losses', () => {
       { participant: 'Claude', content: [{ type: 'tool_use', id: 't2', name: 'noop', input: {} }] },
       { participant: 'User', content: [{ type: 'tool_result', toolUseId: 't2', content: [{ type: 'text', text: 'second' }, shared] }] },
     ];
-    // The real Bedrock request builder and cleanup; only transport is scripted.
     const { BedrockAdapter } = await import('../../src/providers/bedrock.js');
     class ScriptedBedrock extends BedrockAdapter {
       sent: any;
@@ -640,8 +607,6 @@ describe('producer-boundary losses', () => {
     expect(both.rounds[0]!.altered.messages).toEqual([1, 3]);
     expect(both.rounds[0]!.fidelity).toBe('established');
 
-    // A report naming the consumer's own object, which membrane never emitted:
-    // which occurrence is unknowable.
     const once = new ScriptedAdapter([finalTurn()]);
     const original = once.stream.bind(once);
     once.stream = async (request, callbacks, options) => {
@@ -657,7 +622,6 @@ describe('producer-boundary losses', () => {
       { participant: 'Claude', content: [{ type: 'tool_use', id: 't1', name: 'noop', input: {} }] },
       { participant: 'User', content: [{ type: 'tool_result', toolUseId: 't1', content: [{ type: 'text', text: 'first' }] }] },
     ];
-    /** Reports the nested block membrane emitted for message 1, on the attempts named. */
     const reporting = (reportOn: number[]) => {
       let attempt = 0;
       return {
@@ -721,7 +685,6 @@ describe('Greptile\'s review of #104', () => {
       expect(rounds[1]!.injectedBatch).toEqual({ batch: 0, applied: 1 });
       expect(rounds[1]!.altered.injected).toEqual([[0, 0]]);
       expect(rounds[2]!.injectedBatch).toEqual({ batch: 1, applied: 1 });
-      // [1, 0] lost its image to the builder and its tool block to the cleaning: one entry.
       expect(rounds[2]!.altered.injected).toEqual([[0, 0], [1, 0]]);
     });
 
@@ -793,8 +756,6 @@ describe('Greptile\'s review of #104', () => {
       altered: [1, 3],
     },
     {
-      // A result with no id is textified as '<missing>'; a separate result whose
-      // id is literally '<missing>' is paired and carried.
       name: 'a missing id beside a literal \'<missing>\' id',
       messages: (): NormalizedRequest['messages'] => [
         { participant: 'User', content: [toolResult(undefined, 'no id')] },
@@ -805,7 +766,6 @@ describe('Greptile\'s review of #104', () => {
       altered: [0],
     },
     {
-      // A second result for a call that was already answered is textified too.
       name: 'a duplicate result for an answered call',
       messages: (): NormalizedRequest['messages'] => [
         { participant: 'User', content: [text('start')] },
@@ -818,7 +778,6 @@ describe('Greptile\'s review of #104', () => {
       altered: [4],
     },
     {
-      // A second result for the call in the same message is textified too.
       name: 'a duplicate result beside the one that answered its call',
       messages: (): NormalizedRequest['messages'] => [
         { participant: 'User', content: [text('start')] },
@@ -857,9 +816,6 @@ describe('Greptile\'s review of #104', () => {
 
 
   describe('a stranded call\'s round reports the breakpoint block the Anthropic cleanup removes', () => {
-    // The stranded tool_use gets a synthetic [pending] result in the next user
-    // envelope. The breakpoint sits on a whitespace-only last block, which the
-    // Anthropic cleanup then removes, and its report names that block's message.
     const messages = (): NormalizedRequest['messages'] => [
       { participant: 'User', content: [text('start')] },
       { participant: 'Claude', content: [toolUse('stranded')] },
@@ -888,7 +844,6 @@ describe('Greptile\'s review of #104', () => {
     expect(dropped).toBe(1);
     normalizeResponsesInput([{ type: 'tool_result', toolUseId: 'c2', content: lossy }] as any, () => dropped++);
     expect(dropped).toBe(2);
-    // Text-only and string results lose nothing.
     normalizeResponsesInput([{ role: 'user', content: [
       { type: 'tool_result', toolUseId: 'c3', content: [{ type: 'text', text: 'ok' }] },
       { type: 'tool_result', toolUseId: 'c4', content: 'ok' },
@@ -921,7 +876,6 @@ describe('slimepriestess\'s review of #104', () => {
       config: { model: 'claude-sonnet-4-5', maxTokens: 1000 },
       tools: [noopTool], toolMode: 'native', promptCaching: false,
     });
-    /** A hook that edits the consumer's first message in the given rounds. */
     const editing = (rounds: number[]) => {
       let call = 0;
       return {
@@ -975,7 +929,6 @@ describe('slimepriestess\'s review of #104', () => {
     });
   });
 
-  /** The real Responses API request builder (API-key mode); only the network is scripted. */
   class ScriptedResponses extends OpenAIResponsesAPIAdapter {
     sent: any[] = [];
     constructor() { super({ apiKey: 'sk-test' }); }
@@ -1041,9 +994,8 @@ describe('slimepriestess\'s review of #104', () => {
   });
 
   describe('a zero-width carrier is all raw form: a path that leaves it out alters its message, and one that sends its item carries it', () => {
-    // How Anthropic's unconvertible response blocks (server-tool results) are kept.
     const carrier = (): ContentBlock => ({ type: 'text', text: '', rawItem: { type: 'web_search_tool_result', tool_use_id: 'srv_1', content: [] } }) as ContentBlock;
-    // The call the result answers: the API takes a result only after its call.
+    // The Anthropic API takes a server tool's result only after its call.
     const callCarrier = (): ContentBlock => ({ type: 'text', text: '', rawItem: { type: 'server_tool_use', id: 'srv_1', name: 'web_search', input: { query: 'zz' } } }) as ContentBlock;
     const conversations = {
       'beside text': (): NormalizedRequest['messages'] => [
@@ -1087,7 +1039,7 @@ describe('slimepriestess\'s review of #104', () => {
     it('an Anthropic-shaped build that doesn\'t replay server blocks leaves the block out, and names its message', async () => {
       for (const messages of Object.values(conversations)) {
         const adapter = new ScriptedAnthropic([{ content: [{ type: 'text', text: 'done' }], stopReason: 'end_turn' }]);
-        (adapter as { replaysAnthropicServerBlocks: boolean }).replaysAnthropicServerBlocks = false; // as a build that doesn't declare it
+        (adapter as { replaysAnthropicServerBlocks: boolean }).replaysAnthropicServerBlocks = false;
         const { rounds } = await drive(new Membrane(adapter), {
           messages: messages(), config: { model: 'claude-sonnet-4-5', maxTokens: 1000 }, tools: [noopTool], toolMode: 'native', promptCaching: false,
         });
@@ -1178,7 +1130,6 @@ describe('an automated review of #104\'s own range', () => {
   const text = (value: string): ContentBlock => ({ type: 'text', text: value });
   const buildOptions = (notes: FidelityNotes) => ({ assistantParticipant: 'Claude', participantMode: 'multiuser', fidelity: notes }) as any;
 
-  /** Reports the usage it's given, refusing the first `refusals` attempts. */
   class UsageAdapter implements ProviderAdapter {
     readonly name = 'zz-usage';
     readonly reportsContentAlterations = true;
@@ -1208,8 +1159,6 @@ describe('an automated review of #104\'s own range', () => {
     const usageEvent = streamed.events.find((e) => e.type === 'usage') as Extract<StreamEvent, { type: 'usage' }>;
     expect(usageEvent.usage).toMatchObject({ cacheReadTokens: 0, cacheCreationTokens: 0 });
     expect(streamed.rounds[0]!.usage).toMatchObject({ cacheReadTokens: 0, cacheCreationTokens: 0 });
-    // Unreported, the count is absent from the totals (complete() copies the
-    // provider's own fields, so there it reads undefined).
     const unreported = await new Membrane(new UsageAdapter({ inputTokens: 40, outputTokens: 2 })).complete(request);
     expect(unreported.usage.cacheReadTokens).toBeUndefined();
     expect(unreported.usage.cacheCreationTokens).toBeUndefined();
@@ -1271,7 +1220,6 @@ describe('an automated review of #104\'s own range', () => {
     expect(heard[2]).toBe(failed);
     expect([...notes.altered].sort()).toEqual([0, 1]);
     expect(notes.established).toBe(true);
-    // A standalone (top-level) failed result is reported too.
     let standalone = 0;
     normalizeResponsesInput([{ type: 'tool_result', toolUseId: 'c3', content: 'boom', is_error: true }] as any, () => standalone++);
     expect(standalone).toBe(1);

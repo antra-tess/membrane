@@ -1,11 +1,3 @@
-/**
- * Provider capability and registry types
- */
-
-// ============================================================================
-// Provider Quirks
-// ============================================================================
-
 export interface ProviderQuirks {
   /** Anthropic: must trim trailing whitespace from assistant messages */
   trimAssistantTrailingWhitespace?: boolean;
@@ -26,61 +18,41 @@ export interface ProviderQuirks {
   notes?: string;
 }
 
-// ============================================================================
-// Media Capabilities
-// ============================================================================
-
 export interface MediaCapabilities {
-  // Input support
   imageInput: boolean;
   pdfInput: boolean;
   audioInput: boolean;
   videoInput: boolean;
   
-  // Output support
   imageGeneration: boolean;
   
-  // Limits
   maxImageSizeBytes?: number;
   maxImageDimensions?: { width: number; height: number };
   maxPdfPages?: number;
   maxAudioDurationSec?: number;
   maxVideoDurationSec?: number;
   
-  // Supported formats
-  imageFormats?: string[];  // ['image/jpeg', 'image/png', ...]
-  audioFormats?: string[];  // ['audio/mpeg', 'audio/wav', ...]
-  videoFormats?: string[];  // ['video/mp4', 'video/webm', ...]
+  imageFormats?: string[];
+  audioFormats?: string[];
+  videoFormats?: string[];
 }
 
-// ============================================================================
-// Provider Capabilities
-// ============================================================================
-
 export interface ProviderCapabilities {
-  // Mode support
   supportsPrefill: boolean;
   supportsChat: boolean;
   supportsCaching: boolean;
   supportsThinking: boolean;
   supportsStreaming: boolean;
   
-  // Media
   media: MediaCapabilities;
   
-  // Limits
   maxContextTokens: number;
   maxOutputTokens: number;
   maxStopSequences: number;
   maxCacheBreakpoints?: number;
   
-  // Quirks
   quirks: ProviderQuirks;
 }
-
-// ============================================================================
-// Model Pricing
-// ============================================================================
 
 /**
  * Whether a provider's prompt-token count INCLUDES the span served from cache.
@@ -91,14 +63,12 @@ export interface ProviderCapabilities {
  * that reported `cached_tokens: 1664`, so cached is a SUBSET of the prompt.
  *
  * `cache-inclusive` describes the input count as a whole: every cached token,
- * read or written, is inside it, and membrane subtracts both to restate it.
- * `cache-excluded` counts are disjoint already: fresh input, cache writes and
- * cache reads are three parts of the prompt.
+ * read or written, is inside it. `cache-excluded` counts are disjoint already:
+ * fresh input, cache writes and cache reads are three parts of the prompt.
  *
- * `unknown` is a real epistemic state, not a default to lean on: it means no
- * one has established this adapter's convention, and membrane will pass the
- * counts through unchanged and warn the first time a cache read or write makes
- * the ambiguity bite.
+ * `unknown` means no one has established this adapter's convention: membrane
+ * passes the counts through unchanged and warns the first time a cache read or
+ * write makes the ambiguity bite.
  */
 export type UsageCacheConvention = 'cache-excluded' | 'cache-inclusive' | 'unknown';
 
@@ -121,15 +91,10 @@ export interface ModelPricing {
   /**
    * ISO date these rates were last checked against the provider's published
    * price page, surfaced to callers as {@link CostBreakdown.pricingAsOf}. A
-   * pricing source that cannot vouch for a date leaves it unset — better an
-   * absent freshness signal than a fabricated one.
+   * pricing source that cannot vouch for a date leaves it unset.
    */
   asOf?: string;
 }
-
-// ============================================================================
-// Model Information
-// ============================================================================
 
 export interface ModelDefinition {
   /** Unique model identifier */
@@ -156,10 +121,6 @@ export interface ModelDefinition {
   /** Successor model if deprecated */
   successorId?: string;
 }
-
-// ============================================================================
-// Model Registry Interface
-// ============================================================================
 
 export interface ModelRegistry {
   /** Get capabilities for a model */
@@ -189,10 +150,6 @@ export interface ModelFilter {
   includeDeprecated?: boolean;
 }
 
-// ============================================================================
-// Provider Adapter Interface
-// ============================================================================
-
 export interface ProviderAdapter {
   /** Provider name */
   readonly name: string;
@@ -202,13 +159,8 @@ export interface ProviderAdapter {
    * normalizes every response onto `cache-excluded` before any ratio or cost is
    * computed, and it can only do that if the adapter says what it is reporting.
    *
-   * OPTIONAL, defaulting to `'unknown'`: an adapter that declares nothing is in
-   * exactly the state `'unknown'` names, and treating it that way — pass the
-   * counts through untouched, warn once when a cache read makes the ambiguity
-   * bite — is the honest reading of silence. Requiring it would also stop every
-   * external custom adapter compiling for a fact membrane can already say it
-   * does not know. Declare it: `'unknown'` is a real epistemic state, not a
-   * resting place.
+   * Optional, defaulting to `'unknown'`: membrane passes the counts through
+   * untouched and warns once when a cache read makes the ambiguity bite.
    */
   usageCacheConvention?: UsageCacheConvention;
 
@@ -227,6 +179,16 @@ export interface ProviderAdapter {
    * capability. */
   readonly replaysAnthropicServerBlocks?: boolean;
 
+  /** Whether this adapter sends a mid-conversation `role: 'system'` message,
+   * which a formatter that `rendersSystemChanges` builds from a message's
+   * `system_change` blocks (SystemChangeContent), with what the API needs for
+   * it. Only AnthropicAdapter declares it: live checks had the Anthropic API
+   * accept such messages, and whether another provider accepts them is
+   * unknown. For any other adapter Membrane refuses a request carrying one
+   * before sending. A decorator must forward this capability, or a request
+   * through it is refused. */
+  readonly sendsSystemChanges?: boolean;
+
   /**
    * True when this adapter carries the content of every message in the
    * ProviderRequest it receives into its API call (format conversion
@@ -235,13 +197,8 @@ export interface ProviderAdapter {
    * up to the final body, passthrough parameters and cleanup included.
    *
    * Declaring it also commits the adapter to leaving the supplied
-   * ProviderRequest unchanged: it derives its wire body as a separate object
-   * and never mutates the request, its messages or their blocks. Membrane
-   * reuses one request across refusal-retry attempts and attributes reports
-   * by the identity of the blocks it built, so an adapter that edited the
-   * request in place would change what later attempts carry without any
-   * report saying so. The built-in declaring adapters build their bodies
-   * this way.
+   * ProviderRequest unchanged: it never mutates the request, its messages or
+   * their blocks.
    *
    * Round reports (UsageEvent.round) rely on it: an adapter that doesn't
    * declare it leaves a round's fidelity 'unknown'. Decorators must forward
@@ -272,7 +229,6 @@ export interface ProviderAdapter {
   ): Promise<ProviderResponse>;
 }
 
-// Internal types used by adapters
 export interface ProviderRequest {
   /** Raw messages in provider format */
   messages: unknown[];
@@ -312,7 +268,8 @@ export interface ProviderRequest {
 
   /**
    * Extended-thinking config (Anthropic). Presence with a `type` other than
-   * `'disabled'` enables thinking, which strips custom sampling parameters.
+   * `'disabled'` enables thinking, which strips custom temperature and top_k,
+   * and a top_p below 0.95.
    */
   thinking?: { type?: string; [key: string]: unknown };
 
@@ -323,19 +280,58 @@ export interface ProviderRequest {
 export interface ProviderRequestContext {
   formatterName: string;
   toolMode: 'native' | 'xml';
+  /** Whether the request's `tools` holds any. */
   toolsDeclared: boolean;
   /** An XML streaming runner may manufacture prefill on a later continuation. */
   requiresAssistantPrefill: boolean;
+}
+
+/**
+ * What a parsed provider event is, as an adapter that reports content says
+ * through `ProviderRequestOptions.onProgress`. `'content'`: a content delta of
+ * any kind (text, thinking, tool input, a signature), or a `redacted_thinking`
+ * block's start, since that block arrives whole once its think is done. Any
+ * other block's start, apart from a thinking block's (below), is only an
+ * event: a text or tool block's content follows as deltas, and a server
+ * tool's result block, which arrives whole too, follows its call's input
+ * deltas, so content has begun by then.
+ * `'think'`: a `thinking` block's start, unless the body asks for summarized
+ * thinking (`display: 'summarized'`): any other such block can stream
+ * nothing until its signature, as a block of reasoning does under
+ * `display: 'omitted'` or `'updates'`.
+ */
+export type ProgressSeen = 'content' | 'think';
+
+/**
+ * What an adapter reports about one attempt as it sends it, through
+ * `ProviderRequestOptions.onSend`. It comes before any credential resolver
+ * runs, and once for the attempt, so progress bounds count a resolver's time,
+ * and the one resend after an HTTP 401 it makes within the attempt, against
+ * `beforeContentMs`.
+ */
+export interface SendReport {
+  /**
+   * The output-token limit the body asks for (its `max_tokens` or
+   * equivalent), after any default and passthrough parameter the adapter
+   * applied. Progress bounds size a thinking block's allowance from it.
+   */
+  maxTokens?: number;
+  /**
+   * Whether this attempt reports content and thinking blocks' starts through
+   * `onProgress`, so a stream whose content never began can be told from one
+   * whose content isn't reported. Progress bounds apply only to an attempt
+   * that does.
+   */
+  reportsContent?: boolean;
 }
 
 export interface ProviderRequestOptions {
   /** Build/protocol facts for validation against the adapter's final model/body.
    * Not provider JSON. Decorators forward this context with the other options. */
   requestContext?: ProviderRequestContext;
-  /** Current normalized participant messages for prompt serialization. Native
-   * loops pass them outside ProviderRequest so opaque message metadata is not
-   * serialized by semantic receipts. Explicit extra.prompt/normalizedMessages
-   * retain precedence in OpenAICompletionsAdapter. */
+  /** Current normalized participant messages for prompt serialization.
+   * Explicit extra.prompt/normalizedMessages retain precedence in
+   * OpenAICompletionsAdapter. */
   promptMessages?: import('./message.js').NormalizedMessage[];
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -351,29 +347,38 @@ export interface ProviderRequestOptions {
    */
   firstEventTimeoutMs?: number;
   /**
-   * Stream progress, for the progress deadline Membrane core keeps per
-   * provider call (`progressTimeoutMs`). An adapter calls it once per parsed
+   * Stream progress, for the progress deadline and bounds Membrane core keeps
+   * per provider call (`progressTimeoutMs`, `progressBounds`). An adapter
+   * calls it once per parsed
    * provider event: each SDK event, each SSE data frame that parses to a JSON
    * object, each event-stream message that decodes to one. Never for a frame
    * that parses to anything else (`null`, a number, a string, an array),
    * which carries no event, nor for keepalives (Anthropic's and
    * Bedrock's `ping`), SSE comments or raw body bytes: those prove the
-   * connection is up, not that the model is making progress. Decorators must
-   * forward it with the other options; one that drops it turns the progress
-   * deadline into a total one.
+   * connection is up, not that the model is making progress. An adapter that
+   * reports content (SendReport.reportsContent) passes `'content'` for an
+   * event that is content and `'think'` for a thinking block's start (see
+   * ProgressSeen), and nothing for any other.
+   * Decorators must forward it beside the other options: one that drops it
+   * turns the progress deadline into a total one, and one that drops it or
+   * its argument while forwarding `onSend` reports content that never
+   * arrives, so progress bounds end any of its calls still running
+   * `beforeContentMs` after the send. TypeScript doesn't catch a dropped
+   * argument, since a function of no arguments fits this type.
    */
-  onProgress?: () => void;
+  onProgress?: (seen?: ProgressSeen) => void;
+  /**
+   * What this attempt sends (see SendReport), reported once per attempt
+   * beside `onRequest`, before the request goes out. Progress bounds count
+   * from it. Decorators forward it with the other options.
+   */
+  onSend?: (send: SendReport) => void;
   /** Report the final API request body immediately before sending it.
    * Required for adapters declaring cacheReceiptBasis: 'wire-request'.
    * Decorators forward it; raw logging observes each attempt, even when
    * a refusal retry shares its logical cache receipt with an earlier attempt. */
   onRequest?: (rawRequest: unknown) => void;
-  /**
-   * Wrap native thinking deltas in <thinking>...</thinking> tags on the
-   * onChunk stream. Used by the XML formatter path so its tag-based parser
-   * tracks thinking blocks; without this, native thinking content streams
-   * indistinguishably from visible text.
-   */
+  /** Wrap native thinking deltas in <thinking>...</thinking> tags on the onChunk stream. */
   wrapThinkingTags?: boolean;
   /**
    * Called when the adapter did not carry some message content of this
@@ -397,8 +402,7 @@ export interface ProviderInputTransformation {
   path?: string;
   /**
    * The request's own block object at that path, when the adapter could
-   * resolve it (as `ProviderRequestOptions.onContentAltered` takes one), so
-   * membrane can say which message it came from.
+   * resolve it (as `ProviderRequestOptions.onContentAltered` takes one).
    */
   block?: unknown;
 }
@@ -419,6 +423,22 @@ export interface ProviderResponse {
    * otherwise. A value that isn't a non-empty string counts as none.
    */
   providerStopReason?: string;
+
+  /**
+   * The provider's category for a refusal: Anthropic's
+   * `stop_details.category`, such as 'cyber'. Set only when the provider
+   * stopped with `refusal` and named a category as a non-empty string; absent
+   * otherwise. AnthropicAdapter and BedrockAdapter set it on stream() and
+   * complete(). AWS documents Bedrock's `stop_details` on a non-streamed body;
+   * its page doesn't show them in a stream's events, so on Bedrock's stream
+   * they may never come, and the field is read only if a message_delta
+   * carries them. No other built-in adapter sets it. Membrane announces it, and nothing read from
+   * the raw response, on a refusal re-issue's `RetryingEvent.category`.
+   * Custom adapters opt in by supplying it, and a decorator that rebuilds the
+   * response must carry it. As with providerStopReason, membrane reads a value
+   * that isn't a non-empty string as none.
+   */
+  refusalCategory?: string;
   
   /** Which stop sequence triggered */
   stopSequence?: string;
@@ -470,6 +490,20 @@ export interface ProviderResponse {
   /** Model that actually ran */
   model: string;
 
+  /**
+   * The provider's own id for this response (Anthropic: the message id from
+   * `message_start`). Diagnostics only: it names the response in a report to
+   * the provider. Absent when the provider sent none.
+   */
+  responseId?: string;
+
+  /**
+   * The provider's id for the HTTP request (Anthropic: the `request-id`
+   * response header), the id provider support asks for. Absent when the
+   * transport exposed none.
+   */
+  requestId?: string;
+
   /** Raw request that was actually sent to the API */
   rawRequest: unknown;
 
@@ -481,12 +515,12 @@ export interface StreamCallbacks {
   onChunk: (chunk: string) => void;
   /**
    * A provider content block, by its position in the response. Built-in
-   * adapters follow one of two conventions, and Membrane's native loops rely
-   * on them to tell a finished block from one still arriving:
+   * adapters follow one of two conventions:
    * - paired (Anthropic, Bedrock): once when the block starts, with its start
    *   payload, and again when it is finished, with the final payload. A start
    *   payload is not the block's content: a tool call's `input` there is an
-   *   empty placeholder until its arguments have arrived.
+   *   empty placeholder until its arguments have arrived, and Bedrock's adapter
+   *   goes on changing the start payload's object as the block streams.
    * - single-final (OpenAI Responses): once per block, already finished,
    *   after the terminal response has been parsed successfully.
    * Images (OpenRouter) are reported once, when received.

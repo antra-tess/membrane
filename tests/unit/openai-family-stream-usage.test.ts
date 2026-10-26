@@ -1,15 +1,4 @@
-/**
- * `openai-compatible` and `openai-completions` must report the token usage the
- * server sent on a streamed call.
- *
- * Both adapters neither requested usage (`stream_options.include_usage`) nor
- * read it when it arrived anyway: `parseStreamedResponse` / `buildStreamedResponse`
- * hardcoded `inputTokens: 0, outputTokens: 0` behind a comment asserting the
- * data was unavailable. It is available — same endpoint, same wire format, and
- * their two siblings (`openai`, `openrouter`) already consume it. The zeros
- * fed `estimateCost` (cost 0), `calculateCacheHitRatio` (0 by the total===0
- * guard) and every caller-side budget.
- */
+/** An OpenAI-compatible server sends token usage on a streamed call when it is asked for with `stream_options.include_usage`. */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { OpenAICompatibleAdapter } from '../../src/providers/openai-compatible.js';
 import { OpenAICompletionsAdapter } from '../../src/providers/openai-completions.js';

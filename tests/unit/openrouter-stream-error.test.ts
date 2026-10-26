@@ -1,10 +1,6 @@
 /**
- * Mid-stream SSE error events must surface as errors, not truncate silently.
- *
  * OpenRouter delivers upstream failures (e.g. provider 429s) as a data line
- * with an `error` payload inside an HTTP-200 SSE stream. Ignoring it produced
- * a fake-successful empty completion (content: null, finish: stop, usage: 0),
- * which downstream consumers can't distinguish from the model saying nothing.
+ * with an `error` payload inside an HTTP-200 SSE stream.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { OpenRouterAdapter } from '../../src/providers/openrouter.js';

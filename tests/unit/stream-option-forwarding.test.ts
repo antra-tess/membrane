@@ -1,12 +1,3 @@
-/**
- * stream() forwards its per-request deadlines to the adapter (A3 MAJOR-1).
- *
- * timeoutMs is declared and documented on StreamOptions, honoured by every
- * adapter, and forwarded by complete() and by the yielding paths — but the
- * callback streaming path dropped it, so a caller who set a timeout on the
- * one call that can wedge mid-stream got no timeout at all.
- */
-
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { MockAdapter } from '../../src/providers/mock.js';

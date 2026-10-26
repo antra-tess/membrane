@@ -1,14 +1,4 @@
-/**
- * Unit coverage for audio pass-through in the NativeFormatter.
- *
- * The formatter used to treat `audio` as unsupported media (throwing under the
- * default `unsupportedMedia: 'error'`), which meant audio never reached the
- * provider adapters even though Gemini (inlineData) and OpenRouter (input_audio)
- * can convert it. Audio blocks now pass through in the same shape as images:
- * `{ type: 'audio', source: { type: 'base64', media_type, data } }` — the
- * snake_case `media_type` the providers read (with camelCase fallback).
- * Documents remain unsupported media (error/strip as configured).
- */
+/** Gemini (inlineData) and OpenRouter (input_audio) take audio. */
 import { describe, it, expect, vi } from 'vitest';
 import { NativeFormatter } from '../../src/formatters/native.js';
 import type { NormalizedMessage } from '../../src/types/index.js';
@@ -44,7 +34,7 @@ describe('NativeFormatter audio pass-through', () => {
   });
 
   it('does not throw for audio under the default unsupportedMedia: error config', () => {
-    const formatter = new NativeFormatter(); // default: unsupportedMedia 'error'
+    const formatter = new NativeFormatter();
     const messages: NormalizedMessage[] = [
       {
         participant: 'Human',
@@ -58,7 +48,7 @@ describe('NativeFormatter audio pass-through', () => {
   });
 
   it('still errors on document blocks (regression guard)', () => {
-    const formatter = new NativeFormatter(); // default: unsupportedMedia 'error'
+    const formatter = new NativeFormatter();
     const messages: NormalizedMessage[] = [
       {
         participant: 'Human',
@@ -92,7 +82,6 @@ describe('NativeFormatter audio pass-through', () => {
     expect(content.some((b) => b.type === 'audio')).toBe(true);
     expect(content.some((b) => b.type === 'document')).toBe(false);
     expect(content.some((b) => b.type === 'text' && b.text === 'hello')).toBe(true);
-    // The strip warning fires for the document, not the audio
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('Stripped unsupported media'));
     warn.mockRestore();
   });

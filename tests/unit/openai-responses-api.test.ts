@@ -185,8 +185,6 @@ describe('OpenAIResponsesAPIAdapter', () => {
     expect(body.tools).toEqual([{ type: 'function', name: 'patch', description: 'Patch a file', parameters: { type: 'object' }, strict: false }]);
     expect(body.reasoning).toEqual({ effort: 'high', context: 'all_turns' });
 
-    // The native array is the lossless continuation surface: IDs, phases,
-    // encrypted payloads, and ordering are untouched.
     expect(result.outputItems).toEqual(output);
     expect(result.outputItems.map((item) => item.id)).toEqual([
       'rs_2', 'cmp_2', 'msg_2', 'fc_item_2', 'fco_2', 'msg_3',
@@ -260,7 +258,6 @@ describe('OpenAIResponsesAPIAdapter', () => {
     const bytes = new TextEncoder().encode(sse);
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
-        // Split in the middle of JSON to exercise the cross-chunk SSE parser.
         controller.enqueue(bytes.slice(0, 137));
         controller.enqueue(bytes.slice(137));
         controller.close();
@@ -291,10 +288,7 @@ describe('OpenAIResponsesAPIAdapter', () => {
   });
 
   it('raises a retryable error when the stream ends without a terminal event', async () => {
-    // Deltas arrive, then the connection closes cleanly (proxy/LB drop) with
-    // no response.completed / response.incomplete / response.failed / error
-    // event. This must NOT be fabricated into a 'completed' response — that
-    // would permanently persist a truncated turn with end_turn and 0/0 usage.
+    // A proxy or load balancer can close the connection cleanly after the deltas, with no response.completed, response.incomplete, response.failed or error event.
     const events = [
       { type: 'response.output_item.added', output_index: 0, item: { type: 'message', id: 'msg_cut', role: 'assistant', status: 'in_progress', content: [] } },
       { type: 'response.output_text.delta', output_index: 0, content_index: 0, item_id: 'msg_cut', delta: 'Partial ans' },
@@ -303,7 +297,7 @@ describe('OpenAIResponsesAPIAdapter', () => {
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
         controller.enqueue(new TextEncoder().encode(sse));
-        controller.close(); // clean EOF, no terminal event
+        controller.close();
       },
     });
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(body, { status: 200 })));
@@ -320,7 +314,6 @@ describe('OpenAIResponsesAPIAdapter', () => {
     expect(error.type).toBe('network');
     expect(error.retryable).toBe(true);
     expect(error.message).toMatch(/stream ended before a terminal response event/);
-    // The deltas were still surfaced live before the drop was detected.
     expect(chunks).toEqual(['Partial ans']);
   });
 

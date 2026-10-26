@@ -1,18 +1,8 @@
 /**
- * A provider error inside an HTTP 200 reaches the caller as an error on the
- * four OpenAI-style adapters, streamed or not (antra-tess/membrane#136).
- *
- * - A response whose first choice ends with finish_reason "error" and carries
- *   no `error` object read as an ordinary end_turn over the partial text.
- * - So did OpenRouter's documented non-streaming body for a generation that
- *   failed partway, which carries its `error` object on the choice, beside
- *   finish_reason "error" and the partial content.
- * - A non-streaming 200 whose body is only an `error` object, OpenRouter's
- *   documented non-streaming failure, failed in parseResponse on the missing
- *   `choices`: the caller got a TypeError's text, typed unknown and not
- *   retryable, in place of the provider's message and its retry class.
- * - A non-streaming 200 with an `error` object beside its choices returned
- *   the choices' content, where the same object in a stream frame failed it.
+ * OpenRouter documents two failures inside an HTTP 200: a generation that
+ * failed partway carries its `error` object on the choice, beside
+ * finish_reason "error" and the partial content; and a body that is only an
+ * `error` object.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { OpenAIAdapter } from '../../src/providers/openai.js';
@@ -61,7 +51,6 @@ async function rejection(promise: Promise<unknown>): Promise<MembraneError> {
 }
 
 describe("OpenRouter's documented failures are classified by their error object", () => {
-  // The `error` object decides when finish_reason "error" comes beside it.
   it('streamed: an error object at the top level of the last chunk', async () => {
     stubFetchWithSseLines([
       JSON.stringify({ choices: [{ index: 0, delta: { content: 'A summ' }, finish_reason: null }] }),
@@ -91,7 +80,6 @@ describe("OpenRouter's documented failures are classified by their error object"
     expect(error.retryable).toBe(true);
     expect(error.httpStatus).toBe(502);
     expect(error.message).toBe('OpenRouter response error (502): Provider disconnected mid-stream');
-    // The whole body stays attached, the partial content with it.
     expect(error.rawError).toEqual(body);
   });
 
@@ -123,7 +111,6 @@ describe("OpenRouter's documented failures are classified by their error object"
     const objects = [
       { code: 'server_error', message: 'Provider disconnected unexpectedly' },
       { code: 400, message: "This model's maximum context length is 128000 tokens." },
-      // No status or code: the object's message classifies it, not the finish reason.
       { message: "This model's maximum context length is 128000 tokens." },
     ];
     const read = async (body: unknown) => {
@@ -160,7 +147,6 @@ describe.each(ADAPTERS)('$label: a provider error inside a 200', ({ label, compl
     // As the documented server_error frame gets from its code.
     expect(error.httpStatus).toBe(500);
     expect(error.message).toMatch(new RegExp(`^${label} stream error: .*finish_reason "error"`));
-    // The text streamed before the failure was already delivered.
     expect(chunks).toEqual(['A summ']);
   });
 

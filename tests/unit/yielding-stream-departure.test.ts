@@ -1,14 +1,4 @@
-/**
- * Consumer departure on the yielding stream (A3 MAJOR-4, MINOR-6).
- *
- * `for await (… of stream) { break }` calls iterator.return() when the
- * iterator implements it. Without it the loop simply walks away while the
- * background inference promise keeps streaming, keeps auto-resuming and
- * keeps re-sending full context on membrane's own initiative — events piling
- * into an unbounded queue nobody drains, tokens billed for a consumer that
- * left. The stream also kept one abort listener per instance alive on a
- * long-lived caller signal.
- */
+/** `for await (… of stream) { break }` calls iterator.return() when the iterator implements it. */
 
 import { describe, it, expect } from 'vitest';
 import { getEventListeners } from 'node:events';
@@ -22,11 +12,6 @@ import type {
 } from '../../src/types/provider.js';
 import type { StreamCallbacks } from '../../src/types/streaming.js';
 
-/**
- * Streams a long, always-progressing round that stops on a stop sequence
- * inside a block the model opened — the automatic-resumption shape. Left to
- * itself it re-sends full context until the issue-#39 round cap trips.
- */
 class ResumingAdapter implements ProviderAdapter {
   readonly name = 'zz-resuming';
   streamCalls = 0;
@@ -81,8 +66,6 @@ describe('breaking out of the loop stops the producer', () => {
     const callsAtDeparture = adapter.streamCalls;
     await settle();
 
-    // At most the round already in flight may finish. Unfixed, the loop ran
-    // to the resumption cap — ~25 full-context calls after the consumer left.
     expect(adapter.streamCalls).toBeLessThanOrEqual(callsAtDeparture + 1);
     expect(adapter.streamCalls).toBeLessThan(6);
   });
@@ -109,10 +92,7 @@ describe('breaking out of the loop stops the producer', () => {
     await iterator.next();
     expect(typeof iterator.throw).toBe('function');
 
-    // An async generator with no handler of its own rejects with the injected
-    // error. Reporting `done: true` instead made the error vanish: a `yield*`
-    // delegating to this stream resumed after the delegation as if nothing
-    // had been thrown into it.
+    // An async generator with no handler of its own rejects with the injected error.
     const injected = new Error('zz consumer gave up');
     const outcome = await iterator.throw!(injected).then(
       (result) => ({ resolved: result }),
@@ -158,7 +138,6 @@ describe('external abort signal listeners', () => {
       await settle(20);
     }
 
-    // Unfixed: one closure per stream, accumulating on a long-lived signal.
     expect(getEventListeners(controller.signal, 'abort').length).toBe(0);
   });
 });

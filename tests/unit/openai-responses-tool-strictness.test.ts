@@ -1,17 +1,6 @@
 /**
- * Function tools sent through the Responses adapter state their strictness.
- *
- * Connectome's tools are plain JSON Schema: a property outside `required` may
- * be omitted. Left without a `strict` field, a function tool's validation is
- * the provider's default, and strict validation makes every property one the
- * model must send. A Connectome resident's save_recent_image selectors arrived
- * presented as required; that the provider's default caused it is an
- * inference, since these tests mock the provider and no live request was
- * made. So every function tool convertTools takes reaches the wire with a
- * boolean: omitted or null becomes false, an explicit boolean is kept, and
- * anything else is refused, naming the tool, before a request is sent. That
- * holds in API-key and subscription modes and on all three function spellings
- * convertTools accepts.
+ * Without a `strict` field, a function tool's validation is the provider's
+ * default, and strict validation makes every property one the model must send.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OpenAIResponsesAPIAdapter } from '../../src/providers/openai-responses-api.js';
@@ -36,7 +25,6 @@ const SCHEMA = {
 
 type StrictField = Record<string, unknown>;
 
-/** The three function-tool spellings, each carrying `strict` where it keeps it. */
 const SPELLINGS: Record<string, {
   tool: (strict: StrictField) => unknown;
   wire: (strict: boolean) => unknown;
@@ -65,7 +53,6 @@ const ACCEPTED: Array<[string, StrictField, boolean]> = [
   ['explicit false', { strict: false }, false],
 ];
 
-/** Each refused value, and how the refusal spells it: a short string quoted, anything else by its kind. */
 const REFUSED: Array<[string, unknown, string]> = [
   ['the string "true"', 'true', '"true"'],
   ['an empty string', '', '""'],
@@ -131,12 +118,6 @@ const MODES = {
   },
 };
 
-/**
- * A caller's tools, frozen all the way down. Callers send the same tool
- * objects again on later requests, so the adapter must leave them as they
- * are: a write to one throws here, where a copy that only checks the body
- * sent would let it pass.
- */
 function frozen<T>(value: T): T {
   if (value !== null && (typeof value === 'object' || typeof value === 'function') && !Object.isFrozen(value)) {
     Object.freeze(value);
@@ -183,7 +164,6 @@ describe.each(Object.entries(MODES))('Responses function-tool strictness, %s', (
       await expect(sending).rejects.toBeInstanceOf(MembraneError);
       await expect(sending).rejects.toMatchObject({ type: 'invalid_request', retryable: false });
       await expect(sending).rejects.toThrow(`function tool "probe" has strict set to ${spelled}; strict must be true, false, null or omitted`);
-      // It carries the request it refused, holding the tool as the caller wrote it.
       const error = await sending.catch((caught: unknown) => caught);
       expect((error as MembraneError).rawRequest).toMatchObject({ model: refused.model, tools: refused.tools });
       expect(fetchMock).not.toHaveBeenCalled();
@@ -198,7 +178,6 @@ describe.each(Object.entries(MODES))('Responses function-tool strictness, %s', (
     ]));
 
     await expect(sending).rejects.toThrow('the function tool at tools[1], which has no name, has strict set to "yes";');
-    // An empty name is no name, on a flat function, and a Chat-style one has none of its own.
     for (const nameless of [
       { type: 'function', name: '', parameters: SCHEMA, strict: 'yes' },
       { type: 'function', function: { parameters: SCHEMA, strict: 'yes' } },
@@ -230,9 +209,7 @@ describe.each(Object.entries(MODES))('Responses function-tool strictness, %s', (
     const wire = SPELLINGS['a flat Responses function']!.wire;
 
     expect(await sent(wrapped(true))).toEqual([wire(true)]);
-    // null is unstated, as everywhere in the rule, so the wrapper's explicit value stands.
     expect(await sent(wrapped(true, { strict: null }))).toEqual([wire(true)]);
-    // The function's own explicit boolean is the one sent.
     expect(await sent(wrapped(true, { strict: false }))).toEqual([wire(false)]);
 
     const refusing = stubFetch(mode.response);
@@ -248,7 +225,6 @@ describe.each(Object.entries(MODES))('Responses function-tool strictness, %s', (
     };
     await mode.adapter().complete(overridden);
 
-    // The override replaces request.tools, as before; strictness is stated on what reaches the wire.
     expect(sentTools(fetchMock)).toEqual([
       SPELLINGS['a flat Responses function']!.wire(false),
       { type: 'web_search' },
@@ -297,13 +273,6 @@ describe.each(Object.entries(MODES))('Responses function-tool strictness, %s', (
   });
 });
 
-/**
- * AF's synthesized save_recent_image tool, as agent-framework 64c480b
- * (src/framework.ts SAVE_IMAGE_TOOL) defines it: `path` required, the three
- * selectors optional. What this pins is membrane's side — the schema reaches
- * the wire unchanged, beside `strict: false` — which holds for any revision of
- * the definition.
- */
 const SAVE_RECENT_IMAGE: ToolDefinition = frozen({
   name: 'save_recent_image',
   description: 'Save one or more recent images from your own context to workspace files.',
@@ -364,9 +333,6 @@ describe('save_recent_image through Membrane', () => {
     ]);
   });
 
-  // A caller's strict reaches the adapter through Membrane in providerParams.tools,
-  // since ToolDefinition has none. Membrane fills a refusal's missing rawRequest
-  // from the last request it sent, so the refusal brings its own.
   it.each(['complete', 'stream'] as const)(
     'refuses a non-boolean strict from %s() once, unretried, with no onError, carrying the request it refused',
     async (call) => {
@@ -399,9 +365,6 @@ describe('save_recent_image through Membrane', () => {
   );
 
   it('refuses on a retry with the retry\'s own request, not the attempt sent before it', async () => {
-    // The first attempt is sent and answered 500, which Membrane retries; a
-    // beforeRequest hook gives the retry a tool whose strict is refused. The
-    // refusal must carry the retry's request, though Membrane holds the first.
     const fetchMock = vi.fn()
       .mockImplementationOnce(async () => new Response(JSON.stringify({ error: { message: 'boom', type: 'server_error' } }), {
         status: 500,

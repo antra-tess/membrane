@@ -1,10 +1,7 @@
 /**
- * Plain Claude ids must map to invokable Bedrock ids. Claude 4-era models
- * reject on-demand invocation of the direct `anthropic.<id>-v1:0` form
- * ("...with on-demand throughput isn't supported") and require a
- * cross-region inference profile (us./eu./apac.), chosen by adapter
- * region. Verified live 2026-07-31; same probe found the old
- * claude-haiku-4-5 → 3.5 Haiku alias routing to an EOL model.
+ * Claude 4-era models reject on-demand invocation of the direct
+ * `anthropic.<id>-v1:0` form ("...with on-demand throughput isn't supported")
+ * and require a cross-region inference profile (us./eu./apac.).
  */
 
 import { describe, it, expect } from 'vitest';
@@ -25,9 +22,7 @@ describe('BedrockAdapter model id mapping', () => {
     expect(mapId('anthropic.claude-3-opus-20240229-v1:0')).toBe('anthropic.claude-3-opus-20240229-v1:0');
     expect(mapId('us.anthropic.claude-opus-4-1-20250805-v1:0')).toBe('us.anthropic.claude-opus-4-1-20250805-v1:0');
     expect(mapId('bedrock:us.anthropic.claude-sonnet-4-20250514-v1:0')).toBe('us.anthropic.claude-sonnet-4-20250514-v1:0');
-    // `global` is 6 chars — regression check for the {2,4} prefix regex that
-    // re-prefixed global inference-profile ids (found wiring Princess via
-    // gate apse1, where Sonnet 4.5 exists ONLY as the global. profile).
+    // In ap-southeast-1, Sonnet 4.5 is offered only as the `global.` inference profile.
     expect(mapId('global.anthropic.claude-sonnet-4-5-20250929-v1:0')).toBe('global.anthropic.claude-sonnet-4-5-20250929-v1:0');
     expect(mapId('global.anthropic.claude-sonnet-4-5-20250929-v1:0', 'ap-southeast-1')).toBe('global.anthropic.claude-sonnet-4-5-20250929-v1:0');
   });

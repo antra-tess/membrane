@@ -1,18 +1,3 @@
-/**
- * dynamicHeaders: live per-request header stamps (e.g. x-gate-debt-chunks,
- * a household-telemetry value read by an inference gateway and stripped
- * there — the vendor never sees it).
- *
- * Contract under test:
- *   - the callback is evaluated PER REQUEST, so a changing value (compression
- *     debt) produces a fresh header on every call;
- *   - null / undefined / '' entries are dropped, and an all-empty result
- *     leaves headers exactly as they were (undefined stays undefined);
- *   - the cache-keepalive recorder receives the PRE-merge headers: a replayed
- *     touch must never resend a stale telemetry stamp — an unstamped touch is
- *     honest, a stale stamp lies.
- */
-
 import { describe, it, expect, vi } from 'vitest';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import type { ProviderRequest } from '../../src/types/index.js';
@@ -55,7 +40,7 @@ describe('AnthropicAdapter dynamicHeaders', () => {
     await adapter.complete(REQUEST);
     expect(create.mock.calls[0][1].headers).toEqual({ 'x-gate-debt-chunks': '3' });
 
-    debt = 7; // a chunk appeared between calls
+    debt = 7;
     await adapter.complete(REQUEST);
     expect(create.mock.calls[1][1].headers).toEqual({ 'x-gate-debt-chunks': '7' });
   });
@@ -87,9 +72,7 @@ describe('AnthropicAdapter dynamicHeaders', () => {
 
     await adapter.complete(REQUEST);
 
-    // outgoing request carries the live stamp…
     expect(create.mock.calls[0][1].headers).toEqual({ 'x-gate-debt-chunks': '42' });
-    // …but the recorded (replayable) headers do not
     const recordedHeaders = record.mock.calls[0][1];
     expect(recordedHeaders?.['x-gate-debt-chunks']).toBeUndefined();
   });

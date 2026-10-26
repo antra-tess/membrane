@@ -1,9 +1,3 @@
-/**
- * Integration test for onChunk and onBlock callbacks
- *
- * Run with: ANTHROPIC_API_KEY=sk-... npx tsx scripts/test-callbacks.ts
- */
-
 import { Membrane } from '../src/membrane.js';
 import { AnthropicAdapter } from '../src/providers/anthropic.js';
 import type { NormalizedRequest, ToolDefinition, BlockEvent, ChunkMeta } from '../src/types/index.js';
@@ -17,7 +11,6 @@ if (!apiKey) {
 const adapter = new AnthropicAdapter({ apiKey });
 const membrane = new Membrane(adapter);
 
-// Define a simple tool
 const tools: ToolDefinition[] = [
   {
     name: 'get_weather',
@@ -85,7 +78,6 @@ async function runTest() {
         for (const call of calls) {
           console.log(`  - ${call.name}(${JSON.stringify(call.input)})`);
         }
-        // Return mock results
         return calls.map(call => ({
           toolUseId: call.id,
           content: `Weather in ${(call.input as any).location}: Sunny, 22°C`,
@@ -135,7 +127,6 @@ async function runTest() {
       console.log(`  ${type}: ${count}`);
     }
 
-    // Verify expectations
     console.log('\n=== Verification ===\n');
 
     const hasThinkingChunks = chunks.some(c => c.meta.type === 'thinking');

@@ -1,38 +1,15 @@
-/**
- * Regression test for Bug C: thinking-block signatures must round-trip
- * through the Anthropic adapter.
- *
- * Coverage:
- *   - Inbound streaming path: signature_delta events are accumulated onto
- *     contentBlocks[idx].signature during for-await on the SSE stream.
- *   - Inbound non-streaming path: fromAnthropicContent captures signature.
- *   - Outbound path: toAnthropicContent emits signature when present, omits
- *     it when absent.
- *
- * Background: prior to this fix, the streaming accumulator dropped
- * signature_delta events and the outbound serializer stripped the signature
- * field. End result: a thinking block authored by the model could never be
- * faithfully re-sent in history, and any session running with extended
- * thinking enabled would 400 the moment a thinking block landed in a
- * compression chunk or got re-shipped on a tool-result follow-up.
- */
-
 import { describe, it, expect } from 'vitest';
 import {
   AnthropicAdapter,
   toAnthropicContent,
   fromAnthropicContent,
 } from '../../src/providers/anthropic.js';
+import { BedrockAdapter } from '../../src/providers/bedrock.js';
 import type { ContentBlock } from '../../src/types/index.js';
-
-// ---------------------------------------------------------------------------
-// Fake SSE stream — async iterable with the minimal surface area the adapter
-// touches (Symbol.asyncIterator + .controller.abort()).
-// ---------------------------------------------------------------------------
 
 function fakeStream(events: any[]) {
   return {
-    controller: { abort() { /* noop */ } },
+    controller: { abort() { } },
     [Symbol.asyncIterator]() {
       let i = 0;
       return {
@@ -45,15 +22,10 @@ function fakeStream(events: any[]) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// 1. Streaming accumulator — signature_delta lands on the thinking block
-// ---------------------------------------------------------------------------
-
 describe('AnthropicAdapter streaming: signature_delta', () => {
   it('accumulates signature_delta onto the active thinking block', async () => {
     const adapter = new AnthropicAdapter({ apiKey: 'sk-test' });
 
-    // Replace the SDK client with a stub that returns our scripted stream.
     (adapter as any).client = {
       withOptions() { return this; },
       messages: {
@@ -107,9 +79,6 @@ describe('AnthropicAdapter streaming: signature_delta', () => {
   });
 
   it('does not break on signature_delta when no thinking block is active', async () => {
-    // Defensive: stray/out-of-order signature_delta on a text block must not
-    // throw or corrupt the text block. (Should not happen per protocol, but
-    // we don't want to be brittle.)
     const adapter = new AnthropicAdapter({ apiKey: 'sk-test' });
 
     (adapter as any).client = {
@@ -142,10 +111,6 @@ describe('AnthropicAdapter streaming: signature_delta', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// 2. fromAnthropicContent — non-streaming inbound path
-// ---------------------------------------------------------------------------
-
 describe('fromAnthropicContent: thinking signature', () => {
   it('captures signature on non-streaming inbound thinking blocks', () => {
     const normalized = fromAnthropicContent([
@@ -161,10 +126,6 @@ describe('fromAnthropicContent: thinking signature', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// 3. toAnthropicContent — outbound serialization
-// ---------------------------------------------------------------------------
-
 describe('toAnthropicContent: thinking signature', () => {
   it('emits the signature field when present', () => {
     const out = toAnthropicContent([
@@ -177,35 +138,99 @@ describe('toAnthropicContent: thinking signature', () => {
     expect(block.signature).toBe('sig-xyz');
   });
 
-  it('omits the signature field when absent', () => {
+  // The API refuses a thinking block with no signature ("signature: Field
+  // required") and one with an empty or made-up signature ("Invalid
+  // `signature` in `thinking` block").
+  it('leaves out a thinking block with no signature', () => {
     const out = toAnthropicContent([
       { type: 'thinking', thinking: 'no sig' },
+      { type: 'text', text: 'answer' },
     ]);
-    const block = out[0] as any;
-    expect(block.type).toBe('thinking');
-    expect(block.thinking).toBe('no sig');
-    expect('signature' in block).toBe(false);
+    expect(out).toEqual([{ type: 'text', text: 'answer' }]);
   });
 
-  it('omits the signature field when empty string', () => {
-    // An empty signature is just as invalid to the API as a missing one
-    // (HTTP 400 "Invalid signature in thinking block"). Don't ship it.
+  it('leaves out a thinking block whose signature is empty', () => {
     const out = toAnthropicContent([
       { type: 'thinking', thinking: 'empty sig', signature: '' },
+      { type: 'text', text: 'answer' },
     ]);
-    const block = out[0] as any;
-    expect('signature' in block).toBe(false);
+    expect(out).toEqual([{ type: 'text', text: 'answer' }]);
+  });
+
+  it('leaves a turn of only a thinking block with no signature empty, for the caller to drop', () => {
+    expect(toAnthropicContent([{ type: 'thinking', thinking: 'no sig' }])).toEqual([]);
+  });
+
+  it('keeps a signature-only block, Anthropic\'s own with its thinking omitted', () => {
+    const out = toAnthropicContent([{ type: 'thinking', thinking: '', signature: 'sig-only' }]);
+    expect(out).toEqual([{ type: 'thinking', thinking: '', signature: 'sig-only' }]);
   });
 });
 
-// ---------------------------------------------------------------------------
-// 4. Round-trip — chain the three above
-// ---------------------------------------------------------------------------
+function history(blocks: unknown[]) {
+  return {
+    model: 'claude-haiku-4-5',
+    maxTokens: 64,
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: 'Say hello.' }] },
+      { role: 'assistant', content: blocks },
+      { role: 'user', content: [{ type: 'text', text: 'Again?' }] },
+    ],
+  };
+}
+
+const UNSIGNED = { type: 'thinking', thinking: 'another provider\'s reasoning' };
+const SIGNED = { type: 'thinking', thinking: 'mine', signature: 'sig-own' };
+const SIGNATURE_ONLY = { type: 'thinking', thinking: '', signature: 'sig-only' };
+const ANSWER = { type: 'text', text: 'Hello!' };
+
+const builders: Array<[string, (request: unknown, onAltered: (block?: unknown) => void) => any]> = [
+  ['AnthropicAdapter', (request, onAltered) =>
+    (new AnthropicAdapter({ apiKey: 'test', cacheKeepalive: { enabled: false } }) as any).buildRequest(request, onAltered)],
+  ['BedrockAdapter', (request, onAltered) =>
+    (new BedrockAdapter({ accessKeyId: 'test-key', secretAccessKey: 'test-secret', region: 'us-west-2' }) as any)
+      .buildRequest(request, undefined, onAltered)],
+];
+
+describe.each(builders)('%s request: a thinking block with no signature', (_name, build) => {
+  it('is left out of its turn and reported, its signed siblings kept', () => {
+    const heard: unknown[] = [];
+    const built = build(history([UNSIGNED, SIGNED, SIGNATURE_ONLY, ANSWER]), (block) => heard.push(block));
+
+    expect(built.messages[1].content).toEqual([SIGNED, SIGNATURE_ONLY, ANSWER]);
+    expect(heard).toHaveLength(1);
+    expect(heard[0]).toBe(UNSIGNED);
+  });
+
+  it('with an empty signature is left out and reported too', () => {
+    const heard: unknown[] = [];
+    const empty = { ...UNSIGNED, signature: '' };
+    const built = build(history([empty, ANSWER]), (block) => heard.push(block));
+
+    expect(built.messages[1].content).toEqual([ANSWER]);
+    expect(heard).toHaveLength(1);
+    expect(heard[0]).toBe(empty);
+  });
+
+  it('that was its turn\'s only block leaves no empty assistant turn', () => {
+    const heard: unknown[] = [];
+    const built = build(history([UNSIGNED]), (block) => heard.push(block));
+
+    expect(built.messages.map((m: { role: string }) => m.role)).toEqual(['user', 'user']);
+    expect(heard).toContain(UNSIGNED);
+  });
+
+  it('that was the final assistant turn\'s only block is refused, as an emptied final turn is', () => {
+    const heard: unknown[] = [];
+    const final = { ...history([UNSIGNED]), messages: history([UNSIGNED]).messages.slice(0, 2) };
+
+    expect(() => build(final, (block) => heard.push(block))).toThrow("would change the request's final role to user");
+    expect(heard).toContain(UNSIGNED);
+  });
+});
 
 describe('Anthropic adapter: signature round-trip', () => {
   it('preserves signature from inbound through outbound', () => {
-    // Simulate: API returned a thinking block with signature → normalized →
-    // stored → re-serialized on the next outbound request.
     const inbound = fromAnthropicContent([
       { type: 'thinking', thinking: 'inner monologue', signature: 'sig-rt' } as any,
     ]);

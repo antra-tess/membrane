@@ -3,14 +3,7 @@ import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import { createProgressDeadline } from '../../src/providers/utils.js';
 import type { ProviderRequest } from '../../src/types/index.js';
 
-/**
- * Idle-watchdog regressions through the real SDK SSE parser. The SDK drops
- * `ping` events before the adapter sees them, so a body that only carries
- * keepalives must still count as live transport after the first SDK event. The
- * first-event deadline remains fixed even when pre-event bytes arrive. Timings
- * are scaled fixture inputs only: the ratios (pings every ~IDLE/5, runs of
- * 4x IDLE) are wide so loaded machines do not turn them into races.
- */
+/** The Anthropic SDK drops `ping` SSE events before the adapter sees them. */
 const IDLE_MS = 150;
 const PING_MS = 30;
 const LIVE_MS = 4 * IDLE_MS;
@@ -48,7 +41,6 @@ interface Probe { torn: boolean }
 
 const probes: Probe[] = [];
 
-/** A live SSE body the test scripts byte by byte; records transport teardown. */
 function liveResponse(init: RequestInit | undefined, script: (io: Io) => Promise<void>): Response {
   const encoder = new TextEncoder();
   const probe: Probe = { torn: false };
@@ -61,7 +53,7 @@ function liveResponse(init: RequestInit | undefined, script: (io: Io) => Promise
     if (done) return;
     done = true;
     release();
-    try { if (error) controller.error(error); else controller.close(); } catch { /* already settled */ }
+    try { if (error) controller.error(error); else controller.close(); } catch { }
   };
   const body = new ReadableStream<Uint8Array>({
     start(c) { controller = c; },
@@ -72,7 +64,7 @@ function liveResponse(init: RequestInit | undefined, script: (io: Io) => Promise
     stop(Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' }));
   }, { once: true });
   void script({
-    emit: text => { if (!done) { try { controller.enqueue(encoder.encode(text)); } catch { /* closed */ } } },
+    emit: text => { if (!done) { try { controller.enqueue(encoder.encode(text)); } catch { } } },
     sleep: ms => new Promise<void>(resolve => setTimeout(resolve, ms)),
     close: () => stop(),
     isDone: () => done,
@@ -81,7 +73,6 @@ function liveResponse(init: RequestInit | undefined, script: (io: Io) => Promise
   return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream', 'request-id': 'req_fixture' } });
 }
 
-/** Keepalives only, at PING_MS intervals, for about `ms`. */
 async function keepalives(io: Io, ms: number): Promise<void> {
   for (let elapsed = 0; elapsed < ms && !io.isDone(); elapsed += PING_MS) {
     io.emit(ping());
@@ -147,7 +138,7 @@ describe('Anthropic stream idle watchdog with live transport', () => {
     const progress = createProgressDeadline(undefined, 2 * LIVE_MS);
     try {
       await expect(newAdapter().stream(request, { onChunk: () => {} }, {
-        ...timing, signal: progress.signal, onProgress: progress.renew,
+        ...timing, signal: progress.signal, onProgress: progress.onProgress,
       })).rejects.toMatchObject({
         type: 'timeout', retryable: true, message: expect.stringMatching(/first-event timeout/),
       });
@@ -303,16 +294,14 @@ describe('Anthropic stream setup and alternate SDK response bodies', () => {
 
   it('passes an async-iterable SSE body through the real SDK without retry or byte loss', async () => {
     const encoder = new TextEncoder();
-    // message_delta is the adapter's terminal event; it intentionally closes
-    // the transport before any later message_stop frame.
-    const bytes = encoder.encode(messageStart() + ping() + answer().slice(0, -1).join(''));
+    const answerThroughMessageDelta = answer().slice(0, -1);
+    const bytes = encoder.encode(messageStart() + ping() + answerThroughMessageDelta.join(''));
     let consumed = 0;
     const calls = stubFetch(() => {
       const response = new Response(null, { headers: {
         'content-type': 'text/event-stream', 'request-id': 'req_async_fixture',
       } });
-      // SDK 0.52 shims accepts async iterables. Split every byte to also cover
-      // framing boundaries and preserve the exact encoded stream.
+      // The SDK's shims (0.52) accept an async-iterable body.
       Object.defineProperty(response, 'body', { value: {
         async *[Symbol.asyncIterator]() {
           for (const byte of bytes) { consumed++; yield Uint8Array.of(byte); }

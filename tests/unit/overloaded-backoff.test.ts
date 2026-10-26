@@ -1,9 +1,3 @@
-/**
- * Overloaded (529) backoff policy: capacity errors always retry on their own
- * long, jittered schedule — in complete() via the shared retry loop, and in
- * stream() via the pre-emission wrapper (Connectome issue #25).
- */
-
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { MockAdapter } from '../../src/providers/mock.js';
@@ -12,9 +6,6 @@ import type { NormalizedRequest } from '../../src/types/index.js';
 import type { ProviderRequest, ProviderRequestOptions, ProviderResponse } from '../../src/types/provider.js';
 import type { StreamCallbacks } from '../../src/types/streaming.js';
 
-/** Fails the first `failures` calls with the given error factory, then
- *  delegates to MockAdapter. `emitBeforeFailure` streams one chunk before
- *  throwing, to exercise the post-emission no-retry rule. */
 class FlakyAdapter extends MockAdapter {
   completeCalls = 0;
   streamCalls = 0;
@@ -53,7 +44,6 @@ const REQUEST: NormalizedRequest = {
   config: { model: 'test', maxTokens: 100 },
 };
 
-/** Millisecond-scale overloaded schedule so retry tests stay fast. */
 const FAST_OVERLOADED = { retry: { overloaded: { retryDelayMs: 1, maxRetryDelayMs: 2 } } };
 
 describe('isOverloadedError', () => {
@@ -76,13 +66,8 @@ describe('isOverloadedError', () => {
   });
 
   it('does not match bare "overloaded" prose — only the exact token or status', () => {
-    // A retryable error whose message merely contains the word must not be
-    // promoted onto the ~10-minute schedule (same narrowness as classifyError:
-    // status / '529' / exact 'overloaded_error').
     expect(isOverloadedError(classifyError(serverError('worker pool overloaded', 503)))).toBe(false);
     expect(isOverloadedError(classifyError(networkError('connection dropped: peer overloaded')))).toBe(false);
-    // The provider handlers' bare-'overloaded' safety nets attach status 529,
-    // which is what routes them here.
     expect(isOverloadedError(classifyError(serverError('Overloaded', 529)))).toBe(true);
   });
 });
@@ -97,9 +82,9 @@ describe('complete() overloaded retries', () => {
     expect(response.content[0]).toMatchObject({ type: 'text', text: 'recovered' });
   });
 
-  it('still does not retry plain 500s when maxRetries is 0', async () => {
+  it('does not retry plain 500s when maxRetries is 0', async () => {
     const adapter = new FlakyAdapter(1, () => serverError('Internal server error', 500));
-    const membrane = new Membrane(adapter, FAST_OVERLOADED);
+    const membrane = new Membrane(adapter, { retry: { ...FAST_OVERLOADED.retry, maxRetries: 0 } });
     await expect(membrane.complete(REQUEST)).rejects.toThrow('Internal server error');
     expect(adapter.completeCalls).toBe(1);
   });
@@ -107,25 +92,24 @@ describe('complete() overloaded retries', () => {
   it('gives up after overloaded.maxRetries total attempts', async () => {
     const adapter = new FlakyAdapter(Infinity, overloaded529);
     const membrane = new Membrane(adapter, {
-      retry: { overloaded: { maxRetries: 2, retryDelayMs: 1, maxRetryDelayMs: 2 } },
+      retry: { maxRetries: 1, overloaded: { maxRetries: 2, retryDelayMs: 1, maxRetryDelayMs: 2 } },
     });
     await expect(membrane.complete(REQUEST)).rejects.toThrow('Overloaded');
-    // maxRetries bounds TOTAL attempts, matching the base/429 semantics.
     expect(adapter.completeCalls).toBe(2);
   });
 
   it('stream() shares the same attempt bound', async () => {
     const adapter = new FlakyAdapter(Infinity, overloaded529);
     const membrane = new Membrane(adapter, {
-      retry: { overloaded: { maxRetries: 2, retryDelayMs: 1, maxRetryDelayMs: 2 } },
+      retry: { maxRetries: 1, overloaded: { maxRetries: 2, retryDelayMs: 1, maxRetryDelayMs: 2 } },
     });
     await expect(membrane.stream(REQUEST, {})).rejects.toThrow('Overloaded');
     expect(adapter.streamCalls).toBe(2);
   });
 
-  it('overloaded.maxRetries: 0 opts out entirely', async () => {
+  it('overloaded.maxRetries: 0 opts out of the overloaded schedule: with maxRetries 1, no retry', async () => {
     const adapter = new FlakyAdapter(1, overloaded529);
-    const membrane = new Membrane(adapter, { retry: { overloaded: { maxRetries: 0 } } });
+    const membrane = new Membrane(adapter, { retry: { maxRetries: 1, overloaded: { maxRetries: 0 } } });
     await expect(membrane.complete(REQUEST)).rejects.toThrow('Overloaded');
     expect(adapter.completeCalls).toBe(1);
   });
@@ -136,9 +120,6 @@ describe('complete() overloaded retries', () => {
       retry: { maxRetries: 2, retryDelayMs: 1, maxRetryDelayMs: 2, overloaded: { maxRetries: 0 } },
     });
     await expect(membrane.complete(REQUEST)).rejects.toThrow('Overloaded');
-    // With the dedicated policy disabled, the 529 is still a retryable
-    // server error under the BASE config (pre-policy behavior), so the
-    // base bound of 2 attempts applies — neither zero nor the 529 floor.
     expect(adapter.completeCalls).toBe(2);
   });
 
@@ -156,12 +137,12 @@ describe('complete() overloaded retries', () => {
     });
     await expect(membrane.complete(REQUEST)).rejects.toThrow('Overloaded');
     expect(hookAttempts).toEqual([1, 2]);
-    expect(adapter.completeCalls).toBe(2); // stopped by the hook, not the bound
+    expect(adapter.completeCalls).toBe(2);
   });
 });
 
 describe('stream() overloaded retries', () => {
-  it('retries a 529 that arrives before any output', async () => {
+  it('retries a 529 that arrives before any output, and reports the attempts and retry delays', async () => {
     const adapter = new FlakyAdapter(2, overloaded529);
     adapter.queueResponse('recovered');
     const membrane = new Membrane(adapter, FAST_OVERLOADED);
@@ -169,10 +150,7 @@ describe('stream() overloaded retries', () => {
     const result = await membrane.stream(REQUEST, { onChunk: (text) => { chunks.push(text); } });
     expect(adapter.streamCalls).toBe(3);
     expect('content' in result && result.content[0]).toMatchObject({ type: 'text', text: 'recovered' });
-    // Output was delivered exactly once — the failed attempts emitted nothing.
     expect(chunks.join('')).toBe('recovered');
-    // Truthful telemetry: a success after two retries must not look like a
-    // first-attempt success in durable logs.
     expect('details' in result && result.details.timing.attempts).toBe(3);
     expect('details' in result && result.details.timing.retryDelaysMs).toHaveLength(2);
   });
@@ -187,32 +165,36 @@ describe('stream() overloaded retries', () => {
   });
 
   it('does NOT retry once output has been emitted', async () => {
-    const adapter = new FlakyAdapter(1, overloaded529, /* emitBeforeFailure */ true);
+    const emitBeforeFailure = true;
+    const adapter = new FlakyAdapter(1, overloaded529, emitBeforeFailure);
     const membrane = new Membrane(adapter, FAST_OVERLOADED);
     const chunks: string[] = [];
     await expect(
       membrane.stream(REQUEST, { onChunk: (text) => { chunks.push(text); } }),
     ).rejects.toThrow('Overloaded');
     expect(adapter.streamCalls).toBe(1);
-    expect(chunks.join('')).toBe('partial '); // no replayed content
+    expect(chunks.join('')).toBe('partial ');
   });
 
-  it('does not retry non-overloaded stream errors', async () => {
-    const adapter = new FlakyAdapter(1, () => serverError('Internal server error', 500));
-    const membrane = new Membrane(adapter, FAST_OVERLOADED);
+  it('retries a non-overloaded stream error within maxRetries, and not with maxRetries 1', async () => {
+    const retried = new FlakyAdapter(1, () => serverError('Internal server error', 500));
+    retried.queueResponse('recovered');
+    await new Membrane(retried, { retry: { ...FAST_OVERLOADED.retry, retryDelayMs: 1, maxRetryDelayMs: 2 } }).stream(REQUEST, {});
+    expect(retried.streamCalls).toBe(2);
+
+    const once = new FlakyAdapter(1, () => serverError('Internal server error', 500));
+    const membrane = new Membrane(once, { retry: { ...FAST_OVERLOADED.retry, maxRetries: 1 } });
     await expect(membrane.stream(REQUEST, {})).rejects.toThrow('Internal server error');
-    expect(adapter.streamCalls).toBe(1);
+    expect(once.streamCalls).toBe(1);
   });
 
-  it('opt-out disables stream retries even with positive base retries', async () => {
+  it('with the overloaded policy off, a 529 on stream() follows the base policy', async () => {
     const adapter = new FlakyAdapter(Infinity, overloaded529);
     const membrane = new Membrane(adapter, {
       retry: { maxRetries: 3, retryDelayMs: 1, maxRetryDelayMs: 2, overloaded: { maxRetries: 0 } },
     });
     await expect(membrane.stream(REQUEST, {})).rejects.toThrow('Overloaded');
-    // Streaming had no retry before this policy; disabling the policy
-    // restores exactly that, whatever the base config says.
-    expect(adapter.streamCalls).toBe(1);
+    expect(adapter.streamCalls).toBe(3);
   });
 
   it('consults the onError hook before each stream retry and honors abort', async () => {
@@ -229,6 +211,6 @@ describe('stream() overloaded retries', () => {
     });
     await expect(membrane.stream(REQUEST, {})).rejects.toThrow('Overloaded');
     expect(hookAttempts).toEqual([1, 2]);
-    expect(adapter.streamCalls).toBe(2); // stopped by the hook, not the bound
+    expect(adapter.streamCalls).toBe(2);
   });
 });

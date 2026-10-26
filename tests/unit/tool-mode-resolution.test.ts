@@ -1,14 +1,3 @@
-/**
- * Tool-mode resolution is ONE decision, made by Membrane.resolveToolMode, and
- * both request paths must obey it identically.
- *
- * Before this suite, complete() never consulted resolveToolMode: it built
- * through AnthropicXmlFormatter's constructor-time config.toolMode, so a
- * request carrying toolMode: 'native' still got XML tool instructions injected
- * into the conversation and no native tool declarations on the wire, while the
- * same request through stream() got native tools.
- */
-
 import { describe, it, expect } from 'vitest';
 import { AnthropicXmlFormatter } from '../../src/formatters/anthropic-xml.js';
 import { OpenAIResponsesFormatter } from '../../src/formatters/openai-responses.js';
@@ -47,11 +36,6 @@ function zzRequest(toolMode?: ToolMode): NormalizedRequest {
   };
 }
 
-/**
- * The two wire-visible consequences of the tool-mode decision: native tool
- * declarations on the provider request, and XML tool instructions injected
- * into the built conversation/system text.
- */
 function toolModeEvidence(adapter: MockAdapter): { nativeToolNames: string[]; xmlInjected: boolean } {
   const lastRequest = adapter.getLastRequest() as unknown as {
     tools?: Array<{ name: string }>;
@@ -78,7 +62,7 @@ async function evidenceFromStream(membrane: Membrane, adapter: MockAdapter, tool
 describe('complete() honors request.toolMode', () => {
   it('sends native tool declarations instead of XML instructions for toolMode: native', async () => {
     const adapter = new MockAdapter();
-    const membrane = new Membrane(adapter); // default AnthropicXmlFormatter (config.toolMode 'xml')
+    const membrane = new Membrane(adapter);
 
     const evidence = await evidenceFromComplete(membrane, adapter, 'native');
 
@@ -135,7 +119,7 @@ describe('stream() and complete() resolve tool mode identically', () => {
 describe('per-request formatter override participates in resolution', () => {
   it('complete() with an options.formatter configured native declares native tools', async () => {
     const adapter = new MockAdapter();
-    const membrane = new Membrane(adapter); // instance formatter is XML-mode
+    const membrane = new Membrane(adapter);
 
     await membrane.complete(zzRequest(), {
       formatter: new AnthropicXmlFormatter({ toolMode: 'native' }),
@@ -148,7 +132,7 @@ describe('per-request formatter override participates in resolution', () => {
 
   it('stream() with an options.formatter configured native declares native tools', async () => {
     const adapter = new MockAdapter();
-    const membrane = new Membrane(adapter); // instance formatter is XML-mode
+    const membrane = new Membrane(adapter);
 
     await membrane.stream(zzRequest(), {
       formatter: new AnthropicXmlFormatter({ toolMode: 'native' }),
@@ -159,8 +143,6 @@ describe('per-request formatter override participates in resolution', () => {
     expect(evidence.xmlInjected).toBe(false);
   });
 
-  // The override cell of the symmetry table above: the same override, through
-  // both entry points, for every request mode.
   for (const requestMode of [undefined, 'auto', 'xml', 'native'] as Array<ToolMode | undefined>) {
     it(`override formatter configured native + request toolMode ${String(requestMode)} resolves identically on both paths`, async () => {
       const completeAdapter = new MockAdapter();
@@ -188,25 +170,9 @@ describe('resolution drives the stream tool loop, not just the wire', () => {
     await membrane.stream(zzRequest());
 
     const lastRequest = adapter.getLastRequest() as unknown as { stopSequences?: string[] };
-    // The XML tool loop stops the model on the closing tag; the native loop has
-    // no such stop. Native tools on the wire with an XML stop sequence means the
-    // loop and the request disagree about the mode.
     expect(lastRequest.stopSequences ?? []).not.toContain('</function_calls>');
   });
 });
-
-// ---------------------------------------------------------------------------
-// One ACTIVE formatter per request: the loop, the build, and the mode
-// resolution must all name the same formatter instance.
-//
-// The Responses transport keeps the configured Responses formatter
-// authoritative over a per-request override (its input is a provider-native
-// item array a generic override cannot produce). That authority rule used to
-// live inside transformRequest alone, so the build honored it while
-// resolveToolMode and buildNativeToolRequest resolved against a different
-// formatter — the same split the suite above exists to prevent, one layer
-// down.
-// ---------------------------------------------------------------------------
 
 interface ZzScriptedTurn {
   content: ContentBlock[];
@@ -226,12 +192,6 @@ const zzFinalTurn: ZzScriptedTurn = {
   stopReason: 'end_turn',
 };
 
-/**
- * Scripted adapter that records every provider request verbatim and answers
- * with native tool_use content — the tool loop's own shape, which the XML
- * parser cannot see. Its `name` is a constructor argument because the
- * Responses authority rule keys on the adapter name.
- */
 class ZzScriptedToolAdapter implements ProviderAdapter {
   readonly name: string;
   readonly requests: ProviderRequest[] = [];
@@ -280,7 +240,6 @@ class ZzScriptedToolAdapter implements ProviderAdapter {
   }
 }
 
-/** Answer every tool round, recording the calls the loop actually delivered. */
 function zzToolRoundRecorder(): {
   rounds: ToolCall[][];
   onToolCalls: (calls: ToolCall[]) => Promise<ToolResult[]>;
@@ -297,10 +256,6 @@ function zzToolRoundRecorder(): {
 
 describe('the active formatter drives the loop, the build, and the mode together', () => {
   it('runs the native loop when Responses authority overrides a per-request formatter', async () => {
-    // Sol's probe: instance Responses formatter on the Responses transport
-    // (authoritative for the BUILD) plus an XML per-request override. Resolving
-    // the mode against the override selected the XML loop over a request built
-    // as Responses items: one provider call, zero tool rounds.
     const adapter = new ZzScriptedToolAdapter('openai-responses-api', [zzToolUseTurn, zzFinalTurn]);
     const membrane = new Membrane(adapter, { formatter: new OpenAIResponsesFormatter() });
     const recorder = zzToolRoundRecorder();
@@ -315,11 +270,8 @@ describe('the active formatter drives the loop, the build, and the mode together
   });
 
   it('builds the tool-loop request with the per-request override, not the instance formatter', async () => {
-    // buildNativeToolRequest read `this.formatter` while resolveToolMode read
-    // the override, so an override that selected the native loop still built
-    // through the instance formatter's Anthropic-item path.
     const adapter = new ZzScriptedToolAdapter('zz-adapter-1', [zzToolUseTurn, zzFinalTurn]);
-    const membrane = new Membrane(adapter); // instance formatter is the default XML one
+    const membrane = new Membrane(adapter);
     const recorder = zzToolRoundRecorder();
 
     await membrane.stream(zzRequest(), {
@@ -328,7 +280,6 @@ describe('the active formatter drives the loop, the build, and the mode together
     });
 
     expect(recorder.rounds.length).toBe(1);
-    // Responses items, not `{ role, content: [{ type: 'text', text: 'User: …' }] }`.
     expect(adapter.requests[0]?.messages).toEqual([
       { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'zz fixture prompt' }] },
     ]);

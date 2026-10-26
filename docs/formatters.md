@@ -60,7 +60,7 @@ import { NativeFormatter } from '@animalabs/membrane';
 const formatter = new NativeFormatter({ nameFormat: '{name}: ' });
 ```
 
-In simple mode, supply `humanParticipant` and `assistantParticipant`; other participants are rejected. Multiuser mode supports multiple names. Tool-pair normalization and media sanitation run in `buildMessages()`, including on native streaming and yielding paths. Native loop floating-cache placement is a separate post-build operation. Native names use the existing colon-to-double-underscore encoding. Returned calls are matched to declared names so literal double underscores survive. Colliding encoded definitions fail before dispatch.
+In simple mode, supply `humanParticipant` and `assistantParticipant`; other participants are rejected, except on a message holding only `system_change` blocks, which goes by its blocks' type. Multiuser mode supports multiple names. Tool-pair normalization and media sanitation run in `buildMessages()`, including on native streaming and yielding paths. Native loop floating-cache placement is a separate post-build operation. Native names use the existing colon-to-double-underscore encoding. Returned calls are matched to declared names so literal double underscores survive. Colliding encoded definitions fail before dispatch.
 
 ### CompletionsFormatter
 
@@ -124,7 +124,9 @@ const result = formatter.buildMessages(messages, {
 });
 ```
 
-With prompt caching enabled, explicit message breakpoints are retained. Under the default `cacheMarkers: 'membrane-system'`, the formatters also mark the context prefix, and system/tool fallback markers depend on the selected representation and existing markers; they are not unconditional extra markers. Under `cacheMarkers: 'cm-owned'`, neither formatter places a system, context-prefix or fallback marker of its own, so the request carries only the markers the caller placed. A formatter's optional `cacheMarkersApplied` describes its build-time count. Membrane's reported request count is reconciled with its final marker policy.
+A message of `system_change` blocks never takes such a boundary, since `NativeFormatter` can place it past later turns: a boundary goes where it would with the request's changes left out. A change's own `cacheBreakpoint` goes with it to where it lands.
+
+With prompt caching enabled, explicit message breakpoints are retained. Under the default `cacheMarkers: 'membrane-system'`, the formatters also mark the context prefix, and system/tool fallback markers depend on the selected representation and existing markers; they are not unconditional extra markers. Under `cacheMarkers: 'cm-owned'`, neither formatter places a system, context-prefix or fallback marker of its own, so the request carries only the markers the caller placed. Called directly, `NativeFormatter` and `AnthropicXmlFormatter` keep the markers of a `systemPrompt` block array. Through `Membrane`, whose request's `system` is a string, a `cm-owned` caller marks its system prompt in a `beforeRequest` hook. The hook adds `cache_control` to a block of the provider request's `system`, and where that is a string, the hook first turns it into `[{ type: 'text', text }]`, since a string can't carry a marker. That marker counts toward the four, and a fifth is refused. A formatter's optional `cacheMarkersApplied` describes its build-time count. Membrane's reported request count is reconciled with its final marker policy.
 
 For `cacheMarkers: 'membrane-system'`, Membrane applies the complete-request clamp after hooks, retaining the deepest permitted markers, and native streaming spends only the remaining budget on floating tool-loop markers, withholding them across prefix-rewriting normalization repairs. For `cacheMarkers: 'cm-owned'`, it rejects an excess budget instead of displacing caller-owned markers, and places no floating marker.
 

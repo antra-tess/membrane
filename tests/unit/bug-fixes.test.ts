@@ -1,23 +1,8 @@
-/**
- * Tests for bug fixes identified in code review.
- *
- * Covers:
- * 1. Temperature=1 enforcement when thinking is enabled
- * 2. Stop sequence capture in native mode streaming
- * 3. Abort signal respected during retry delay
- *
- * Malformed tool arguments are covered by tool-input-object.test.ts.
- */
-
 import { describe, it, expect, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { NativeFormatter } from '../../src/formatters/native.js';
 import { MockAdapter } from '../../src/providers/mock.js';
 import type { NormalizedRequest, NormalizedMessage } from '../../src/types/index.js';
-
-// ============================================================================
-// Helpers
-// ============================================================================
 
 function createMessage(participant: string, text: string): NormalizedMessage {
   return { participant, content: [{ type: 'text', text }] };
@@ -34,10 +19,6 @@ function makeRequest(overrides: Partial<NormalizedRequest> = {}): NormalizedRequ
     ...overrides,
   };
 }
-
-// ============================================================================
-// 1. Temperature enforcement for extended thinking
-// ============================================================================
 
 describe('Temperature enforcement for thinking', () => {
   it('forces temperature=1 in complete() when thinking is enabled', async () => {
@@ -112,14 +93,13 @@ describe('Temperature enforcement for thinking', () => {
   it('clamps thinking budget_tokens below max_tokens', async () => {
     let capturedRequest: any;
     const adapter = new MockAdapter({ defaultResponse: 'Hello' });
-    // Native formatter — no assistant prefill, so the thinking param is kept
     const membrane = new Membrane(adapter, { formatter: new NativeFormatter() });
 
     const request = makeRequest({
       config: {
         model: 'claude-sonnet-4-5-20250929',
         maxTokens: 4096,
-        thinking: { enabled: true, budgetTokens: 10000 },  // exceeds max_tokens
+        thinking: { enabled: true, budgetTokens: 10000 },
       },
     });
 
@@ -138,7 +118,7 @@ describe('Temperature enforcement for thinking', () => {
     const request = makeRequest({
       config: {
         model: 'claude-sonnet-4-5-20250929',
-        maxTokens: 1000,  // can't fit minimum 1024 budget below this
+        maxTokens: 1000,  // below Anthropic's minimum thinking budget of 1024
         temperature: 0.5,
         thinking: { enabled: true, budgetTokens: 5000 },
       },
@@ -149,16 +129,12 @@ describe('Temperature enforcement for thinking', () => {
     });
 
     expect(capturedRequest.thinking).toBeUndefined();
-    // No thinking sent — temperature should NOT be forced to 1
     expect(capturedRequest.temperature).toBe(0.5);
   });
 
   it('does not clamp adaptive thinking (no budget)', async () => {
     let capturedRequest: any;
     const adapter = new MockAdapter({ defaultResponse: 'Hello' });
-    // Native formatter — no assistant prefill, so the thinking param is kept.
-    // Use a configurable-thinking model (not a fable/mythos always-on model,
-    // which omits the thinking param entirely — see isAlwaysThinkingModel).
     const membrane = new Membrane(adapter, { formatter: new NativeFormatter() });
 
     const request = makeRequest({
@@ -179,8 +155,6 @@ describe('Temperature enforcement for thinking', () => {
   it('drops API thinking param for prefill-style builds (XML formatter)', async () => {
     let capturedRequest: any;
     const adapter = new MockAdapter({ defaultResponse: 'Hello' });
-    // Explicit XML produces an assistant prefill. Its thinking configuration
-    // drives the literal <thinking> prefix rather than a second API channel.
     const membrane = new Membrane(adapter);
 
     const request = makeRequest({
@@ -197,25 +171,18 @@ describe('Temperature enforcement for thinking', () => {
     });
 
     expect(capturedRequest.thinking).toBeUndefined();
-    // The prefill should still carry the <thinking> text convention
     const lastMsg = capturedRequest.messages[capturedRequest.messages.length - 1];
     expect(lastMsg.role).toBe('assistant');
     expect(String(lastMsg.content)).toContain('<thinking>');
   });
 });
 
-// ============================================================================
-// 3. Abort signal respected during retry delay
-// ============================================================================
-
 describe('Abort signal during retry', () => {
   it('aborts promptly during retry delay instead of waiting', async () => {
-    // Create an adapter that fails with a retryable error
     const adapter = new MockAdapter({
       defaultResponse: 'Hello',
     });
 
-    // Override complete to always throw a retryable error
     const originalComplete = adapter.complete.bind(adapter);
     let callCount = 0;
     adapter.complete = async (request: any, options: any) => {
@@ -228,7 +195,7 @@ describe('Abort signal during retry', () => {
     const membrane = new Membrane(adapter, {
       retry: {
         maxRetries: 5,
-        retryDelayMs: 5000, // Long delay - we should abort before this
+        retryDelayMs: 5000,
         backoffMultiplier: 1,
         maxRetryDelayMs: 10000,
       },
@@ -236,7 +203,6 @@ describe('Abort signal during retry', () => {
 
     const controller = new AbortController();
 
-    // Abort after 100ms - well before the 5000ms retry delay
     setTimeout(() => controller.abort(), 100);
 
     const startTime = Date.now();
@@ -247,9 +213,7 @@ describe('Abort signal during retry', () => {
 
     const elapsed = Date.now() - startTime;
 
-    // Should abort in ~100ms, not 5000ms
     expect(elapsed).toBeLessThan(1000);
-    // Should have made at least 1 attempt
     expect(callCount).toBeGreaterThanOrEqual(1);
   });
 });

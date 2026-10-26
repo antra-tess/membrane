@@ -1,11 +1,3 @@
-/**
- * The request byte cap. `requestByteCap()` takes `MEMBRANE_MAX_REQUEST_BYTES`
- * when it's set and `DEFAULT_MAX_REQUEST_BYTES` otherwise. Requests read the
- * cap as they're built, so a broken fallback already fails many tests, but only
- * this file holds the default's size: the image-shedding tests in
- * round-report.test.ts lower the cap through the variable.
- */
-
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { requestByteCap, DEFAULT_MAX_REQUEST_BYTES } from '../../src/utils/image-media.js';
 

@@ -1,45 +1,11 @@
 /**
- * Model capability heuristics that no provider SDK exposes.
- *
- * Same shape as the sampling-parameter lists in the provider adapters
- * (`NO_TEMPERATURE_MODELS` in `providers/anthropic.ts` and
- * `providers/openai.ts`): a prefix table plus a predicate, prefix-matched so
- * dated snapshots are covered, and kept current by hand as models launch.
- * Message adapters consult this shared table against their final built model
- * and body. Formatter/parser prefill on a text-prompt transport is separate.
- */
-
-/**
- * Anthropic models that REFUSE an assistant message prefill outright.
- *
- * Sending a conversation whose last message is an assistant turn returns
- * HTTP 400 `invalid_request_error`: "This model does not support assistant
- * message prefill. The conversation must end with a user message."
- *
- * Measured live against api.anthropic.com on 2026-08-25 (max_tokens 8,
- * two-message conversation ending in an assistant turn):
- *
- *   - REFUSED (400): claude-sonnet-4-6, claude-opus-4-6, claude-opus-4-7,
- *     claude-opus-4-8, claude-sonnet-5, claude-fable-5.
- *   - ACCEPTED (200): claude-haiku-4-5-20251001, claude-sonnet-4-5. Haiku 4.5
- *     also accepted prefill combined with `thinking.type: 'enabled'` (200),
- *     so the prefill/thinking incompatibility is per-model too, not API law.
- *
- * The maintainer independently re-measured refusal on 2026-09-14 for
- * claude-opus-5 and claude-fable-5-1, in addition to the 4.6/4.8 and sonnet-5
- * cases. Mythos entries remain family-analogy entries, not measurements here;
- * an incorrect refusal entry would reject a working request.
- *
- * claude-haiku-5-5 was measured on 2026-10-19 (the same two-message shape;
- * max_tokens 16 with no thinking config, 2048 with an adaptive or an enabled
- * one): REFUSED (400) each time, with the message above. With no thinking
- * config, claude-sonnet-5-5 was refused too and claude-haiku-4-5-20251001
- * accepted.
- *
- * Older Claude (4.5 and earlier, including 3.x) accepts prefill and must NOT
- * be listed. Nothing outside Anthropic belongs here: the OpenAI, Gemini and
- * text-completion surfaces have their own prefill stories, and an unlisted model is
- * treated as capable.
+ * Anthropic models that refuse an assistant message prefill: a conversation
+ * whose last message is an assistant turn gets HTTP 400
+ * `invalid_request_error`: "This model does not support assistant message
+ * prefill. The conversation must end with a user message." The Mythos
+ * entries are by family analogy, not measured. Older Claude (4.5 and
+ * earlier, including 3.x) accepts prefill and must NOT be listed; Haiku 4.5
+ * accepts it with thinking enabled too.
  */
 const NO_ASSISTANT_PREFILL_MODELS = [
   'claude-opus-4-6',
@@ -55,16 +21,10 @@ const NO_ASSISTANT_PREFILL_MODELS = [
 ];
 
 /**
- * Strip the routing prefixes that gateways bolt onto the vendor's own model
- * id, so one prefix table covers direct, OpenRouter and Bedrock spellings:
- * `bedrock:claude-sonnet-4-6`, `anthropic/claude-sonnet-4.6`, and
- * `us.anthropic.claude-sonnet-4-6-v1:0` share the same capability lookup.
- * Dotted version components are canonicalized by the predicate below.
- *
- * Only an id that carries the Claude model name can be recognized. A Bedrock
- * application inference profile's ARN ends in an opaque profile id, so it
- * matches nothing, is treated as capable, and an assistant-ended body sent to
- * a refusing model fails with the provider's own 400.
+ * Gateways prefix the vendor's model id: `bedrock:claude-sonnet-4-6`,
+ * `anthropic/claude-sonnet-4.6`, `us.anthropic.claude-sonnet-4-6-v1:0`. A
+ * Bedrock application inference profile's ARN ends in an opaque profile id,
+ * so it matches nothing and is treated as capable.
  */
 function stripRoutingPrefix(model: string): string {
   const afterSlash = model.slice(model.lastIndexOf('/') + 1).replace(/^bedrock:/, '');
@@ -74,13 +34,6 @@ function stripRoutingPrefix(model: string): string {
     : afterSlash.slice(vendorMarker + 'anthropic.'.length);
 }
 
-/**
- * Whether this model accepts a conversation that ends in an assistant turn.
- *
- * Unknown models are reported as capable: the prefill paths are the legacy
- * default and a false negative would break a working deployment, while a
- * false positive degrades to the raw provider 400 we had before.
- */
 export function supportsAssistantPrefill(model: string): boolean {
   const id = stripRoutingPrefix(model).replace(/(\d)\.(\d)/g, '$1-$2');
   return !NO_ASSISTANT_PREFILL_MODELS.some(prefix => id.startsWith(prefix));

@@ -1,18 +1,4 @@
-/**
- * An unparseable accumulated tool_use input must not persist as a plausible
- * empty-argument call.
- *
- * The streaming accumulator did `try { block.input = JSON.parse(acc) } catch {}`,
- * leaving the block holding whatever content_block_start carried — and
- * Anthropic's tool_use start event carries `input: {}`. A truncated call
- * (max_tokens mid-arguments) therefore became a wire-valid tool_use with empty
- * arguments, indistinguishable from a genuine no-arg call, and the raw
- * accumulation was discarded. It does not misdispatch — membrane gates
- * execution on stop_reason 'tool_use' and truncation reports 'max_tokens' —
- * but it is written into durable history and re-shipped on the next compile.
- * The raw text now stays on the block as `unparseableInput`, and membrane
- * surfaces it, so a consumer can refuse the block instead of trusting `{}`.
- */
+/** Anthropic's tool_use content_block_start event carries `input: {}`. */
 import { describe, it, expect } from 'vitest';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import { Membrane } from '../../src/membrane.js';
@@ -27,7 +13,7 @@ import type { NormalizedRequest } from '../../src/types/index.js';
 
 function fakeAnthropicStream(events: unknown[]) {
   return {
-    controller: { abort() { /* noop */ } },
+    controller: { abort() { } },
     [Symbol.asyncIterator]() {
       let i = 0;
       return {
@@ -60,12 +46,10 @@ function adapterStreamingTruncatedToolCall(): AnthropicAdapter {
 }
 
 /**
- * Live event sequence measured against claude-haiku-4-5 on 2026-08-25 with
- * max_tokens 40 and a forced tool call:
+ * Anthropic's event sequence for a forced tool call that max_tokens cuts off:
  *   message_start -> content_block_start(tool_use) -> content_block_delta x4
  *   -> message_delta(max_tokens) -> message_stop
- * No content_block_stop: the block is left OPEN, so every input_json_delta
- * fragment was discarded and the block kept content_block_start's `input: {}`.
+ * No content_block_stop: the block is left open.
  */
 function adapterStreamingUnterminatedToolCall(): AnthropicAdapter {
   const adapter = new AnthropicAdapter({ apiKey: 'zz-key' });
@@ -131,7 +115,6 @@ describe('AnthropicAdapter streaming: unparseable tool_use input', () => {
   });
 });
 
-/** Adapter returning a provider block that already carries the marker. */
 class TruncatedToolCallAdapter implements ProviderAdapter {
   readonly name = 'zz-truncated';
 
@@ -167,8 +150,6 @@ function createRequest(): NormalizedRequest {
 
 describe('membrane parseProviderContent', () => {
   it('surfaces the unparseable-input marker to the caller', async () => {
-    // The streamed native-tools path here; complete() carries it too
-    // (tool-input-object.test.ts).
     const response: any = await new Membrane(new TruncatedToolCallAdapter()).stream(createRequest(), {
       onChunk: () => {},
     });

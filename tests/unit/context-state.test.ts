@@ -1,14 +1,3 @@
-/**
- * Unit tests for context-management primitives: createInitialState,
- * defaultTokenEstimator, DEFAULT_CONTEXT_CONFIG.
- *
- * Converted from the legacy tsx script test/context.test.ts (pre-vitest
- * layout, never ran in CI). That script's remaining sections asserted
- * language behavior (spread copies, JSON round-trips) against local test
- * helpers rather than library exports, so they were retired instead of
- * ported.
- */
-
 import { describe, it, expect } from 'vitest';
 import {
   createInitialState,
@@ -33,7 +22,7 @@ describe('createInitialState', () => {
 
 describe('defaultTokenEstimator', () => {
   it('estimates ~4 chars per token, rounding up', () => {
-    expect(defaultTokenEstimator(textMessage('Hello world'))).toBe(3); // 11 chars
+    expect(defaultTokenEstimator(textMessage('Hello world'))).toBe(3);
     expect(defaultTokenEstimator(textMessage('x'.repeat(400)))).toBe(100);
   });
 });

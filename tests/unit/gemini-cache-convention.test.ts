@@ -1,14 +1,8 @@
 /**
- * Membrane reads Gemini's `promptTokenCount` as counting the cached span that
- * `cachedContentTokenCount` reports, and subtracts it, so every consumer that
- * sums fresh input, cache reads and cache writes as one convention counts a
- * hit once. The basis is Google's UsageMetadata definition ("this is still
- * the total effective prompt size meaning this includes the number of tokens
- * in the cached content"), which it states for explicit cached content, and
- * one published chat fits it for implicit hits too (see
- * GeminiAdapter.usageCacheConvention). A response the inclusive reading
- * can't explain, with more cached tokens than prompt tokens, is read as
- * cache-excluded. The usage below is constructed, not a captured hit.
+ * Google's UsageMetadata definition counts the cached span inside
+ * `promptTokenCount` ("this is still the total effective prompt size meaning
+ * this includes the number of tokens in the cached content"), stated for
+ * explicit cached content.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { GeminiAdapter, resetPromptExcludesCacheWarning } from '../../src/providers/gemini.js';
@@ -86,7 +80,6 @@ describe('Gemini usage is cache-inclusive', () => {
   });
 
   it('prices a hit once: the fresh span at the input rate, the cached span at the cache-read rate', async () => {
-    // gemini-3.5-flash-lite in the default table: $0.30 input, $0.03 cache read, $2.50 output per million.
     const expected = { input: 2_000 * 0.30 / 1e6, cacheRead: 8_000 * 0.03 / 1e6, output: 5 * 2.50 / 1e6 };
     for (const run of ['complete', 'stream'] as const) {
       if (run === 'complete') stubComplete(HIT); else stubStream(HIT);
@@ -136,7 +129,7 @@ describe('a response the inclusive reading cannot explain', () => {
   });
 
   it('a cached span above the prompt count is read as cache-excluded, with one warning', async () => {
-    resetPromptExcludesCacheWarning(); // the latch is process-wide: this test doesn't depend on order
+    resetPromptExcludesCacheWarning();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const usage = { promptTokenCount: 2_000, cachedContentTokenCount: 8_000, candidatesTokenCount: 5, totalTokenCount: 2_005 };
     const warning = '[membrane:gemini] cachedContentTokenCount(8000) exceeds promptTokenCount(2000),'
@@ -148,20 +141,17 @@ describe('a response the inclusive reading cannot explain', () => {
     const completed = await new Membrane(new GeminiAdapter({ apiKey: 'zz-key-not-used' })).complete(REQUEST);
     expect(completed.usage.inputTokens).toBe(2_000);
     expect(completed.details.usage.cacheReadTokens).toBe(8_000);
-    // This warning and no other: the counts reconcile, and the convention is declared.
     expect(warn.mock.calls).toEqual([[warning]]);
     stubStream(usage);
     const streamed = await new Membrane(new GeminiAdapter({ apiKey: 'zz-key-not-used' })).stream(REQUEST) as NormalizedResponse;
     expect(streamed.usage.inputTokens).toBe(2_000);
     expect(streamed.details.usage.cacheReadTokens).toBe(8_000);
-    // Once per process, though two responses exceeded.
     expect(warn.mock.calls).toEqual([[warning]]);
   });
 
   it('a total that includes the cached span, the total membrane counts, reconciles too, so three such responses warn only once', async () => {
     resetPromptExcludesCacheWarning();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    // prompt + cached + candidates = 2,000 + 8,000 + 5 = 10,005.
     stubComplete({ promptTokenCount: 2_000, cachedContentTokenCount: 8_000, candidatesTokenCount: 5, totalTokenCount: 10_005 });
     const membrane = new Membrane(new GeminiAdapter({ apiKey: 'zz-key-not-used' }));
     for (let call = 0; call < 3; call++) {
@@ -176,7 +166,6 @@ describe('a response the inclusive reading cannot explain', () => {
   it('that total reconciles with a tool-use prompt and thoughts in it too: every term of the sum membrane counts', async () => {
     resetPromptExcludesCacheWarning();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    // prompt + tool-use prompt + cached + candidates + thoughts = 2,000 + 500 + 8,000 + 5 + 1,000 = 11,505.
     stubComplete({
       promptTokenCount: 2_000, toolUsePromptTokenCount: 500, cachedContentTokenCount: 8_000,
       candidatesTokenCount: 5, thoughtsTokenCount: 1_000, totalTokenCount: 11_505,
@@ -196,12 +185,10 @@ describe('a response the inclusive reading cannot explain', () => {
     const sums = '[membrane:gemini] usageMetadata does not reconcile: promptTokenCount(2000)'
       + ' + toolUsePromptTokenCount(0) + candidatesTokenCount(5) + thoughtsTokenCount(0)'
       + ' = 2005 (10005 with cachedContentTokenCount(8000))';
-    // Between the two sums: above one, below the other, so no field is named.
     stubComplete({ promptTokenCount: 2_000, cachedContentTokenCount: 8_000, candidatesTokenCount: 5, totalTokenCount: 9_000 });
     await membrane.complete(REQUEST);
     expect(warn.mock.calls[0]).toEqual([`${sums}, but totalTokenCount = 9000.`]);
-    expect(warn).toHaveBeenCalledTimes(2); // and the cache-excluded warning
-    // Above both.
+    expect(warn).toHaveBeenCalledTimes(2);
     stubComplete({ promptTokenCount: 2_000, cachedContentTokenCount: 8_000, candidatesTokenCount: 5, totalTokenCount: 12_000 });
     await membrane.complete(REQUEST);
     expect(warn.mock.calls[2]).toEqual([
@@ -212,7 +199,6 @@ describe('a response the inclusive reading cannot explain', () => {
 
   it('a response the inclusive reading explains gets no such allowance: a total that adds the cached span again warns', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    // 10,000 prompt tokens already hold the 8,000 cached; 18,005 counts them twice.
     stubComplete({ promptTokenCount: 10_000, cachedContentTokenCount: 8_000, candidatesTokenCount: 5, totalTokenCount: 18_005 });
     await new Membrane(new GeminiAdapter({ apiKey: 'zz-key-not-used' })).complete(REQUEST);
     expect(warn).toHaveBeenCalledTimes(1);
@@ -237,11 +223,6 @@ describe('a response the inclusive reading cannot explain', () => {
   });
 });
 
-/**
- * What a direct GeminiAdapter caller gets, which the changelog says is
- * unchanged. Membrane's restated usage can't hold this: it reads the same
- * whether the adapter or membrane subtracts the cached span.
- */
 describe('a direct GeminiAdapter caller', () => {
   const DIRECT = {
     messages: [{ role: 'user', parts: [{ text: 'zz-prompt' }] }],

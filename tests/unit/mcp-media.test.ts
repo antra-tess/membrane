@@ -1,14 +1,4 @@
-/**
- * Media in MCP's form, `{ type, data, mimeType }` with no `source`
- * (membrane#139). Membrane converts it to its own form wherever it takes
- * content (utils/mcp-media.ts): a request carrying it is the request the same
- * media in membrane's form gives, on every path, with the same round report,
- * and what membrane hands back stays as the caller gave it. A media block
- * with no source object that can't convert is a source each reader can't
- * represent: left out and reported, or noted, rather than failing the request,
- * except where membrane's form fails too: toAnthropicContent gives audio or
- * video the error it gives them in membrane's form.
- */
+/** MCP's media form is `{ type, data, mimeType }`, with no `source`. */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
@@ -54,20 +44,14 @@ const WAV = 'UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
 const PDF = Buffer.from('%PDF-1.4\n%%EOF\n').toString('base64');
 
 const text = (value: string) => ({ type: 'text', text: value });
-/** One piece of media in MCP's form, with the annotations and _meta an MCP
- *  server may send beside it, which no request carries; or in membrane's. */
+/** An MCP server may send annotations and _meta beside a piece of media; no provider request carries them. */
 const mcp = (type: string, data: string, mimeType: string, extra: object = {}) =>
   ({ type, data, mimeType, annotations: { audience: ['user'], priority: 0.5 }, _meta: { server: 'test' }, ...extra });
 const ours = (type: string, data: string, mediaType: string, extra: object = {}) => ({ type, ...extra, source: { type: 'base64', data, mediaType } });
 
-/** MCP's form or membrane's: what each test runs twice, once each way. */
 type Form = typeof mcp;
 const FORMS: Array<[string, Form]> = [["MCP's form", mcp], ["membrane's form", ours]];
 
-/**
- * A conversation holding an image an API accepts, one it doesn't, and an
- * audio clip, at the top level and inside a tool_result.
- */
 function history(form: Form, options: { audioAtTop?: boolean } = {}): NormalizedMessage[] {
   const media = () => [form('image', PNG, 'image/png'), form('image', SVG, 'image/svg+xml')];
   return [
@@ -83,7 +67,6 @@ const noop: ToolDefinition = { name: 'noop', description: 'A tool', inputSchema:
 const CALL_XML = '<function_calls>\n<invoke name="noop">\n</invoke>';
 const config = { model: 'claude-sonnet-4-5', maxTokens: 64 };
 
-/** The real Anthropic request builder; each round's response is scripted: `calls` tool calls, then text. */
 class ScriptedAnthropic extends AnthropicAdapter {
   sent: any[] = [];
   private round = 0;
@@ -106,7 +89,6 @@ class ScriptedAnthropic extends AnthropicAdapter {
   }
 }
 
-/** The real Responses request builder, answering once. */
 class ScriptedResponses extends OpenAIResponsesAPIAdapter {
   sent: any[] = [];
   constructor() { super({ apiKey: 'sk-test' }); }
@@ -118,7 +100,6 @@ class ScriptedResponses extends OpenAIResponsesAPIAdapter {
   }
 }
 
-/** Keeps what it's sent (the formatter's output as it stands) and answers once; it carries it as is. */
 class Recording implements ProviderAdapter {
   readonly name = 'recording';
   readonly reportsContentAlterations = true;
@@ -135,13 +116,11 @@ class Recording implements ProviderAdapter {
 
 interface Turn {
   rounds: RoundReport[];
-  /** What the executor returned, round by round, and the context each call was given. */
   given: ToolResult[][];
   contexts: ToolContext[];
   response: any;
 }
 
-/** One turn through `stream()` or `streamYielding()`, the executor answering each call with `results(id)`. */
 async function turn(
   method: 'stream' | 'streamYielding',
   membrane: Membrane,
@@ -175,7 +154,6 @@ describe('the rule: what converts, and what stays as it was', () => {
     const converted = ours(type, 'AAAA', 'x/y', { cache_control: { type: 'ephemeral' } });
     const nested = (inner: unknown) => ({ type: 'tool_result', toolUseId: 't', content: [text('t'), inner] });
     expect(convertMcpMedia([block])).toEqual([converted]);
-    // In a tool_result, in one inside that, in a message, and in a ToolResult.
     expect(convertMcpMedia([nested(nested(block))])).toEqual([nested(nested(converted))]);
     expect(convertMcpMedia([{ participant: 'User', content: [block] }])).toEqual([{ participant: 'User', content: [converted] }]);
     expect(convertMcpMedia([{ toolUseId: 't', content: [block] }])).toEqual([{ toolUseId: 't', content: [converted] }]);
@@ -209,12 +187,10 @@ describe('the rule: what converts, and what stays as it was', () => {
   it('leaves what doesn\'t fit; gives back the same array when nothing converts, and changes nothing it\'s handed', () => {
     const left = [
       text('t'),
-      // No mimeType, or an empty one: nothing decides audio, a document or video by its header.
       { type: 'audio', data: WAV },
       { type: 'document', data: PNG },
       { type: 'video', data: PNG },
       { type: 'audio', data: WAV, mimeType: '' },
-      // No data, empty data, or data that isn't a string: their builders send the source as it is.
       { type: 'audio', mimeType: 'audio/wav' },
       { type: 'document', data: '', mimeType: 'application/pdf' },
       { type: 'video', data: 7, mimeType: 'video/mp4' },
@@ -239,13 +215,6 @@ describe('the rule: what converts, and what stays as it was', () => {
   });
 });
 
-/**
- * Each adapter besides Anthropic's whose request built directly reads
- * membrane's content blocks: how to make one, what its built request holds
- * the messages in, and whether it reports what it alters. The Responses
- * adapter reads them in subscription mode; in API mode it takes native items
- * as they are.
- */
 const DIRECT: Array<[string, () => any, (adapter: any, messages: unknown[], report?: (block: unknown) => void) => unknown, boolean]> = [
   ['Bedrock', () => new BedrockAdapter({ accessKeyId: 'x', secretAccessKey: 'y', region: 'us-east-1' }),
     (adapter, messages, report) => adapter.buildRequest({ model: 'claude-sonnet-4-5', maxTokens: 64, messages }, undefined, report).messages, true],
@@ -262,7 +231,6 @@ const DIRECT: Array<[string, () => any, (adapter: any, messages: unknown[], repo
 ];
 
 describe('every path that builds a request carries MCP\'s form as it carries membrane\'s', () => {
-  /** What reaches Anthropic's transport from `complete()`. */
   async function sentByComplete(formatter: PrefillFormatter, toolMode: 'xml' | 'native', messages: NormalizedMessage[]) {
     const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify({
       id: 'msg_test', type: 'message', role: 'assistant', model: 'claude-sonnet-4-5',
@@ -308,7 +276,6 @@ describe('every path that builds a request carries MCP\'s form as it carries mem
   it('the Anthropic adapter\'s request built directly reports the block the caller handed in, not the copy it converted', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const adapter = new AnthropicAdapter({ apiKey: 'test', cacheKeepalive: { enabled: false } }) as any;
-    // Data that is no accepted image: it converts, then goes as the formats note.
     const handed = mcp('image', Buffer.from('not an image').toString('base64'), 'image/png');
     const reported: unknown[] = [];
     const built = adapter.buildRequest({ model: 'claude-sonnet-4-5', maxTokens: 64, messages: [
@@ -329,7 +296,6 @@ describe('every path that builds a request carries MCP\'s form as it carries mem
     };
     const handed = await sent(mcp);
     expect(handed).toEqual(await sent(ours));
-    // On 0.6.0 the formatter gave its note that the request couldn't carry one in MCP's form here.
     const output = handed[0].input.find((item: any) => item.type === 'function_call_output');
     expect(output.output).toContainEqual({ type: 'input_image', image_url: `data:image/png;base64,${PNG}` });
   });
@@ -338,21 +304,18 @@ describe('every path that builds a request carries MCP\'s form as it carries mem
     const wire = (form: Form) => [
       { role: 'user', content: [text('look'), form('image', PNG, 'image/png')] },
       { role: 'assistant', content: [{ type: 'tool_use', id: 'shot', name: 'noop', input: {} }] },
-      // A tool_result as either builder names its call.
       { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'shot', toolUseId: 'shot', content: [text('here'), form('image', PNG, 'image/png')] }] },
     ];
     const messages = wire(mcp);
     const before = structuredClone(messages);
     const sent = built(make(), messages);
     expect(sent).toEqual(built(make(), wire(ours)));
-    // The image at the top goes, in the form this API takes it.
     expect(JSON.stringify(sent)).toContain(PNG);
     expect(messages).toEqual(before);
   });
 
   it.each(DIRECT.filter(([, , , reports]) => reports))('%s\'s request built directly reports the block the caller handed in, not the copy it converted', (_name, make, built) => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
-    // Data that is no accepted image: it converts, then goes as the formats note.
     const handed = mcp('image', Buffer.from('not an image').toString('base64'), 'image/png');
     const reported: unknown[] = [];
     const sent = built(make(), [{ role: 'user', content: [text('look'), handed] }], (block: unknown) => reported.push(block));
@@ -364,7 +327,6 @@ describe('every path that builds a request carries MCP\'s form as it carries mem
   it('Bedrock\'s request built directly reports the block the caller handed in for an image with a sourceUrl and for a tool_result', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const notAnImage = Buffer.from('not an image').toString('base64');
-    // Each converts, so the build works on a copy, and goes as the formats note.
     const linked = mcp('image', notAnImage, 'image/png', { sourceUrl: 'https://example.com/a.png' });
     const result = { type: 'tool_result', tool_use_id: 'shot', content: [text('here'), mcp('image', notAnImage, 'image/png')] };
     const reported: unknown[] = [];
@@ -398,7 +360,7 @@ describe('every path that builds a request carries MCP\'s form as it carries mem
       { type: 'tool_use', id: 'shot', name: 'noop', input: {} },
       handed,
     ], (block: unknown) => reported.push(block));
-    // A function_call_output has no error flag, so the build reports the result.
+    // A function_call_output has no error flag.
     expect(JSON.stringify(sent)).toContain(PNG);
     expect(reported).toEqual([handed]);
     expect(reported[0]).toBe(handed);
@@ -433,7 +395,6 @@ describe('every path that builds a request carries MCP\'s form as it carries mem
     ['the anthropic-xml formatter, native tool mode', () => new AnthropicXmlFormatter(), 'native'],
     ['the native formatter', () => new NativeFormatter(), undefined],
     ['the Responses formatter', () => new OpenAIResponsesFormatter(), undefined],
-    // It reads no image data, so it builds the same either way without a step.
     ['the completions formatter', () => new CompletionsFormatter(), undefined],
   ] as const)('%s called directly builds MCP\'s form as it builds membrane\'s, at the top of a message and in a tool_result', (_name, make, toolMode) => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -464,7 +425,6 @@ describe('every path that builds a request carries MCP\'s form as it carries mem
 
   it('the exported xml result renderers, which take an xml tool loop\'s results each round', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
-    // The second result comes after the split, rendered on its own.
     const results = (form: Form) => [
       { toolUseId: 'a', toolName: 'noop', content: [text('first'), form('image', PNG, 'image/png')] },
       { toolUseId: 'b', toolName: 'noop', content: [text('second'), form('image', PNG, 'image/png'), form('image', SVG, 'image/svg+xml')] },
@@ -503,16 +463,11 @@ describe('every path that builds a request carries MCP\'s form as it carries mem
     expect(asMcp.sent).toEqual(asOurs.sent);
     expect(asMcp.rounds).toEqual(asOurs.rounds);
     expect(asMcp.response.toolResults).toHaveLength(asMcp.given.flat().length);
-    // What membrane hands back of the executor's results is its own objects, as they were.
     expect(asMcp.contexts[1]!.previousResults[0]).toBe(asMcp.given[0]![0]);
     expect((asMcp.given[0]![0]!.content as any[])[1]).toEqual(mcp('image', PNG, 'image/png'));
     if (toolMode === 'native') {
       asMcp.response.toolResults.forEach((result: ToolResult, i: number) => expect(result).toBe(asMcp.given.flat()[i]));
     } else {
-      // An xml turn's response reads its results back out of the document
-      // (Membrane.buildFinalResponse), and a result whose images a round split
-      // out gets a copy of its content as the executor returned it
-      // (attachSplitResults): here every round's, in MCP's form as it was.
       asMcp.response.toolResults.forEach((result: ToolResult, i: number) => expect(result.content).toEqual(asMcp.given.flat()[i]!.content));
     }
   });
@@ -520,7 +475,6 @@ describe('every path that builds a request carries MCP\'s form as it carries mem
 
 describe('an image in MCP\'s form with no mimeType is sent as the same image with one, since every request that sends an image decides it by its header', () => {
   const png = (labelled: boolean) => (labelled ? mcp('image', PNG, 'image/png') : { type: 'image', data: PNG });
-  /** A PNG at the top of a message and inside a tool_result. */
   const holding = (labelled: boolean): NormalizedMessage[] => [
     { participant: 'User', content: [text('look'), png(labelled)] },
     { participant: 'Claude', content: [{ type: 'tool_use', id: 'shot', name: 'noop', input: {} }] },
@@ -582,7 +536,6 @@ describe('a round with media in MCP\'s form reports what the same round in membr
     expect(asMcp.rounds).toEqual((await run(ours)).rounds);
     expect(asMcp.rounds).toHaveLength(1);
     expect(asMcp.rounds[0]!.fidelity).toBe('established');
-    // Every path leaves something of this conversation out: the svg, at least.
     expect(asMcp.rounds[0]!.altered.messages.length).toBeGreaterThan(0);
   });
 });
@@ -614,7 +567,6 @@ describe('an image in MCP\'s form with empty data, or none, gets the note the sa
     }));
     expect(runs[0]!.sent).toBe(runs[1]!.sent);
     expect(runs[0]!.rounds).toEqual(runs[1]!.rounds);
-    // Two at the top of a message, where MCP's form was left out with no note, and two in the tool result.
     expect(count(runs[0]!.sent, NO_DATA)).toBe(4);
     expect(runs[0]!.sent).not.toContain('"data":""');
   });
@@ -637,8 +589,6 @@ describe('an image in MCP\'s form with empty data, or none, gets the note the sa
 describe('a media block with no source object that doesn\'t convert is a source each reader can\'t represent', () => {
   const NO_DATA = '[system: an image that belongs here was NOT shown to you — it came without its data. You are not seeing this image.]';
   const LINK = "[system: an image that belongs here was NOT shown to you — it came as a link (https://example.com/a.png), which tool results here can't carry. You are not seeing this image.]";
-  /** Audio with no mimeType, an empty one, no data, or empty data: nothing
-   *  decides audio by its header, and its builders send its source as it is. */
   const unconvertible = () => [
     { type: 'audio', data: WAV }, { type: 'audio', data: WAV, mimeType: '' },
     { type: 'audio', mimeType: 'audio/wav' }, { type: 'audio', data: '', mimeType: 'audio/wav' },
@@ -663,9 +613,7 @@ describe('a media block with no source object that doesn\'t convert is a source 
     expect(rounds[0]!.fidelity).toBe('established');
     expect(rounds[0]!.altered.messages).toEqual([0, 2]);
     const sent = JSON.stringify(adapter.sent);
-    // An image's note isn't one for audio.
     expect(sent).not.toContain(JSON.stringify(NO_DATA).slice(1, -1));
-    // Nothing without a source reached the provider, nor media with empty data.
     expect(sent).not.toMatch(/"type":"(image|audio)","(data|mimeType)"/);
     expect(sent).not.toMatch(/"type":"(image|audio)"\}/);
     expect(sent).not.toContain('"data":""');
@@ -676,7 +624,6 @@ describe('a media block with no source object that doesn\'t convert is a source 
     for (const formatter of [new AnthropicXmlFormatter(), new NativeFormatter(), new OpenAIResponsesFormatter()]) {
       const sent = JSON.stringify(formatter.buildMessages(messages, { participantMode: 'simple', assistantParticipant: 'Claude', humanParticipant: 'User' } as any).messages);
       expect(sent).toContain('look');
-      // Left out: no image of any provider's shape, nor the block as it came.
       expect(sent).not.toMatch(/"type":"(image|input_image|image_url)"/);
     }
   });
@@ -684,7 +631,6 @@ describe('a media block with no source object that doesn\'t convert is a source 
   it('the Anthropic adapter built directly leaves them out, at the top of a message and in a tool_result, and reports each block it was handed', () => {
     const adapter = new AnthropicAdapter({ apiKey: 'test', cacheKeepalive: { enabled: false } }) as any;
     const top = unconvertible();
-    // With an image that converts beside them, so the result it builds from is a copy.
     const result = { type: 'tool_result', tool_use_id: 'shot', content: [text('here'), mcp('image', PNG, 'image/png'), ...unconvertible()] };
     const reported: unknown[] = [];
     const built = adapter.buildRequest({ model: 'claude-sonnet-4-5', maxTokens: 64, messages: [
@@ -760,7 +706,7 @@ describe('a media block with no source object that doesn\'t convert is a source 
         .buildRequest({ model: 'claude-sonnet-4-5', maxTokens: 64, messages }, undefined, report)],
   ])('%s built directly drops a message it left empty, and refuses when that message was the last, since the final role would change', (_name, build) => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const lone = { type: 'audio', data: WAV }; // no mimeType: can't convert
+    const lone = { type: 'audio', data: WAV };
     const reported: unknown[] = [];
     const built = build([
       { role: 'user', content: [lone] },
@@ -777,8 +723,6 @@ describe('a media block with no source object that doesn\'t convert is a source 
     ], () => {})).toThrow("Removing empty final user content would change the request's final role to assistant.");
   });
 
-  // With the images these renderers had no data for before either: a URL
-  // image, and a base64 source with no data, or with an empty string for it.
   const unshowable = { toolUseId: 't', content: [
     text('here'), { type: 'image' },
     { type: 'image', source: { type: 'url', url: 'https://example.com/a.png' } },
@@ -794,7 +738,6 @@ describe('a media block with no source object that doesn\'t convert is a source 
   ] as const)('%s, which takes an xml tool loop\'s results, notes them, and any other image it has no data for', (_name, render) => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const xml = render();
-    // The block with no data, and the two base64 sources without it.
     expect(count(xml, NO_DATA)).toBe(3);
     expect(count(xml, LINK)).toBe(1);
   });
@@ -818,8 +761,8 @@ describe('the note for an image that came without its data', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const link = (url: unknown) => ({ type: 'image', source: { type: 'url', url } }) as any;
     const long = `https://example.com/${'a'.repeat(3000)}`;
-    // A pair whose first half is the last the cut would keep, and a URL holding half of one.
-    const astride = `https://example.com/${'a'.repeat(2027)}\u{1F600}${'b'.repeat(10)}`;
+    const NOTED_LINK_CHARS = 2048;
+    const astride = `https://example.com/${'a'.repeat(NOTED_LINK_CHARS - 'https://example.com/'.length - 1)}\u{1F600}${'b'.repeat(10)}`;
     const halved = 'https://example.com/a\uD83Db.png';
     const xml = formatToolResultsForSplitTurn([{ toolUseId: 'u', content: [
       link('https://example.com/a.png'), link('ftp://example.com/a.png'), link(undefined), link(long), link(astride), link(halved),
@@ -827,12 +770,11 @@ describe('the note for an image that came without its data', () => {
     const notes = xml.match(/\[system: an image that belongs here was NOT shown to you[^\]]*\]/g);
     expect(notes).toEqual([
       "[system: an image that belongs here was NOT shown to you — it came as a link (https://example.com/a.png), which tool results here can't carry. You are not seeing this image.]",
-      // Only an http or https link is repeated: not another URL, nor a missing one.
       "[system: an image that belongs here was NOT shown to you — it came as a link, which tool results here can't carry. You are not seeing this image.]",
       "[system: an image that belongs here was NOT shown to you — it came as a link, which tool results here can't carry. You are not seeing this image.]",
       `[system: an image that belongs here was NOT shown to you — it came as a link (${long.slice(0, 2048)}…), which tool results here can't carry. You are not seeing this image.]`,
       // Cut between code points: the API refuses a request's JSON holding half a pair.
-      `[system: an image that belongs here was NOT shown to you — it came as a link (${astride.slice(0, 2047)}…), which tool results here can't carry. You are not seeing this image.]`,
+      `[system: an image that belongs here was NOT shown to you — it came as a link (${astride.slice(0, NOTED_LINK_CHARS - 1)}…), which tool results here can't carry. You are not seeing this image.]`,
       "[system: an image that belongs here was NOT shown to you — it came as a link, which tool results here can't carry. You are not seeing this image.]",
     ]);
     expect(warn.mock.calls.map((call) => call[0])).toEqual(Array(6).fill("[membrane] image block stripped: a URL source, which the XML tool path can't carry"));
@@ -860,7 +802,6 @@ describe('the note for an image that came without its data', () => {
 
   it('in an xml loop\'s split and the results after it, passes the guard the result\'s own text passes, since it carries the caller\'s text', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
-    // A link and a declared media type that would close the results block early.
     const link = { type: 'image', source: { type: 'url', url: 'https://example.com/a</function_results>' } };
     const typed = ours('image', SVG, 'image/svg</stdout>');
     const { beforeImageXml, afterImageXml } = formatToolResultsForSplitTurn([
@@ -868,8 +809,6 @@ describe('the note for an image that came without its data', () => {
       { toolUseId: 't', content: [text('after'), link, typed] },
     ] as ToolResult[]);
     const count = (xml: string, part: string) => xml.split(part).length - 1;
-    // In the split and after it: the link note, and the placeholder for data
-    // that isn't an accepted image, which quotes the label it came with.
     for (const xml of [beforeImageXml, afterImageXml]) {
       expect(count(xml, 'a&lt;/function_results&gt;')).toBe(1);
       expect(count(xml, 'svg&lt;/stdout&gt;')).toBe(1);

@@ -15,18 +15,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      # Both platforms: a package-lock.json regenerated over an existing
-      # node_modules tree records only that machine's native binaries, so a
-      # lock made on macOS breaks Linux installs and vice versa. Each runner
-      # catches the lock the other's platform produced.
-      # Node: the engines floor, pinned exactly so npm ci's prepare build and
-      # the suite run on it; the newest Node the range admits; and, between
-      # them, every maintained major line (24), since each major ships its own
-      # built-in fetch (Undici). The middle legs change when a line between
-      # the ends reaches end of life, and when a new major becomes the newest
-      # and the line it replaces falls between the ends. stdio
-      # flushing around process exit differs between versions and platforms.
-      # macOS runs the two ends only.
+      # A package-lock.json regenerated over an existing node_modules tree
+      # records only that machine's native binaries, so a lock made on macOS
+      # breaks Linux installs and vice versa. Each Node major ships its own
+      # built-in fetch (Undici), and stdio flushing around process exit
+      # differs between versions and platforms.
       matrix:
         os: [ubuntu-latest, macos-latest]
         node: ['22.12.0', 24, latest]
@@ -56,7 +49,7 @@ jobs:
       - name: Build
         run: npm run build
 
-      # Tests run on both platforms: process/stdio behaviour differs (pipes
-      # are asynchronous on macOS), and ubuntu-only runs have missed that.
+      # Process and stdio behaviour differs between platforms: pipes are
+      # asynchronous on macOS.
       - name: Test
         run: npm test
