@@ -1,3 +1,4 @@
+import { getEventListeners } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import type { ProviderRequest } from '../../src/types/index.js';
@@ -63,6 +64,22 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+function completingResponse(): Response {
+  const encoder = new TextEncoder();
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode(frame('message_start', { message })));
+      controller.enqueue(encoder.encode(frame('content_block_start', { index: 0, content_block: { type: 'text', text: '' } })));
+      controller.enqueue(encoder.encode(frame('content_block_delta', { index: 0, delta: { type: 'text_delta', text: 'hello back' } })));
+      controller.enqueue(encoder.encode(frame('content_block_stop', { index: 0 })));
+      controller.enqueue(encoder.encode(frame('message_delta', { delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 2 } })));
+      controller.enqueue(encoder.encode(frame('message_stop', {})));
+      controller.close();
+    },
+  });
+  return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream', 'request-id': 'req_fixture' } });
+}
+
 function hangingResponse(init: RequestInit | undefined): Promise<Response> {
   return new Promise<Response>((_resolve, reject) => {
     init?.signal?.addEventListener('abort', () => {
@@ -101,5 +118,31 @@ describe('Anthropic adapter timeoutMs (membrane#97)', () => {
       clearTimeout(callerAbort);
       caller.abort();
     }
+  });
+
+  // The combined signal's cleanup must run on the SUCCESS paths too: without
+  // it, a finished call leaves the deadline timer armed (setLongTimeout is a
+  // plain setTimeout, not unref'd — a 600s timeoutMs keeps a script's process
+  // alive ten minutes after its last stream) and a dead listener on the
+  // caller's signal. The listener on the caller's signal is the observable
+  // half, so it is the pin.
+  it('releases the deadline and the caller-signal listener once a stream completes', async () => {
+    vi.stubGlobal('fetch', async () => completingResponse());
+    const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
+    const caller = new AbortController();
+    const result = await adapter.stream(request, { onChunk: () => {} }, { timeoutMs: 600_000, signal: caller.signal });
+    expect(result.stopReason).toBe('end_turn');
+    expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
+  });
+
+  it('releases the deadline and the caller-signal listener once complete() returns', async () => {
+    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({
+      ...message, content: [{ type: 'text', text: 'hello back' }], stop_reason: 'end_turn',
+    }), { status: 200, headers: { 'content-type': 'application/json', 'request-id': 'req_fixture' } }));
+    const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
+    const caller = new AbortController();
+    const result = await adapter.complete(request, { timeoutMs: 600_000, signal: caller.signal });
+    expect(result.stopReason).toBe('end_turn');
+    expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
   });
 });
