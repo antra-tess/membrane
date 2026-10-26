@@ -9,6 +9,7 @@ import { OpenAICompatibleAdapter } from '../../src/providers/openai-compatible.j
 import { OpenRouterAdapter } from '../../src/providers/openrouter.js';
 import { OpenAIResponsesAPIAdapter } from '../../src/providers/openai-responses-api.js';
 import { BedrockAdapter } from '../../src/providers/bedrock.js';
+import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import { OpenAIResponsesAdapter } from '../../src/providers/openai-responses.js';
 import { createCombinedSignal, isDeadlineAbort } from '../../src/providers/utils.js';
 import { MembraneError, isAbortedResponse, isTimeoutAbortError } from '../../src/types/index.js';
@@ -212,6 +213,7 @@ describe('every createCombinedSignal-based adapter maps its own deadline', () =>
     ['openai-responses-api', () => new OpenAIResponsesAPIAdapter({ apiKey: 'zz-not-a-key' })],
     ['openai-responses', () => new OpenAIResponsesAdapter({ apiKey: 'zz-not-a-key' })],
     ['bedrock', () => new BedrockAdapter({ accessKeyId: 'zz-not-a-key-id', secretAccessKey: 'zz-not-a-secret', region: 'zz-region-1' })],
+    ['anthropic', () => new AnthropicAdapter({ apiKey: 'zz-not-a-key', cacheKeepalive: { enabled: false } })],
   ] as never;
 
   for (const [name, build] of adapters) {

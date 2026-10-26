@@ -33,7 +33,7 @@ import {
 import { markSystemChangeRefused, runCallerCode, statusForProviderCode, deadlineExpired, isDeadlineExpiry, errorFromThrown } from '../types/errors.js';
 import { flattenRootSchemaUnion } from './anthropic-tool-schema.js';
 import { isPlainObject } from '../utils/tool-schema.js';
-import { assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, isDeadlineAbort, deadlineTimeoutError, isToolCallBlock, isToolCallArgumentsDelta, progressOfAnthropicEvent } from './utils.js';
+import { assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, isToolCallBlock, isToolCallArgumentsDelta, progressOfAnthropicEvent } from './utils.js';
 import { fetchWithCredentials, validateCredential, type CredentialContext, type CredentialResolver } from './credentials.js';
 import { CacheKeepalive, type CacheKeepaliveConfig } from '../cache-keepalive.js';
 
@@ -462,19 +462,26 @@ export class AnthropicAdapter implements ProviderAdapter {
     const headers = this.betaHeaders(request, anthropicRequest);
     const live = this.liveHeaders(headers, 'complete');
 
+    // timeoutMs bounds the whole call, as the other adapters bound it through
+    // createCombinedSignal (#97): the SDK's own timeout clears once response
+    // headers arrive, so it alone never bounds the request.
+    const { signal: callSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
       const sentAt = Date.now();
-      const response = await this.createMessage(fullRequest, live, options?.signal, { maxRetries: 0 });
+      const response = await this.createMessage(fullRequest, live, callSignal, { maxRetries: 0 });
       this.cacheKeepalive?.record(
         fullRequest as unknown as Record<string, unknown>, headers, 'complete', sentAt,
       );
 
       return this.parseResponse(response, fullRequest);
     } catch (error) {
-      // A deadline on the caller's signal (Membrane's progressTimeoutMs) is a
-      // timeout, as on every adapter; the SDK's abort error can't say so.
-      if (isDeadlineAbort(options?.signal?.reason)) throw deadlineTimeoutError(options!.signal!.reason, fullRequest);
+      // A deadline on the combined signal (the caller's progressTimeoutMs, or
+      // timeoutMs here) is a timeout, as on every adapter; the SDK's abort
+      // error can't say so.
+      if (isDeadlineAbort(callSignal?.reason)) throw deadlineTimeoutError(callSignal!.reason, fullRequest);
       throw this.handleError(error, fullRequest);
+    } finally {
+      cleanup?.();
     }
   }
 
@@ -510,10 +517,15 @@ export class AnthropicAdapter implements ProviderAdapter {
     let idleTimedOut = false;
     let sawEvent = false;
 
+    // timeoutMs bounds the whole call, as the other adapters bound it through
+    // createCombinedSignal (#97). The idle and first-event deadlines above
+    // bound gaps BETWEEN events; a stream that keeps sending has no bound but
+    // this one and the caller's own signal.
+    const { signal: callSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     const onExternalAbort = () => idleAbort.abort();
-    if (options?.signal) {
-      if (options.signal.aborted) { idleAbort.abort(); }
-      else { options.signal.addEventListener('abort', onExternalAbort, { once: true }); }
+    if (callSignal) {
+      if (callSignal.aborted) { idleAbort.abort(); }
+      else { callSignal.addEventListener('abort', onExternalAbort, { once: true }); }
     }
 
     const resetIdleTimer = () => {
@@ -787,7 +799,8 @@ export class AnthropicAdapter implements ProviderAdapter {
 
       settled = true;
       if (idleTimer) clearTimeout(idleTimer);
-      options?.signal?.removeEventListener('abort', onExternalAbort);
+      callSignal?.removeEventListener('abort', onExternalAbort);
+      cleanup?.();
 
       if (openBlockIndex >= 0) {
         finalizeContentBlock(openBlockIndex, false);
@@ -864,7 +877,8 @@ export class AnthropicAdapter implements ProviderAdapter {
     } catch (error) {
       settled = true;
       if (idleTimer) clearTimeout(idleTimer);
-      options?.signal?.removeEventListener('abort', onExternalAbort);
+      callSignal?.removeEventListener('abort', onExternalAbort);
+      cleanup?.();
 
       // The idle watchdog fired: whatever the SDK wrapped the abort in
       // (AbortError, APIUserAbortError "Request was aborted.", a connection
@@ -880,10 +894,10 @@ export class AnthropicAdapter implements ProviderAdapter {
           rawRequest: fullRequest,
         }));
       }
-      // A deadline on the caller's signal (Membrane's progressTimeoutMs or
-      // progressBounds) is a timeout with its own message, whatever the SDK
-      // wrapped the abort in.
-      if (isDeadlineAbort(options?.signal?.reason)) throw deadlineTimeoutError(options!.signal!.reason, fullRequest);
+      // A deadline on the combined signal (the caller's progressTimeoutMs or
+      // progressBounds, or timeoutMs here) is a timeout with its own message,
+      // whatever the SDK wrapped the abort in.
+      if (isDeadlineAbort(callSignal?.reason)) throw deadlineTimeoutError(callSignal!.reason, fullRequest);
       throw this.handleError(session?.failure() ?? error, fullRequest);
     }
   }
