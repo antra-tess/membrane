@@ -147,9 +147,9 @@ describe('createProgressDeadline', () => {
     vi.setSystemTime(new Date('2026-10-14T12:00:00.000Z'));
     const deadline = createProgressDeadline(undefined, 1000);
     vi.advanceTimersByTime(200);
-    deadline.renew!();
+    deadline.onProgress!();
     vi.advanceTimersByTime(300);
-    deadline.renew!();
+    deadline.onProgress!();
     vi.advanceTimersByTime(1000);
     expect(deadline.signal!.aborted).toBe(true);
     expect(deadlineTimeoutError(deadline.signal!.reason).message).toBe(
@@ -164,7 +164,7 @@ describe('createProgressDeadline', () => {
     const deadline = createProgressDeadline(undefined, 1000);
     for (let i = 0; i < 12; i++) {
       vi.advanceTimersByTime(400);
-      deadline.renew!();
+      deadline.onProgress!();
     }
     expect(deadline.signal!.aborted).toBe(false);
     vi.advanceTimersByTime(999);
@@ -218,7 +218,7 @@ describe('createProgressDeadline', () => {
     vi.setSystemTime(new Date('2026-10-14T12:00:00.000Z'));
     const forward = createProgressDeadline(undefined, 1000);
     vi.advanceTimersByTime(500);
-    forward.renew!();
+    forward.onProgress!();
     vi.setSystemTime(new Date('2026-10-14T13:00:00.000Z'));
     vi.advanceTimersByTime(999);
     expect(forward.signal!.aborted).toBe(false);
@@ -237,11 +237,11 @@ describe('createProgressDeadline', () => {
     backward.cleanup();
   });
 
-  it('without a timeout passes the caller signal through and offers no renew', () => {
+  it('without a timeout passes the caller signal through and offers no onProgress', () => {
     const caller = new AbortController();
     const off = createProgressDeadline(caller.signal, undefined);
     expect(off.signal).toBe(caller.signal);
-    expect(off.renew).toBeUndefined();
+    expect(off.onProgress).toBeUndefined();
     off.cleanup();
   });
 });

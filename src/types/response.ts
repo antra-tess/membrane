@@ -315,6 +315,9 @@ export interface AbortedResponse {
   /** Why it was aborted */
   reason: 'user' | 'timeout' | 'error';
 
+  /** What ended it, when the caller didn't: a deadline's names the bound that ran out. */
+  message?: string;
+
   /**
    * Raw assistant text accumulated before abort.
    * Use for displaying partial output or as prefill to continue.

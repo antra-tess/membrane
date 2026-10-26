@@ -64,6 +64,7 @@ import type { BuildResult } from './formatters/types.js';
 import { computeCacheWireReceipt } from './cache-wire-receipt.js';
 import { awaitCallerCode, runCallerCode, isDeadlineExpiry, errorFromThrown, systemChangeRefusedError } from './types/errors.js';
 import { createProgressDeadline, setLongTimeout } from './providers/utils.js';
+import { resolveProgressBounds, type ProgressBounds } from './progress-bounds.js';
 import {
   parseToolCalls,
   formatToolResults,
@@ -419,7 +420,7 @@ export class Membrane {
             },
             signal: progress.signal,
             timeoutMs: options.timeoutMs,
-            ...(progress.renew ? { onProgress: progress.renew } : {}),
+            ...(progress.onProgress ? { onProgress: progress.onProgress } : {}),
             onRequest: (req) => {
               rawRequest = req;
               if (useWireReceipt) {
@@ -560,6 +561,7 @@ export class Membrane {
     request: NormalizedRequest,
     options: StreamOptions = {}
   ): Promise<NormalizedResponse | AbortedResponse> {
+    resolveProgressBounds(options.progressBounds);
     if (request.streaming === false) {
       if (options.onToolCalls) {
         throw unsupportedError(
@@ -579,7 +581,7 @@ export class Membrane {
             { inputTokens: 0, outputTokens: 0 },
             [],
             [],
-            this.abortReason(error, options.signal),
+            this.abortOutcome(error, options.signal),
             []
           );
         }
@@ -677,6 +679,7 @@ export class Membrane {
       timeoutMs,
       idleTimeoutMs,
       progressTimeoutMs,
+      progressBounds,
       retry,
     } = options;
 
@@ -830,6 +833,7 @@ export class Membrane {
             timeoutMs,
             idleTimeoutMs,
             progressTimeoutMs,
+            progressBounds,
             retry,
             normalizedRequest: request,
             formatterName: formatter.name,
@@ -1161,7 +1165,7 @@ export class Membrane {
           turnUsage.total,
           executedToolCalls,
           executedToolResults,
-          this.abortReason(error, signal),
+          this.abortOutcome(error, signal),
           xmlToolProtocol
             ? attachSplitResults(parseAccumulatedIntoBlocks(newContent, { tools: request.tools, ...(initialBlockType ? { startInsideBlock: initialBlockType } : {}) }), splitRounds).blocks
             : streamedThinking.content(newContent, (value, context) => formatter.parseContentBlocks(value, request.tools, context))
@@ -1191,6 +1195,7 @@ export class Membrane {
       timeoutMs,
       idleTimeoutMs,
       progressTimeoutMs,
+      progressBounds,
       retry,
     } = options;
 
@@ -1255,6 +1260,7 @@ export class Membrane {
             timeoutMs,
             idleTimeoutMs,
             progressTimeoutMs,
+            progressBounds,
             retry,
             normalizedRequest: request,
             formatterName: activeFormatter.name,
@@ -1409,7 +1415,7 @@ export class Membrane {
           turnUsage.total,
           executedToolCalls,
           executedToolResults,
-          this.abortReason(error, signal),
+          this.abortOutcome(error, signal),
           [...allContentBlocks, ...(roundReceived?.() ?? [])]
         );
       }
@@ -1939,6 +1945,7 @@ export class Membrane {
       timeoutMs?: number;
       idleTimeoutMs?: number;
       progressTimeoutMs?: number;
+      progressBounds?: boolean | Partial<ProgressBounds>;
       onRequest?: (rawRequest: unknown) => void;
       wrapThinkingTags?: boolean;
       normalizedRequest: NormalizedRequest;
@@ -1960,7 +1967,7 @@ export class Membrane {
   > {
     // TypeScript checks excess properties only on object literals, so nothing
     // else keeps `normalizedRequest` out of the adapter's options.
-    const { normalizedRequest, formatterName, requiresAssistantPrefill, refusalRetries, onRetrying, retry, onWireCacheMarkers, progressTimeoutMs, fidelity, ...adapterOptions } = options;
+    const { normalizedRequest, formatterName, requiresAssistantPrefill, refusalRetries, onRetrying, retry, onWireCacheMarkers, progressTimeoutMs, progressBounds, fidelity, ...adapterOptions } = options;
     const hooked = fidelity !== undefined && this.config.hooks?.beforeRequest !== undefined;
     const beforeHook = hooked ? requestFingerprint(request) : undefined;
     const normalizedBefore = hooked ? requestFingerprint(normalizedRequest) : undefined;
@@ -2032,12 +2039,14 @@ export class Membrane {
       };
       let attemptResult: ProviderResponse | undefined;
       let failure: { error: unknown } | undefined;
-      const progress = createProgressDeadline(observedOptions.signal, progressTimeoutMs);
+      const progress = createProgressDeadline(observedOptions.signal, progressTimeoutMs, resolveProgressBounds(progressBounds));
       try {
         const streamCall = this.adapter.stream(
           finalRequest,
           attemptCallbacks,
-          progress.renew ? { ...observedOptions, signal: progress.signal, onProgress: progress.renew } : observedOptions,
+          progress.onProgress
+            ? { ...observedOptions, signal: progress.signal, onProgress: progress.onProgress, ...(progress.onSend ? { onSend: progress.onSend } : {}) }
+            : observedOptions,
         );
         attemptResult = receiptGuard ? await receiptGuard.settle(streamCall) : await streamCall;
       } catch (error) {
@@ -2680,10 +2689,10 @@ export class Membrane {
     return signal?.aborted === true || this.isAbortError(error);
   }
 
-  private abortReason(error: unknown, signal?: AbortSignal): 'user' | 'timeout' | 'error' {
-    if (signal?.aborted) return 'user';
-    if (classifyError(error).type === 'timeout') return 'timeout';
-    return 'error';
+  private abortOutcome(error: unknown, signal?: AbortSignal): { reason: 'user' | 'timeout' | 'error'; message?: string } {
+    if (signal?.aborted) return { reason: 'user' };
+    const reason = classifyError(error).type === 'timeout' ? 'timeout' : 'error';
+    return error instanceof Error && error.message ? { reason, message: error.message } : { reason };
   }
 
   private buildAbortedResponse(
@@ -2691,14 +2700,14 @@ export class Membrane {
     usage: BasicUsage,
     toolCalls: ToolCall[],
     toolResults: ToolResult[],
-    reason: 'user' | 'timeout' | 'error',
+    outcome: { reason: 'user' | 'timeout' | 'error'; message?: string },
     blocks: ContentBlock[]
   ): AbortedResponse {
     return {
       aborted: true,
       partialContent: blocks.length > 0 ? blocks : undefined,
       partialUsage: usage,
-      reason,
+      ...outcome,
       rawAssistantText: accumulated || undefined,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
       toolResults: toolResults.length > 0 ? toolResults : undefined,
@@ -2736,6 +2745,7 @@ export class Membrane {
     request: NormalizedRequest,
     options: YieldingStreamOptions = {}
   ): YieldingStream {
+    resolveProgressBounds(options.progressBounds);
     const activeFormatter = this.resolveActiveFormatter();
     const toolMode = this.resolveToolMode(request, activeFormatter);
 
@@ -2941,6 +2951,7 @@ export class Membrane {
             timeoutMs: options.timeoutMs,
             idleTimeoutMs: options.idleTimeoutMs,
             progressTimeoutMs: options.progressTimeoutMs,
+            progressBounds: options.progressBounds,
             retry: options.retry,
             normalizedRequest: request,
             formatterName: formatter.name,
@@ -3309,7 +3320,7 @@ export class Membrane {
     } catch (error) {
       if (stream.isCancelled) return;
       if (this.isAbortError(error)) {
-        stream.emit({ type: 'aborted', reason: this.abortReason(error, stream.signal), ...abortedPartial() });
+        stream.emit({ type: 'aborted', ...this.abortOutcome(error, stream.signal), ...abortedPartial() });
       } else {
         throw error;
       }
@@ -3424,6 +3435,7 @@ export class Membrane {
             timeoutMs: options.timeoutMs,
             idleTimeoutMs: options.idleTimeoutMs,
             progressTimeoutMs: options.progressTimeoutMs,
+            progressBounds: options.progressBounds,
             retry: options.retry,
             normalizedRequest: request,
             formatterName: activeFormatter.name,
@@ -3625,7 +3637,7 @@ export class Membrane {
     } catch (error) {
       if (stream.isCancelled) return;
       if (this.isAbortError(error)) {
-        stream.emit({ type: 'aborted', reason: this.abortReason(error, stream.signal), ...abortedPartial() });
+        stream.emit({ type: 'aborted', ...this.abortOutcome(error, stream.signal), ...abortedPartial() });
       } else {
         throw error;
       }

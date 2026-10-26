@@ -3,6 +3,7 @@ import type { NormalizedMessage } from './message.js';
 import type { ToolCall, ToolResult, ToolContext } from './tools.js';
 import type { DetailedUsage, NormalizedResponse, StopReason } from './response.js';
 import type { ChunkMeta, BlockEvent } from './streaming.js';
+import type { ProgressBounds } from '../progress-bounds.js';
 
 /**
  * Token/chunk event - raw text as it arrives from the LLM, and in XML tool
@@ -243,6 +244,8 @@ export interface RetryingEvent {
 export interface AbortedEvent {
   type: 'aborted';
   reason: 'user' | 'timeout' | 'error';
+  /** What ended it, when the caller didn't: a deadline's names the bound that ran out. */
+  message?: string;
   partialContent?: ContentBlock[];
   rawAssistantText?: string;
   toolCalls?: ToolCall[];
@@ -384,6 +387,15 @@ export interface YieldingStreamOptions {
    * deadline bounds the whole call.
    */
   progressTimeoutMs?: number;
+
+  /**
+   * Progress bounds per provider call (default: off); see
+   * StreamOptions.progressBounds. On expiry the stream ends with an `aborted`
+   * event whose reason is `'timeout'` and whose `message` names the bound
+   * that ran out. Time between provider calls, such as waiting for
+   * `provideToolResults()`, never counts.
+   */
+  progressBounds?: boolean | Partial<ProgressBounds>;
 
   /** Request ID for correlation/logging */
   requestId?: string;

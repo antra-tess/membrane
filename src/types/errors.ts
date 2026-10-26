@@ -235,8 +235,8 @@ export function abortError(message: string = 'Request was aborted', rawRequest?:
 
 /**
  * A request cancelled by a deadline of the call's own (the adapter's
- * `timeoutMs`, or the progress deadline), as opposed to a caller's signal or a
- * stray abort.
+ * `timeoutMs`, the progress deadline or progress bounds), as opposed to a
+ * caller's signal or a stray abort.
  *
  * It is both at once: a timeout by `type` (`classifyError` and the
  * abort-reason ladder report `'timeout'`), and an abort by provenance (the
