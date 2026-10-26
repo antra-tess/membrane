@@ -21,7 +21,9 @@ export function stripEmptyTextBlocks<T>(blocks: readonly T[], onDropped?: (block
   }).map(block => {
     const value = block as { type?: string; content?: unknown } | null;
     if (value?.type === 'tool_result' && Array.isArray(value.content)) {
-      return { ...block, content: stripEmptyTextBlocks(value.content, onDropped as ((nested: unknown) => void) | undefined) };
+      const held: unknown[] = value.content;
+      const content = stripEmptyTextBlocks(held, onDropped as ((nested: unknown) => void) | undefined);
+      return content.length === held.length && content.every((nested, i) => nested === held[i]) ? block : { ...block, content };
     }
     return block;
   });

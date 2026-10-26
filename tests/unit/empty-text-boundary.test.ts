@@ -62,9 +62,22 @@ describe.each(['Anthropic', 'Bedrock'])('%s empty text at the wire boundary', ki
     expect(built.messages[0]).toEqual(request.messages[0]);
     expect(built.messages[1].content).toEqual([
       { type: 'tool_result', tool_use_id: 'call', content: [text('ok'), image] },
-      { type: 'tool_result', tool_use_id: 'empty-array', content: [], is_error: true },
+      // The API takes no error result without content.
+      { type: 'tool_result', tool_use_id: 'empty-array', content: [{ type: 'text', text: '[system: this tool error carries no content this request can show.]' }], is_error: true },
       { type: 'tool_result', tool_use_id: 'empty-string', content: '' },
     ]);
+  });
+
+  it('removes whitespace text from a tool_result nested in a passthrough tool_result', () => {
+    const inner = { type: 'tool_result', tool_use_id: 'inner', content: [text(' \n'), text('ok')] };
+    const dropped: unknown[] = [];
+    const built = makeAdapter(kind).buildRequest(
+      { ...base, messages: [{ role: 'user', content: 'hello' }], extra: { messages: [{ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'outer', content: [inner] }] }] } },
+      ...(kind === 'Bedrock' ? [undefined] : []),
+      (block: unknown) => dropped.push(block),
+    );
+    expect(built.messages[0].content[0].content[0].content).toEqual([text('ok')]);
+    expect(dropped).toContainEqual(text(' \n'));
   });
 
   it('filters system blocks while retaining valid text and its cache marker', () => {
