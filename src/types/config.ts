@@ -1,16 +1,8 @@
-/**
- * Configuration types for membrane
- */
-
 import type { ModelRegistry } from './provider.js';
 import type { ErrorInfo } from './errors.js';
 import type { NormalizedRequest } from './request.js';
 import type { NormalizedResponse } from './response.js';
 import type { NormalizeEvent, PrefillFormatter } from '../formatters/types.js';
-
-// ============================================================================
-// Retry Config
-// ============================================================================
 
 export interface RetryConfig {
   /**
@@ -51,11 +43,9 @@ export interface RetryConfig {
 
   /**
    * Separate, longer schedule for provider capacity errors (529
-   * overloaded_error). Capacity storms last minutes, not seconds — the
-   * standard schedule's 30s ceiling turns one into a dead turn. Overloaded
-   * retries are attempted whatever the base maxRetries says (mirroring the
-   * forced 429 retries), unless the call passes `retry: false`, with jitter
-   * so a fleet backing off doesn't re-create the stampede in sync.
+   * overloaded_error). Overloaded retries are attempted whatever the base
+   * maxRetries says (mirroring the forced 429 retries), unless the call
+   * passes `retry: false`, with jitter.
    *
    * maxRetries: 0 here disables this dedicated policy entirely: 529s then
    * follow the base retry config like any other retryable server error, on
@@ -88,10 +78,6 @@ export interface OverloadedRetryConfig {
 export type RetryConfigInput = Partial<Omit<RetryConfig, 'overloaded'>> & {
   overloaded?: Partial<OverloadedRetryConfig>;
 };
-
-// ============================================================================
-// Media Processing Config
-// ============================================================================
 
 export interface MediaConfig {
   images: {
@@ -126,10 +112,6 @@ export interface MediaConfig {
     maxDurationSec: number;
   };
 }
-
-// ============================================================================
-// Hooks
-// ============================================================================
 
 /**
  * Each hook is the caller's code, run beside the call: what one throws ends
@@ -205,20 +187,12 @@ export interface MembraneHooks {
   onNormalize?: (event: NormalizeEvent) => void;
 }
 
-// ============================================================================
-// Logger Interface
-// ============================================================================
-
 export interface MembraneLogger {
   debug(message: string, data?: Record<string, unknown>): void;
   info(message: string, data?: Record<string, unknown>): void;
   warn(message: string, data?: Record<string, unknown>): void;
   error(message: string, data?: Record<string, unknown>): void;
 }
-
-// ============================================================================
-// Membrane Config
-// ============================================================================
 
 export interface MembraneConfig {
   /** Model registry for capability lookup */
@@ -246,9 +220,9 @@ export interface MembraneConfig {
 
   /**
    * Default for request.promptCaching when the request doesn't set it.
-   * Historical default is true (Anthropic API). Set false for transports
-   * that reject cache_control (e.g. Bedrock legacy Claude models, which 400
-   * with "your request did not allow prompt caching").
+   * Default: true. Set false for transports that reject cache_control (e.g.
+   * Bedrock legacy Claude models, which 400 with "your request did not allow
+   * prompt caching").
    */
   defaultPromptCaching?: boolean;
 
@@ -281,21 +255,11 @@ export interface MembraneConfig {
   debug?: boolean;
 }
 
-// ============================================================================
-// Default Config
-// ============================================================================
-
 export const DEFAULT_RETRY_CONFIG: RetryConfig = {
-  // 3 attempts = 2 waits: 1s → 2s, the three sends AnthropicAdapter's SDK
-  // client used to make inside each attempt, for a 5xx or a dropped
-  // connection before anything was delivered. Its retries are off now that
-  // membrane is the one retry layer.
   maxRetries: 3,
   retryDelayMs: 1000,
   backoffMultiplier: 2,
   maxRetryDelayMs: 30000,
-  // 7 attempts = 6 waits: 10s → 20s → 40s → 80s → 160s → 300s, ~10 minutes
-  // of patience in total — the scale capacity storms actually resolve on.
   overloaded: {
     maxRetries: 7,
     retryDelayMs: 10_000,
@@ -306,7 +270,7 @@ export const DEFAULT_RETRY_CONFIG: RetryConfig = {
 
 export const DEFAULT_MEDIA_CONFIG: MediaConfig = {
   images: {
-    maxSizeBytes: 5 * 1024 * 1024, // 5MB (Anthropic limit)
+    maxSizeBytes: 5 * 1024 * 1024,
     autoResize: true,
     resizeQuality: 85,
     relocateInPrefillMode: true,

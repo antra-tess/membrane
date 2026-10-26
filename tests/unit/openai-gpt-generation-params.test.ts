@@ -1,12 +1,7 @@
 /**
- * `OpenAIAdapter` picks the request parameter surface by model generation.
- *
  * GPT-5 and later reject `max_tokens` ("Unsupported parameter: 'max_tokens' is
  * not supported with this model. Use 'max_completion_tokens' instead."), and
- * accept only default temperature/top_p and no stop sequences. The adapter
- * used to recognise this family by listing `gpt-5` prefixes, so the first
- * GPT-6 model (gpt-6-astra) fell through to the legacy parameters and every
- * request 400'd. Detection is now by major version.
+ * accept only default temperature/top_p and no stop sequences.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { OpenAIAdapter } from '../../src/providers/openai.js';

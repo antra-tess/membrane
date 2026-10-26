@@ -62,8 +62,6 @@ describe('fetch failures preserve transport retryability', () => {
     const membrane = new Membrane(new OpenAIAdapter({ apiKey: 'zz-key' }), {
       formatter: new NativeFormatter(), retry: { maxRetries: 2, retryDelayMs: 1 },
     });
-    // One retry layer, the same on every entry point: the connection failed
-    // before anything was delivered, so the request is sent again.
     await invoke(membrane, entry);
     expect(sends).toBe(2);
   });

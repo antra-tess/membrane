@@ -1,13 +1,6 @@
 // Runs as npm's `version` lifecycle hook (see package.json): at that point
 // package.json already carries the new version, and files staged here are
 // included in the release commit that `npm version` then creates and tags.
-//
-// Folds the pending fragments in changelog.d/ (one file per change,
-// `<slug>.<breaking|added|changed|fixed>.md`) together with anything filed
-// directly under the standing `## Unreleased` section into a new
-// `## X.Y.Z — YYYY-MM-DD` section, deletes the consumed fragments, and
-// leaves a fresh empty `## Unreleased` above it. Refuses to release when
-// there is nothing to release, or when the input's shape is ambiguous.
 import {
   existsSync,
   readdirSync,
@@ -19,7 +12,6 @@ import { join } from "node:path";
 
 const CHANGELOG = "CHANGELOG.md";
 const FRAGMENT_DIR = "changelog.d";
-// Canonical subsection order; a fragment's category must be one of these.
 const CATEGORIES = ["breaking", "added", "changed", "fixed"];
 const HEADINGS = {
   breaking: "Breaking",
@@ -28,20 +20,15 @@ const HEADINGS = {
   fixed: "Fixed",
 };
 
-// Refusals throw and are reported at the entry point, which then lets the
-// process end on its own with exitCode 1. process.exit() would race the
-// stderr write when stderr is a pipe (asynchronous on macOS), leaving the
-// caller a bare failure status with no reason attached.
+// A refusal throws this, and the entry point reports it and sets exitCode:
+// process.exit() would race a stderr write to a pipe, which is asynchronous
+// on macOS, and the caller would get the failure status without its reason.
 class ReleaseError extends Error {}
 const fail = (msg) => {
   throw new ReleaseError(msg);
 };
 
-// Fragment grammar: every non-blank line starts a bullet or continues one
-// (indented two or more spaces; nested bullets included). Headings and
-// thematic breaks are refused wherever they appear — at top level a '## '
-// line would splice a fake section boundary into the released changelog,
-// and as item content ('- ## x', '  ## x') they still render as headings.
+// A heading inside a list item ('- ## x', '  ## x') still renders as a heading.
 const isBulletStart = (l) => /^[-*] /.test(l);
 const isContinuation = (l) => /^ {2,}\S/.test(l);
 const itemContent = (l) => l.replace(/^\s*(?:[-*]\s+)?/, "");
@@ -50,10 +37,6 @@ const isHeading = (s) => /^#{1,6}(\s|$)/.test(s);
 const isRule = (s) => /^([-*_=])(\s*\1){2,}\s*$/.test(s);
 const isBlockConstruct = (l) => isRule(l.trim()) || isHeading(itemContent(l));
 
-// The directory is scanned fail-closed: anything that is not README.md or
-// a well-formed fragment file aborts the release, so an entry can never be
-// silently left out (e.g. a fragment created under a 'fix/' subdirectory
-// because the slug was taken verbatim from a branch name).
 function collectFragments() {
   const fragments = [];
   if (!existsSync(FRAGMENT_DIR)) return fragments;
@@ -98,11 +81,6 @@ function collectFragments() {
   return fragments;
 }
 
-// Merge fragment bullets into the Unreleased body's subsection structure.
-// Directly-filed entries are kept; a fragment joins the first subsection
-// whose title starts with its category (so audience-qualified headings like
-// '### Breaking (module authors only)' still attract 'breaking' fragments),
-// or a new canonical subsection. Output is emitted in canonical order.
 function mergeFragments(body, frags) {
   const preamble = [];
   const parts = [];
@@ -145,9 +123,6 @@ function main() {
   const text = readFileSync(CHANGELOG, "utf8");
   const fragments = collectFragments();
 
-  // Exactly one Unreleased heading. A second one silently strands entries:
-  // only the first is ever cut, so anything filed under a later heading is
-  // never released and never reaches the GitHub release notes.
   const headings = [...text.matchAll(/^## Unreleased[ \t]*$/gm)];
   if (headings.length === 0) {
     fail(`no '## Unreleased' section in ${CHANGELOG} — add one before releasing.`);
@@ -179,10 +154,6 @@ function main() {
     );
   }
 
-  // Spliced by index rather than string-replaced: `text.replace("## Unreleased", …)`
-  // would hit the first *substring* occurrence, which is not necessarily the
-  // heading the regex matched (an inline mention of `## Unreleased` in prose
-  // comes first) and would inject the version heading into the wrong place.
   const date = new Date().toISOString().slice(0, 10);
   writeFileSync(
     CHANGELOG,

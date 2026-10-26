@@ -8,11 +8,6 @@ function sse(frames: unknown[]) {
   return new Response(frames.map(frame => 'data: ' + (typeof frame === 'string' ? frame : JSON.stringify(frame)) + '\n\n').join(''), { headers: { 'content-type': 'text/event-stream' } });
 }
 
-// ---------------------------------------------------------------------------
-// A completions stream ended by the adapter's own end-of-turn token keeps the
-// metadata the provider already sent in that frame.
-// ---------------------------------------------------------------------------
-
 describe('completions end-of-turn keeps its frame metadata', () => {
   const adapter = () => new OpenAICompletionsAdapter({ apiKey: 'zz-key', baseURL: 'https://review.invalid/v1' });
   const frame = (reason?: string, usage = true) => ({

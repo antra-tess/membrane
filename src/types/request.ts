@@ -1,13 +1,5 @@
-/**
- * Request types for membrane
- */
-
 import type { NormalizedMessage } from './message.js';
 import type { ToolDefinition } from './tools.js';
-
-// ============================================================================
-// Generation Config
-// ============================================================================
 
 export interface GenerationConfig {
   /** Model identifier */
@@ -16,7 +8,7 @@ export interface GenerationConfig {
   /** Maximum tokens to generate */
   maxTokens: number;
   
-  /** Temperature (0-2) */
+  /** Temperature. Its range is the provider's (Anthropic's is 0-1, OpenAI's 0-2); membrane doesn't clamp it. */
   temperature?: number;
   
   /** Top P nucleus sampling */
@@ -86,16 +78,15 @@ export interface GenerationConfig {
      * with a budget that fits under `maxTokens`, adaptive thinking, or a model
      * whose thinking is always on. Such a model's thinking config is otherwise
      * left out; with this set it gets `{ type: 'adaptive', block_binding }`,
-     * plus `display` when that is set. Fable 5 and Fable 5.1 accepted the
-     * binding config on 2026-10-10, and with `display: 'summarized'` beside it
-     * on 2026-10-12, returning signed thinking with its text. Mythos hasn't
-     * been tried, and the family has refused thinking configs with a 400
-     * before, so for a Mythos model setting it may fail every request.
-     * Bedrock's acceptance of the beta hasn't been tried either. The Bedrock
-     * adapter sends the interleaved-thinking beta only to models that take
-     * it, since legacy 3.x models there refuse unknown beta flags, but it
-     * sends this one whenever the body carries the binding, so an older
-     * thinking-capable model on Bedrock may refuse the request with a 400.
+     * plus `display` when that is set. Fable 5 and Fable 5.1 accept the
+     * binding config, and with `display: 'summarized'` beside it return signed
+     * thinking with its text. Mythos hasn't been tried, and the family has
+     * refused thinking configs with a 400 before, so for a Mythos model setting
+     * it may fail every request. Bedrock's acceptance of the beta hasn't been
+     * tried either. The Bedrock adapter sends this beta whenever the body
+     * carries the binding, and legacy 3.x models there refuse unknown beta
+     * flags, so an older thinking-capable model on Bedrock may refuse the
+     * request with a 400.
      *
      * A request that carries no thinking config carries no binding, and the
      * account's default applies there: thinking disabled, an enabled budget
@@ -105,19 +96,18 @@ export interface GenerationConfig {
      * thinking. Fable and Mythos are the exception to the first two: they
      * think whatever the config says, so they carry the binding whenever it's
      * asked for. Sending no thinking config doesn't mean a reply holds no
-     * thinking that binds: on 2026-10-19 Opus 5.5 and 5, Sonnet 5.5 and 5,
-     * and Haiku 5.5 each returned a signed thinking block to a request with
-     * no thinking config, and Opus 5.5, Sonnet 5.5 and Haiku 5.5 bind it. To
-     * carry the binding to such a model in a request that doesn't end in an
-     * assistant prefill, set this and ask for adaptive thinking
-     * (`enabled: true`, `type: 'adaptive'`, and `display: 'omitted'`, so the
-     * block comes back signature only, as it did with no config). Those three
-     * accepted that config with the binding in place of no config, and read
-     * the same cached prefix, in one run each at the 5-minute TTL. As with any
-     * thinking config other than `disabled`, the Anthropic adapter then sends
-     * none of the caller's `temperature` or `topK`, and no `topP` below 0.95;
-     * to these three it sends no `topP` at all, since it strips sampling
-     * parameters for them whatever the config (NO_TEMPERATURE_MODELS).
+     * thinking that binds: Opus 5.5 and 5, Sonnet 5.5 and 5, and Haiku 5.5
+     * each return a signed thinking block to a request with no thinking
+     * config, and Opus 5.5, Sonnet 5.5 and Haiku 5.5 bind it. To carry the
+     * binding to such a model in a request that doesn't end in an assistant
+     * prefill, set this and ask for adaptive thinking (`enabled: true`,
+     * `type: 'adaptive'`, and `display: 'omitted'`, so the block comes back
+     * signature only, as it does with no config). Those three accept that
+     * config with the binding in place of no config, and read the same cached
+     * prefix. As with any thinking config other than `disabled`, the Anthropic
+     * adapter then sends none of the caller's `temperature` or `topK`, and no
+     * `topP` below 0.95; to these three it sends no `topP` at all, since it
+     * strips sampling parameters for them whatever the config.
      * The Bedrock adapter sends `temperature` 1 and the caller's `topK` beside
      * it; whether Bedrock takes that hasn't been tried. A `thinking` object
      * passed through `providerParams` replaces the one membrane builds,
@@ -136,10 +126,6 @@ export interface GenerationConfig {
     imageSize?: 'SMALL' | 'MEDIUM' | 'LARGE';
   };
 }
-
-// ============================================================================
-// Stop Sequence Config
-// ============================================================================
 
 export type StopSequenceStrategy = 
   | 'none'              // Trust API stop sequences only
@@ -160,10 +146,6 @@ export interface StopSequenceConfig {
   postFactoOnly?: string[];
 }
 
-// ============================================================================
-// Request Options
-// ============================================================================
-
 export interface RequestOptions {
   /** Abort signal for cancellation */
   signal?: AbortSignal;
@@ -178,18 +160,10 @@ export interface RequestOptions {
   tags?: Record<string, string>;
 }
 
-// ============================================================================
-// Tool Mode
-// ============================================================================
-
 export type ToolMode = 
-  | 'xml'     // XML injection in prefill mode (chatperx style)
+  | 'xml'     // XML injection in prefill mode
   | 'native'  // Native API tool support (Anthropic tool_use, OpenAI tool_calls)
   | 'auto';   // Automatically choose based on provider/mode
-
-// ============================================================================
-// Normalized Request
-// ============================================================================
 
 export interface NormalizedRequest {
   /** Cache-layout receipt: the default basis is the post-format/post-hook,
@@ -204,8 +178,7 @@ export interface NormalizedRequest {
    * Explicitly own the loss of old inline images when the serialized request
    * exceeds the API byte cap: oldest images are replaced with loud
    * placeholders (error-logged). Without this flag an oversize request FAILS
-   * LOUDLY before the API call (2026-07-12 — no silent transport-layer
-   * mutation). Intended for summarizer/compression callers.
+   * LOUDLY before the API call.
    */
   shedOversizeImages?: boolean;
   /** Conversation messages */
@@ -238,9 +211,9 @@ export interface NormalizedRequest {
   maxParticipantsForStop?: number;
   
   /**
-   * Enable prompt caching (Anthropic/Bedrock).
-   * Defaults to true for backward compatibility.
-   * Set to false to disable cache_control markers in requests.
+   * Enable prompt caching (Anthropic/Bedrock). Defaults to true.
+   * Set to false to stop membrane adding cache_control markers; a
+   * `cache_control` a content block carries is still sent.
    */
   promptCaching?: boolean;
 
@@ -260,11 +233,14 @@ export interface NormalizedRequest {
   /**
    * Float a trailing cache_control marker onto the newest message when the
    * native tool loop rebuilds the request between tool-execution rounds, so
-   * the growing tool-round suffix caches incrementally (each round writes
-   * only its delta and cache-reads everything before it). Placed only from
-   * the request's *residual* breakpoint budget — the marker is withheld when
-   * upstream markers already occupy all 4 Anthropic cache_control slots —
-   * so upstream breakpoints are never displaced or stripped.
+   * the growing tool-round suffix caches incrementally: each round writes its
+   * delta and cache-reads everything before it. Placed only from the request's
+   * residual breakpoint budget: the marker is withheld when upstream markers
+   * already occupy all 4 Anthropic cache_control slots, so upstream breakpoints
+   * are never displaced or stripped. With two or more slots free, the message
+   * before the round's calling turn is marked too; with one, a round that
+   * appends more blocks than Anthropic's ~20-block backward cache search covers
+   * writes again what it could have read.
    * Defaults to true (when promptCaching is enabled). Set false for context
    * strategies whose request prefix churns between rounds, where a trailing
    * marker would be pure cache-write cost.
@@ -274,7 +250,7 @@ export interface NormalizedRequest {
   /**
    * Context prefix for simulacrum seeding.
    * Injected as first assistant message (before conversation history).
-   * Cached when promptCaching is enabled.
+   * Cached when promptCaching is enabled and `cacheMarkers` isn't 'cm-owned'.
    */
   contextPrefix?: string;
 
@@ -299,7 +275,6 @@ export interface NormalizedRequest {
    * - true or undefined: use streaming (default)
    * - false: force non-streaming — membrane.stream() will internally use
    *   complete() and synthesize streaming callbacks from the full response.
-   *   Useful for working around provider streaming bugs.
    */
   streaming?: boolean;
 

@@ -1,12 +1,3 @@
-/**
- * A throwing receipt consumer must fail the call before any provider request,
- * whatever basis the receipt uses.
- *
- * Post-hook receipts fire before the adapter is called. Wire-request receipts
- * fire from inside the adapter's onRequest, where adapter decorators commonly
- * swallow hook errors ("never block on caller hook"). Without a guard, the
- * request would go out and the consumer's failure would vanish.
- */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { NativeFormatter } from '../../src/formatters/native.js';
@@ -36,7 +27,7 @@ function swallowHookErrors(options?: ProviderRequestOptions): ProviderRequestOpt
   return {
     ...options,
     onRequest: (raw: unknown) => {
-      try { hook?.(raw as never); } catch { /* never block on caller hook */ }
+      try { hook?.(raw as never); } catch { }
     },
   } as ProviderRequestOptions;
 }
@@ -104,8 +95,7 @@ describe('wire-request receipt guard on a generic adapter', () => {
     sent = 0;
     supportsModel(): boolean { return true; }
     private async send(options?: ProviderRequestOptions): Promise<ProviderResponse> {
-      // A decorator in the way: hook errors are swallowed.
-      try { options?.onRequest?.({ model: 'm', messages: [] }); } catch { /* swallowed */ }
+      try { options?.onRequest?.({ model: 'm', messages: [] }); } catch { }
       if (options?.signal?.aborted) throw new Error('aborted before send');
       this.sent++;
       return { content: [{ type: 'text', text: 'ok' }], stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 }, model: 'm', raw: {} } as ProviderResponse;

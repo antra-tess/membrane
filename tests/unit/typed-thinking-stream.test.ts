@@ -41,7 +41,6 @@ function setup(provider: string, mode: string, finish: string, signatureOnly = f
     const source = wire ?? events(signatureOnly, mode === 'xml');
     const abortAt = finish === 'thinking-abort'
       ? source.findIndex(event => event.delta?.type === 'thinking_delta')
-      // After the signature (the thinking block's last delta) and before its stop.
       : finish === 'signed-abort' ? source.findIndex(event => event.delta?.type === 'signature_delta')
       : finish === 'text-abort' ? source.findIndex(event => event.delta?.type === 'text_delta' && event.delta.text === abortChunk) : -1;
     const frames = (abortAt >= 0 ? source.slice(0, abortAt + 1) : source).map(event => provider === 'anthropic'
@@ -60,11 +59,8 @@ function setup(provider: string, mode: string, finish: string, signatureOnly = f
   const adapter = provider === 'anthropic'
     ? new AnthropicAdapter({ apiKey: 'test' })
     : new BedrockAdapter({ accessKeyId: 'test', secretAccessKey: 'test', region: 'us-west-2' });
-  // Partial fixtures end the actual transport after the selected typed delta.
   const formatter = mode === 'plain' ? new CompletionsFormatter() : mode === 'xml' ? new AnthropicXmlFormatter() : new NativeFormatter();
   if (mode === 'plain') {
-    // A plain parser on a valid user-ended Messages body: transport semantics
-    // are independent of the formatter label and parser's prefill convention.
     const build = formatter.buildMessages.bind(formatter);
     formatter.buildMessages = (messages, options) => ({
       ...build(messages, options), messages: [{ role: 'user', content: 'Question' }], assistantPrefill: undefined,
@@ -117,8 +113,6 @@ for (const provider of ['anthropic', 'bedrock']) {
           const thinkingChunk = chunks.find(item => item.chunk === thought);
           expect(thinkingChunk?.meta).toMatchObject({ type: 'thinking', visible: false });
           expect(chunks.filter(item => item.meta?.visible).map(item => item.chunk).join('')).not.toContain(thought);
-          // The text fields hold visible text on native paths as on plain ones
-          // (stream()'s abort leaves out an empty rawAssistantText).
           expect(response.rawAssistantText ?? '').toBe(inThinking ? '' : visible);
         });
       }
@@ -179,7 +173,6 @@ it.each(['stream', 'yielding'])('a local text stop in plain %s also bounds block
   expect(response.content).toEqual([{ type: 'thinking', thinking: thought, signature: 'signature' }, text('KEEP ')]);
   const texts = blocks.filter(event => event.block.type === 'text');
   expect(texts.filter(event => event.event === 'block_complete').map(event => event.block.content)).toEqual(['KEEP ']);
-  // The stop chunk's text goes out labelled by the provider's text block, the index its block events carry.
   expect(chunks.filter(c => c.meta.type === 'text')).toEqual([{ chunk: 'KEEP ', meta: expect.objectContaining({ visible: true, blockIndex: texts[0].index }) }]);
   expect(texts.map(event => event.index)).toEqual([texts[0].index, texts[0].index]);
 });

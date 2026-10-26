@@ -1,18 +1,14 @@
 /**
- * System changes (SystemChangeContent): a message of `system_change` blocks
- * goes out as a mid-conversation `role: 'system'` message, so a caller can
- * change the tools and system text the model is offered without editing the
- * request's `tools` or `system`, which would rewrite the whole cached prefix.
+ * Changing a request's `tools` or `system` rewrites the whole cached prefix.
  *
- * Wire shapes and rules are the Anthropic API's, as live runs showed them,
- * Oct 19 and 20 2026: `tool_removal` with a
- * `tool_reference` and `tool_addition` with a `tool_definition` (Opus 5.5,
- * Haiku 5.5), text blocks (Haiku 5.5, Sonnet 5), the inline-tools beta for
- * tool changes, a cache marker taken on any of those blocks (Haiku 5.5), and a
- * 400 with one of three wordings on a model without them (Opus 4.6, Haiku 4.5,
- * Sonnet 5 for tool changes). Placement follows the API's page: after a
- * user turn, a tool-result turn included, and before an assistant turn or at
- * the end.
+ * In the Anthropic API:
+ * `tool_removal` with a `tool_reference` and `tool_addition` with a
+ * `tool_definition` (Opus 5.5, Haiku 5.5), text blocks (Haiku 5.5, Sonnet 5),
+ * the inline-tools beta for tool changes, a cache marker taken on any of those
+ * blocks (Haiku 5.5), and a 400 with one of three wordings on a model without
+ * them (Opus 4.6, Haiku 4.5, Sonnet 5 for tool changes). A system message goes
+ * after a user turn, a tool-result turn included, and before an assistant turn
+ * or at the end.
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
@@ -56,7 +52,6 @@ const options = { participantMode: 'simple' as const, assistantParticipant: 'Cla
 const build = (messages: NormalizedMessage[], extra: Record<string, unknown> = {}) =>
   new NativeFormatter().buildMessages(messages, { ...options, ...extra });
 const roles = (built: { messages: Array<{ role: string }> }) => built.messages.map((m) => m.role);
-/** Each built message's first text, or its role for one with none: enough to see where a system message went. */
 const shape = (built: { messages: Array<{ role: string; content: unknown }> }) => built.messages.map((m) => {
   const first = (m.content as Array<{ type: string; text?: string }>).find((b) => b.type === 'text');
   return `${m.role}:${first?.text ?? (m.content as Array<{ type: string }>)[0]?.type}`;
@@ -174,16 +169,13 @@ describe('NativeFormatter: cache markers and system messages', () => {
       ...caching,
       hasCacheMarker: (_m: NormalizedMessage, index: number) => index === at,
     }).messages.flatMap((m) => (m.content as Array<Record<string, unknown>>).filter((b) => b.cache_control).map((b) => `${m.role}:${b.text}`));
-    // The change lands after u4, past a3: the boundary before a3 stays after a1, as without the change.
     expect(marked([user('u0'), reply(text('a1')), s, reply(text('a3')), user('u4'), reply(text('a5'))], 3)).toEqual(['assistant:a1']);
     expect(marked([user('u0'), reply(text('a1')), reply(text('a3')), user('u4'), reply(text('a5'))], 2)).toEqual(['assistant:a1']);
-    // Landing right before the boundary's message, it still takes none.
     expect(marked([user('u0'), s, reply(text('a2'))], 2)).toEqual(['user:u0']);
     expect(marked([user('u0'), reply(text('a1')), s, user('u2'), reply(text('a3'))], 4)).toEqual(['user:u2']);
   });
 });
 
-/** A native adapter that records each request, and says whether it sends system changes. */
 class RecordingAdapter implements ProviderAdapter {
   readonly name = 'recording';
   requests: ProviderRequest[] = [];
@@ -269,7 +261,7 @@ describe('AnthropicAdapter and system changes', () => {
     ]);
   });
 
-  it('marks a 400 refusing the system change, keeping its classification, and no other 400', () => {
+  it('marks a 400 refusing the system change, keeping its classification, and not a 400 with other wording, a 500 with a refusal\'s wording, or an error whose rendered request quotes one', () => {
     const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
     const classify = (message: string, status = 400) =>
       (adapter as any).handleError(new Anthropic.APIError(status, { type: 'error', error: { type: 'invalid_request_error', message } }, undefined, new Headers()), { model: 'm' });
@@ -285,7 +277,6 @@ describe('AnthropicAdapter and system changes', () => {
     }
     expect(classify('messages.1: a system message must follow a user turn').systemChangeRefused).toBeUndefined();
     expect(classify("role 'system' is not supported on this model", 500).systemChangeRefused).toBeUndefined();
-    // Only the provider's own message counts, not a rendering of the request.
     expect(isSystemChangeRefusal({ error: { message: 'max_tokens: too large' }, request: "role 'system' is not supported on this model" })).toBe(false);
   });
 });
@@ -370,7 +361,6 @@ describe('system changes: placement edges, markers, names, the beta and refusals
     expect(anyOfSchema).toEqual(anyOfSnapshot);
   });
 
-  /** An adapter that sends system changes and answers with a call to `srv__get_weather`. */
   class CallingAdapter extends RecordingAdapter {
     override async complete(request: ProviderRequest): Promise<ProviderResponse> {
       this.requests.push(request);
@@ -391,8 +381,8 @@ describe('system changes: placement edges, markers, names, the beta and refusals
   });
 
   it('tools a change defines count as tools when the tool mode is chosen, and that refusal comes first, unflagged', async () => {
-    // An adapter that doesn't send system changes, so its flagged refusal would come if the tool-mode check didn't come first.
-    const membrane = new Membrane(new RecordingAdapter(false), { formatter: new NativeFormatter() });
+    const sendsSystemChanges = false;
+    const membrane = new Membrane(new RecordingAdapter(sendsSystemChanges), { formatter: new NativeFormatter() });
     const xml: NormalizedRequest = { ...request([user('u0'), changes(change({ defineTools: [tool('get_weather')] }))]), tools: undefined, toolMode: 'xml' };
     let thrown: unknown;
     try {
@@ -443,7 +433,6 @@ describe('system changes: the empty-text cleanup, alterations, and the tools a r
 
   describe('placement reads the turns the empty-text cleanup leaves', () => {
     it('a user turn the cleanup drops leaves the assistant turn after it no point', () => {
-      // u0, a1, S, uWS, a4, u5: the cleanup drops uWS, and a1 and a4 are one assistant turn.
       expect(roles(build([user('u0'), reply(text('a1')), changes(change({ addSystem: ['s'] })), user('   '), reply(text('a4')), user('u5')])))
         .toEqual(['user', 'assistant', 'user', 'assistant', 'user', 'system']);
     });
@@ -454,13 +443,11 @@ describe('system changes: the empty-text cleanup, alterations, and the tools a r
     });
 
     it('a run of dropped turns is skipped: the previous surviving turn decides', () => {
-      // u0, S, aWS, uWS, a4: after cleanup u0 then a4, so S goes before a4.
       expect(roles(build([user('u0'), changes(change({ addSystem: ['s'] })), reply(ws()), user('   '), reply(text('a4'))])))
         .toEqual(['user', 'assistant', 'user', 'system', 'assistant']);
     });
 
     it('a turn is dated by the blocks that survive the cleanup', () => {
-      // aWS and a3 merge into one assistant turn; its surviving block is a3's, after S.
       expect(shape(build([user('u0'), reply(ws()), changes(change({ addSystem: ['s'] })), reply(text('a3')), user('u4')])))
         .toEqual(['user:u0', 'system:s', 'assistant:   ', 'user:u4']);
     });
@@ -487,7 +474,6 @@ describe('system changes: the empty-text cleanup, alterations, and the tools a r
       { role: 'user', content: [{ type: 'text', text: 'hello' }] },
       { role: 'system', content: [flattened, plain] },
     ] } as any, { onContentAltered: (block?: unknown) => altered.push(block) } as any);
-    // The block itself: a report is attributed by looking its block up by identity.
     expect(altered).toHaveLength(1);
     expect(altered[0]).toBe(flattened);
   });
@@ -519,16 +505,17 @@ describe('system changes: the empty-text cleanup, alterations, and the tools a r
     });
   });
 
-  /** Replies in script order through stream(), announcing each block as a provider does. */
+  const announceStartAndCompletion = (callbacks: StreamCallbacks, index: number, block: ContentBlock) => {
+    callbacks.onContentBlock?.(index, block);
+    callbacks.onContentBlock?.(index, block);
+  };
+
   class Scripted extends RecordingAdapter {
     constructor(private readonly replies: ContentBlock[][]) { super(true); }
     override async stream(req: ProviderRequest, callbacks: StreamCallbacks): Promise<ProviderResponse> {
       this.requests.push(req);
       const content = this.replies[this.requests.length - 1] ?? [text('done')];
-      content.forEach((block, index) => {
-        callbacks.onContentBlock?.(index, block);
-        callbacks.onContentBlock?.(index, block);
-      });
+      content.forEach((block, index) => announceStartAndCompletion(callbacks, index, block));
       const toolUse = content.some((b) => b.type === 'tool_use');
       return { content, stopReason: toolUse ? 'tool_use' : 'end_turn', usage: { inputTokens: 1, outputTokens: 1 }, model: req.model, raw: {} } as ProviderResponse;
     }
@@ -574,8 +561,6 @@ describe('system changes: turns as the API reads them, the float, and withdrawn 
 
   describe('placement reads the turns the API reads after the cleanup', () => {
     it('an assistant turn joined across a dropped user turn is dated by all its blocks, a contextPrefix\'s included', () => {
-      // Begin., Seed., uWS, a2: the cleanup drops uWS, and Seed. and a2 are one assistant turn after
-      // Begin., dated by a2. S came before a2, so it goes before that turn.
       expect(shape(build([user('   '), s, reply(text('a2'))], { contextPrefix: 'Seed.', prefillUserMessage: 'Begin.' })))
         .toEqual(['user:Begin.', 'system:s', 'assistant:Seed.', 'user:   ', 'assistant:a2']);
     });
@@ -590,16 +575,13 @@ describe('system changes: turns as the API reads them, the float, and withdrawn 
     });
 
     it('an assistant turn of another provider\'s unsigned thinking alone is no point, since the adapter leaves the block out (#191)', () => {
-      // u0, aU, u2, a3: the adapter leaves aU out, so u0 and u2 are one user turn, and S goes before a3.
-      // Placed before aU, S would sit between u0 and u2 once aU is gone, where the API refuses a system message.
+      // u0 and u2 become one user turn, and the API refuses a system message inside a user turn.
       const unsigned: ContentBlock = { type: 'thinking', thinking: 'reasoning from another provider' };
       expect(shape(build([user('u0'), s, reply(unsigned), user('u2'), reply(text('a3'))])))
         .toEqual(['user:u0', 'assistant:thinking', 'user:u2', 'system:s', 'assistant:a3']);
     });
 
     it('an unsigned thinking block doesn\'t date the turn it shares with later blocks', () => {
-      // u0, aU, S, a3, u4: aU and a3 are one assistant turn, dated by a3 since the adapter leaves aU
-      // out, so S goes before that turn, as it does for a whitespace block in its place.
       const unsigned: ContentBlock = { type: 'thinking', thinking: 'reasoning from another provider' };
       expect(roles(build([user('u0'), reply(unsigned), s, reply(text('a3')), user('u4')])))
         .toEqual(['user', 'system', 'assistant', 'user']);
@@ -618,10 +600,8 @@ describe('system changes: turns as the API reads them, the float, and withdrawn 
       sent.push(body);
       return { content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn', model: 'm', usage: { input_tokens: 1, output_tokens: 1 } };
     } } };
-    // u0, aWS, S, a3, u4: aWS and a3 are one assistant turn, dated by a3, after S.
     await new Membrane(adapter, { formatter: new NativeFormatter() }).complete(request([user('u0'), reply(ws()), s, reply(text('a3')), user('u4')]));
     expect(sent[0]!.messages.map((m) => m.role)).toEqual(['user', 'system', 'assistant', 'user']);
-    // The whitespace block merged into a3's message, and the cleanup took it out of what is sent.
     const assistantTexts = (sent[0]!.messages[2] as unknown as { content: Array<{ type: string; text?: string }> }).content
       .filter((b) => b.type === 'text').map((b) => b.text);
     expect(assistantTexts).toEqual(['a3']);
@@ -640,8 +620,6 @@ describe('system changes: turns as the API reads them, the float, and withdrawn 
   });
 
   it('through the real AnthropicAdapter, a trailing turn of unsigned thinking alone with a change after the last user turn is dropped, not refused (#191)', async () => {
-    // The change ends the request after the trailing turn, so leaving the turn out doesn't change
-    // the final role, as for a trailing turn of whitespace.
     const sent: Array<{ messages: Array<{ role: string }> }> = [];
     const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
     (adapter as any).client = { messages: { create: async (body: { messages: Array<{ role: string }> }) => {
@@ -678,7 +656,6 @@ describe('system changes: turns as the API reads them, the float, and withdrawn 
 
   it('a change withdrawing the last tool leaves no tools, so no tool-mode refusal comes first', async () => {
     const withdrawn = [user('u0'), changes(change({ removeTools: ['get_time'] }))];
-    // CompletionsFormatter carries no tools: with one offered, its tool-mode refusal would come first, unflagged.
     let thrown: unknown;
     try {
       await new Membrane(new RecordingAdapter(true), { formatter: new CompletionsFormatter() }).complete({ ...request(withdrawn), toolMode: 'auto' });
@@ -720,21 +697,15 @@ describe('system changes: whole messages the cleanup empties, and the float\'s s
 
   it('through the real AnthropicAdapter, a whole message the cleanup empties is left out, and the change goes after the user turn it leaves', async () => {
     const { adapter, sent } = realAdapter();
-    // u0, S, aWS, u2, a4, u5: Membrane names a user message's participant, so only an assistant message
-    // empties. aWS sits between two user messages, so no merge takes it: the cleanup drops it whole, u0 and
-    // u2 are one user turn, and S, which came before aWS, goes after u2, before a4. Placed before aWS, it
-    // would sit between two user messages once aWS is gone.
     await new Membrane(adapter, { formatter: new NativeFormatter() }).complete(request([user('u0'), s, reply(ws()), user('u2'), reply(text('a4')), user('u5')]));
     expect(sent[0]!.messages.map((m) => m.role)).toEqual(['user', 'user', 'system', 'assistant', 'user']);
     expect(sent[0]!.messages.map(firstText)).toEqual(['User: u0', 'User: u2', 's', 'a4', 'User: u5']);
   });
 
   describe('the formatter\'s placement, then the adapter\'s empty-text cleanup (utils/empty-text.ts)', () => {
-    // Simple participant mode adds no name, so a user message of whitespace empties too.
     const sentAfterCleanup = (messages: NormalizedMessage[]) => stripEmptyTextMessages(build(messages).messages);
 
     it('whole messages of either role the cleanup empties are left out, and the change goes between the turns that survive', () => {
-      // u0, aWS, uWS, S, a3, u4: the cleanup drops aWS and uWS, so S follows u0 and comes before a3.
       const cleaned = sentAfterCleanup([user('u0'), reply(ws()), user('   '), s, reply(text('a3')), user('u4')]);
       expect(cleaned.map((m) => m.role)).toEqual(['user', 'system', 'assistant', 'user']);
       expect(cleaned.map(firstText)).toEqual(['u0', 's', 'a3', 'u4']);
@@ -778,14 +749,12 @@ describe('system changes: whole messages the cleanup empties, and the float\'s s
         } as any);
       }
     }
-    // Round 3: u0, A1, R1, S1, A2, R2, S2. Round 2 ended at S1, which now sits before A2.
     const third = adapter.requests[2]!.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>;
     expect(third.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'system', 'assistant', 'user', 'system']);
     expect(third.map((m) => m.content.some((b) => b.cache_control !== undefined))).toEqual([false, false, false, true, false, false, true]);
   });
 
   it('the float\'s second target walks back over consecutive assistant messages, for a formatter that leaves them unmerged', async () => {
-    // A formatter that sends an assistant message's blocks as one message each, as a custom formatter may.
     class SplittingFormatter extends NativeFormatter {
       override buildMessages(messages: NormalizedMessage[], opts: Parameters<NativeFormatter['buildMessages']>[1]) {
         const built = super.buildMessages(messages, opts);
@@ -808,7 +777,6 @@ describe('system changes: whole messages the cleanup empties, and the float\'s s
     for await (const event of stream as AsyncIterable<any>) {
       if (event.type === 'tool-calls') stream.provideToolResults(event.calls.map((c: { id: string }) => ({ toolUseId: c.id, content: 'noon' })));
     }
-    // Round 2: u0, A1a (text), A1b (call), R1. Round 1 ended at u0, before both assistant messages.
     const second = adapter.requests[1]!.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>;
     expect(second.map((m) => m.role)).toEqual(['user', 'assistant', 'assistant', 'user']);
     expect(second.map((m) => m.content.some((b) => b.cache_control !== undefined))).toEqual([true, false, false, true]);
@@ -832,8 +800,6 @@ describe('system changes: whole messages the cleanup empties, and the float\'s s
         } as any);
       }
     }
-    // Round 2: u0, a0, u1, A1 (call), R1, the injected note. Round 1 ended at u1, before the turn that made the call;
-    // the note is the newest assistant message, and the results are the message before it.
     const second = adapter.requests[1]!.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>;
     expect(second.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant', 'user', 'assistant']);
     expect(second.map((m) => m.content.some((b) => b.cache_control !== undefined))).toEqual([false, false, true, false, false, true]);
@@ -861,14 +827,10 @@ describe('system changes: whole messages the cleanup empties, and the float\'s s
     }
     type Wire = Array<{ role: string; content: Array<Record<string, unknown>> }>;
     const marked = (messages: Wire) => messages.map((m) => m.content.some((b) => b.cache_control !== undefined));
-    // Round 2: u0, a0, u1, A1, R1, N1: the previous request's last message (u1) and the newest; R1 is left unmarked.
     expect(marked(adapter.requests[1]!.messages as Wire)).toEqual([false, false, true, false, false, true]);
-    // Round 3: u0, a0, u1, A1, R1, [N1 A2], R2, N2. Round 2 ended at N1, which NativeFormatter merges into the turn that
-    // made round 2's call, so the second mark goes on R1, the message before that turn (main's rule marked the turn).
     const third = adapter.requests[2]!.messages as Wire;
     expect(third.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant', 'user', 'assistant', 'user', 'assistant']);
     expect(marked(third)).toEqual([false, false, false, false, true, false, false, true]);
-    // Round 4: ..., R1, [N1 A2], R2, [N2 A3], R3, with nothing injected in round 3: R2, as main's rule marked too.
     const fourth = adapter.requests[3]!.messages as Wire;
     expect(fourth.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant', 'user', 'assistant', 'user', 'assistant', 'user']);
     expect(marked(fourth)).toEqual([false, false, false, false, false, false, true, false, true]);

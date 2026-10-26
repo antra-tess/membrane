@@ -1,13 +1,5 @@
-/**
- * Response types for membrane
- */
-
 import type { ContentBlock } from './content.js';
 import type { ToolCall, ToolResult } from './tools.js';
-
-// ============================================================================
-// Stop Reason
-// ============================================================================
 
 export type StopReason =
   | 'end_turn'       // Natural completion
@@ -18,27 +10,17 @@ export type StopReason =
                      // expected to resume it (Anthropic pause_turn)
   | 'refusal'        // Content refused by safety
   | 'abort'          // Request was aborted
-  | 'no_progress'    // Stall guard ended the turn (issue #39): consecutive
+  | 'no_progress'    // Stall guard ended the turn: consecutive
                      // automatic resumptions re-sent context without advancing
   | 'round_limit';   // Resumption round cap ended the turn: the turn kept
                      // resuming (with progress) past maxResumptionRounds
-
-// ============================================================================
-// Usage Information
-// ============================================================================
 
 export interface BasicUsage {
   inputTokens: number;
   outputTokens: number;
 }
 
-/**
- * What ONE priced unit of work cost — a turn, or the discarded attempts summed
- * together. Held apart from `DetailedUsage` so the discarded-spend record can
- * carry every token field without also inheriting `discardedAttempts`, which
- * would let the type describe discarded spend nested inside discarded spend:
- * a shape nothing produces and nothing could read sensibly.
- */
+/** What ONE priced unit of work cost — a turn, or the discarded attempts summed together. */
 export interface CallUsage extends BasicUsage {
   /** Tokens used for cache creation */
   cacheCreationTokens?: number;
@@ -61,13 +43,11 @@ export interface CallUsage extends BasicUsage {
 
 export interface DetailedUsage extends CallUsage {
   /**
-   * Spend on provider calls whose output was thrown away — today, refusal
-   * retries. Those attempts were completed, billed HTTP calls; the response
-   * describes only the attempt that STANDS, so without this the real cost of
-   * a turn is invisible. Absent when nothing was discarded.
+   * Spend on provider calls whose output was thrown away. Absent when nothing
+   * was discarded.
    *
-   * Reported on `details.usage` only: the top-level `usage` stays the
-   * surviving attempt's, so existing consumers keep their meaning.
+   * Read it on `details.usage`: the top-level `usage`'s counts stay the
+   * surviving attempt's.
    */
   discardedAttempts?: DiscardedAttemptsUsage;
 }
@@ -79,12 +59,6 @@ export interface DiscardedAttemptsUsage extends CallUsage {
 
 type Assert<TCondition extends true> = TCondition;
 
-/**
- * Erased at build; checked by `tsc --noEmit`, which covers src/ and not the
- * test suite — so this is where a type-level guarantee can actually fail the
- * build. Re-widening the discarded record to `DetailedUsage` reintroduces
- * discarded-spend-inside-discarded-spend and turns this line red.
- */
 type DiscardedSpendDoesNotNest = Assert<
   'discardedAttempts' extends keyof DiscardedAttemptsUsage ? false : true
 >;
@@ -92,8 +66,7 @@ type DiscardedSpendDoesNotNest = Assert<
 /**
  * One provider round of a turn: the model that served it and what that round
  * alone used and cost. `usage.estimatedCost` here is priced at THIS round's
- * model, which is why the rounds can be summed into a turn total that a
- * multi-model turn's bill actually matches.
+ * model, so the rounds sum to a multi-model turn's bill.
  */
 export interface TurnRoundUsage {
   /** Model the provider named as having served this round; the requested id when it named none. */
@@ -118,10 +91,6 @@ export interface CostBreakdown {
    */
   pricingAsOf?: string;
 }
-
-// ============================================================================
-// Stop Information
-// ============================================================================
 
 export interface StopInfo {
   reason: StopReason;
@@ -156,10 +125,6 @@ export interface StopInfo {
   unclosedToolBlock?: boolean;
 }
 
-// ============================================================================
-// Model Information
-// ============================================================================
-
 export interface ModelInfo {
   /** Model ID that was requested */
   requested: string;
@@ -180,15 +145,10 @@ export interface ModelInfo {
    * cannot say what was billed at which rate.
    *
    * Set on the streaming/tool-loop paths, which are the ones that sum. Unset
-   * on `complete()`, which makes exactly one call: `actual` is the whole story
-   * there.
+   * on `complete()`.
    */
   perRound?: TurnRoundUsage[];
 }
-
-// ============================================================================
-// Timing Information
-// ============================================================================
 
 export interface TimingInfo {
   /** Total request duration */
@@ -202,9 +162,7 @@ export interface TimingInfo {
   
   /**
    * Provider calls this turn actually cost: retries plus, on the streaming
-   * paths, every continuation round and refusal re-issue. A stitched
-   * multi-call turn used to report 1 here, indistinguishable in durable
-   * logs from a single-shot one.
+   * paths, every continuation round and refusal re-issue.
    */
   attempts: number;
 
@@ -218,10 +176,6 @@ export interface TimingInfo {
   /** Delay between retries */
   retryDelaysMs?: number[];
 }
-
-// ============================================================================
-// Cache Information
-// ============================================================================
 
 export interface CacheInfo {
   /** Cache markers in the last logical request, using the adapter's
@@ -240,10 +194,6 @@ export interface CacheInfo {
   hitRatio: number;
 }
 
-// ============================================================================
-// Response Details
-// ============================================================================
-
 export interface ResponseDetails {
   stop: StopInfo;
   usage: DetailedUsage;
@@ -258,10 +208,6 @@ export interface ResponseDetails {
    */
   anomalies?: ResponseAnomaly[];
 }
-
-// ============================================================================
-// Provider anomalies
-// ============================================================================
 
 /**
  * A round the provider ended with a literal `stop_reason: end_turn` while its
@@ -311,10 +257,6 @@ export interface ToolUseWithEndTurnAnomaly {
 
 export type ResponseAnomaly = ToolUseWithEndTurnAnomaly;
 
-// ============================================================================
-// Raw Access
-// ============================================================================
-
 export interface RawAccess {
   /** Exact request body sent to provider */
   request: unknown;
@@ -325,10 +267,6 @@ export interface RawAccess {
   /** Response headers */
   headers?: Record<string, string>;
 }
-
-// ============================================================================
-// Normalized Response
-// ============================================================================
 
 export interface NormalizedResponse {
   /** Response content blocks (parsed/structured) */
@@ -364,10 +302,6 @@ export interface NormalizedResponse {
   /** Raw request/response for debugging */
   raw: RawAccess;
 }
-
-// ============================================================================
-// Aborted Response
-// ============================================================================
 
 export interface AbortedResponse {
   aborted: true;

@@ -1,7 +1,3 @@
-/**
- * Test prefill mode image handling - verify content before/after image
- */
-
 import { Membrane } from './src/index.js';
 import { AnthropicAdapter } from './src/providers/anthropic.js';
 import { transformToPrefill } from './src/index.js';
@@ -15,7 +11,6 @@ if (!API_KEY) {
 
 const TINY_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==';
 
-// First, let's see what the transform produces
 console.log('========================================');
 console.log('TEST: Prefill Transform with Image');
 console.log('========================================\n');
@@ -73,7 +68,6 @@ result.messages.forEach((msg, i) => {
   console.log('');
 });
 
-// Check structure
 const userMessages = result.messages.filter(m => m.role === 'user');
 const assistantMessages = result.messages.filter(m => m.role === 'assistant');
 
@@ -81,7 +75,6 @@ console.log('=== STRUCTURE CHECK ===');
 console.log('User messages:', userMessages.length);
 console.log('Assistant messages:', assistantMessages.length);
 
-// Image should cause a flush to user turn
 const hasImageInUser = userMessages.some(m => {
   if (Array.isArray(m.content)) {
     return m.content.some((b: any) => b.type === 'image');
@@ -90,21 +83,18 @@ const hasImageInUser = userMessages.some(m => {
 });
 console.log('Image in user message:', hasImageInUser ? 'YES' : 'NO');
 
-// Content before image should be in assistant message
 const hasAliceBobBefore = assistantMessages.some(m => {
   const content = typeof m.content === 'string' ? m.content : '';
   return content.includes('Alice:') && content.includes('Bob:');
 });
 console.log('Alice/Bob content before image:', hasAliceBobBefore ? 'YES' : 'NO');
 
-// Content after image should also be handled
 const hasAliceAfter = result.messages.some(m => {
   const content = typeof m.content === 'string' ? m.content : '';
   return content.includes('Let me look');
 });
 console.log('Alice content after image:', hasAliceAfter ? 'YES' : 'NO');
 
-// Now test with actual API
 console.log('\n========================================');
 console.log('TEST: Actual API Call with Image in Prefill');
 console.log('========================================\n');
@@ -143,7 +133,7 @@ async function testActualAPI() {
         ],
       },
     ],
-    toolMode: 'xml',  // Force prefill mode
+    toolMode: 'xml',
   };
 
   let response = '';

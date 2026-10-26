@@ -1,8 +1,6 @@
 /**
- * Request Sanitization Tests
- *
- * Ensures internal membrane fields are not leaked to provider APIs.
- * This prevents 400 errors from providers rejecting unknown parameters.
+ * Providers reject unknown request parameters, such as membrane's internal
+ * `normalizedMessages`, with a 400.
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -10,20 +8,12 @@ import { Membrane } from '../../src/membrane.js';
 import { MockAdapter } from '../../src/providers/mock.js';
 import type { NormalizedMessage, NormalizedRequest } from '../../src/types/index.js';
 
-// ============================================================================
-// Test Helpers
-// ============================================================================
-
 function textMessage(participant: string, text: string): NormalizedMessage {
   return {
     participant,
     content: [{ type: 'text', text }],
   };
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 describe('Request Sanitization', () => {
   let adapter: MockAdapter;
@@ -108,7 +98,6 @@ describe('Request Sanitization', () => {
       expect(rawRequest).not.toBeNull();
       expect(rawRequest).not.toHaveProperty('normalizedMessages');
       expect(rawRequest).not.toHaveProperty('prompt');
-      // But custom params should be passed through
       expect(rawRequest.extra).toHaveProperty('customParam', 'value');
       expect(rawRequest.extra).toHaveProperty('anotherParam', 123);
     });

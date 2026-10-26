@@ -1,7 +1,3 @@
-/**
- * Provider exports
- */
-
 export {
   AnthropicAdapter,
   toAnthropicContent,

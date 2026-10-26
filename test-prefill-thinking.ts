@@ -1,8 +1,3 @@
-/**
- * Test thinking in prefill mode with actual API
- * Run with: ANTHROPIC_API_KEY=... npx tsx test-prefill-thinking.ts
- */
-
 import { Membrane } from './src/index.js';
 import { AnthropicAdapter } from './src/providers/anthropic.js';
 import { transformToPrefill } from './src/index.js';
@@ -17,10 +12,6 @@ if (!API_KEY) {
 
 const adapter = new AnthropicAdapter({ apiKey: API_KEY });
 const membrane = new Membrane(adapter, {});
-
-// ============================================================================
-// Test 1: Transform check - verify thinking tag is in prefill
-// ============================================================================
 
 console.log('========================================');
 console.log('TEST 1: Transform with prefillThinking');
@@ -63,10 +54,6 @@ const lastContent = typeof lastAssistant?.content === 'string' ? lastAssistant.c
 console.log('Last assistant ends with <thinking>:', lastContent.includes('<thinking>') ? 'YES' : 'NO');
 console.log('');
 
-// ============================================================================
-// Test 2: Actual API call with thinking in prefill
-// ============================================================================
-
 console.log('========================================');
 console.log('TEST 2: API call with prefillThinking');
 console.log('========================================\n');
@@ -102,7 +89,6 @@ async function testThinkingAPI() {
       chunks.push({ text: chunk, meta });
       fullText += chunk;
 
-      // Show chunk with metadata
       const typeLabel = meta.type.padEnd(10);
       const visLabel = meta.visible ? 'vis' : 'hid';
       console.log('[' + typeLabel + ' ' + visLabel + ' blk' + meta.blockIndex + '] "' + chunk.replace(/\n/g, '\\n') + '"');
@@ -157,7 +143,6 @@ async function testThinkingAPI() {
   console.log(thinkingText || '(none captured)');
   console.log('');
 
-  // Checks
   const hasThinkingBlock = blocks.some(b => b.block.type === 'thinking');
   const hasThinkingChunks = chunks.some(c => c.meta.type === 'thinking');
   const thinkingIsHidden = chunks.filter(c => c.meta.type === 'thinking').every(c => !c.meta.visible);
@@ -170,10 +155,6 @@ async function testThinkingAPI() {
 
   return hasThinkingChunks || fullText.includes('thinking');
 }
-
-// ============================================================================
-// Test 3: Without prefillThinking - model may or may not think
-// ============================================================================
 
 async function testWithoutPrefillThinking() {
   console.log('\n========================================');
@@ -215,7 +196,6 @@ async function testWithoutPrefillThinking() {
   console.log('Full response:', fullText);
 }
 
-// Run tests
 (async () => {
   try {
     const test2Pass = await testThinkingAPI();

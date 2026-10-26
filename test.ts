@@ -1,13 +1,6 @@
-/**
- * Standalone test for membrane
- * 
- * Run with: npx tsx test.ts
- */
-
 import { Membrane, AnthropicAdapter, textMessage } from './src/index.js';
 import type { NormalizedRequest, ToolCall, ToolResult, ToolContext } from './src/index.js';
 
-// Simple tool for testing
 const echoTool = {
   name: 'echo',
   description: 'Echoes back the input message',
@@ -38,8 +31,7 @@ const calculatorTool = {
   },
 };
 
-// Tool executor
-async function executeTool(call: ToolCall): Promise<ToolResult> {
+async function executeToolUnsafelyForDemo(call: ToolCall): Promise<ToolResult> {
   console.log(`\n  [Tool] Executing: ${call.name}`, call.input);
   
   if (call.name === 'echo') {
@@ -51,7 +43,6 @@ async function executeTool(call: ToolCall): Promise<ToolResult> {
   
   if (call.name === 'calculate') {
     try {
-      // Simple eval for demo (don't do this in production!)
       const result = eval(call.input.expression as string);
       return {
         toolUseId: call.id,
@@ -160,7 +151,7 @@ async function testToolExecution() {
       },
       onToolCalls: async (calls: ToolCall[], context: ToolContext) => {
         console.log(`\n\n  [Tool] Executing ${calls.length} tool(s) at depth ${context.depth}`);
-        const results = await Promise.all(calls.map(executeTool));
+        const results = await Promise.all(calls.map(executeToolUnsafelyForDemo));
         console.log('  [Tool] Results:', results.map(r => r.content).join(', '));
         console.log('\n  Continuing generation...\n');
         return results;
@@ -203,7 +194,6 @@ async function testMultiTurn() {
   }
 }
 
-// Run tests
 async function main() {
   console.log('Membrane Standalone Tests');
   console.log('=========================');

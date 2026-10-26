@@ -1,8 +1,7 @@
 /**
- * Tool-Pair Normalizer
- *
- * Anthropic's API enforces structural rules on tool cycles that any of
- * Membrane's upstreams can accidentally violate:
+ * Anthropic's API enforces structural rules on tool cycles, and returns 400
+ * when one is broken (e.g. `tool_use blocks can only be in assistant
+ * messages`):
  *
  *   - `tool_use` blocks must live in assistant-role messages.
  *   - `tool_result` blocks must live in user-role messages.
@@ -10,93 +9,24 @@
  *     next user-role message.
  *   - `thinking` blocks must live in assistant turns.
  *
- * When these are violated, the API returns 400 (e.g. `tool_use blocks can
- * only be in assistant messages`). This module is the wire-boundary safety
- * net for the paths that reach it, so producer-side bugs cannot leak the
- * same 400 family (compression-bug 5/6/7/8/9, agent-framework #37,
- * 2026-05-22 miner stall).
- *
- * COVERAGE — what actually funnels through `normalizeToolPairs`:
- *
- *   - `NativeFormatter.buildMessages` — COVERED. Membrane's shared
- *     construction uses this pass for complete and native streaming/yielding
- *     requests built by NativeFormatter, including native loop rebuilds and
- *     AnthropicXmlFormatter's native-mode delegation.
- *   - `AnthropicXmlFormatter` in XML mode and `CompletionsFormatter` — NOT
- *     covered, and they do not need to be: both emit flattened text with no
- *     structural tool blocks, so tool-cycle placement rules have nothing
- *     to bind to in their output.
- *   - `OpenAIResponsesFormatter` — NOT covered. It owns provider-native
- *     `function_call` / `function_call_output` items, whose ids, encrypted
- *     reasoning, assistant phases and compaction items must survive shared
- *     construction rather than being forced through this Anthropic-shaped
- *     normalizer. Responses item pairing is outside this module's scope;
- *     that formatter's `ready: true` is not this pass's validation result.
- *
- * Custom formatters own their structural validation. Sharing the formatter
- * build does not imply that every formatter invokes this normalizer.
- *
- * Algorithm overview (phases): refuse malformed input at entry (phase 0 —
- * a `pendingToolCallIds` that isn't a set of strings, a message that isn't
- * a user or assistant message with string or block-array content, a block
- * without a string `type`, a tool_use without a string id), reclassify
- * blocks by required role, reflow into role-correct envelopes, refuse two
- * calls sharing one id in a turn, hoist matching tool_results across the
- * assistant→user boundary, sweep the converse direction so every
- * tool_result sits with its own tool_use, synthesize `[pending]` results
- * for orphans (or signal not-ready for caller-declared pending ids), put
- * all results before non-results while preserving order within each group,
- * drop empty envelopes, prepend a synthetic user envelope (`[continuing]`,
- * or the caller's `leadingUserText`) when the first envelope ended up
- * assistant-role, validate both
- * directions of the pairing rule and its one-to-one arity.
- *
- * PAIRING IS POSITIONAL, as on the wire: a tool_result answers the nearest
- * tool_use with its id before it. Ids are normally unique, but a history
- * can reuse one across turns (a provider that omits or recycles ids), and
- * the API accepts that; every phase below pairs by position, so a reused
- * id needs no refusal. Only two calls with one id in the same turn can't be
- * answered apart, and the API refuses those.
+ * A tool_result answers the nearest tool_use with its id before it, and the
+ * API accepts an id reused across turns.
  */
 
 import type { ProviderTurnMessage as LooseProviderMessage } from './types.js';
 import type { NormalizeEvent } from './types.js';
 import { MembraneError } from '../types/errors.js';
 
-// ============================================================================
-// Public API
-// ============================================================================
-
 /**
  * Block shape used internally and exposed for callers that want to
- * build inputs without the full Anthropic SDK types. The required
- * `type` discriminator names the kind of block; any block whose `type`
- * matches a strict-role entry in `requiredRoleOf` is re-roled to its
- * required role during normalization. Unrecognized `tool_*` or
- * `thinking*` types fall through as `inherit` — see the one-shot
- * warning below.
+ * build inputs without the full Anthropic SDK types. `type` names the kind
+ * of block: `tool_use`, `thinking` and `redacted_thinking` blocks are moved
+ * to an assistant envelope and `tool_result` blocks to a user envelope during
+ * normalization; any other type stays with its message's role, and an
+ * unknown `tool_*` or `thinking*` type warns once.
  */
 export type ProviderBlock = Record<string, unknown> & { type: string };
 
-/**
- * Does this repair REWRITE prefix bytes, or only re-shape envelopes?
- *
- * The `true` entries rewrite content: synthetic `[pending]` results, orphan
- * textification, and duplicate-result textification. A pending result or
- * orphan can change again when its real pairing arrives, so a cache
- * breakpoint placed at or past one caches a prefix that is about to change,
- * poisoning every subsequent read.
- *
- * EVERY kind is listed, and the type is a `Record` over the whole union
- * precisely so the compiler forces that: a new `NormalizeEvent` kind is a
- * missing-property error here until someone decides which side it falls on.
- * The previous shape (`[...] satisfies Array<NormalizeEvent['kind']>`) only
- * checked that the listed kinds were REAL, and a `satisfies` on an array
- * accepts any subset — so a new prefix-rewriting repair could be added to the
- * union, never listed, and silently escape the cache gate below while the
- * comment claimed a compile error that did not exist.
-
- */
 const NORMALIZE_EVENT_REWRITES_PREFIX: Record<NormalizeEvent['kind'], boolean> = {
   block_re_roled: false,
   tool_result_hoisted: false,
@@ -115,12 +45,6 @@ function deriveKindsThatRewritePrefix(): ReadonlySet<NormalizeEvent['kind']> {
   return new Set(kinds);
 }
 
-/**
- * The repairs that rewrite prefix bytes, derived from the exhaustive
- * classification above. Consumers gate cache placement on this SET rather
- * than on a single kind, so a normalizer that grows another prefix-rewriting
- * repair is covered at every cache site by classifying it once.
- */
 export const PREFIX_REWRITING_NORMALIZE_EVENT_KINDS: ReadonlySet<NormalizeEvent['kind']> =
   deriveKindsThatRewritePrefix();
 
@@ -133,17 +57,13 @@ export interface NormalizeOptions {
    * Hears each input block the normalizer rewrote as a new object with
    * different content: a tool_result textified because it was an orphan or
    * a duplicate. For a caller that follows its blocks by object identity
-   * (request fidelity). Phase 1 also copies a tool_result spelled
-   * `toolUseId` to rename the key, without calling this; NativeFormatter,
-   * which passes it, writes `tool_use_id` before the normalizer runs.
+   * (request fidelity). A tool_result spelled `toolUseId` is also copied to
+   * rename the key, without calling this.
    */
   onBlockRewritten?: (original: ProviderBlock, replacement: ProviderBlock) => void;
   /**
    * Text of the synthetic user envelope prepended when the first envelope is
-   * assistant (phase 7). `[continuing]` when absent, empty or only
-   * whitespace. NativeFormatter passes `BuildOptions.prefillUserMessage`, so
-   * a caller's text is used wherever the conversation needs a leading user
-   * turn, whatever made it need one.
+   * assistant. `[continuing]` when absent, empty or only whitespace.
    */
   leadingUserText?: string;
 }
@@ -152,9 +72,7 @@ export interface NormalizeResult {
   /**
    * Normalized messages, structurally compatible with the loose
    * `ProviderMessage` from `./types.js`. Block contents are
-   * `ProviderBlock[]` at runtime; the loose type is preserved at the
-   * public boundary so callers wired against `./types.js` don't need
-   * to cast.
+   * `ProviderBlock[]` at runtime.
    */
   messages: LooseProviderMessage[];
   /**
@@ -184,132 +102,49 @@ export class MembraneNormalizerError extends MembraneError {
   }
 }
 
-// ============================================================================
-// Implementation
-// ============================================================================
-
 /**
  * Normalize a sequence of provider messages so the output is API-valid
  * with respect to Anthropic's tool-cycle structural rules.
  *
- * This function does NOT merge consecutive same-role envelopes — that
- * is the responsibility of `mergeConsecutiveRoles` (exported below). Run
- * the two together at every wire boundary; splitting them keeps the
- * normalize step independently testable and lets callers preserve their
- * own cache-control / breakpoint logic between the two steps if needed.
+ * Consecutive messages of one role become one envelope as their blocks are
+ * reflowed, but the output can still hold adjacent envelopes of one role,
+ * which the API accepts.
  */
 export function normalizeToolPairs(
   input: ReadonlyArray<LooseProviderMessage>,
   options: NormalizeOptions = {},
 ): NormalizeResult {
-  // ---------------------------------------------------------------------
-  // Phase 0: entry guards. Producer defects refuse HERE — typed, before any
-  // phase has rebuilt an envelope — rather than surfacing later as a silent
-  // mis-repair or an untyped mid-pipeline TypeError.
-  // ---------------------------------------------------------------------
   assertPendingToolCallIdsIsSetLike(options.pendingToolCallIds, input);
   assertInputWellFormed(input);
 
   const pending = options.pendingToolCallIds ?? new Set<string>();
   const onEvent = options.onEvent ?? noop;
 
-  // ---------------------------------------------------------------------
-  // Phase 1 + 2: reclassify blocks by required role and reflow envelopes.
-  // A turn is now an envelope, so this is where two calls sharing an id in
-  // one turn can be seen.
-  // ---------------------------------------------------------------------
   let envelopes = rebuildEnvelopes(input, onEvent);
   assertCallIdsUniquePerTurn(envelopes, input);
 
-  // ---------------------------------------------------------------------
-  // Phase 3: pair tool_use → tool_result across assistant→user boundary
-  // ---------------------------------------------------------------------
   envelopes = hoistMatchingResults(envelopes, onEvent);
 
-  // ---------------------------------------------------------------------
-  // Phase 3.5: the converse sweep. Phase 3 asks "does every tool_use have
-  // its result in the next user envelope?"; nothing asked the mirror
-  // question, so a tool_result whose tool_use is NOT in the immediately-
-  // preceding assistant envelope passed every phase untouched — and phase
-  // 3 itself creates one such shape by hoisting a matching result into an
-  // envelope that already holds a non-matching one.
-  // ---------------------------------------------------------------------
   envelopes = repairStrayResults(envelopes, onEvent, options.onBlockRewritten);
 
-  // ---------------------------------------------------------------------
-  // Phase 4: resolve orphans. Textification can create new non-result
-  // blocks before or between results, so ordering repair must follow it.
-  // ---------------------------------------------------------------------
   const orphanRes = resolveOrphans(envelopes, pending, onEvent, options.onBlockRewritten);
   envelopes = orphanRes.envelopes;
   const ready = orphanRes.ready;
 
-  // ---------------------------------------------------------------------
-  // Phase 5: put every tool_result before all other user-envelope blocks.
-  // This includes text just created by orphan/duplicate recovery.
-  // ---------------------------------------------------------------------
   envelopes = evictInterlopers(envelopes, onEvent);
 
-  // ---------------------------------------------------------------------
-  // Phase 6: drop empty envelopes left by hoisting or relocation.
-  // We deliberately do NOT merge consecutive same-role envelopes here —
-  // that's the formatter's job.
-  // ---------------------------------------------------------------------
   envelopes = envelopes.filter((e) => e.content.length > 0);
 
-  // ---------------------------------------------------------------------
-  // Phase 7: ensure first envelope is user-role.
-  //
-  // Anthropic requires `messages[0].role === 'user'`. The leading
-  // envelope can become assistant for two distinct reasons:
-  //
-  //   (a) Re-roling artifact — a strict-role block (thinking, tool_use)
-  //       lived under a user-role input message and phase 1+2 moved it
-  //       to a new leading assistant envelope. `originalFirstRole`
-  //       is `'user'`.
-  //
-  //   (b) Producer bug — a context strategy genuinely selected an
-  //       assistant message as the first message of its compiled view
-  //       (the 2026-05-26 reviewer postmortem: PassthroughStrategy
-  //       `selectFromEnd` cut on an assistant turn). `originalFirstRole`
-  //       is `'assistant'`.
-  //
-  // Both cases get the same repair (prepend a synthetic user envelope:
-  // the caller's `leadingUserText` when given, else `[continuing]`)
-  // because deletion would lose content in case (a) — the
-  // re-roled blocks are real conversation content the producer
-  // expected to ship. The synthetic costs a leading cache miss
-  // (deterministic literal, so idempotent across identical inputs)
-  // but preserves API correctness and producer simplicity. We emit
-  // a warn-level event so telemetry can distinguish the causes and
-  // alert on (b) without coupling control flow to attribution.
-  //
-  // Idempotency: the synthetic content is fixed for a given call. Running
-  // normalize twice on the same input produces identical output the
-  // second time (envelope[0] is user, gate doesn't fire).
-  // ---------------------------------------------------------------------
+  // Anthropic requires `messages[0].role === 'user'`.
   if (envelopes.length > 0 && envelopes[0]!.role === 'assistant') {
-    // `input` is guaranteed non-empty here: rebuildEnvelopes only
-    // produces envelopes when iterating input messages, so a non-empty
-    // envelopes implies a non-empty input.
     const originalFirstRole = input[0]!.role;
     const leadingBlockTypes = envelopes[0]!.content.map((b) => b.type);
-    // Blank text would be a whitespace-only block, which Anthropic rejects
-    // and stripEmptyTextRequest drops, leaving an assistant first again.
+    // Anthropic rejects a text block that is only whitespace.
     const leadingText = options.leadingUserText?.trim() ? options.leadingUserText : '[continuing]';
     envelopes.unshift({ role: 'user', content: [{ type: 'text', text: leadingText }] });
     onEvent({ kind: 'leading_user_synthesized', originalFirstRole, leadingBlockTypes });
   }
 
-  // ---------------------------------------------------------------------
-  // Phase 8: validate. When `ready === false` we intentionally have
-  // unmatched tool_uses — but ONLY the ones in `pending` are allowed to
-  // remain unsynthesized. Any other gap is a bug in phase 4 and must
-  // throw. The first-message-must-be-user branch should be unreachable
-  // after phase 7; it remains as defense-in-depth against a future
-  // phase introducing a leading assistant envelope without firing
-  // phase 7.
-  // ---------------------------------------------------------------------
   validate(envelopes, input, pending, AFTER_REPAIR);
 
   return { messages: envelopes.map(toProviderMessage), ready };
@@ -322,16 +157,12 @@ export function normalizeToolPairs(
  * preceded by its own tool_use, and exactly one result per use. All results
  * must precede text, images, and other blocks in their user envelope.
  *
- * This is phase 8 of {@link normalizeToolPairs}, reachable on its own. The
- * validator's contract has to hold independently of the repair phases that
- * normally establish it — otherwise the only evidence it refuses a shape is
- * that no earlier phase produced one, which is a claim about the sweep, not
- * about the validator. Callers holding messages from a path that does NOT
- * funnel through this module (see the COVERAGE note in the file header) can
- * use it to check pairing and known strict-role placement. This is not a
- * complete provider-schema or cache-budget validator. Explicitly pending
- * calls may remain unmatched; success with a pending set does not establish
- * that the request is ready to send.
+ * {@link normalizeToolPairs} ends with this check. A caller holding messages
+ * from a path that doesn't go through it can use it to check pairing and
+ * known strict-role placement. This is not a complete provider-schema or
+ * cache-budget validator. Explicitly pending calls may remain unmatched;
+ * success with a pending set does not establish that the request is ready
+ * to send.
  *
  * The messages are judged as the provider reads them: consecutive messages
  * with one role are one turn, as the API combines them. Nothing else is
@@ -348,15 +179,6 @@ export function assertToolPairsValid(
   validate(envelopes, messages, pendingToolCallIds ?? new Set<string>(), origin);
 }
 
-// ============================================================================
-// Phase 0: entry guards
-// ============================================================================
-
-/**
- * Render a runtime value's shape for a refusal message. Constructor names
- * beat `typeof` here — `object` tells a caller nothing, `Map` tells them
- * exactly which wrong container they reached for.
- */
 function describeShape(value: unknown): string {
   if (value === null) return 'null';
   if (Array.isArray(value)) return `Array(${value.length})`;
@@ -365,24 +187,6 @@ function describeShape(value: unknown): string {
   return (value as { constructor?: { name?: string } }).constructor?.name ?? 'object';
 }
 
-/**
- * `pendingToolCallIds` is typed `ReadonlySet<string>` and consumed solely
- * through `.has(id)`. Both `.has()` sites are reached ONLY for a tool_use
- * with no matching result, so a wrong container (an array — the shape a
- * config round-trip through JSON produces, since a Set cannot survive one)
- * sails through every well-formed transcript and throws untyped, mid-
- * pipeline, the first time the safety net actually has repair work to do.
- * A set of the wrong members is quieter still: a Set of numbers answers
- * every `.has(id)` with false, so an in-flight call gets a fabricated
- * `[pending]` result and `ready` stays true.
- *
- * Refuse at entry, unconditionally: the value must be set-like (a callable
- * `has`, iterable) and hold only strings. `undefined`, and `null` as untyped
- * configuration writes it, mean nothing is pending. Deliberately NOT
- * `new Set(value)`: coercing here would launder the caller's type error into
- * behaviour that happens to work, and the public type stays a membership set
- * rather than growing a permanent union plus an O(n) scan per unmatched id.
- */
 function assertPendingToolCallIdsIsSetLike(
   value: ReadonlySet<string> | null | undefined,
   input: ReadonlyArray<LooseProviderMessage>,
@@ -411,30 +215,6 @@ function assertPendingToolCallIdsIsSetLike(
   }
 }
 
-/**
- * Structural preconditions on the input message list. Each one turns a
- * producer defect into a typed refusal before any phase runs, where it would
- * otherwise surface as an untyped TypeError mid-pipeline or as a silently
- * wrong request.
- *
- * (a) A message is an object with role 'user' or 'assistant'.
- *
- * (b) Content is a block array or a plain string; `null` or `undefined` is
- *     an empty block list, as the old `String(msg.content ?? '')` made it
- *     empty text. Anything else used to reach that `String()`, which puts
- *     the literal text `[object Object]` in front of the model — a poisoned
- *     turn that no downstream phase can detect or undo.
- *
- * (c) Every block is an object with a string `type`.
- *
- * (d) A tool_use has a string id: a tool_result names its call by id, so a
- *     call without one can never be answered, and every pairing phase would
- *     pass over it on its way to the provider's refusal.
- *
- * Ids may repeat across turns (see PAIRING IS POSITIONAL in the header); two
- * calls sharing an id within one turn are refused after reflow, by
- * {@link assertCallIdsUniquePerTurn}, since a turn is only known then.
- */
 function assertInputWellFormed(input: ReadonlyArray<LooseProviderMessage>): void {
   for (let i = 0; i < input.length; i++) {
     const msg = input[i] as unknown;
@@ -495,16 +275,7 @@ function describeBlock(block: unknown): string {
   return `an object whose type is ${describeShape((block as { type?: unknown }).type)}`;
 }
 
-/**
- * Two calls with one id in the same turn can't be answered apart: a result
- * names its call by id alone, and the API refuses such a request ("tool_use
- * ids must be unique"). A turn is an assistant envelope, which is one wire
- * message. Ids reused across turns are fine (see the header).
- *
- * `origin`, given for a caller's own history, names the messages at fault;
- * without it the turn is one of the normalizer's reflowed envelopes, which a
- * caller can't index, so the id alone identifies it.
- */
+/** The API refuses two calls with one id in the same turn ("tool_use ids must be unique"). */
 function assertCallIdsUniquePerTurn(
   envelopes: ReadonlyArray<Envelope>,
   input: ReadonlyArray<LooseProviderMessage>,
@@ -530,10 +301,6 @@ function assertCallIdsUniquePerTurn(
   }
 }
 
-// ============================================================================
-// Phase implementations
-// ============================================================================
-
 interface Envelope {
   role: 'user' | 'assistant';
   content: ProviderBlock[];
@@ -541,14 +308,6 @@ interface Envelope {
 
 type RequiredRole = 'user' | 'assistant' | 'inherit';
 
-/**
- * Role-strict block types. Extending Anthropic's tool surface
- * (e.g. `server_tool_use`, `web_search_tool_result`, `computer_use`)
- * means adding entries here. Unknown block types whose `type` starts
- * with `tool_` or `thinking` fall through to 'inherit' and trigger a
- * one-shot console warning so the next addition doesn't sail silently
- * through the safety net.
- */
 function requiredRoleOf(block: ProviderBlock): RequiredRole {
   if (isStrictReasoningBlock(block)) return 'assistant';
   switch (block.type) {
@@ -564,16 +323,7 @@ function requiredRoleOf(block: ProviderBlock): RequiredRole {
   }
 }
 
-/**
- * The reasoning block types Anthropic pins to the assistant role, listed
- * once so {@link requiredRoleOf} and the weld guard in
- * {@link rebuildEnvelopes} cannot drift apart. Membership is exact, not
- * prefix-based: `redacted_thinking` does not start with `thinking`, and a
- * `startsWith` test here silently exempted the one variant whose payload is
- * opaque — a misattributed one cannot even be read back out of the
- * transcript. Any unknown `thinking`-prefixed type is 'inherit' (see the
- * default branch), so it never reaches the guard at all.
- */
+/** The reasoning block types Anthropic pins to the assistant role. */
 const STRICT_REASONING_BLOCK_TYPES: ReadonlySet<string> = new Set([
   'thinking',
   'redacted_thinking',
@@ -601,22 +351,16 @@ function rebuildEnvelopes(
 ): Envelope[] {
   const out: Envelope[] = [];
   let current: Envelope | null = null;
-  // The input message whose tool_use first entered `current`; -1 for none.
-  let currentFirstCallFrom = -1;
+  let currentFirstCallInputIndex = -1;
 
   for (let m = 0; m < input.length; m++) {
     const msg = input[m]!;
     if (typeof msg.content === 'string') {
-      // Provider message with plain-string content. Treat it as a single
-      // text block under the message's declared role. The phase-0 guard
-      // (assertInputWellFormed) has already refused every other non-array
-      // shape but null and undefined, which carry no blocks, so no coercion
-      // is needed or wanted here.
       const role = msg.role;
       if (current === null || current.role !== role) {
         if (current) out.push(current);
         current = { role, content: [] };
-        currentFirstCallFrom = -1;
+        currentFirstCallInputIndex = -1;
       }
       current.content.push({ type: 'text', text: msg.content });
       continue;
@@ -636,41 +380,20 @@ function rebuildEnvelopes(
         });
       }
 
-      // A reasoning block must not join a turn that an EARLIER message has
-      // already used to call a tool, whether the block was re-roled or
-      // arrived in an assistant message. Opening on role change alone put a
-      // thinking block from message N — signature and all — inside message
-      // N-1's turn, AFTER its tool_use: content attributed to the wrong turn,
-      // and signed reasoning claiming to belong to a cycle it did not
-      // produce. Two assistant messages in a row (the results message
-      // between them lost) weld the same way without any re-roling. A
-      // message's own reasoning after its own call stays where it was put.
-      // This is a content-correctness repair, NOT 400-prevention: measured
-      // live on 2026-08-25 (claude-haiku-4-5, and sonnet-4-6 independently),
-      // replaying a genuinely signed thinking block positioned after its
-      // tool_use returns 200, exactly as the correctly-ordered control does.
-      // Re-measured the same day for redacted_thinking (a real block from the
-      // documented magic-string trigger, claude-haiku-4-5): welded 200,
-      // control 200 — same verdict, so both variants move for attribution.
-      // types/tools.ts:100 still asserts this shape "fails API validation" —
-      // that claim is stale.
-      // Phase 3 guarantees a user envelope after any tool_use-bearing
-      // assistant envelope, so the fresh envelope opened here cannot be
-      // concatenated back by the mergeConsecutiveRoles that follows.
       const wouldWeldReasoningPastToolUse =
         isStrictReasoningBlock(block) &&
         current !== null &&
         current.role === 'assistant' &&
-        currentFirstCallFrom >= 0 &&
-        currentFirstCallFrom < m;
+        currentFirstCallInputIndex >= 0 &&
+        currentFirstCallInputIndex < m;
 
       if (current === null || current.role !== targetRole || wouldWeldReasoningPastToolUse) {
         if (current) out.push(current);
         current = { role: targetRole, content: [] };
-        currentFirstCallFrom = -1;
+        currentFirstCallInputIndex = -1;
       }
       current.content.push(block);
-      if (block.type === 'tool_use' && currentFirstCallFrom < 0) currentFirstCallFrom = m;
+      if (block.type === 'tool_use' && currentFirstCallInputIndex < 0) currentFirstCallInputIndex = m;
     }
   }
 
@@ -682,16 +405,12 @@ function hoistMatchingResults(
   envelopes: Envelope[],
   onEvent: (e: NormalizeEvent) => void,
 ): Envelope[] {
-  // For every assistant envelope, ensure its tool_use ids have matching
-  // tool_results in the immediately-following user envelope. If a
-  // matching tool_result lives further downstream, hoist it forward.
   for (let i = 0; i < envelopes.length; i++) {
     const env = envelopes[i]!;
     if (env.role !== 'assistant') continue;
     const useIds = collectToolUseIds(env);
     if (useIds.length === 0) continue;
 
-    // Ensure there is a user envelope at i+1. If not, insert an empty one.
     let nextIdx = i + 1;
     if (nextIdx >= envelopes.length || envelopes[nextIdx]!.role !== 'user') {
       envelopes.splice(nextIdx, 0, { role: 'user', content: [] });
@@ -708,10 +427,6 @@ function hoistMatchingResults(
       const useId = useIds[useIdIndex]!;
       if (presentIds.has(useId)) continue;
 
-      // Search downstream envelopes for this id and hoist the first match,
-      // but never from past a later call that reuses the id: a result
-      // answers the nearest call with its id before it, so one sitting past
-      // that later call is the later call's.
       const found = removeFirstMatchingResult(
         envelopes,
         nextIdx + 1,
@@ -719,10 +434,6 @@ function hoistMatchingResults(
         useId,
       );
       if (found) {
-        // Place the hoisted result at its own call's position, which is the
-        // front while no earlier call's result has landed — so hoisted
-        // results still precede any interloping content already present, but
-        // a batch of them no longer comes back reversed.
         nextEnv.content.splice(
           callOrderInsertionIndex(nextEnv, useIds, useIdIndex),
           0,
@@ -735,47 +446,16 @@ function hoistMatchingResults(
           toEnvelope: nextIdx,
         });
       }
-      // If not found downstream, leave it — phase 4 will synthesize.
     }
   }
   return envelopes;
 }
 
-/**
- * Enforce the converse of phase 3's rule: every tool_result must sit in the
- * user envelope immediately following the assistant envelope that holds its
- * tool_use. Three reachable shapes reach here unpaired:
- *
- *   A. out-of-order append — the result was written before its own cycle;
- *   B. leading result — the window cut left it with no preceding envelope;
- *   C. duplicate re-append — the same result arrives again after a later
- *      turn (the module's doc names cancellations and stream restarts).
- *
- * A and B are RELOCATED into their own cycle's user envelope, which keeps
- * the real payload as a tool_result and stops phase 4 from synthesizing a
- * `[pending]` over a result that actually landed. C cannot be relocated
- * without displacing the real result, so it is textified — content
- * preserved, structure dropped. A result whose id appears nowhere is left
- * alone here; phase 4's orphan pass owns that case.
- *
- * Pairing is ONE-TO-ONE, so this scan CONSUMES ids rather than testing
- * membership: the first result carrying an id its envelope actually pairs
- * takes that id, and any later copy of it is shape C wearing a different
- * costume — same cycle, same repair. A membership test (`is this id called
- * here?`) is blind to the second copy by construction, which is how a
- * one-call/two-result envelope reached the provider through every phase.
- *
- * Which call a stray belongs to is positional, as on the wire: the nearest
- * call with its id before it, or, for a result written before every such
- * call (A and B), the nearest one after it. With unique ids that is simply
- * the id's one call.
- */
 function repairStrayResults(
   envelopes: Envelope[],
   onEvent: (e: NormalizeEvent) => void,
   onBlockRewritten?: NormalizeOptions['onBlockRewritten'],
 ): Envelope[] {
-  // Each id's call envelopes, in order.
   const callEnvelopesOfId = new Map<string, number[]>();
   for (let i = 0; i < envelopes.length; i++) {
     const env = envelopes[i]!;
@@ -819,7 +499,6 @@ function repairStrayResults(
       }
       const calls = callEnvelopesOfId.get(id);
       if (calls === undefined) {
-        // Id appears nowhere — phase 4's orphan textification owns it.
         kept.push(block);
         continue;
       }
@@ -834,10 +513,6 @@ function repairStrayResults(
         );
 
       if (cycleIsOpen) {
-        // At its own call's position, never at the front: unshifting each
-        // relocated result reversed a multi-call batch ([ite1, ite2] came
-        // back as [ite2, ite1]), which is the read-order defect phase 4
-        // already fixed for synthetics.
         const cycleUseIds = collectToolUseIds(envelopes[useEnvelope]!);
         cycleEnvelope!.content.splice(
           callOrderInsertionIndex(cycleEnvelope!, cycleUseIds, cycleUseIds.indexOf(id)),
@@ -860,13 +535,6 @@ function repairStrayResults(
   return envelopes;
 }
 
-/**
- * The one repair both duplicate shapes take: keep the payload as text under a
- * deterministic provenance line, drop the tool_result structure that has no
- * open call to attach to. `reason` is the only thing that differs between a
- * copy stranded outside its (already-answered) cycle and a copy sitting
- * behind the result that answered its call inside it.
- */
 function textifyDuplicateResult(
   block: ProviderBlock,
   toolUseId: string,
@@ -887,18 +555,6 @@ function textifyDuplicateResult(
   return textified.block;
 }
 
-/**
- * The text block both textifications (orphan and duplicate) put in a
- * result's place. It carries:
- *   - the payload, as {@link renderResultContent} renders it, after a
- *     provenance line, which also says when the result was an error, since
- *     a failed call's output must not read as a successful one;
- *   - one cache marker, TTL included: the result's own, else the last one
- *     among its content parts. The block stands where the result stood, so a
- *     caller's breakpoint stays at that boundary; several markers inside one
- *     result can merge into one, never move past it, so the request's marker
- *     count never grows.
- */
 function textifyResult(
   block: ProviderBlock,
   provenance: string,
@@ -931,9 +587,6 @@ function evictInterlopers(
   envelopes: Envelope[],
   onEvent: (e: NormalizeEvent) => void,
 ): Envelope[] {
-  // Results must form a prefix, not merely start the envelope. Partition
-  // after every repair that can create text, preserving the relative order
-  // and payloads of both groups. No user content is discarded.
   for (let i = 0; i < envelopes.length; i++) {
     const env = envelopes[i]!;
     if (env.role !== 'user') continue;
@@ -943,8 +596,6 @@ function evictInterlopers(
     for (const block of env.content) {
       if (block.type === 'tool_result') {
         results.push(block);
-        // Only non-results before the LAST result are displaced. A suffix
-        // already after all results needs neither repair nor an event.
         deferredCount = other.length;
       } else {
         other.push(block);
@@ -972,8 +623,6 @@ function resolveOrphans(
 ): OrphanResolution {
   let ready = true;
 
-  // First pass: textify any tool_result whose tool_use never appeared
-  // anywhere in the message list (orphan result).
   const allUseIds = new Set<string>();
   for (const env of envelopes) {
     for (const block of env.content) {
@@ -1002,9 +651,6 @@ function resolveOrphans(
     });
   }
 
-  // Second pass: for each assistant envelope, every tool_use must have
-  // a matching tool_result in the immediately-following user envelope.
-  // If pending, signal not-ready. Else, synthesize.
   for (let i = 0; i < envelopes.length; i++) {
     const env = envelopes[i]!;
     if (env.role !== 'assistant') continue;
@@ -1016,11 +662,6 @@ function resolveOrphans(
       envelopes.splice(nextIdx, 0, { role: 'user', content: [] });
     }
     const nextEnv = envelopes[nextIdx]!;
-    // 'trailing' iff after the next user envelope there are no further
-    // envelopes AND the next envelope is empty (so it exists only to
-    // receive our synthetic). This must be computed *after* the splice
-    // because phase 3 may have already inserted an empty user envelope
-    // earlier in the pipeline.
     const isTrailing =
       nextIdx + 1 >= envelopes.length && nextEnv.content.length === 0;
     const presentIds = new Set(
@@ -1039,10 +680,6 @@ function resolveOrphans(
         continue;
       }
       const synth = syntheticToolResult(useId);
-      // Place the synthetic at its own call's position. Unshifting to the
-      // front put a [pending] for call #2 ahead of the REAL result of call
-      // #1: wire-valid, but the model then reads results in an order that
-      // does not match the order it made the calls.
       nextEnv.content.splice(callOrderInsertionIndex(nextEnv, useIds, useIdIndex), 0, synth);
       onEvent({
         kind: 'synthetic_pending_result',
@@ -1055,18 +692,6 @@ function resolveOrphans(
   return { envelopes, ready };
 }
 
-/**
- * Where the result for `useIds[useIdIndex]` belongs in the cycle's user
- * envelope: immediately after the result of the nearest earlier call that
- * already landed, or at the front when no earlier call has one. Every phase
- * that puts a result into a cycle envelope (synthesis in phase 4, relocation
- * in phase 3.5) routes through here. Only the inserted result is placed:
- * results already in the envelope keep their order. So an envelope whose
- * results are in call order stays in call order whichever phase inserts and
- * in whatever sequence, because each insertion anchors on landed neighbours
- * rather than a running counter; one whose results arrived out of call order
- * keeps them as they are.
- */
 function callOrderInsertionIndex(
   envelope: Envelope,
   useIds: ReadonlyArray<string>,
@@ -1082,16 +707,8 @@ function callOrderInsertionIndex(
   return 0;
 }
 
-/**
- * Whose history a validation judges, which decides how its refusals read:
- * after {@link normalizeToolPairs}'s repair a violation is the normalizer's
- * own bug; in a caller's history given to {@link assertToolPairsValid} it is
- * that history's defect, at messages the caller can find.
- */
 interface ValidationOrigin {
-  /** Names turn `i` in a refusal. */
   readonly turn: (i: number) => string;
-  /** Says whose defect a refusal is, after its description. */
   readonly blame: string;
 }
 
@@ -1100,13 +717,6 @@ const AFTER_REPAIR: ValidationOrigin = {
   blame: ' The repair should have prevented this, so this is a bug in the normalizer itself.',
 };
 
-/**
- * A caller's messages as the provider reads them, for
- * {@link assertToolPairsValid}: consecutive messages with one role are one
- * turn, concatenated as the API (and {@link mergeConsecutiveRoles}) combine
- * them. A message without blocks adds nothing and doesn't separate turns,
- * as in {@link rebuildEnvelopes}. Nothing else is repaired.
- */
 function turnsAsGiven(messages: ReadonlyArray<LooseProviderMessage>): {
   envelopes: Envelope[];
   origin: ValidationOrigin;
@@ -1146,7 +756,6 @@ function validate(
   pending: ReadonlySet<string>,
   origin: ValidationOrigin,
 ): void {
-  // Empty input → empty output is fine.
   if (envelopes.length === 0) return;
 
   const refuse = (description: string): never => {
@@ -1157,9 +766,6 @@ function validate(
     );
   };
 
-  // The standalone assertion reaches this phase without the repair pass.
-  // Check the same strict-role policy used by reflow before role-filtered
-  // pairing loops can accidentally ignore a misplaced block.
   for (let i = 0; i < envelopes.length; i++) {
     const envelope = envelopes[i]!;
     for (const block of envelope.content) {
@@ -1171,17 +777,10 @@ function validate(
     }
   }
 
-  // First message must be user (Anthropic requirement). Repair prepends a
-  // synthetic user envelope (phase 7); if it still isn't user here, fail.
   if (envelopes[0]!.role !== 'user') {
     refuse(`The first message must have role 'user', got '${envelopes[0]!.role}'.`);
   }
 
-  // Every tool_use in an assistant envelope must have a matching
-  // tool_result in the immediately-following user envelope — except
-  // tool_uses whose id is in `pending` (the in-flight set the caller
-  // declared off-limits for synthesis). After repair, a gap on any other
-  // id means phase 4 failed to synthesize.
   for (let i = 0; i < envelopes.length; i++) {
     const env = envelopes[i]!;
     if (env.role !== 'assistant') continue;
@@ -1198,7 +797,7 @@ function validate(
     );
     for (const useId of useIds) {
       if (presentIds.has(useId)) continue;
-      if (pending.has(useId)) continue; // legitimately in-flight
+      if (pending.has(useId)) continue;
       refuse(
         `tool_use id='${useId}' in ${origin.turn(i)} has no matching tool_result in the user ` +
           `turn right after it, and the id is not in pendingToolCallIds.`,
@@ -1206,20 +805,6 @@ function validate(
     }
   }
 
-  // The mirror of the loop above. Anthropic's rule binds in both directions,
-  // and for years only the forward half was checked — so an unpaired
-  // tool_result (out-of-order append, leading result, duplicate re-append)
-  // passed every phase AND this validation on its way to a 400. Phase 3.5
-  // repairs all three shapes; this asserts the repair actually held.
-  //
-  // Membership is not the whole rule: the pairing is one-to-one, so results
-  // are COUNTED per id here rather than tested for presence. Counting per
-  // envelope is complete: a result answers the call right before it, ids
-  // are unique within a turn (assertCallIdsUniquePerTurn), and any result
-  // whose id that turn doesn't call already fails the membership check. This
-  // assertion stands on its own: it refuses a second result even if some
-  // future phase (or a caller of `assertToolPairsValid`) hands it a
-  // duplicate the sweep never saw.
   for (let i = 0; i < envelopes.length; i++) {
     const env = envelopes[i]!;
     if (env.role !== 'user') continue;
@@ -1265,29 +850,12 @@ function validate(
   }
 }
 
-// ============================================================================
-// Helpers
-// ============================================================================
-
-/**
- * Read a tool_result's id: Anthropic's `tool_use_id`, the only field the wire
- * pairs by. Phase 1 has already rewritten a `toolUseId`-only result into this
- * form ({@link withCanonicalResultId}); in a caller's history given to
- * {@link assertToolPairsValid}, a result without `tool_use_id` answers
- * nothing, as on the wire.
- */
+/** Anthropic pairs a result with its call by `tool_use_id` alone. */
 function getToolUseId(block: ProviderBlock): string | undefined {
   const id = (block as { tool_use_id?: unknown }).tool_use_id;
   return typeof id === 'string' ? id : undefined;
 }
 
-/**
- * A tool_result that names its call as `toolUseId`, as Membrane's own content
- * types spell it, leaves phase 1 naming it as `tool_use_id`, the only field
- * the provider pairs by. Pairing it here under the camelCase name alone would
- * send an answer the provider can't see. Results leave the normalizer with
- * the one spelling. A copy; the caller's block is untouched.
- */
 function withCanonicalResultId(block: ProviderBlock): ProviderBlock {
   if (block.type !== 'tool_result' || !('toolUseId' in block)) return block;
   const { toolUseId, ...rest } = block as ProviderBlock & { toolUseId?: unknown };
@@ -1297,39 +865,6 @@ function withCanonicalResultId(block: ProviderBlock): ProviderBlock {
   return rest as ProviderBlock;
 }
 
-/**
- * Render a tool_result's payload as text for the two repairs that must
- * abandon the tool_result structure (orphan and duplicate textification),
- * keeping everything text can carry:
- *   - string content as it is, and null or undefined content as nothing;
- *   - a text part as its text;
- *   - inline base64 data (an image, a generated image, a base64 document,
- *     audio or video) as a placeholder naming its media type and size: its
- *     bytes mean nothing as text and would cost their whole length in every
- *     later prompt;
- *   - every other part (a url or file source, a text-source document, a part
- *     type this module doesn't know) and any other content as its JSON, the
- *     way text-only tool-result wires already carry it
- *     (`textOnlyToolResultContent` in `providers/utils.ts`).
- *
- * `ToolResult.content` is `string | ToolResultContentBlock[]`, and the array
- * form is a first-class feature — image results ride it. The previous
- * recovery read only the string branch, so every array-shaped payload was
- * replaced by the empty string with no signal of the loss.
- *
- * This deliberately does not reuse `renderResultContentString` from
- * `utils/tool-parser.ts`: that helper renders an internal `ToolResult`'s text
- * and images, deciding each image's data for the request (data in no format
- * the request can carry gets `imageForRequest`'s placeholder), while parts
- * arriving here are provider-shaped and of every media kind, and a part's
- * media type may be spelled as Anthropic's wire-form `media_type`, as
- * Membrane's `mediaType` (a part a builder passed through unconverted), or as
- * `mimeType` (an MCP-style or generated image). Reading all three spellings
- * is the point. An image's placeholder here keeps the form of that helper's
- * note for an image the request would carry, so the two renderings stay
- * recognisable as the same thing to a model; this renderer doesn't decide the
- * data, so it names the media type the part was labelled with.
- */
 function renderResultContent(block: ProviderBlock): string {
   const content = (block as { content?: unknown }).content;
   if (typeof content === 'string') return content;
@@ -1349,11 +884,6 @@ function renderResultPart(part: unknown): string {
   return inlineDataPlaceholder(fields) ?? JSON.stringify(fields);
 }
 
-/**
- * Part types whose inline `data` is binary, and how a placeholder names them:
- * every media type Membrane's content model carries as base64
- * (`isMediaContent`), and a provider-generated image.
- */
 const INLINE_DATA_LABELS: ReadonlyMap<unknown, string> = new Map([
   ['image', 'Image'],
   ['generated_image', 'Image'],
@@ -1366,8 +896,8 @@ function inlineDataPlaceholder(part: Record<string, unknown>): string | undefine
   const label = INLINE_DATA_LABELS.get(part.type);
   if (label === undefined) return undefined;
   const source = part.source as Record<string, unknown> | null | undefined;
-  // Wire form keeps the data in `source` (a text source's data is text, not
-  // bytes); MCP-style and generated images keep it on the part itself.
+  // Anthropic's wire form keeps the data in `source` (a text source's data is
+  // text, not bytes); MCP-style and generated images keep it on the part itself.
   const holder =
     source !== null && typeof source === 'object' && typeof source.data === 'string'
       ? source.type === 'text' ? undefined : source
@@ -1393,11 +923,6 @@ function collectToolUseIds(env: Envelope): string[] {
   return ids;
 }
 
-/**
- * The first assistant envelope at or after `from` that calls `id`, or the
- * envelope count when none does: the end of the stretch whose results can
- * answer an earlier call with that id.
- */
 function nextCallIndex(envelopes: ReadonlyArray<Envelope>, id: string, from: number): number {
   for (let i = from; i < envelopes.length; i++) {
     const env = envelopes[i]!;
@@ -1406,11 +931,6 @@ function nextCallIndex(envelopes: ReadonlyArray<Envelope>, id: string, from: num
   return envelopes.length;
 }
 
-/**
- * The call envelope a result in envelope `at` belongs to, given its id's call
- * envelopes in order: the nearest one before it, as the wire pairs, or, when
- * the result was written before every one of them, the nearest one after it.
- */
 function owningCall(calls: ReadonlyArray<number>, at: number): number {
   let owner = calls[0]!;
   for (const call of calls) {
@@ -1433,9 +953,6 @@ function removeFirstMatchingResult(
       const block = env.content[j]!;
       if (block.type !== 'tool_result') continue;
       if (getToolUseId(block) === useId) {
-        // Mutates the envelope's content array in place. Caller
-        // (phase 3) is expected to handle the possibly-empty source
-        // envelope; phase 6's filter sweeps any envelope left empty.
         env.content.splice(j, 1);
         return { block, fromEnvelope: i };
       }
@@ -1444,15 +961,6 @@ function removeFirstMatchingResult(
   return null;
 }
 
-/**
- * Synthetic tool_result for an unmatched tool_use. Writes
- * `tool_use_id` in Anthropic's canonical snake_case form — do NOT
- * change to camelCase without auditing every consumer of the
- * downstream message. The "[pending]" content is intentionally
- * tombstone-shaped (is_error: false) — most synthesis triggers are
- * normal-flow gaps (cancellations, stream restarts), not failures
- * worth alarming the agent about.
- */
 function syntheticToolResult(toolUseId: string): ProviderBlock {
   return {
     type: 'tool_result',
@@ -1466,12 +974,6 @@ function toProviderMessage(env: Envelope): LooseProviderMessage {
   return { role: env.role, content: env.content };
 }
 
-/**
- * The caller's messages as a refusal reports them: each message and its
- * block list shallow-copied, so later changes to the caller's arrays don't
- * rewrite the report. A malformed entry, which phase 0 refuses, is kept as
- * it was given.
- */
 function snapshot(input: ReadonlyArray<LooseProviderMessage>): LooseProviderMessage[] {
   return input.map((msg) =>
     msg !== null && typeof msg === 'object'
@@ -1481,23 +983,11 @@ function snapshot(input: ReadonlyArray<LooseProviderMessage>): LooseProviderMess
 }
 
 function noop(): void {
-  /* intentionally empty */
 }
 
 /**
- * Merge consecutive same-role envelopes by concatenating their content
- * arrays. Anthropic's API accepts adjacent same-role envelopes, but counts
- * one token more at each boundary than for the same blocks in one envelope,
- * so the merge gives a turn one rendering however its blocks arrived; and
- * `normalizeToolPairs` can leave adjacent same-role envelopes
- * (e.g. an assistant turn re-roled out of a user message, or two
- * assistant turns stranded by an upstream chunker that dropped the
- * tool_result message between them).
- *
- * This is the second half of the wire-boundary safety net and should run
- * AFTER `normalizeToolPairs` at every callsite that ships messages to
- * Anthropic. Hoisted here so both `NativeFormatter.buildMessages` and
- * `Membrane.buildNativeToolRequest` share one implementation.
+ * Anthropic's API accepts adjacent same-role messages, but counts one token
+ * more at each boundary than for the same blocks in one message.
  */
 export function mergeConsecutiveRoles(
   messages: ReadonlyArray<LooseProviderMessage>,

@@ -1,17 +1,3 @@
-/**
- * The progress deadline (`progressTimeoutMs`, agent-framework #268).
- *
- * After antra-tess/membrane#94 a body carrying only SSE keepalives renews the
- * Anthropic idle watchdog, so a connection that stays up while the model sends
- * nothing never ends. The progress deadline is renewed only by parsed provider
- * events (`ProviderRequestOptions.onProgress`), one per provider call, so tool
- * waits between calls never count. On expiry the call aborts with the deadline
- * mark and becomes a TimeoutAbortError on every path.
- *
- * Timings are scaled fixture inputs: a deadline of PROGRESS_MS, events or
- * keepalives every TICK_MS, and runs of 4x the deadline, wide enough that a
- * loaded machine doesn't turn them into races.
- */
 import { getEventListeners } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
@@ -40,17 +26,12 @@ const REQUEST: NormalizedRequest = {
   messages: [{ participant: 'User', content: [{ type: 'text', text: 'zz hello' }] }],
   config: { model: 'claude-sonnet-4-6', maxTokens: 100 },
 };
-/** The prefill (XML tool) path; plain requests default to the native path. */
 const XML_REQUEST: NormalizedRequest = { ...REQUEST, toolMode: 'xml' };
 const NATIVE_REQUEST: NormalizedRequest = {
   ...REQUEST,
   toolMode: 'native',
   tools: [{ name: 'zz_probe', description: 'zz probe', inputSchema: { type: 'object', properties: { fld1: { type: 'string' } } } }],
 };
-
-// ---------------------------------------------------------------------------
-// A live response body the test scripts over time; records transport teardown.
-// ---------------------------------------------------------------------------
 
 interface Io {
   emit(text: string): void;
@@ -72,20 +53,19 @@ function liveResponse(init: RequestInit | undefined, script: (io: Io) => Promise
     if (done) return;
     done = true;
     release();
-    try { if (error) controller.error(error); else controller.close(); } catch { /* already settled */ }
+    try { if (error) controller.error(error); else controller.close(); } catch { }
   };
   const body = new ReadableStream<Uint8Array>({
     start(c) { controller = c; },
     cancel() { torn[index] = true; done = true; release(); },
   });
-  // The platform's fetch rejects a body read with the signal's own reason
-  // (pinned against a real server in adapter-timeout-identity.test.ts).
+  // The platform's fetch rejects a body read with the signal's own reason.
   init?.signal?.addEventListener('abort', () => {
     torn[index] = true;
     stop(init.signal!.reason as Error);
   }, { once: true });
   void script({
-    emit: (text) => { if (!done) { try { controller.enqueue(encoder.encode(text)); } catch { /* closed */ } } },
+    emit: (text) => { if (!done) { try { controller.enqueue(encoder.encode(text)); } catch { } } },
     sleep: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
     close: () => stop(),
     isDone: () => done,
@@ -110,7 +90,7 @@ afterEach(() => {
   torn.length = 0;
 });
 
-// Anthropic SSE, through the real SDK parser (which drops `ping` events).
+// The Anthropic SDK's stream parser drops `ping` events.
 const message = {
   id: 'msg_test', type: 'message', role: 'assistant', model: REQUEST.config.model,
   content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 0 },
@@ -143,8 +123,6 @@ async function collect(stream: AsyncIterable<StreamEvent>, onEvent?: (event: Str
   return events;
 }
 
-// ---------------------------------------------------------------------------
-
 describe('createProgressDeadline', () => {
   it('aborts with the deadline mark, naming itself and when the call began, when nothing renews it', async () => {
     vi.useFakeTimers();
@@ -165,8 +143,6 @@ describe('createProgressDeadline', () => {
   });
 
   it('says in its message how many events the call had and when the last came', () => {
-    // A log that keeps only the message can tell a call that stopped partway
-    // from one that never produced an event (the case above).
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-14T12:00:00.000Z'));
     const deadline = createProgressDeadline(undefined, 1000);
@@ -226,8 +202,6 @@ describe('createProgressDeadline', () => {
   });
 
   it("lets go of the caller's signal at cleanup", () => {
-    // A resident's signal outlives many calls: each call's listener must go
-    // with its call.
     const caller = new AbortController();
     const deadline = createProgressDeadline(caller.signal, 1000);
     expect(getEventListeners(caller.signal, 'abort')).toHaveLength(1);
@@ -250,7 +224,6 @@ describe('createProgressDeadline', () => {
     expect(forward.signal!.aborted).toBe(false);
     vi.advanceTimersByTime(1);
     expect(forward.signal!.aborted).toBe(true);
-    // The message's times are the wall clock's: the renewal came before the step.
     expect(deadlineTimeoutError(forward.signal!.reason).message).toBe(
       'No provider progress within 1000ms: the call began at 2026-10-14T12:00:00.000Z, ' +
       'provider events: 1, the last at 2026-10-14T12:00:00.500Z',
@@ -290,7 +263,6 @@ describe('deadlines past the platform timer limit', () => {
     vi.useFakeTimers();
     const armed = vi.spyOn(globalThis, 'setTimeout');
     const deadline = createProgressDeadline(undefined, PAST_LIMIT_MS);
-    // A deadline re-armed every millisecond would make the long advance below spin for hours.
     vi.advanceTimersByTime(10);
     expect(armed).toHaveBeenCalledTimes(1);
     vi.advanceTimersByTime(PAST_LIMIT_MS - 11);
@@ -308,10 +280,8 @@ describe('deadlines past the platform timer limit', () => {
     const armed = vi.spyOn(globalThis, 'setTimeout');
     const deadline = createProgressDeadline(undefined, PAST_LIMIT_MS);
     const combined = createCombinedSignal(undefined, PAST_LIMIT_MS);
-    // A deadline re-armed every millisecond would make the long advance below spin for hours.
     vi.advanceTimersByTime(10);
     expect(armed).toHaveBeenCalledTimes(2);
-    // Past the first step: each helper has armed its second.
     vi.advanceTimersByTime(2 ** 31 - 10);
     expect(vi.getTimerCount()).toBe(2);
     deadline.cleanup();
@@ -361,13 +331,12 @@ describe('Membrane core: one renewable deadline per provider call', () => {
     await new Membrane(on).stream(XML_REQUEST, { progressTimeoutMs: 60_000 });
     await new Membrane(on).stream(NATIVE_REQUEST, { progressTimeoutMs: 60_000 });
     await new Membrane(on).complete(REQUEST, { progressTimeoutMs: 60_000 });
-    for await (const _ of new Membrane(on).streamYielding(XML_REQUEST, { progressTimeoutMs: 60_000 })) { /* drain */ }
-    for await (const _ of new Membrane(on).streamYielding(NATIVE_REQUEST, { progressTimeoutMs: 60_000 })) { /* drain */ }
+    for await (const _ of new Membrane(on).streamYielding(XML_REQUEST, { progressTimeoutMs: 60_000 })) { }
+    for await (const _ of new Membrane(on).streamYielding(NATIVE_REQUEST, { progressTimeoutMs: 60_000 })) { }
     expect(on.seen).toHaveLength(5);
     for (const options of on.seen) {
       expect(typeof options?.onProgress).toBe('function');
       expect(options?.signal).toBeInstanceOf(AbortSignal);
-      // Core keeps the option to itself.
       expect(options !== undefined && 'progressTimeoutMs' in options).toBe(false);
     }
 
@@ -375,7 +344,7 @@ describe('Membrane core: one renewable deadline per provider call', () => {
     const caller = new AbortController();
     await new Membrane(off).stream(REQUEST, { signal: caller.signal });
     await new Membrane(off).complete(REQUEST, { signal: caller.signal });
-    for await (const _ of new Membrane(off).streamYielding(REQUEST, { signal: caller.signal })) { /* drain */ }
+    for await (const _ of new Membrane(off).streamYielding(REQUEST, { signal: caller.signal })) { }
     expect(off.seen).toHaveLength(3);
     for (const options of off.seen) {
       expect(options?.onProgress).toBeUndefined();
@@ -386,8 +355,6 @@ describe('Membrane core: one renewable deadline per provider call', () => {
   });
 
   it('gives each refusal re-issue a deadline of its own, and lets go of the caller as each call returns', async () => {
-    // Each attempt is silent for three quarters of the deadline, so one
-    // deadline shared by both attempts would expire during the second.
     vi.useFakeTimers();
     class RefusesOnce implements ProviderAdapter {
       readonly name = 'zz-refuses-once';
@@ -442,7 +409,6 @@ describe('Membrane core: one renewable deadline per provider call', () => {
     expect(events.some((e) => e.type === 'complete')).toBe(true);
     expect(viaStream.signals[0]).not.toBe(viaStream.signals[1]);
 
-    // stream() has no refusal re-issue; its one call lets go of the caller too.
     const once = new RefusesOnce();
     once.calls = 1;
     const streamed = new Membrane(once).stream(REQUEST, { progressTimeoutMs: 1000, signal: caller.signal });
@@ -451,10 +417,6 @@ describe('Membrane core: one renewable deadline per provider call', () => {
     expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
   });
 
-  /**
-   * Sends a call's answer after `quietMs` of silence, honouring its signal as
-   * an adapter does; `fails` decides, per send, what the send throws instead.
-   */
   class QuietSends implements ProviderAdapter {
     readonly name = 'zz-quiet-sends';
     calls = 0;
@@ -494,12 +456,7 @@ describe('Membrane core: one renewable deadline per provider call', () => {
   }
 
   it('gives each retry of a failed send a deadline of its own, and counts the wait before it against none', async () => {
-    // Each send is silent for three quarters of the deadline, and the first
-    // then fails with a 529 before delivering anything. The retry waits 400
-    // ms first. One deadline shared by both sends would expire in the retry,
-    // and so would a retry's deadline that counted its wait.
     vi.useFakeTimers();
-    // The overloaded schedule's jitter draws from [delay / 2, delay): take its least.
     vi.spyOn(Math, 'random').mockReturnValue(0);
     const schedule = { retry: { overloaded: { maxRetries: 2, retryDelayMs: 800, maxRetryDelayMs: 800, backoffMultiplier: 1 } } };
     const overloadedOnce = (): QuietSends => new QuietSends(() => 750, (send) => (send === 0 ? serverError('zz overloaded', 529) : undefined));
@@ -534,9 +491,6 @@ describe('Membrane core: one renewable deadline per provider call', () => {
   });
 
   it('sends a call whose deadline ran out once, and leaves its timeout to the caller', async () => {
-    // The first send is silent past its deadline; a second send would answer
-    // at once. Membrane's retries don't send it again: a deadline that ran
-    // out on a sent request is the caller's.
     vi.useFakeTimers();
     const silentFirst = (): QuietSends => new QuietSends((send) => (send === 0 ? Infinity : 10), () => undefined);
 
@@ -584,8 +538,6 @@ describe('Anthropic: the deadline follows SDK events, not keepalives', () => {
       await keepalives(io, ping, 20 * LIVE_MS);
     }));
     const result = await new Membrane(anthropic()).stream(REQUEST, { progressTimeoutMs: PROGRESS_MS });
-    // An aborted response with reason 'timeout' comes only from the deadline's
-    // mark: the idle watchdog throws a retryable timeout instead.
     expect(isAbortedResponse(result)).toBe(true);
     expect((result as { reason: string }).reason).toBe('timeout');
     expect(torn[0]).toBe(true);
@@ -610,7 +562,6 @@ describe('Anthropic: the deadline follows SDK events, not keepalives', () => {
     const stream = new Membrane(anthropic()).streamYielding(NATIVE_REQUEST, { progressTimeoutMs: PROGRESS_MS });
     const events = await collect(stream, (event) => {
       if (event.type !== 'tool-calls') return;
-      // A tool that takes several deadlines to run: time outside a provider call.
       setTimeout(() => stream.provideToolResults([{ toolUseId: event.calls[0]!.id, content: 'zz ok' }]), 3 * PROGRESS_MS);
     });
     expect(events.filter((e) => e.type === 'aborted')).toEqual([]);
@@ -644,12 +595,6 @@ describe('Anthropic: the deadline follows SDK events, not keepalives', () => {
 });
 
 describe('every streaming adapter reports progress once per parsed event', () => {
-  // The end-to-end cases above drive two adapters through Membrane. The call
-  // lives in each adapter's own parser, so the family fact is pinned here:
-  // three events that parse to an object count; comments, keepalives, data
-  // that doesn't parse and data that parses to anything else don't.
-  // Each body then ends without a terminal event, which is fine: only the
-  // count matters.
   const sseBody = [
     ': comment\n\n',
     'data: {"zz":1}\n\n',
@@ -671,7 +616,7 @@ describe('every streaming adapter reports progress once per parsed event', () =>
   ] as never;
 
   for (const [name, build] of adapters) {
-    it(`${name}: three data frames, three reports`, async () => {
+    it(`${name}: three data frames parse to an object, three reports`, async () => {
       stubFetch(() => rawSseResponse(sseBody));
       let progress = 0;
       const adapter = build() as unknown as {

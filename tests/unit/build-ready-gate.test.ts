@@ -1,15 +1,4 @@
-/**
- * The `ready` flag must be READ at the wire boundary.
- *
- * `BuildOptions.pendingToolCallIds` is public API: a caller declares which
- * tool_use ids are still in flight, and the tool-pair normalizer answers with
- * `BuildResult.ready === false` instead of synthesizing a `[pending]` result
- * over a call that has not finished. The flag was written by two formatters
- * and read nowhere — so a consumer following Membrane's own example of
- * ignoring it built a request carrying an unmatched tool_use, which is exactly
- * the 400 family the normalizer exists to prevent, produced by using its
- * documented option.
- */
+/** A request carrying a tool_use with no matching tool_result is refused with a 400. */
 
 import { describe, it, expect, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
@@ -19,14 +8,12 @@ import { MembraneError, MembraneNotReadyError } from '../../src/types/errors.js'
 import type { NormalizedRequest, NormalizedMessage } from '../../src/types/index.js';
 import type { BuildOptions, BuildResult } from '../../src/formatters/types.js';
 
-/** A formatter whose build reports an unfinished tool cycle. */
 class ZzNotReadyFormatter extends NativeFormatter {
   buildMessages(messages: NormalizedMessage[], options: BuildOptions): BuildResult {
     return { ...super.buildMessages(messages, options), ready: false };
   }
 }
 
-/** Same shape, ready — proves the gate is keyed on the flag and nothing else. */
 class ZzReadyFormatter extends NativeFormatter {
   buildMessages(messages: NormalizedMessage[], options: BuildOptions): BuildResult {
     return { ...super.buildMessages(messages, options), ready: true };
@@ -64,7 +51,6 @@ describe('BuildResult.ready gates the send', () => {
       caught = err;
     }
 
-    // The readiness gate refused it, not some other early failure.
     expect(caught).toBeInstanceOf(MembraneNotReadyError);
     expect(build).toHaveBeenCalledTimes(1);
     expect(beforeRequest).not.toHaveBeenCalled();
@@ -85,7 +71,6 @@ describe('BuildResult.ready gates the send', () => {
     expect(caught).toBeInstanceOf(MembraneError);
     expect((caught as MembraneError).type).toBe('invalid_request');
     expect((caught as MembraneError).retryable).toBe(false);
-    // A deterministic build failure must not burn the transport retry budget.
     expect(adapter.getRequestLog()).toHaveLength(0);
   });
 

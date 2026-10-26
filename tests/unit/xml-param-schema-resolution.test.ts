@@ -1,23 +1,3 @@
-/**
- * Declared-type resolution for XML-mode parameters (greptile #53, tool-parser.ts:52;
- * review of 2026-09-29, findings 1, 2, 3, 5, 6 and 7).
- *
- * The schema-typed parse landed reading `properties[paramName].type` and
- * nothing else, so every OTHER spelling of the same declaration — a
- * `["string","null"]` type array, an `anyOf` of a type and null, a `$ref` into
- * the tool's own definitions, a parameter carried inside a ROOT-level union —
- * looked undeclared and fell back to the legacy guess: trim, then JSON.parse.
- * Whitespace-sensitive and JSON-looking string arguments changed shape on the
- * way to the tool callback, silently.
- *
- * readToolSchema (src/utils/tool-schema.ts) reads every declaration as the set
- * of JSON types it admits: a declaration that admits exactly one type (null
- * aside) is parsed by it; one that admits several, none, or cannot be read
- * keeps the legacy guess but says so ONCE per distinct schema form, which turns
- * a silent divergence into a named bound. Schema shapes are read as data:
- * nothing a producer sends makes reading throw.
- */
-
 import { describe, it, expect, vi } from 'vitest';
 import {
   parseToolCalls,
@@ -29,12 +9,11 @@ import { readToolSchema } from '../../src/utils/tool-schema.js';
 import { AnthropicXmlFormatter } from '../../src/formatters/anthropic-xml.js';
 import type { ToolDefinition, NormalizedMessage } from '../../src/types/index.js';
 
-/** Every tool this file builds with `toolWith`, for the check that the two readings agree. */
-const fixtures: ToolDefinition[] = [];
+const everyToolBuilt: ToolDefinition[] = [];
 
 function toolWith(name: string, inputSchema: ToolDefinition['inputSchema']): ToolDefinition {
   const tool = { name, description: 'obviously-fake schema-form probe', inputSchema };
-  fixtures.push(tool);
+  everyToolBuilt.push(tool);
   return tool;
 }
 
@@ -133,7 +112,7 @@ describe('$ref into the tool\'s own definitions', () => {
     expect(parseParam(tool, 'fld1', '  {"ite1": 1}  ')).toBe('  {"ite1": 1}  ');
   });
 
-  it('follows a chain within the depth cap', () => {
+  it('follows a two-hop reference chain', () => {
     const tool = toolWith('zz_ref_chain_tool', {
       type: 'object',
       properties: { fld1: { $ref: '#/$defs/zz1' } },
@@ -143,8 +122,6 @@ describe('$ref into the tool\'s own definitions', () => {
   });
 
   it('follows a chain of any length: no depth budget to exhaust', () => {
-    // A three-hop cap used to be shared with union traversal, so a $ref inside a
-    // parameter anyOf inside a root variant ran out of hops and fell back.
     const defs: Record<string, unknown> = {};
     for (let hop = 1; hop < 12; hop++) defs[`zz${hop}`] = { $ref: `#/$defs/zz${hop + 1}` };
     defs.zz12 = { type: 'string' };
@@ -166,8 +143,6 @@ describe('$ref into the tool\'s own definitions', () => {
   });
 
   it('reads a definition shared along many paths once, not once per path', () => {
-    // Forty levels of two branches onto the same next definition: 2^40 paths,
-    // one definition each. Finishing at all is the assertion.
     const defs: Record<string, unknown> = {};
     for (let level = 0; level < 40; level++) {
       defs[`zz${level}`] = {
@@ -246,7 +221,6 @@ describe('anyOf / oneOf unions', () => {
       parseParam(tool, 'fld1', ' 17 ');
       return first;
     });
-    // Unchanged from the unfixed tip: the legacy guess still trims and parses.
     expect(result).toBe('zz-spaced-text');
     expect(messages).toHaveLength(1);
     expect(messages[0]).toContain('zz_ambiguous_union_tool');
@@ -271,7 +245,7 @@ describe('anyOf / oneOf unions', () => {
   });
 
   it('reads branches of ONE type as that type (literal unions)', () => {
-    // zod's union of literals: every branch is a string, so the parameter is.
+    // zod's encoding of a union of literals.
     const tool = toolWith('zz_literal_union_tool', {
       type: 'object',
       properties: {
@@ -308,9 +282,6 @@ describe('anyOf / oneOf unions', () => {
 });
 
 describe('nullable declarations', () => {
-  // A declaration that admits null lets the model write `null` for it. Main
-  // delivered null for these; collapsing ["string","null"] to plain string
-  // delivered the four-character text "null" instead.
   const tool = toolWith('zz_nullable_tool', {
     type: 'object',
     properties: {
@@ -362,10 +333,7 @@ describe('nullable declarations', () => {
 describe("OpenAPI's nullable: true beside a type (#143)", () => {
   // OpenAPI 3.0 and Gemini's dialect say a parameter may be null with
   // `nullable: true` beside its `type`, where JSON Schema names null in the
-  // type itself. Main read the type alone, so `{type: "string", nullable:
-  // true}` read as a plain string: the instructions didn't say it admits
-  // null, and a written null reached the tool as the four-character text
-  // "null".
+  // type itself.
   const tool = toolWith('zz_openapi_nullable_tool', {
     type: 'object',
     properties: {
@@ -410,8 +378,6 @@ describe("OpenAPI's nullable: true beside a type (#143)", () => {
   });
 
   it('delivers null for an integer or an object without a type-mismatch warning', () => {
-    // Main parsed these as JSON, so the null arrived, but each warned that
-    // the value wasn't the declared type.
     const { result, messages } = writtenNulls('fld3', 'fld4');
     expect(messages).toEqual([]);
     expect(result).toEqual({ fld3: null, fld4: null });
@@ -440,11 +406,6 @@ describe("OpenAPI's nullable: true beside a type (#143)", () => {
   });
 
   it('parses `nullable: true` beside an enum without consulting the enum, but does not mark it (#150)', () => {
-    // As for every `type` here, the enum beside it isn't read for what the
-    // parameter admits, so the parse delivers null though the enum doesn't
-    // list it, as it already did for `{type: ['string', 'null'], enum: [...]}`.
-    // The instructions do consult the enum: null is a value this schema
-    // doesn't accept, so the model isn't told it may send one.
     expect(parseParam(tool, 'fld8', 'null')).toBeNull();
     expect(renderedTools(tool)).toContain(
       '<parameter name="fld8" type="string" enum="zz-a,zz-b">'
@@ -457,9 +418,6 @@ describe("OpenAPI's nullable: true beside a type (#143)", () => {
   });
 
   it('reads `nullable` only beside a type, where OpenAPI 3.0.3 gives it effect', () => {
-    // Without a `type`, the declaration is read from its other keywords, as
-    // before: here an enum of strings, and OpenAPI's wrapper of a $ref in an
-    // allOf, so a written null stays text.
     const untyped = toolWith('zz_nullable_without_type_tool', {
       type: 'object',
       properties: {
@@ -471,7 +429,6 @@ describe("OpenAPI's nullable: true beside a type (#143)", () => {
     });
     expect(parseParam(untyped, 'fld1', 'null')).toBe('null');
     expect(parseParam(untyped, 'fld3', 'null')).toBe('null');
-    // fld2 constrains nothing, so it keeps the legacy guess: null, as before.
     expect(parseParam(untyped, 'fld2', 'null')).toBeNull();
     const doc = renderedTools(untyped);
     expect(doc).toContain('<parameter name="fld1" type="string" enum="zz-a,zz-b">');
@@ -481,11 +438,10 @@ describe("OpenAPI's nullable: true beside a type (#143)", () => {
 });
 
 describe('an enum or const beside a type that admits null (#150)', () => {
-  // The type says null is admitted; the enum or const beside it may leave null
-  // out, and the specifications let it decide (OpenAPI 3.0.3 on `nullable`:
-  // other constraints "may disallow the use of null as a value"; JSON Schema
-  // 2020-12 §6.1.2 on `enum`). Main marked `nullable="true"` from the type
-  // alone, and printed a null enum member as an empty item, `enum="a,b,"`.
+  // A type may admit null while the enum or const beside it leaves null out,
+  // and the specifications let it decide (OpenAPI 3.0.3 on `nullable`: other
+  // constraints "may disallow the use of null as a value"; JSON Schema
+  // 2020-12 §6.1.2 on `enum`).
   const tool = toolWith('zz_enum_nullable_tool', {
     type: 'object',
     properties: {
@@ -504,8 +460,6 @@ describe('an enum or const beside a type that admits null (#150)', () => {
       fld13: { type: ['string', 'null'], allOf: [{ enum: ['zz-a', 'zz-b'] }] } as never,
       fld14: { type: ['string', 'null'], $ref: '#/$defs/zz3' } as never,
       fld15: { type: ['string', 'null'], anyOf: [{ enum: ['zz-a'] }, { type: 'null' }] } as never,
-      // A type name this reader doesn't know, beside an enum: unresolved, as on
-      // main, and the tool's other parameters read as they do without it.
       fld16: { type: ['STRING', 'null'], enum: ['zz-a'] } as never,
     },
     $defs: {
@@ -515,8 +469,6 @@ describe('an enum or const beside a type that admits null (#150)', () => {
       zz3: { enum: ['zz-a', 'zz-b'] },
     },
   });
-  // Root alternatives declaring one parameter. A call may fit either of a
-  // oneOf's alternatives, and must fit both of an allOf's.
   const rootTool = toolWith('zz_enum_nullable_root_tool', {
     type: 'object',
     oneOf: [
@@ -572,7 +524,6 @@ describe('an enum or const beside a type that admits null (#150)', () => {
 
   it('reads an enum in a branch the same way', () => {
     const doc = renderedTools(tool);
-    // Neither branch accepts null: the first's enum leaves it out, the second is integer.
     expect(doc).toContain('<parameter name="fld8">');
     expect(doc).toContain('<parameter name="fld10" type="string">');
     expect(doc).toContain('<parameter name="fld11" type="string" enum="zz-a,zz-b">');
@@ -594,7 +545,6 @@ describe('an enum or const beside a type that admits null (#150)', () => {
   });
 
   it('withholds it where no root alternative admits null', () => {
-    // The second alternative takes any string, so no list holds for every call.
     expect(renderedTools(rootSplitTool)).toContain('<parameter name="fld1" type="string">');
   });
 
@@ -698,7 +648,6 @@ describe('values behind a $ref, in branches and across root alternatives', () =>
       } as never,
     },
   });
-  // The same cycle, read from its other end first.
   const cycleFromB = toolWith('zz_values_cycle_tool', {
     type: 'object',
     properties: { fld18: { $ref: '#/$defs/CycleB' }, fld17: { $ref: '#/$defs/CycleA' } },
@@ -707,8 +656,6 @@ describe('values behind a $ref, in branches and across root alternatives', () =>
       CycleB: { allOf: [{ enum: ['zz-y', 'zz-z'] }, { $ref: '#/$defs/CycleA' }] },
     } as never,
   });
-  // A call names its alternative by `kind`, so a value two alternatives share
-  // is valid in each.
   const rootTool = toolWith('zz_values_root_tool', {
     type: 'object',
     oneOf: [
@@ -716,8 +663,6 @@ describe('values behind a $ref, in branches and across root alternatives', () =>
       { properties: { kind: { const: 'zz-y' }, fld1: { enum: ['zz-b', 'zz-c'] } }, required: ['kind'] },
     ],
   } as never);
-  // The root's list, narrowed by an allOf alternative; and a root type that
-  // keeps two of an alternative's three kinds.
   const rootAllOfTool = toolWith('zz_values_root_allof_tool', {
     type: 'object',
     properties: { fld1: { enum: ['zz-a', 'zz-b', 'zz-c'] }, fld2: { type: ['string', 'integer'] } },
@@ -762,9 +707,7 @@ describe('values behind a $ref, in branches and across root alternatives', () =>
 
   it('keeps only the values of kinds the parameter admits, and null only where it is marked', () => {
     const doc = renderedTools(tool);
-    // The first allOf branch takes strings only, so 1 can't be sent.
     expect(doc).toContain('<parameter name="fld13" type="string" enum="zz-a">');
-    // A type name this reader can't read gives no null mark, so null isn't listed.
     expect(doc).toContain('<parameter name="fld14" enum="zz-a">');
   });
 
@@ -787,7 +730,6 @@ describe('values behind a $ref, in branches and across root alternatives', () =>
   });
 
   it('keeps only the values of kinds every keyword of a branch admits', () => {
-    // The allOf branch takes integers only, so 1.5 can't be sent through it.
     expect(renderedTools(tool)).toContain('<parameter name="fld16" type="number" enum="1,2.5">');
   });
 
@@ -823,7 +765,6 @@ describe('values behind a $ref, in branches and across root alternatives', () =>
   });
 
   it("reads a null-only branch's other keywords before a oneOf counts it", () => {
-    // The first branch admits nothing, so null is in exactly one branch.
     expect(renderedTools(more)).toContain('<parameter name="fld1" type="string" nullable="true" enum="zz-a,null">');
   });
 
@@ -867,14 +808,10 @@ describe('values behind a $ref, in branches and across root alternatives', () =>
   });
 
   it("reads the kinds of a branch's keywords as the instructions do", () => {
-    // The nested type excludes null for the instructions, so only the second
-    // branch admits it.
     expect(renderedTools(more)).toContain('<parameter name="fld13" type="string" nullable="true" enum="zz-a,zz-b,null">');
   });
 
   it('keeps each value once through unions of a shared list', () => {
-    // Sixteen levels of two branches onto the same next definition, ending in
-    // an enum: a union that kept duplicates would double the list per level.
     const defs: Record<string, unknown> = {};
     for (let level = 0; level < 16; level++) {
       defs[`zz${level}`] = {
@@ -890,10 +827,7 @@ describe('values behind a $ref, in branches and across root alternatives', () =>
     expect(renderedTools(diamond)).toContain('<parameter name="fld1" type="string" enum="zz-a,zz-b">');
   });
 
-  // 300,000 values is the point: a union that spread them into `push` would
-  // throw RangeError past about 125,000 on Node 24. Reading them takes under
-  // a second alone but took longer than vitest's 5 s default on a loaded host,
-  // so the test states its own timeout.
+  // Spreading 300,000 values into `push` throws RangeError past about 125,000 arguments on Node 24.
   it('reads a very long enum whole', () => {
     const long = Array.from({ length: 300000 }, (_, index) => `zz-${index}`);
     const reading = readToolSchema({
@@ -917,13 +851,7 @@ describe('values behind a $ref, in branches and across root alternatives', () =>
 });
 
 describe('null beside several types, and declarations membrane cannot type (#143)', () => {
-  // A list of several types it can read has no one type, so it keeps the
-  // legacy guess; main gave it no null mark in the instructions, whether the
-  // list names null or `nullable: true` sits beside it.
-  // A declaration with a type name membrane doesn't know (Gemini's upper-case
-  // `STRING`), or an alternative it can't read, is left as it was: no type
-  // and no null mark. Both kinds keep the legacy guess, which reads a written
-  // null as null.
+  // Gemini names its types in upper case (`STRING`).
   const tool = toolWith('zz_unresolved_nullable_tool', {
     type: 'object',
     properties: {
@@ -975,7 +903,6 @@ describe('enum and const without a type', () => {
       parseParam(tool, 'fld2', 'zz-fixed'),
       parseParam(tool, 'fld3', ' 2 '),
     ]);
-    // Main guessed '1' into the number 1, which no value of this enum is.
     expect(result).toEqual(['1', 'zz-fixed', 2]);
     expect(messages).toHaveLength(0);
     const doc = renderedTools(tool);
@@ -1047,12 +974,6 @@ describe('root-level unions', () => {
   });
 
   describe('alternatives that disagree on a parameter', () => {
-    // A discriminated union: `kind` selects the alternative, and the two
-    // alternatives declare `fld2` with different types. Taking the FIRST
-    // alternative's declaration parsed a valid call to the second one by the
-    // first one's type. Neither type is safe to apply without choosing the
-    // alternative, so the parameter keeps the legacy guess — the values main
-    // delivered — and the instructions state no type for it.
     const tool = toolWith('zz_root_disagreeing_tool', {
       type: 'object',
       oneOf: [
@@ -1110,12 +1031,6 @@ describe('root-level unions', () => {
   });
 
   describe('a root union whose variants are not all object schemas', () => {
-    // The native wire merges a root union only when every variant is an
-    // object schema, and otherwise falls back to a permissive object schema
-    // whose properties are the root's own. The XML surfaces read the same
-    // union the same way: variant parameters are not read, and saying
-    // otherwise (rendering one alternative's parameters as required, say)
-    // told the model something the native wire does not.
     const tool = toolWith('zz_root_unmergeable_tool', {
       type: 'object',
       properties: { fld1: { type: 'string' } },
@@ -1175,12 +1090,6 @@ describe('parameters with no declaration at all', () => {
 });
 
 describe('schema shapes are data, never structure', () => {
-  // Tool schemas arrive from producers unvalidated, and the parser runs on
-  // every model reply: nothing in a schema, and nothing a model names, may
-  // make it throw. A parameter named like an Object.prototype member used to
-  // resolve to the prototype FUNCTION, whose serialization is undefined; the
-  // diagnostic then threw on its length, once per process, aborting the
-  // inference that carried the call.
   const agentFrameworkReadTool = toolWith('zz_read_tool', {
     type: 'object',
     properties: { path: { type: 'string' } },
@@ -1257,9 +1166,6 @@ describe('schema shapes are data, never structure', () => {
 });
 
 describe('unresolved-form diagnostics are deduplicated by schema content', () => {
-  // Keyed by tool and parameter NAME alone, the first schema to warn silenced
-  // every other: two agents in one host whose servers expose the same tool
-  // name with different schemas heard only about the first.
   it('warns once per distinct schema, not once per tool and parameter name', () => {
     const first = toolWith('zz_shared_name_tool', {
       type: 'object',
@@ -1283,10 +1189,6 @@ describe('unresolved-form diagnostics are deduplicated by schema content', () =>
 });
 
 describe('schema-mismatch diagnostics name coordinates, never argument content', () => {
-  // Tool arguments routinely carry credentials, tokens and private documents,
-  // and the mismatch path fires exactly when a model formats such a value
-  // oddly. BOTH warn paths of a JSON-shaped declaration are covered here:
-  // (a) text that is not valid JSON at all, (b) valid JSON of the wrong kind.
   const zzSecret = 'zz-secret-token-8f3a1c';
 
   it('omits the value when the text does not parse as JSON', () => {
@@ -1358,8 +1260,6 @@ describe('tool instructions rendered from the same resolution', () => {
         ],
       })
     );
-    // The lone alternative applies to every valid instance, so its required
-    // list IS the effective one.
     expect(doc).toContain('<parameter name="fld1" type="string" required="true">');
   });
 });
@@ -1427,7 +1327,6 @@ describe('effective requiredness across root combinators', () => {
   });
 });
 
-/** Whether a value is of a JSON Schema type name. */
 function isOfType(value: unknown, type: string): boolean {
   switch (type) {
     case 'string':
@@ -1450,9 +1349,7 @@ function isOfType(value: unknown, type: string): boolean {
 }
 
 describe("enum values the attribute can't show exactly (#176)", () => {
-  // Each list puts the value it can't show second, so the check has to read
-  // every value.
-  const withheld: Record<string, string[]> = {
+  const unshowableSecond: Record<string, string[]> = {
     fld1: ['zz-a', 'say "hi"'],
     fld2: ['zz-a', 'x,y'],
     fld3: ['zz-a', 'line1\nline2'],
@@ -1470,9 +1367,9 @@ describe("enum values the attribute can't show exactly (#176)", () => {
     type: 'object',
     properties: {
       ...Object.fromEntries(
-        Object.entries(withheld).map(([name, values]) => [name, { type: 'string', enum: values }])
+        Object.entries(unshowableSecond).map(([name, values]) => [name, { type: 'string', enum: values }])
       ),
-      fld1: { type: 'string', enum: withheld.fld1, description: 'zz-quote-description' },
+      fld1: { type: 'string', enum: unshowableSecond.fld1, description: 'zz-quote-description' },
       fld13: { type: 'string', enum: ['R&D', "it's", 'a<b', 'a>b'] },
       fld14: { type: 'string', enum: ['read only', 'read write'] },
       fld15: { type: 'string', enum: ['zz-red', 'zz-green'] },
@@ -1498,8 +1395,6 @@ describe("enum values the attribute can't show exactly (#176)", () => {
   });
 
   it('prints every other list raw, as the model should write its values', () => {
-    // The parser keeps an entity the model copies, so `&amp;` here would be
-    // sent as `&amp;`.
     const doc = renderedTools(tool);
     expect(doc).toContain(`<parameter name="fld13" type="string" enum="R&D,it's,a<b,a>b">`);
     expect(doc).toContain('<parameter name="fld14" type="string" enum="read only,read write">');
@@ -1527,20 +1422,16 @@ describe("enum values the attribute can't show exactly (#176)", () => {
 
   it('still hands toolDefinitionForPrompt every value', () => {
     const { parameters } = toolDefinitionForPrompt(tool);
-    for (const [name, values] of Object.entries(withheld)) {
+    for (const [name, values] of Object.entries(unshowableSecond)) {
       expect(parameters[name]!.enum, name).toEqual(values);
     }
   });
 });
 
-describe("the instructions' values and the kinds reading agree", () => {
-  // Runs last, over every tool `toolWith` builds, so the values the line lists
-  // can't drift from what its type and nullable mark say. A parameter of
-  // several kinds renders no type, so its kinds aren't checked here; its own
-  // tests pin its list.
+describe("the instructions' values and the kinds reading agree, over every tool built above (keep it last)", () => {
   it("lists only values of a parameter's type, and null only where it's marked nullable", () => {
     let lists = 0;
-    for (const tool of fixtures) {
+    for (const tool of everyToolBuilt) {
       for (const [name, declaration] of readToolSchema(tool.inputSchema).parameters) {
         if (declaration.enum === undefined) continue;
         lists += 1;

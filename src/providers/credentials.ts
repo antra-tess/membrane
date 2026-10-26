@@ -18,9 +18,6 @@ export type CredentialResolver = (
   context: CredentialContext,
 ) => ResolvedCredential | Promise<ResolvedCredential>;
 
-/** Internal shared HTTP seam: refresh only a 401, before a body is consumed.
- * Static credentials retain their single-attempt behavior. SDK-backed callers
- * can use this as their fetch implementation without rebuilding a client. */
 export async function fetchWithCredentials(
   input: string | URL | Request,
   init: RequestInit,
@@ -46,7 +43,6 @@ export async function fetchWithCredentials(
   throw new Error('Unreachable credential retry state');
 }
 
-/** Bound credential acquisition by the same cancellation/deadline as HTTP. */
 async function resolveWithSignal(
   resolver: CredentialResolver,
   forceRefresh: boolean,
@@ -69,7 +65,6 @@ async function resolveWithSignal(
   }
 }
 
-/** Runtime validation also protects JavaScript callers and external resolvers. */
 export function validateCredential(credential: ResolvedCredential): void {
   if (!credential || typeof credential.token !== 'string' || credential.token.trim().length === 0) {
     throw authError('Credential resolver must return a non-empty string token');

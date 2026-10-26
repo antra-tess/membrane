@@ -1,27 +1,6 @@
 /**
- * Three boundaries of a native-mode stream that this PR's native construction
- * left open (greptile on #102: discussion_r4207037937, r4207037948,
- * r4207037963).
- *
- * - Stops. A provider that does not apply a request's stop sequences (the
- *   Responses API has no stop parameter; Chat Completions drops it for some
- *   models and sends at most four) still ends the accepted output at the
- *   stop, including in text it reports only in its returned output: no
- *   chunk, block event, returned block or replayed item carries the stop or
- *   anything after it (chunks already sent ahead of unstreamed text that
- *   holds a stop aside; see LocalStopSequences), and thinking is never
- *   scanned. The returned content decides where the attempt stops when an
- *   adapter's chunks don't match it (slimepriestess's review of #58): text a
- *   stop withheld while streaming is delivered at the end when that content
- *   holds no stop.
- * - prefillUserMessage. The caller's synthetic user text is the leading user
- *   turn wherever a native conversation needs one.
- * - Aborts. A block the provider finished delivering before an abort is kept
- *   in partialContent, and once the provider has returned, every block it
- *   returned is; a tool call whose arguments never finished is not.
- *
- * The Anthropic fixtures stream past the stop on purpose: they stand for any
- * provider that does not apply it.
+ * The Responses API has no stop parameter, and Chat Completions drops it for
+ * some models.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
@@ -36,10 +15,6 @@ import { LocalStopSequences, cutVisible } from '../../src/utils/local-stop-seque
 const text = (value: string) => ({ type: 'text' as const, text: value });
 const MODEL = 'claude-haiku-4-5';
 afterEach(() => vi.unstubAllGlobals());
-
-// ---------------------------------------------------------------------------
-// Anthropic SSE fixtures
-// ---------------------------------------------------------------------------
 
 type Event = Record<string, any>;
 const messageStart: Event = {
@@ -67,7 +42,6 @@ const messageEnd = (stopReason = 'end_turn'): Event[] => [
   { type: 'message_stop' },
 ];
 
-/** One Anthropic SSE response; `abort` ends the transport with an AbortError after the events. */
 function anthropicResponse(events: Event[], abort = false): Response {
   const frames = events.map(event => new TextEncoder().encode(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`));
   const body = new ReadableStream<Uint8Array>({
@@ -81,7 +55,6 @@ function anthropicResponse(events: Event[], abort = false): Response {
   return new Response(body, { headers: { 'Content-Type': 'text/event-stream' } });
 }
 
-/** Answer each request with the next scripted response; the last one repeats. Returns the request bodies. */
 function script(...responses: Array<() => Response>): any[] {
   const bodies: any[] = [];
   vi.stubGlobal('fetch', vi.fn(async (_url: unknown, init: RequestInit) => {
@@ -130,10 +103,6 @@ const ask = (extra: Record<string, unknown> = {}) => ({
   ...extra,
 });
 const lookup = { name: 'lookup', description: 'look up a record', inputSchema: { type: 'object' as const, properties: {} } };
-
-// ---------------------------------------------------------------------------
-// Stops
-// ---------------------------------------------------------------------------
 
 describe('a request stop on a native stream the provider did not stop', () => {
   it.each(['stream', 'yielding'])('ends the accepted output at a stop split across chunks, emitting no part of it (%s)', async path => {
@@ -285,9 +254,6 @@ describe('a request stop on a native stream the provider did not stop', () => {
   });
 
   it.each(['stream', 'yielding'])('leaves explicit XML streams to their own parser-aware stop handling (%s)', async path => {
-    // The XML loops read raw chunks: a stop spelled inside a payload is
-    // theirs to judge. Were the native hold-back active here, `a E` would be
-    // split to hold the `E`.
     script(() => anthropicResponse([messageStart, ...textBlock(0, 'a E', 'X b'), ...messageEnd()]));
     const s = sink();
     const response = await run(path, claude(), ask({ stopSequences: ['END'], toolMode: 'xml' }), s);
@@ -308,14 +274,8 @@ describe('a request stop on a native stream the provider did not stop', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Stops where the returned text is not the streamed text: OpenAICompatibleAdapter
-// drops reasoning a backend leaked into the content channel (`…</think>`)
-// from what it returns, while its chunks carried it. The returned content
-// decides where the attempt stops (slimepriestess's review of #58).
-// ---------------------------------------------------------------------------
+// Some backends leak reasoning into the content channel (`…</think>`).
 
-/** An OpenAI-compatible chat stream of `deltas`, ending with finish_reason stop. */
 function compatibleResponse(deltas: string[]): Response {
   const frames = [
     ...deltas.map(content => ({ choices: [{ index: 0, delta: { content } }] })),
@@ -368,15 +328,13 @@ describe('a request stop where the returned text is not the streamed text', () =
       expect(response.rawAssistantText).toBe(row.chunks);
       expect(response.content).toEqual([text(row.content)]);
       expect(response.stopReason).toBe(row.reason);
-      // Every row: a row that stops names its stop, and one that doesn't names none.
       expect(response.details.stop.reason).toBe(row.reason);
       expect(response.details.stop.triggeredSequence).toBe(row.stop);
     });
   }
 
   it.each(['stream', 'yielding'])('cuts at a fifth stop the adapter could not send (%s)', async path => {
-    // Chat Completions takes at most four stops, so the compatible adapter
-    // sends four. The fifth still ends the accepted output.
+    // Chat Completions takes at most four stops.
     const bodies = script(() => compatibleResponse(['one two ', 'five FIVE more']));
     const s = sink();
     const response = await run(path, compatible(), {
@@ -391,16 +349,6 @@ describe('a request stop where the returned text is not the streamed text', () =
   });
 });
 
-// ---------------------------------------------------------------------------
-// Stops through the Responses API, which has no stop parameter and reports
-// its blocks only after the stream, carrying raw items the formatter replays.
-// ---------------------------------------------------------------------------
-
-/**
- * A Responses stream: reasoning, then a message streamed as `deltas`, then any
- * `after` items. `finalText` puts message text in the returned output that
- * never streamed as deltas, as a provider may.
- */
 function responsesResponse(deltas: string[], options: { finalText?: string; after?: OpenAIResponsesOutputItem[] } = {}): Response {
   const after = options.after ?? [];
   const output: OpenAIResponsesOutputItem[] = [
@@ -442,11 +390,8 @@ describe('a request stop through the Responses API', () => {
     expect(response.content[0]).toMatchObject({ data: 'sealed', rawItem: { id: 'rs_1' } });
     expect(response.content[1]).toMatchObject(text('before '));
     expect(response.content[1].rawItem).toBeUndefined();
-    // Block events follow the same projection: the reasoning before the stop
-    // arrives, the message arrives cut, and nothing after it arrives at all.
     expect(s.blocks.filter(event => event.event === 'block_complete').map(event => [event.block.type, event.block.content]))
       .toEqual([['thinking', undefined], ['text', 'before ']]);
-    // The next request replays the reasoning item and the accepted text only.
     const next = formatter.buildMessages([
       ...request.messages,
       { participant: 'Sol', content: response.content },
@@ -487,9 +432,6 @@ describe('a request stop through the Responses API', () => {
     expect(wire).not.toContain('after');
   });
 
-  // The adapter reports no item boundaries while streaming, so the streamed
-  // `before E` + `ND after` looks like one stretch; the returned content's
-  // function call ends the stretch, so it holds no stop.
   const message = (id: string, value: string): OpenAIResponsesOutputItem => ({
     type: 'message', id, role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: value, annotations: [] }],
   });
@@ -517,8 +459,6 @@ describe('a request stop through the Responses API', () => {
     const response = await run(path, responses(), callRequest, s);
     expect(bodies).toHaveLength(2);
     expect(s.toolCalls).toMatchObject([{ id: 'call_1', name: 'lookup' }]);
-    // What the stream withheld after the stop it found arrives when the
-    // round's content shows there was none.
     expect(s.chunks.map(item => item.chunk).join('')).toBe('before END afterdone');
     expect(firstRoundBlocks(s)).toEqual([['text', 'before E'], ['tool_call', 'lookup'], ['text', 'ND after']]);
     expect(response.stopReason).toBe('end_turn');
@@ -535,8 +475,6 @@ describe('a request stop through the Responses API', () => {
   });
 
   it.each(['stream', 'yielding'])('keeps only what preceded such a stop when the transport aborts before the content can settle it (%s)', async path => {
-    // With no returned content, a stop found while streaming stands, so a
-    // stop that the content would not have held still truncates partialContent.
     script(() => spanned(true, true));
     const s = sink();
     const response = await run(path, responses(), callRequest, s);
@@ -546,9 +484,6 @@ describe('a request stop through the Responses API', () => {
   });
 
   it.each(['stream', 'yielding'])('cuts at the stop in the returned text when a refusal it never streamed comes first (%s)', async path => {
-    // The adapter returns a refusal part as text but streams only output_text,
-    // so the returned text is not the streamed text: the second live case of
-    // the streamed-offset cut (Barnaby-1871's probe gave `no` + `ab`).
     const item = {
       type: 'message', id: 'msg_1', role: 'assistant', status: 'completed',
       content: [{ type: 'refusal', refusal: 'no' }, { type: 'output_text', text: 'abc END after', annotations: [] }],
@@ -567,12 +502,6 @@ describe('a request stop through the Responses API', () => {
   });
 });
 
-/**
- * A Responses stream of `items` in order, each message streaming its
- * `deltas` into part `contentIndex` (none: its text is only in the returned
- * output). `abort` errors the transport where response.completed would have
- * been.
- */
 function responsesItems(items: Array<{ item: OpenAIResponsesOutputItem; deltas?: string[]; contentIndex?: number }>, abort = false): Response {
   const output = items.map(entry => entry.item);
   const events: Event[] = items.flatMap(({ item, deltas = [], contentIndex = 0 }, index) => [
@@ -595,11 +524,6 @@ function responsesItems(items: Array<{ item: OpenAIResponsesOutputItem; deltas?:
   }, { highWaterMark: 0 });
   return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
 }
-
-// ---------------------------------------------------------------------------
-// The stop wrapper's own boundaries: callbacks that throw, the returned
-// content's stretches, and replay identity.
-// ---------------------------------------------------------------------------
 
 describe('LocalStopSequences', () => {
   const response = (content: unknown) => ({
@@ -656,7 +580,6 @@ describe('LocalStopSequences', () => {
     expect(result.content).toBe(content);
   });
 
-  /** A wrapper over a recording sink: chunks as strings, events as [index, type], signatures as ['sig', index]. */
   const recording = (stops: string[]) => {
     const events: unknown[] = [];
     const wrapper = new LocalStopSequences(stops, {
@@ -680,7 +603,6 @@ describe('LocalStopSequences', () => {
     const { events, callbacks, wrapper } = recording(['END']);
     callbacks.onChunk('before E');
     callbacks.onChunk('ND');
-    // After the stop: a thinking block streams, then a text block opens.
     callbacks.onContentBlock!(3, { type: 'thinking', thinking: '' });
     callbacks.onChunk('mull');
     callbacks.onThinkingSignature!(3, 'sig');
@@ -703,15 +625,12 @@ describe('LocalStopSequences', () => {
   });
 
   it('delivers nothing more where streamed and returned positions do not correspond', () => {
-    // Streamed `leak END x</think>Answer END more`, returned `Answer END more`:
-    // offset arithmetic across the two would hand out `EN` of the withheld stop.
     const stopped = recording(['END']);
     stopped.callbacks.onChunk('leak END x</think>');
     stopped.callbacks.onChunk('Answer END more');
     const cut = stopped.wrapper.finish(response([text('Answer END more')]) as any);
     expect(cut).toMatchObject({ content: [text('Answer ')], stopReason: 'stop_sequence', stopSequence: 'END' });
     expect(stopped.events).toEqual(['leak ']);
-    // The same when streaming found no stop and only held a possible one.
     const held = recording(['END']);
     held.callbacks.onChunk('leak E');
     const kept = held.wrapper.finish(response([text('Answer END more')]) as any);
@@ -745,10 +664,6 @@ describe('LocalStopSequences', () => {
     expect(wire).not.toContain('END');
   });
 });
-
-// ---------------------------------------------------------------------------
-// prefillUserMessage
-// ---------------------------------------------------------------------------
 
 describe('prefillUserMessage in a native conversation', () => {
   const completed = () => new Response(JSON.stringify({
@@ -802,10 +717,6 @@ describe('prefillUserMessage in a native conversation', () => {
     expect(direct.messages[0]).toEqual({ role: 'user', content: [text('[continuing]')] });
   });
 });
-
-// ---------------------------------------------------------------------------
-// Aborts
-// ---------------------------------------------------------------------------
 
 describe('partialContent after a native stream aborts', () => {
   it.each(['stream', 'yielding'])('keeps a finished tool call when the transport aborts before another chunk, with stops configured (%s)', async path => {
@@ -892,7 +803,7 @@ describe('partialContent after a native stream aborts', () => {
   });
 
   it.each(['stream', 'yielding'])('keeps received text that was held as a possible stop (%s)', async path => {
-    const open = textBlock(0, 'before E').slice(0, -1); // no content_block_stop
+    const open = textBlock(0, 'before E').slice(0, -1);
     script(() => anthropicResponse([messageStart, ...open], true));
     const s = sink();
     const response = await run(path, claude(), ask({ stopSequences: ['END'] }), s);

@@ -1,13 +1,5 @@
-/**
- * Context management module
- * 
- * Handles rolling context, cache marker placement, and state management
- * for efficient prompt caching with LLMs.
- */
-
 export { processContext } from './process.js';
 
-// Rolling helpers - can be used standalone by callers doing their own transforms
 export {
   shouldRoll,
   truncateMessages,

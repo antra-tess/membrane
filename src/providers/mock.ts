@@ -1,10 +1,3 @@
-/**
- * Mock Provider Adapter for testing
- *
- * Returns canned responses without calling any real LLM API.
- * Useful for testing the framework without API costs.
- */
-
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -31,7 +24,7 @@ export interface MockAdapterConfig {
   /** If true, echo back the last user message */
   echoMode?: boolean;
 
-  /** Queue of responses to return (FIFO, then falls back to default) */
+  /** Queue of responses to return first (FIFO); after it, responseGenerator, echoMode, then defaultResponse */
   responseQueue?: string[];
 
   /** Function to generate response based on request */
@@ -122,24 +115,17 @@ export class MockAdapter implements ProviderAdapter {
     this.clearRequestLog();
   }
 
-  /**
-   * Get the response for a request.
-   */
   private getResponse(request: ProviderRequest): string {
-    // Log the request
     this.requestLog.push({ timestamp: Date.now(), request });
 
-    // Try queued response first
     if (this.responseQueue.length > 0) {
       return this.responseQueue.shift()!;
     }
 
-    // Try response generator
     if (this.config.responseGenerator) {
       return this.config.responseGenerator(request);
     }
 
-    // Echo mode - reflect back the last user message
     if (this.config.echoMode) {
       const lastMessage = request.messages[request.messages.length - 1];
       if (lastMessage && typeof lastMessage === 'object') {
@@ -157,7 +143,6 @@ export class MockAdapter implements ProviderAdapter {
       return '[Echo] (no text found in last message)';
     }
 
-    // Default response
     return this.config.defaultResponse;
   }
 
@@ -165,13 +150,10 @@ export class MockAdapter implements ProviderAdapter {
     request: ProviderRequest,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    // Check for abort before starting
     this.checkAbort(options?.signal);
 
-    // Call onRequest callback if provided
     options?.onRequest?.(request);
 
-    // Simulate processing delay
     if (this.config.completeDelayMs > 0) {
       await this.abortableSleep(this.config.completeDelayMs, options?.signal);
     }
@@ -196,23 +178,18 @@ export class MockAdapter implements ProviderAdapter {
     callbacks: StreamCallbacks,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    // Check for abort before starting
     this.checkAbort(options?.signal);
 
-    // Call onRequest callback if provided
     options?.onRequest?.(request);
 
     const responseText = this.getResponse(request);
     let streamedText = '';
 
-    // Stream the response in chunks
     let offset = 0;
     while (offset < responseText.length) {
-      // Check for abort before each chunk
       this.checkAbort(options?.signal);
 
       const chunk = responseText.slice(offset, offset + this.config.streamChunkSize);
-      // Each streamed chunk is a provider event, as a real adapter reports.
       options?.onProgress?.();
       callbacks.onChunk(chunk);
       streamedText += chunk;
@@ -236,23 +213,16 @@ export class MockAdapter implements ProviderAdapter {
     };
   }
 
-  /**
-   * Check if the abort signal is set and throw if so.
-   */
   private checkAbort(signal?: AbortSignal): void {
     if (signal?.aborted) {
       throw this.abortFor(signal);
     }
   }
 
-  /** A deadline abort (the caller's progress deadline) is a timeout, as on every adapter. */
   private abortFor(signal?: AbortSignal): Error {
     return isDeadlineAbort(signal?.reason) ? deadlineTimeoutError(signal!.reason) : abortError('Request aborted');
   }
 
-  /**
-   * Sleep that can be interrupted by an abort signal.
-   */
   private abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
     return new Promise((resolve, reject) => {
       if (signal?.aborted) {
@@ -279,7 +249,6 @@ export class MockAdapter implements ProviderAdapter {
   }
 
   private estimateTokens(text: string): number {
-    // Rough estimate: ~4 characters per token
     return Math.ceil(text.length / 4);
   }
 }

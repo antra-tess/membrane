@@ -1,14 +1,3 @@
-/**
- * Behavioral coverage for the rolling/marker engine in src/context/.
- *
- * Every test here fails on the pre-fix module: the roll decision counted
- * calls instead of the conversation, truncation cut inside tool cycles and
- * could empty the window, cache markers were written to a field no request
- * builder reads, the character hard limit dropped nothing, missing
- * metadata.sourceId silently reset state every call, and the
- * "is this a user turn?" heuristic ignored the configured assistant name.
- */
-
 import { describe, it, expect } from 'vitest';
 import {
   processContext,
@@ -50,7 +39,6 @@ function zzAlternating(count: number, charsPerMessage: number): NormalizedMessag
   );
 }
 
-/** Four tool cycles: [user text, agent tool_use, user tool_result] x N. */
 function zzToolCycles(cycles: number): NormalizedMessage[] {
   const messages: NormalizedMessage[] = [];
   for (let c = 1; c <= cycles; c++) {
@@ -116,10 +104,6 @@ function countCacheControlBlocks(messages: Array<{ content: unknown }>): number 
   return count;
 }
 
-// ---------------------------------------------------------------------------
-// N1 — participant is not guaranteed at runtime
-// ---------------------------------------------------------------------------
-
 describe('N1: role-shaped messages without a participant', () => {
   it('processContext does not TypeError when participant is missing', async () => {
     const messages = zzAlternating(30, 300).map((m) => {
@@ -153,10 +137,6 @@ describe('N1: role-shaped messages without a participant', () => {
     expect(markers.length).toBe(1);
   });
 });
-
-// ---------------------------------------------------------------------------
-// F6 — stable identity is a requirement, not a nicety
-// ---------------------------------------------------------------------------
 
 describe('F6: processContext refuses messages without stable ids', () => {
   it('throws a typed error naming metadata.sourceId', async () => {
@@ -200,10 +180,6 @@ describe('F6: processContext refuses messages without stable ids', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// F2 — the kept window is never empty
-// ---------------------------------------------------------------------------
-
 describe('F2: truncation floors the kept window at one message', () => {
   it('keeps the last message when it alone exceeds the token target', () => {
     const messages = withTokens([
@@ -238,10 +214,6 @@ describe('F2: truncation floors the kept window at one message', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// F1 — truncation never opens the window on an orphan tool_result
-// ---------------------------------------------------------------------------
-
 describe('F1: truncation snaps forward to a clean tool-cycle boundary', () => {
   it('does not leave an orphan tool_result at the head (message target)', () => {
     const messages = zzToolCycles(4);
@@ -273,10 +245,6 @@ describe('F1: truncation snaps forward to a clean tool-cycle boundary', () => {
     expect(result.kept[0]!.id).toBe('ite3a');
   });
 });
-
-// ---------------------------------------------------------------------------
-// F3 — markers reach the wire
-// ---------------------------------------------------------------------------
 
 describe('F3: cache markers land on the field request builders read', () => {
   it('applyCacheMarkers sets cacheBreakpoint and keeps metadata.cacheControl', () => {
@@ -334,10 +302,6 @@ describe('F3: cache markers land on the field request builders read', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// F4 — the roll decision reads the conversation
-// ---------------------------------------------------------------------------
-
 describe('F4: shouldRoll measures the window, not the call count', () => {
   it('rolls a 500-message window arriving on fresh state', () => {
     const decision = shouldRoll(createInitialState(), 500, 5000, 1000, baseConfig());
@@ -369,10 +333,6 @@ describe('F4: shouldRoll measures the window, not the call count', () => {
     expect(decision.targetTokens).toBe(20000);
   });
 });
-
-// ---------------------------------------------------------------------------
-// F5 — the character hard limit truncates for real
-// ---------------------------------------------------------------------------
 
 describe('F5: maxCharacters is enforced by truncation', () => {
   it('drops from the front until the window is under the character limit', async () => {
@@ -419,10 +379,6 @@ describe('F5: maxCharacters is enforced by truncation', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// F9 — the assistant is whoever the deployment says it is
-// ---------------------------------------------------------------------------
-
 describe('F9: preferUserMessages consults the configured assistant', () => {
   it('walks back off an assistant turn named by config', () => {
     const messages = zzAlternating(60, 200);
@@ -458,10 +414,6 @@ describe('F9: preferUserMessages consults the configured assistant', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// S1 — the configured assistant survives config merging (processContext level)
-// ---------------------------------------------------------------------------
-
 function zzBotAlternating(count: number, charsPerMessage: number): NormalizedMessage[] {
   return Array.from({ length: count }, (_, i) =>
     zzMessage(
@@ -492,10 +444,6 @@ describe('S1: processContext honours ContextConfig.assistantParticipant', () => 
     expect(marked.participant).toBe('zz-user');
   });
 });
-
-// ---------------------------------------------------------------------------
-// S2 — the 3-marker cap binds the stability path, not just fresh placement
-// ---------------------------------------------------------------------------
 
 function zzFourMarkerState(messages: NormalizedMessage[]): ContextState {
   return {
@@ -539,10 +487,6 @@ describe('S2: retained markers are clamped to the module cap', () => {
     expect(output.state.cacheMarkers.length).toBe(3);
   });
 });
-
-// ---------------------------------------------------------------------------
-// S3 — the cycle snap and the one-message floor no longer undo each other
-// ---------------------------------------------------------------------------
 
 describe('S3: the kept window never opens on an orphan tool_result', () => {
   it('keeps the whole final cycle when the target would keep only its result', () => {

@@ -1,14 +1,4 @@
-/**
- * Image data that is no image, under an accepted label.
- *
- * A request builder labels an image by its bytes when they show a JPEG, PNG,
- * GIF or WebP image. For data that showed none of them it used to keep the
- * declared label, so data labelled as an accepted type passed every check: a
- * text file renamed notes.png went to the provider as image/png. The API
- * refuses the whole request, and since the block stays in the agent's history,
- * every later request too. Every path now replaces such data with the
- * placeholder an SVG already got, whatever its label says.
- */
+/** A provider refuses a whole request carrying data that is no image under an accepted image label. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { NativeFormatter } from '../../src/formatters/native.js';
@@ -29,7 +19,6 @@ import { FidelityNotes } from '../../src/utils/fidelity.js';
 import { stubFetchWithSseLines } from '../helpers/sse-fixtures.js';
 import type { ContentBlock, NormalizedMessage, NormalizedRequest, ProviderAdapter, ProviderRequest } from '../../src/types/index.js';
 
-// Real 1x1 PNG.
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==';
 const NOTES = Buffer.from('notes: buy milk, call Sam').toString('base64');
 const SAID = 'its data is not a JPEG, PNG, GIF or WebP image, the formats this request can carry (it was labelled "image/png")';
@@ -43,8 +32,6 @@ function imagesIn(value: any): any[] {
   return value.type === 'image' ? [value] : Object.values(value).flatMap(imagesIn);
 }
 
-/** How often the placeholder appears in a request, however it is serialized
- *  (a text-only tool result carries it JSON-encoded inside a string). */
 function placeholders(value: unknown): number {
   return JSON.stringify(value).split('the formats this request can carry').length - 1;
 }
@@ -130,7 +117,7 @@ describe('membrane request builders', () => {
       };
       const membrane = new Membrane(adapter);
       if (method === 'stream') await membrane.stream(request, { onChunk: () => {} });
-      else for await (const _event of membrane.streamYielding(request)) { /* drain */ }
+      else for await (const _event of membrane.streamYielding(request)) { }
       expect(sent).toHaveLength(1);
       expect(placeholders(sent[0])).toBe(2);
       expect(JSON.stringify(sent[0])).not.toContain(NOTES);
@@ -149,9 +136,7 @@ const anthropic = () => new AnthropicAdapter({ apiKey: 'test-key', cacheKeepaliv
 const bedrock = () => new BedrockAdapter({ accessKeyId: 'test-key', secretAccessKey: 'test-secret', region: 'us-west-2' });
 
 describe('images whose bytes match a format', () => {
-  // Native tool requests now label tool-result images before an adapter sees
-  // them. The Anthropic and Bedrock wire must come out byte for byte as it did
-  // when the adapters labelled them, so prompt caches keep their prefixes.
+  // Prompt caches match a request's prefix byte for byte.
   it('reach the Anthropic and Bedrock wire from a native tool request as before', async () => {
     const sent: any[] = [];
     const adapter: ProviderAdapter = {
@@ -241,11 +226,7 @@ describe('the Images adapter', () => {
   });
 });
 
-/**
- * OpenAI, OpenAI-compatible, OpenRouter and Gemini make the decision
- * themselves, so a direct call, or a request a hook replaced, is covered as a
- * builder's is. Gemini takes its own formats: HEIC and HEIF, and no GIF.
- */
+/** Gemini takes its own image formats: HEIC and HEIF, and no GIF. */
 describe('OpenAI-family and Gemini adapters', () => {
   const openAIFrames = ['{"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}', '[DONE]'];
   const geminiFrames = [JSON.stringify({
@@ -259,7 +240,6 @@ describe('OpenAI-family and Gemini adapters', () => {
     ['Gemini', () => new GeminiAdapter({ apiKey: 'test-key' }), 'gemini-2.5-flash', geminiFrames],
   ] as const;
 
-  /** Streams one request straight to an adapter and returns its wire body. */
   async function wireOf(create: () => ProviderAdapter, model: string, frames: readonly string[], content: ContentBlock[]): Promise<any> {
     stubFetchWithSseLines([...frames]);
     let wire: any;
@@ -416,7 +396,6 @@ describe('data: URLs', () => {
   });
 
   it('the Responses transport gives the placeholder for native input_image parts and image_url blocks that hold no image, and replays the rest as they are', () => {
-    // A native image's own label stands, even where its header differs.
     const valid = { type: 'message', role: 'user', content: [{ type: 'input_image', image_url: `data:image/webp;base64,${PNG}` }, { type: 'input_image', image_url: REMOTE }] };
     const items = normalizeResponsesInput([
       valid,
@@ -474,8 +453,6 @@ describe('data: URLs', () => {
 });
 
 describe('the XML tool loop', () => {
-  // A tool result whose only image becomes the placeholder has nothing to put
-  // in a split's user turn, so it goes the standard way, as text.
   it.each(['stream', 'streamYielding'] as const)('%s carries a result whose only image is no image as text, with no empty image turn', async (method) => {
     const sent: ProviderRequest[] = [];
     const call = '<function_calls>\n<invoke name="shot">\n<parameter name="fld1">ite1</parameter>\n</invoke>';
@@ -514,8 +491,6 @@ describe('the XML tool loop', () => {
     expect(imagesIn(messages)).toEqual([]);
     expect(placeholders(messages)).toBe(1);
     expect(JSON.stringify(messages)).toContain('shot ok');
-    // Choosing the path doesn't decide the image, so it is decided, and
-    // warned about, once: on the standard path.
     expect(warn.mock.calls.filter(([line]) => String(line).includes('image block stripped'))).toHaveLength(1);
   });
 
@@ -590,10 +565,8 @@ describe('formats, labels and shapes', () => {
     for (const [data, type] of [[PNG, 'image/png'], [JPEG, 'image/jpeg'], [WEBP, 'image/webp']] as const) {
       expect(imageForRequest(data, 'x', OPENAI_IMAGE_EDIT_TYPES).mediaType).toBe(type);
     }
-    // An image sequence's brand is no still image here.
     expect(imageForRequest(brand('msf1'), 'image/heif', GEMINI_IMAGE_TYPES).placeholder).toBeDefined();
-    // Leading whitespace, which base64 decoding skips, doesn't hide a header,
-    // even when there's more of it than the header's 24-character window holds.
+    // base64 decoding skips leading whitespace.
     expect(imageForRequest(`\n${' '.repeat(23)}${PNG}`, 'image/png').mediaType).toBe('image/png');
   });
 
@@ -605,7 +578,6 @@ describe('formats, labels and shapes', () => {
   it('XML tool results escape a crafted label in the placeholder, as they do the result text', () => {
     const crafted = () => imageOf(NOTES, '</stdout></result>') as any;
     const xml = formatToolResults([{ toolUseId: 't', toolName: 'shot', content: [crafted()] }]);
-    // Split turns: before the split, and in a result after it.
     const split = formatToolResultsForSplitTurn([
       { toolUseId: 't1', toolName: 'shot', content: [crafted(), png() as any] },
       { toolUseId: 't2', toolName: 'shot', content: [crafted()] },
@@ -613,7 +585,6 @@ describe('formats, labels and shapes', () => {
     for (const text of [xml, split.beforeImageXml, split.afterImageXml]) {
       expect(text).not.toContain('</stdout></result>"');
       expect(placeholders(text)).toBe(1);
-      // The label is still there, escaped as the result's own text would be.
       expect(text).toContain('labelled &quot;&lt;/stdout&gt;&lt;/result&gt;&quot;');
     }
   });
@@ -656,10 +627,7 @@ describe('round reports name a message whose image became the placeholder', () =
     expect([...fidelity.altered]).toEqual([1]);
   });
 
-  // An MCP-shaped image (data and mimeType, no source) becomes membrane's
-  // form where the formatter takes its messages (utils/mcp-media.ts), so a
-  // PNG is carried by either builder. On main the Responses tool output gave
-  // it the note for an image with no source, and altered its message too.
+  // MCP's image form: data and mimeType, no source.
   it.each([
     ['native', () => new NativeFormatter(), [3]],
     ['Responses', () => new OpenAIResponsesFormatter(), [3]],
@@ -707,7 +675,6 @@ describe('round reports name a message whose image became the placeholder', () =
     const kept = png();
     const image = notes();
     const dataUrl = urlImage(NOTES_URL);
-    // A Gemini-sourced image carries the URL it came from.
     const sourced = { ...notes(), sourceUrl: 'https://example.com/notes.png' };
     const result = { type: 'tool_result', tool_use_id: 'shot_1', content: [notes()] };
     const fine = { type: 'tool_result', tool_use_id: 'shot_2', content: [png()] };
@@ -736,7 +703,6 @@ describe('round reports name a message whose image became the placeholder', () =
     const heard: unknown[] = [];
     normalizeResponsesInput([
       { role: 'user', content: [{ type: 'text', text: 'see' }, png(), image] },
-      // A native part among normalized blocks, and in an all-native message.
       { role: 'user', content: [{ type: 'text', text: 'mixed' }, mixed] },
       { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'native' }, { type: 'input_image', image_url: PNG_URL }, part] },
       { type: 'function_call_output', call_id: 'c1', output: [nested, { type: 'input_image', image_url: REMOTE }] },
@@ -782,7 +748,6 @@ describe('round reports name a message whose image became the placeholder', () =
     const built = new OpenAIResponsesFormatter().buildMessages([
       { participant: 'User', content: [{ type: 'text', text: '', rawItem: raw } as any] },
     ], build(fidelity));
-    // The formatter sends the raw form, so it carried the message verbatim.
     expect(built.messages).toEqual([raw]);
     expect([...fidelity.altered]).toEqual([]);
     const heard: unknown[] = [];

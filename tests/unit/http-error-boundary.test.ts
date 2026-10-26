@@ -1,18 +1,3 @@
-/**
- * HTTP-boundary error classification.
- *
- * Every adapter holds a live Response — status, headers — at the moment a
- * call fails, and used to throw it away in favour of a rendered string that
- * its own handleError re-derived a classification from by substring. That
- * round trip fabricated statuses (503 -> 500), erased them entirely
- * (402/403/404/413/422 -> undefined), dropped retry-after and the provider's
- * own error code, and promoted unrelated bodies by accident ("no completion
- * was generated" -> rate_limit).
- *
- * These probes drive each adapter through a stubbed fetch and assert on what
- * reaches the caller.
- */
-
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OpenAIAdapter } from '../../src/providers/openai.js';
 import { OpenAICompatibleAdapter } from '../../src/providers/openai-compatible.js';

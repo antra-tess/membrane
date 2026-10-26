@@ -1,7 +1,6 @@
 import { isSystemChangeContent, type ContentBlock } from '../types/content.js';
 
-// Keep the existing native colon encoding. Ordinary underscores are valid
-// wire characters; decoding every `__` would corrupt literal caller names.
+// Underscores are valid in wire tool names, so a caller's literal `__` stays as it is.
 export function sanitizeToolName(name: string): string {
   return name.replace(/:/g, '__');
 }
@@ -12,12 +11,6 @@ export function restoreToolName(name: string, tools?: readonly { name: string }[
     ?? name;
 }
 
-/**
- * The tools a request offers the model as its messages leave them: its
- * `tools`, then each system change in order (SystemChangeContent), each
- * withdrawing the tools it removes and then offering the tools it defines, as
- * it is sent. A reply calls from these.
- */
 export function toolsOffered(request: {
   tools?: readonly { name: string }[];
   messages: readonly { content: readonly ContentBlock[] }[];

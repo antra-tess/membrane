@@ -1,8 +1,3 @@
-/**
- * Type exports for membrane
- */
-
-// Content blocks
 export type {
   CacheControl,
   MediaSource,
@@ -37,7 +32,6 @@ export {
   isMediaContent,
 } from './content.js';
 
-// Messages
 export type {
   MessageMetadata,
   NormalizedMessage,
@@ -50,7 +44,6 @@ export {
   hasToolUse,
 } from './message.js';
 
-// Tools
 export type {
   ToolParameter,
   ToolDefinition,
@@ -61,7 +54,6 @@ export type {
   ParsedToolCalls,
 } from './tools.js';
 
-// Request
 export type {
   GenerationConfig,
   StopSequenceStrategy,
@@ -71,7 +63,6 @@ export type {
   ToolMode,
 } from './request.js';
 
-// Response
 export type {
   StopReason,
   BasicUsage,
@@ -94,7 +85,6 @@ export type {
 
 export { isAbortedResponse } from './response.js';
 
-// Provider
 export type {
   ProviderQuirks,
   MediaCapabilities,
@@ -115,7 +105,6 @@ export type {
   SendReport,
 } from './provider.js';
 
-// Streaming
 export type {
   StreamState,
   StreamOptions,
@@ -132,7 +121,6 @@ export type {
   BlockDelta,
 } from './streaming.js';
 
-// Yielding Stream
 export type {
   TokensEvent,
   StreamBlockEvent,
@@ -160,7 +148,6 @@ export {
   isTerminalEvent,
 } from './yielding-stream.js';
 
-// Errors
 export type {
   MembraneErrorType,
   ErrorInfo,
@@ -192,7 +179,6 @@ export {
   withRawRequest,
 } from './errors.js';
 
-// Config
 export type {
   RetryConfig,
   MediaConfig,

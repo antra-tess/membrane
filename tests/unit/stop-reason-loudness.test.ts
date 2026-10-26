@@ -1,11 +1,3 @@
-/**
- * A stop reason nobody mapped used to become `end_turn` — the value that
- * also means "the model finished cleanly" — with nothing logged and
- * `wasTruncated: false`. A paused turn the caller is expected to resume, an
- * openai-completions content filter, and every Gemini safety enum outside
- * SAFETY/RECITATION all landed there silently.
- */
-
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { MockAdapter } from '../../src/providers/mock.js';
@@ -36,7 +28,6 @@ class FixedStopReasonAdapter extends MockAdapter {
   }
 }
 
-/** The console.warn calls that name this stop reason (printed as a JSON string). */
 function warningsNaming(warn: ReturnType<typeof vi.spyOn>, reason: string): number {
   return warn.mock.calls.filter(args => String(args[0]).includes(JSON.stringify(reason))).length;
 }
@@ -295,11 +286,6 @@ describe('gemini: a prompt blocked before generation is a refusal whatever the r
   }
 });
 
-/**
- * A custom adapter's stopReason with no providerStopReason beside it. When
- * membrane doesn't map the token, it becomes end_turn, so the token itself is
- * the only sign the stop wasn't a clean end of turn (#154).
- */
 class BareStopReasonAdapter extends MockAdapter {
   constructor(private bareStopReason: unknown, private rawToken?: unknown, text?: string) {
     super(text === undefined ? {} : { defaultResponse: text });
@@ -334,7 +320,6 @@ async function finished(membrane: Membrane, entry: Entry, request: NormalizedReq
   throw new Error('no completion');
 }
 
-/** The default formatter carries native tools too, so XML tool mode is asked for. */
 function inMode(mode: 'native' | 'xml', adapter: MockAdapter, request: NormalizedRequest = zzRequest) {
   return {
     membrane: new Membrane(adapter, mode === 'native' ? { formatter: new NativeFormatter() } : {}),
@@ -355,9 +340,6 @@ describe('an unmapped stop token the adapter gives without providerStopReason', 
     }
   }
 
-  // The XML loop finds a stop sequence in the streamed text, and a native
-  // stream's LocalStopSequences finds one, after the adapter has returned:
-  // each replaces the adapter's stopReason with stop_sequence.
   for (const entry of ['stream', 'yielding'] as const) {
     for (const mode of ['native', 'xml'] as const) {
       it(`${entry}() with ${mode} tools keeps it beside a stop sequence membrane finds itself`, async () => {

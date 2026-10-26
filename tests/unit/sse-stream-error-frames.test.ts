@@ -1,18 +1,4 @@
-/**
- * Mid-stream SSE error frames must surface as errors, not truncate silently.
- *
- * Providers deliver upstream failures (provider 429s, capacity drops) as a
- * data line carrying an `error` payload INSIDE an HTTP-200 SSE stream.
- * Ignoring it produced a fake-successful completion — partial content with
- * finish_reason 'stop' and zero usage — which downstream consumers cannot
- * distinguish from the model choosing to stop there, and which anima then
- * persists as a silently truncated turn.
- *
- * The house already ruled this a bug twice: tests/unit/openrouter-stream-error.test.ts
- * (openrouter.ts) and the comment at openai-responses-api.ts (`Fabricating a
- * 'completed' response here would persist a silently truncated turn`). This
- * file covers the four adapters the fix never reached.
- */
+/** Providers deliver upstream failures (provider 429s, capacity drops) as a data line carrying an `error` payload inside an HTTP-200 SSE stream. */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { OpenAIAdapter } from '../../src/providers/openai.js';
 import { OpenAICompatibleAdapter } from '../../src/providers/openai-compatible.js';

@@ -1,19 +1,3 @@
-/**
- * Formatter for stateless, provider-native OpenAI Responses histories.
- *
- * Imported/native items are carried either in message metadata under
- * `openaiResponsesItems` or on content blocks as `rawItem`. Those items are
- * emitted verbatim and in order. Normalized messages created after import are
- * converted to Responses input items without rewriting the native prefix.
- *
- * Native items stand in for what they're attached to: a message's metadata
- * items for its whole content (an empty array sends nothing), a block's
- * `rawItem` for that block. The fields they replace aren't read, and round
- * reports count the message or block as carried when its items are
- * (utils/fidelity.ts). Blocks whose items share a type and id are one item,
- * sent once; a block whose item differs under the same key isn't carried.
- */
-
 import type {
   ContentBlock,
   NormalizedMessage,
@@ -83,17 +67,25 @@ class ResponsesPassthroughParser implements StreamParser {
 
 type NativeItem = { type?: string; id?: string; [key: string]: unknown };
 
-/**
- * The identity under which a block's rawItem is replayed: by type and id, or
- * by its JSON when it has no id. Blocks of one message whose raw items share
- * a key replay that item once.
- */
 export function responsesRawItemKey(rawItem: { type?: unknown; id?: unknown }): string {
   return typeof rawItem.id === 'string'
     ? `${rawItem.type ?? ''}:${rawItem.id}`
     : JSON.stringify(rawItem);
 }
 
+/**
+ * Formatter for stateless, provider-native OpenAI Responses histories.
+ *
+ * Native items, in message metadata under `openaiResponsesItems` or on
+ * content blocks as `rawItem`, are emitted verbatim and in order, and stand
+ * in for what they're attached to: a message's metadata items for its whole
+ * content (an empty array sends nothing), a block's `rawItem` for that block.
+ * The fields they replace aren't read, and the message or block counts as
+ * carried when its items are. Within a message, blocks whose items share a
+ * type and id are one item, sent once; a block whose item differs under the
+ * same key isn't carried. Everything else is converted to Responses input
+ * items in its place, and native items are never rewritten.
+ */
 export class OpenAIResponsesFormatter implements PrefillFormatter {
   readonly name = 'openai-responses';
   readonly usesPrefill = false;
@@ -103,9 +95,6 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
   readonly reportsAlterations = true;
 
   buildMessages(messages: NormalizedMessage[], options: BuildOptions): BuildResult {
-    // Media in MCP's form becomes membrane's first, for a caller that builds
-    // messages directly. Membrane's own builds have converted it already and
-    // get the same array back (utils/mcp-media.ts).
     messages = convertMcpMedia(messages);
     const items: NativeItem[] = [];
     let hasImportedItems = false;
@@ -120,8 +109,6 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
         continue;
       }
 
-      // Each item sent, by its key: blocks of one item share it (the adapter
-      // gives them one object; a JSON round trip, equal copies).
       const seenRawItems = new Map<string, NativeItem>();
       let pendingParts: ContentBlock[] = [];
       const flushPending = () => {
@@ -131,11 +118,7 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
       };
 
       for (const block of message.content) {
-        // An Anthropic server-tool block (web search and the like, from a turn
-        // served by Anthropic), bare or on its carrier, is Anthropic's
-        // content: it has no form on this wire, and as an input item it
-        // would be sent as an item type this API doesn't have. Left out, it
-        // alters its message.
+        // An Anthropic server-tool block has no form on the Responses wire.
         if (carriesAnthropicServerBlock(block)) {
           onAltered?.();
           continue;
@@ -153,25 +136,14 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
           items.push(rawItem);
           seenRawItems.set(key, rawItem);
         } else if (sent !== rawItem && JSON.stringify(sent) !== JSON.stringify(rawItem)) {
-          // Another block's item went out under this key, so this block's
-          // differing item isn't carried.
           onAltered?.();
         }
       }
       flushPending();
     }
 
-    // An imported rollout already carries its own developer/system items, and
-    // re-injecting the recipe prompt over them would double the instructions.
-    // Suppress the system prompt ONLY for imported histories — signalled by
-    // the import metadata key or by a developer/system item in the native
-    // prefix. Blocks with `rawItem` do NOT count: every response from this
-    // provider attaches rawItem (see parseProviderContent), so keying on it
-    // would silently drop a fresh session's system prompt from turn 2 onward
-    // (turn 1 sends it as the top-level `instructions` request field, never
-    // as an input item, and the adapter is stateless — nothing else retains
-    // it). `instructions` is a separate request field, so re-sending it does
-    // not perturb the input-item prefix or its caching.
+    // `instructions` is a request field apart from the input items, so sending
+    // it again doesn't change the input prefix or its caching.
     const hasImportedSystemItem = hasImportedItems ||
       items.some(item =>
         (item.type === 'message' || item.type === undefined) &&
@@ -179,8 +151,6 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
           (item as { role?: unknown }).role === 'system'));
 
     return {
-      // BuildResult's historical type says chat envelopes, but Membrane's
-      // provider boundary deliberately accepts unknown provider-native items.
       messages: items as unknown as BuildResult['messages'],
       systemContent: hasImportedSystemItem ? undefined : options.systemPrompt,
       stopSequences: options.additionalStopSequences ?? [],
@@ -247,10 +217,7 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
         });
       } else if (block.type === 'tool_result') {
         flushMessage();
-        // Image-bearing results go out as native input_text/input_image
-        // parts, image-free ones in the legacy string form (see
-        // responsesToolOutput). A function_call_output has no error flag, so
-        // a failed result reads as a plain one.
+        // A function_call_output has no error flag, so a failed result reads as a plain one.
         const { output, loses } = responsesToolOutput(block.content);
         if (loses || block.isError) onAltered?.();
         out.push({
@@ -262,10 +229,6 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
         flushMessage();
         out.push({ type: 'reasoning', encrypted_content: block.data, summary: [] });
       } else {
-        // An assistant image, an image with no source object (media in MCP's
-        // form that didn't convert, utils/mcp-media.ts), a thinking block
-        // without its provider item, and any other block type have no input
-        // form here: left out.
         onAltered?.();
       }
     }

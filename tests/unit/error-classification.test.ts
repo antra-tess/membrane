@@ -1,12 +1,7 @@
 /**
- * Regression tests for transient-error classification.
- *
- * overloaded_error (Anthropic 529) most commonly arrives MID-STREAM as an
- * SSE `error` event, which the SDK rethrows as APIError with
- * status === undefined (sdk core/streaming.js). Before the fix, that fell
- * through every status branch in handleError into
- * `unknown, retryable: false` — so framework-level retry policies
- * (exponential backoff) never fired and the inference failed ungracefully.
+ * overloaded_error (Anthropic 529) most commonly arrives mid-stream as an SSE
+ * `error` event, which the SDK rethrows as APIError with status === undefined
+ * (sdk core/streaming.js).
  */
 
 import { describe, it, expect } from 'vitest';
@@ -21,7 +16,6 @@ function handleError(error: unknown): MembraneError {
   }).handleError(error);
 }
 
-/** Mirror of the SDK's mid-stream throw: APIError with undefined status. */
 function sseApiError(body: unknown): Anthropic.APIError {
   return new Anthropic.APIError(undefined as never, body, undefined, undefined as never);
 }
@@ -105,9 +99,6 @@ describe('classifyError generic fallback', () => {
   });
 
   it('does not promote unrelated "overloaded" messages to retryable', () => {
-    // The generic fallback matches the exact `overloaded_error` type token,
-    // not a bare 'overloaded' — a non-Anthropic capacity message must not be
-    // silently reclassified as a retryable server error.
     expect(classifyError(new Error('worker pool overloaded'))).toMatchObject({
       type: 'unknown',
       retryable: false,
@@ -116,10 +107,6 @@ describe('classifyError generic fallback', () => {
 });
 
 describe('Anthropic handleError: context-length heuristic gated on HTTP 400 (issue #17)', () => {
-  // Context-length is a client-side request-shape problem — it only ever
-  // arrives as a 400. Before the guard, any error whose message contained
-  // "context" or "too long" (including transient 5xx bodies) became
-  // non-retryable context_length, silently suppressing retries.
   it('keeps a 500 whose message mentions "context" a retryable server error', () => {
     const err = handleError(new Anthropic.APIError(
       500 as never,
@@ -164,24 +151,13 @@ describe('Anthropic handleError: context-length heuristic gated on HTTP 400 (iss
 });
 
 describe('Anthropic handleError: abort classification (fleet incident 2026-07-20)', () => {
-  // The SSE idle watchdog aborts a stalled stream via AbortController; the
-  // SDK surfaces that as APIUserAbortError ("Request was aborted."), whose
-  // .name is NOT 'AbortError'. Before the fix it fell through to
-  // `unknown, retryable: false`, and membrane's message-sniffing then
-  // relabeled it a *user* abort — terminal, never retried, and reported as
-  // "Stream aborted: user" on agents nobody touched (Cairn, 2026-07-20).
+  // The SDK surfaces an abort through AbortController as APIUserAbortError
+  // ("Request was aborted."), whose .name is not 'AbortError'.
   it('classifies the real SDK APIUserAbortError as abort, not unknown', () => {
     const err = handleError(new Anthropic.APIUserAbortError());
     expect(err.type).toBe('abort');
   });
 
-  // The adapter boundary is the last place the laundering could survive, and
-  // it survived at exactly one string: a plain Error whose message equalled
-  // the SDK's abort text was converted into a cancellation even though
-  // nothing about its TYPE said abort. Any caller can produce that string —
-  // a tool, a proxy, a wrapped upstream error — and the turn then resolved as
-  // a user cancellation with the real error destroyed. It must stay an
-  // ordinary unclassified error.
   it('does NOT classify a plain Error carrying the exact SDK abort text as abort', () => {
     const err = handleError(new Error('Request was aborted.'));
     expect(err.type).not.toBe('abort');

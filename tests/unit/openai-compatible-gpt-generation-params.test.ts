@@ -1,12 +1,8 @@
 /**
- * `OpenAICompatibleAdapter` pointed at OpenAI itself (baseURL
- * https://api.openai.com/v1) must send OpenAI's parameter surface for
- * OpenAI's reasoning-generation models. It used to send `max_tokens` for every
- * model, so GPT-5+ and o-series requests 400'd at the wire: "Unsupported
+ * OpenAI's GPT-5+ and o-series models refuse `max_tokens` ("Unsupported
  * parameter: 'max_tokens' is not supported with this model. Use
- * 'max_completion_tokens' instead." Model detection is shared with
- * OpenAIAdapter; any other model id keeps the legacy parameters that generic
- * OpenAI-compatible servers (Ollama, vLLM, ...) expect.
+ * 'max_completion_tokens' instead."), while generic OpenAI-compatible servers
+ * (Ollama, vLLM, ...) expect the legacy parameters.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { OpenAICompatibleAdapter } from '../../src/providers/openai-compatible.js';

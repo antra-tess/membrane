@@ -1,16 +1,7 @@
 /**
- * A routed turn can be served by DIFFERENT models on different rounds —
+ * A routed turn can be served by different models on different rounds:
  * OpenRouter re-picks a provider per call, and an alias can resolve to a new
- * snapshot mid-turn. Each streaming loop re-resolved pricing when the served
- * model changed and then recomputed the WHOLE accumulated usage at that latest
- * rate, so every earlier round was retroactively re-billed at the newest
- * model's price.
- *
- * Probe (sol, 2026-08-25): two rounds of 1M input tokens, round 1 served by a
- * model priced 1,000/M and round 2 by one priced 10,000/M. The bill is
- * 1,000 + 10,000 = 11,000; membrane reported 2M × 10,000/M = 20,000.
- *
- * Every one of the four tool loops carried the bug, so every one is probed.
+ * snapshot mid-turn.
  */
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
@@ -32,13 +23,11 @@ const ZZ_ROUND_TWO_MODEL = 'zz-model-b';
 const ZZ_ROUND_TOKENS = 1_000_000;
 const ZZ_ROUND_ONE_RATE = 1_000;
 const ZZ_ROUND_TWO_RATE = 10_000;
-/** 1M at 1,000/M plus 1M at 10,000/M — what the provider actually bills. */
 const ZZ_BILLED_TOTAL = ZZ_ROUND_ONE_RATE + ZZ_ROUND_TWO_RATE;
 
 const zzRates: Record<string, number> = {
   [ZZ_ROUND_ONE_MODEL]: ZZ_ROUND_ONE_RATE,
   [ZZ_ROUND_TWO_MODEL]: ZZ_ROUND_TWO_RATE,
-  // Deliberately absurd: a fallback to the requested id shows up immediately.
   [ZZ_REQUESTED_MODEL]: 7,
 };
 
@@ -61,10 +50,6 @@ const zzTool: ToolDefinition = {
   inputSchema: { type: 'object', properties: {} },
 };
 
-/**
- * Serves one scripted round per call: round 1 asks for a tool (so the loop
- * runs again), round 2 ends the turn. Each round names its own served model.
- */
 function zzScriptedAdapter(mode: 'xml' | 'native'): ProviderAdapter {
   const servedModels = [ZZ_ROUND_ONE_MODEL, ZZ_ROUND_TWO_MODEL];
   let round = 0;
@@ -188,7 +173,6 @@ describe('multi-round pricing', () => {
 
     expect(response.usage.estimatedCost).toBeUndefined();
     expect(response.details.usage.estimatedCost).toBeUndefined();
-    // The priced round is still recoverable from the roster.
     expect(response.details.model.perRound?.[0]?.usage.estimatedCost?.total)
       .toBeCloseTo(ZZ_ROUND_ONE_RATE, 6);
     expect(response.details.model.perRound?.[1]?.usage.estimatedCost).toBeUndefined();

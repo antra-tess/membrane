@@ -1,19 +1,3 @@
-/**
- * The no-transform contract for XML-mode content.
- *
- * Ordinary content — HTML-shaped markup, entity TEXT, JSON-looking text — is
- * data, not syntax. The parser and the XML formatter must carry it through
- * byte for byte, on the way in and on the way out. This file pins that
- * property so any future change to the XML encoding has to break an explicit
- * assertion rather than a habit.
- *
- * Eight of the nine cells below are byte-identity on merged main and stay
- * byte-identity here. The ninth is a NAMED, pre-existing asymmetry on the
- * tool-result READ path, pinned as it currently behaves in its own describe
- * block at the bottom — see the comment there for what the encoding-redesign
- * lane must do to it.
- */
-
 import { describe, it, expect } from 'vitest';
 import {
   parseToolCalls,
@@ -52,7 +36,6 @@ function parsedParam(value: string): unknown {
   return parsed!.calls[0]!.input.fld1;
 }
 
-/** Render a tool_use block back to XML through the formatter it ships with. */
 function renderThroughFormatter(content: ContentBlock[]): string {
   const formatter = new AnthropicXmlFormatter();
   const messages: NormalizedMessage[] = [
@@ -81,17 +64,13 @@ describe('parameter values are byte-untouched on the READ polarity', () => {
     });
   }
 
-  it('preserves leading and trailing whitespace around ordinary content', () => {
-    // One newline on each side is layout (the framing results are written
-    // in); the spaces inside it are content.
+  it('keeps the spaces around ordinary content, dropping one framing newline on each side', () => {
     expect(parsedParam(`\n  ${zzMarkup}  \n`)).toBe(`  ${zzMarkup}  `);
     expect(parsedParam(`  ${zzMarkup}  `)).toBe(`  ${zzMarkup}  `);
   });
 });
 
 describe('parameter values are byte-untouched on the WRITE polarity', () => {
-  // A string beginning or ending with a newline is reconstructed with one
-  // more there, since one newline per side of a string parameter is layout.
   for (const payload of [...zzOrdinaryPayloads, `\n${zzMarkup}\n`, 'zz-line\n', '\n']) {
     it(`writes ${JSON.stringify(payload)} to the wire raw and reads it back whole`, () => {
       const doc = renderThroughFormatter([
@@ -118,7 +97,6 @@ describe('tool-result bodies are byte-untouched', () => {
   for (const payload of [zzMarkup, zzJsonText]) {
     it(`round-trips ${JSON.stringify(payload)} byte for byte`, () => {
       const { wire, readBack } = roundTrip(payload);
-      // No blanket escaping on the write: the bytes are on the wire as-is.
       expect(wire).toContain(payload);
       expect(readBack).toBe(payload);
     });
@@ -133,18 +111,6 @@ describe('tool-result bodies are byte-untouched', () => {
 
 describe('NAMED ASYMMETRY: entity text in a result body is decoded on read', () => {
   it('is pinned as it currently behaves, NOT as it should behave', () => {
-    // Pre-existing on merged main, predating PR #53 entirely: the result-read
-    // path decodes result and error bodies unconditionally, at the four
-    // unescapeXml calls inside parseAccumulatedIntoBlocks — the result body,
-    // the error body, the legacy result body and the legacy error body
-    // (src/utils/tool-parser.ts:1072, 1089, 1107, 1122 at the time of writing;
-    // grep `unescapeXml(` in that function if the numbers have moved). The
-    // write side does NOT escape correspondingly, so entity text survives the
-    // wire and is then consumed on the way back.
-    //
-    // The collision-only redesign narrows this decode to collision entities
-    // only, making write/read symmetric; this test then flips to assert
-    // byte-identity.
     const wire = formatToolResults([
       { toolUseId: 'ite1', content: zzEntityText, isError: false },
     ]);

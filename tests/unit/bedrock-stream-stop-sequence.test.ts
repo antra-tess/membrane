@@ -1,15 +1,3 @@
-/**
- * Regression test: the Bedrock streaming adapter must surface WHICH stop
- * sequence fired, not just that stop_reason was 'stop_sequence'.
- *
- * Dropping delta.stop_sequence broke prefill/XML tool use on Bedrock
- * entirely: membrane's tool gate matches stopSequence === '</function_calls>',
- * so tool calls were never parsed or executed, the harness never restored the
- * close tag, and the turn continuation looped forever on the dangling block
- * (~6 output tokens per full-prefill round — observed live on Ash,
- * 2026-07-26: 43 consecutive 172k-token retries).
- */
-
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { BedrockAdapter } from '../../src/providers/bedrock.js';
 import { chunkFrame, streamBody } from '../helpers/bedrock-event-stream.js';
@@ -56,7 +44,6 @@ describe('BedrockAdapter streaming stop_sequence', () => {
     );
 
     expect(result.stopReason).toBe('stop_sequence');
-    // The contract the tool loop depends on:
     expect(result.stopSequence).toBe('</function_calls>');
     expect(result.usage.outputTokens).toBe(12);
   });

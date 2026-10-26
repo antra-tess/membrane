@@ -1,20 +1,6 @@
 /**
- * Membrane is the one layer that retries.
- *
- *  - AnthropicAdapter's SDK client makes one attempt at each request a call
- *    makes: its own retries (two by default, invisible to membrane) are off
- *    on them, so with `retry: false` a 429 reaches the caller after one send,
- *    and `details.timing.attempts` and `retryDelaysMs` count every attempt.
- *    The cache keepalive's background replays keep the SDK's retries.
- *  - `retry: false` leaves a credential resolver's one resend after a 401,
- *    which is part of the attempt it follows.
- *  - What the SDK used to retry before delivery, membrane retries: a 5xx, a
- *    provider's 408 and a connection failure get the base schedule, three
- *    attempts by default, on every entry point. `maxRetries` still sets it.
- *  - A deadline that ran out on a sent request is the caller's: it isn't sent
- *    again. A connect timeout is, where the adapter can tell it apart.
- *  - The API's `x-should-retry` and `retry-after-ms`, which the SDK obeyed,
- *    are read where the adapter types the error.
+ * The Anthropic SDK retries a request twice by default, unseen by its caller,
+ * and obeys the API's `x-should-retry` and `retry-after-ms` headers.
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -59,7 +45,6 @@ const REQUEST: NormalizedRequest = {
 
 const FAST = { retry: { retryDelayMs: 1, maxRetryDelayMs: 2, backoffMultiplier: 1 } };
 
-/** Fails its first `failures` sends with `makeError`, then answers. */
 class FailingAdapter implements ProviderAdapter {
   readonly name = 'zz-failing';
   sends = 0;
@@ -99,7 +84,6 @@ describe('membrane retries what the SDK used to, before delivery, on every entry
   });
 
   it('its waits are the base schedule: unjittered, one per retry', async () => {
-    // FAST's base schedule waits exactly 1 ms; the overloaded one is jittered.
     const adapter = new FailingAdapter(2, () => serverError('zz internal', 500));
     const events = await yielding(membrane(adapter));
 
@@ -144,8 +128,6 @@ describe('membrane retries what the SDK used to, before delivery, on every entry
       : entry === 'stream'
         ? await m.stream(REQUEST).catch((e) => e)
         : ((await yielding(m)).at(-1) as Extract<StreamEvent, { type: 'error' }>).error;
-    // Still the retryable timeout the caller sees; membrane just doesn't spend
-    // another full deadline on it.
     expect(thrown).toMatchObject({ type: 'timeout', retryable: true });
     expect(adapter.sends).toBe(1);
   });
@@ -168,8 +150,6 @@ describe('AnthropicAdapter makes one attempt at each request', () => {
   });
 
   it('the cache keepalive’s replays keep the SDK’s own retries', async () => {
-    // A replay refreshes an idle cache in the background, with no caller
-    // waiting, so it keeps the SDK's default of two retries.
     const fetch = vi.fn(async () => new Response(
       JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'zz internal' } }),
       { status: 500, headers: { 'content-type': 'application/json', 'retry-after-ms': '1' } },
@@ -196,8 +176,6 @@ describe('AnthropicAdapter makes one attempt at each request', () => {
   it.each(['complete', 'stream', 'streamYielding'] as const)(
     '%s(): retry: false leaves a credential resolver its one resend after a 401, and retries nothing after it',
     async (entry) => {
-      // Every send is a 401 that says x-should-retry: true, which membrane's
-      // schedule would retry without the switch.
       const authorizations: string[] = [];
       const fetch = vi.fn(async (_url: unknown, init?: { headers?: HeadersInit }) => {
         authorizations.push(new Headers(init?.headers).get('authorization') ?? '');
@@ -238,7 +216,6 @@ describe('AnthropicAdapter makes one attempt at each request', () => {
 
 describe("AnthropicAdapter's watchdog expiry is a deadline", () => {
   it('a stream with no first event ends with a timeout that carries the deadline mark', async () => {
-    // Headers arrive, then nothing: the body stays open until the request is aborted.
     vi.stubGlobal('fetch', vi.fn(async (_url: unknown, init?: { signal?: AbortSignal }) => new Response(
       new ReadableStream({
         start(controller) {
@@ -293,8 +270,6 @@ describe('a deadline on a sent request is the caller’s; a connect timeout is s
   });
 
   it('a mark set by a second loaded copy of membrane survives the retyping', () => {
-    // Another copy's MembraneError isn't this copy's, so it's typed afresh,
-    // and the mark, keyed by Symbol.for, goes with it.
     const foreign = Object.assign(new Error('zz watchdog'), { [Symbol.for('membrane.deadlineExpiry')]: true });
     expect(isDeadlineExpiry(errorFromThrown(foreign))).toBe(true);
   });
@@ -395,8 +370,6 @@ describe('a deadline on a sent request is the caller’s; a connect timeout is s
       expect(fetch).toHaveBeenCalledTimes(1);
     });
 
-    // A fetch that, once the send is in flight, fires the caller's cancel,
-    // then rejects with `reason(signal)` when the request's signal aborts.
     const untilAborted = (cancel: () => void, reason: (signal: AbortSignal) => unknown) =>
       vi.fn((_url: unknown, init?: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
         init?.signal?.addEventListener('abort', () => reject(reason(init.signal!)));
@@ -404,9 +377,6 @@ describe('a deadline on a sent request is the caller’s; a connect timeout is s
       }));
 
     it.each(['complete', 'stream', 'yielding'] as const)('%s: a caller’s own AbortSignal.timeout() is still a cancellation', async (entry) => {
-      // It rejects with the same TimeoutError, but the caller's signal decides.
-      // The caller's signal fires as AbortSignal.timeout()'s does, once the
-      // send is in flight.
       const controller = new AbortController();
       const fetch = untilAborted(
         () => controller.abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError')),
@@ -428,8 +398,6 @@ describe('a deadline on a sent request is the caller’s; a connect timeout is s
     });
 
     it.each(['stream', 'yielding'] as const)('%s: a retryable failure after the caller cancelled asks onError nothing', async (entry) => {
-      // The caller cancels once the send is in flight, and the send then
-      // fails as a connection failure would.
       const controller = new AbortController();
       const fetch = untilAborted(() => controller.abort(), () => new TypeError('fetch failed'));
       vi.stubGlobal('fetch', fetch);
@@ -509,9 +477,6 @@ describe('a deadline on a sent request is the caller’s; a connect timeout is s
   it.each(['complete', 'stream', 'yielding'] as const)(
     '%s: an adapter that throws what fetch threw gets the same rule',
     async (entry) => {
-      // Not every adapter types its own failures. Membrane types one with
-      // errorFromThrown, decides the retry on that, and every entry point
-      // ends with it, streamYielding's error event included.
       const adapter = new FailingAdapter(Infinity, headersTimeout);
       const thrown = await run(membrane(adapter), entry);
       expect(adapter.sends).toBe(1);

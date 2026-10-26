@@ -1,8 +1,3 @@
-/**
- * Test streaming enhancements with real API
- * Run with: ANTHROPIC_API_KEY=... npx tsx test-streaming-api.ts
- */
-
 import { Membrane } from './src/index.js';
 import { AnthropicAdapter } from './src/providers/anthropic.js';
 import type { ChunkMeta, BlockEvent } from './src/types/streaming.js';
@@ -16,7 +11,6 @@ if (!API_KEY) {
 
 const adapter = new AnthropicAdapter({ apiKey: API_KEY });
 
-// Test tool
 const calculatorTool: ToolDefinition = {
   name: 'calculator',
   description: 'Perform basic math calculations',
@@ -50,7 +44,7 @@ async function testPrefillMode() {
       }
     ],
     tools: [calculatorTool],
-    toolMode: 'xml',  // Force XML/prefill mode
+    toolMode: 'xml',
   };
 
   const chunks: Array<{ text: string; meta: ChunkMeta }> = [];
@@ -63,7 +57,6 @@ async function testPrefillMode() {
       if (meta.visible) {
         visibleText += chunk;
       }
-      // Show streaming with type info
       const typeTag = meta.visible ? 'V' : meta.type[0].toUpperCase();
       process.stdout.write(typeTag);
     },
@@ -87,13 +80,11 @@ async function testPrefillMode() {
   console.log('Block events: ' + blocks.length);
   console.log('Visible text: "' + visibleText.slice(0, 100) + '..."');
 
-  // Verify metadata
   const textChunks = chunks.filter(c => c.meta.type === 'text' && c.meta.visible);
   const toolChunks = chunks.filter(c => c.meta.type === 'tool_call' || c.meta.type === 'tool_result');
   console.log('Text chunks (visible): ' + textChunks.length);
   console.log('Tool chunks (hidden): ' + toolChunks.length);
 
-  // Check block events
   const blockStarts = blocks.filter(b => b.event === 'block_start');
   const blockCompletes = blocks.filter(b => b.event === 'block_complete');
   console.log('Block starts: ' + blockStarts.length);
@@ -114,7 +105,6 @@ async function testChatMode() {
 
   const membrane = new Membrane(adapter, {});
 
-  // Native mode requires tools to be defined (otherwise falls back to prefill)
   const dummyTool: ToolDefinition = {
     name: 'get_time',
     description: 'Get the current time',
@@ -134,7 +124,7 @@ async function testChatMode() {
         content: [{ type: 'text', text: 'Say hello in exactly 5 words. Do not use any tools.' }]
       }
     ],
-    tools: [dummyTool],  // Need tools for native mode
+    tools: [dummyTool],
     toolMode: 'native',
   };
 
@@ -156,7 +146,6 @@ async function testChatMode() {
   console.log('Total chunks: ' + chunks.length);
   console.log('Visible text: "' + visibleText + '"');
 
-  // All chunks in chat mode without tools should be visible text
   const allVisible = chunks.every(c => c.meta.visible && c.meta.type === 'text');
   console.log('All chunks visible text: ' + allVisible);
 
@@ -168,8 +157,6 @@ async function testSimplePrefill() {
   console.log('TEST: Prefill Mode (no tools)');
   console.log('========================================\n');
 
-  // Prefill mode uses participant-based format
-  // Messages become "User: ...\nClaude:" in a single assistant prefill
   const membrane = new Membrane(adapter, {});
 
   const request: NormalizedRequest = {
@@ -185,7 +172,6 @@ async function testSimplePrefill() {
         content: [{ type: 'text', text: 'What is 2+2? Answer in one word.' }]
       }
     ],
-    // No toolMode specified = defaults to xml/prefill
   };
 
   const chunks: Array<{ text: string; meta: ChunkMeta }> = [];

@@ -513,7 +513,6 @@ describe('complete response decoding follows the selected protocol', () => {
       expect(response.toolCalls).toHaveLength(xml && script.name !== 'partial' ? 1 : 0);
       expect(response.rawAssistantText).toBe(script.value + (xml && script.stopSequence ? script.stopSequence : ''));
       expect(response.details.stop.unclosedToolBlock).toBe(xml && script.name === 'partial');
-      // Only XML's partial script leaves a tool block open, and nothing else warns.
       expect(warnings.some(message => /unclosed tool block|zero tool calls/.test(message))).toBe(xml && script.name === 'partial');
     });
   }
@@ -565,7 +564,6 @@ describe('plain/native partial and stop responses', () => {
         expect(response.toolCalls ?? []).toEqual([]);
         const content = finish === 'abort' ? response.partialContent : response.content;
         expect(response.rawAssistantText).toBe(value);
-        // Native yielding aborts expose raw text rather than partialContent.
         if (content !== undefined) {
           expect(content.every((block: any) => block.type === 'text')).toBe(true);
           expect(content.map((block: any) => block.text).join('')).toBe(value);
@@ -588,8 +586,7 @@ describe('plain/native partial and stop responses', () => {
 
 describe('the explicit XML and plain stop scans', () => {
   for (const carrier of ['xml', 'plain']) {
-    it.each(['stream', 'yielding'])(carrier + ' %s ends at the stop that ends first, not the first listed', async path => {
-      // The whole text arrives in one chunk, so both stops are there to find.
+    it.each(['stream', 'yielding'])(carrier + ' %s ends at the stop that ends first, not the first listed, when both arrive in one chunk', async path => {
       const adapter = new MockAdapter({ defaultResponse: 'a STOP b END c', completeDelayMs: 0, streamChunkDelayMs: 0, streamChunkSize: 100 });
       const formatter = carrier === 'xml' ? new AnthropicXmlFormatter() : new CompletionsFormatter();
       const response = await run(path, new Membrane(adapter, { formatter }), {
@@ -602,9 +599,6 @@ describe('the explicit XML and plain stop scans', () => {
   }
 
   it.each(['stream', 'yielding'])('an aborted XML %s reads text after the prefill\'s open thinking block as thinking, then text', async path => {
-    // With thinking on, the XML prefill ends inside `<thinking>`, so what
-    // streams first is thinking until the model closes it. The transport then
-    // fails with an abort, as a cancelled request's does.
     const adapter: any = {
       name: 'aborts-after-chunks', supportsModel: () => true,
       async stream(request: any, callbacks: any, options: any) {

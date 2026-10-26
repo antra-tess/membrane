@@ -1,9 +1,3 @@
-/**
- * Test both XML and native tool modes
- * 
- * Run with: npx tsx test-tool-modes.ts
- */
-
 import { 
   Membrane, 
   AnthropicAdapter, 
@@ -18,7 +12,6 @@ import type {
   ToolDefinition 
 } from './src/index.js';
 
-// Tool definition (same for both modes)
 const calculatorTool: ToolDefinition = {
   name: 'calculate',
   description: 'Performs arithmetic calculations',
@@ -34,7 +27,6 @@ const calculatorTool: ToolDefinition = {
   },
 };
 
-// Tool executor (same for both modes)
 async function executeTool(call: ToolCall): Promise<ToolResult> {
   console.log(`    [Tool] ${call.name}(${JSON.stringify(call.input)})`);
   
@@ -66,7 +58,7 @@ async function testXmlToolMode() {
       maxTokens: 500,
     },
     tools: [calculatorTool],
-    toolMode: 'xml',  // Explicit XML mode
+    toolMode: 'xml',
   };
   
   console.log('Using toolMode: xml');
@@ -107,7 +99,7 @@ async function testNativeToolMode() {
       maxTokens: 500,
     },
     tools: [calculatorTool],
-    toolMode: 'native',  // Explicit native mode
+    toolMode: 'native',
   };
   
   console.log('Using toolMode: native');
@@ -148,7 +140,6 @@ async function testOpenRouterTools() {
       maxTokens: 500,
     },
     tools: [calculatorTool],
-    // toolMode: 'auto' (default) - should auto-select native for OpenRouter
   };
   
   console.log('Using toolMode: auto (should select native for OpenRouter)');
@@ -176,7 +167,6 @@ async function testOpenRouterTools() {
 async function testTransparentInterface() {
   console.log('\n=== Test 4: Transparent Interface (Same Code, Different Backends) ===\n');
   
-  // Same request for all backends
   const makeRequest = (model: string): NormalizedRequest => ({
     messages: [
       textMessage('User', 'What is 7 * 8? Use the calculate tool.'),
@@ -186,16 +176,13 @@ async function testTransparentInterface() {
       maxTokens: 300,
     },
     tools: [calculatorTool],
-    // toolMode: 'auto' - let membrane decide
   });
   
-  // Same callback for all backends
   const toolHandler = async (calls: ToolCall[], context: ToolContext): Promise<ToolResult[]> => {
     console.log(`    Tool calls: ${calls.map(c => c.name).join(', ')}`);
     return Promise.all(calls.map(executeTool));
   };
   
-  // Test with Anthropic (XML)
   console.log('  Anthropic (XML mode):');
   const anthropicAdapter = new AnthropicAdapter();
   const anthropicMembrane = new Membrane(anthropicAdapter);
@@ -210,7 +197,6 @@ async function testTransparentInterface() {
     console.log(`    Error: ${e}`);
   }
   
-  // Test with Anthropic (Native)
   console.log('\n  Anthropic (Native mode):');
   try {
     const response2 = await anthropicMembrane.stream(
@@ -222,7 +208,6 @@ async function testTransparentInterface() {
     console.log(`    Error: ${e}`);
   }
   
-  // Test with OpenRouter
   console.log('\n  OpenRouter (Auto = Native):');
   const openRouterAdapter = new OpenRouterAdapter();
   const openRouterMembrane = new Membrane(openRouterAdapter);

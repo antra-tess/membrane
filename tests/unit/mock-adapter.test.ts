@@ -1,7 +1,3 @@
-/**
- * Unit tests for MockAdapter
- */
-
 import { describe, it, expect, beforeEach } from 'vitest';
 import { MockAdapter, createEchoAdapter, createCannedAdapter } from '../../src/providers/mock.js';
 
@@ -79,7 +75,7 @@ describe('MockAdapter', () => {
       );
 
       expect(chunks.join('')).toBe('Hello world!');
-      expect(chunks.length).toBeGreaterThan(1); // Should be chunked
+      expect(chunks.length).toBeGreaterThan(1);
     });
   });
 

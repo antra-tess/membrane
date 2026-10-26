@@ -1,15 +1,4 @@
-/**
- * Discarded refusal-retry spend is reported (A3 MAJOR-2 / A4 MAJOR 6).
- *
- * A refused attempt is a completed, billed provider call: full input tokens
- * plus the refusal's output. Both refusal-retry implementations kept only the
- * surviving attempt's usage, so response.usage under-reported real spend by
- * one whole call per retry — silently, on the exact path a fleet enables to
- * paper over probabilistic refusals.
- *
- * The response's own usage still describes the attempt that STANDS; the
- * discarded spend is reported beside it in details.usage.discardedAttempts.
- */
+/** A refused attempt is a completed, billed provider call: full input tokens plus the refusal's output. */
 
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
@@ -25,7 +14,6 @@ import type { NormalizedRequest, StreamEvent } from '../../src/types/index.js';
 const REFUSED_USAGE = { inputTokens: 700, outputTokens: 70 };
 const SURVIVING_USAGE = { inputTokens: 700, outputTokens: 30 };
 
-/** Refuses the first `refusals` attempts with a real (billed) usage record. */
 class BilledRefusingAdapter implements ProviderAdapter {
   readonly name = 'zz-billed-refusing';
   calls = 0;
@@ -77,7 +65,6 @@ describe('complete() refusal retries report discarded spend', () => {
     const response = await new Membrane(adapter).complete(createRequest(), { refusalRetries: 1 });
 
     expect(adapter.calls).toBe(2);
-    // The response describes the attempt that stands.
     expect(response.usage).toMatchObject(SURVIVING_USAGE);
     expect(response.details.usage.discardedAttempts).toMatchObject({
       attempts: 1,

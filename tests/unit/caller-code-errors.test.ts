@@ -1,18 +1,3 @@
-/**
- * An error the caller's own code throws is never resent (#160).
- *
- * Membrane runs the caller's code beside each call: hooks, request and
- * stream callbacks, receipt consumers, header stamps, the configured logger
- * and a registry's pricing. Before, what that code threw was classified by
- * its wording like a provider's error, so "rate limit" in a callback's
- * message made membrane send the request again, up to five times, paying for
- * each response that had already arrived or running the caller's code again.
- * Now it leaves membrane with `retryable: false`: as itself when it was a
- * MembraneError that already said so, or else wrapped, with the type membrane
- * reads from it and the original as `cause`. So membrane's own retries stop,
- * and so does a caller's policy that reads `retryable`. A provider's own
- * error keeps its classification, before and after the caller's code runs.
- */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { MockAdapter } from '../../src/providers/mock.js';
@@ -31,7 +16,6 @@ const request = (extra: Record<string, unknown> = {}): NormalizedRequest => ({
   messages: [{ participant: 'User', content: [text('hello')] }],
   ...extra,
 }) as NormalizedRequest;
-/** A history whose build makes NativeFormatter report a repair to onNormalize. */
 const repairedHistory = () => request({ tools: [tool], messages: [
   { participant: 'User', content: [text('hello')] },
   { participant: 'Agent', content: [{ type: 'tool_use', id: 't1', name: 'lookup', input: {} }] },
@@ -41,7 +25,6 @@ const repairedHistory = () => request({ tools: [tool], messages: [
   ] },
 ] });
 const noDelay = { retry: { maxRetries: 0, retryDelayMs: 1, maxRetryDelayMs: 2 } };
-/** Worded as a rate limit, which classifies as retryable when a provider says it. */
 const callerError = () => new Error('zz rate limit exceeded in the caller');
 
 class CountingAdapter extends MockAdapter {
@@ -52,10 +35,9 @@ class CountingAdapter extends MockAdapter {
   override async stream(...args: Parameters<MockAdapter['stream']>) { this.streamCalls++; return super.stream(...args); }
 }
 
-/** An SDK message stream that plays back the events given. */
 function scriptedStream(events: unknown[]) {
   return {
-    controller: { abort() { /* nothing to abort */ } },
+    controller: { abort() { } },
     [Symbol.asyncIterator]() {
       let i = 0;
       return { async next() { return i < events.length ? { value: events[i++], done: false } : { value: undefined, done: true }; } };
@@ -63,7 +45,6 @@ function scriptedStream(events: unknown[]) {
   };
 }
 
-/** An Anthropic adapter whose SDK client is a stub, so nothing leaves the test. */
 function anthropic(config: Record<string, unknown> = {}) {
   const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false }, ...config });
   const create = vi.fn().mockResolvedValue({
@@ -86,7 +67,6 @@ async function rejection(promise: Promise<unknown>): Promise<MembraneError> {
   throw new Error('expected a rejection');
 }
 
-/** The error a yielding stream's error event carries, or a failure if none came. */
 async function yieldingError(membrane: Membrane, req: NormalizedRequest): Promise<MembraneError> {
   for await (const event of membrane.streamYielding(req, {})) {
     if (event.type === 'error') {
@@ -240,10 +220,6 @@ describe('the caller\'s code before the send runs once', () => {
 });
 
 describe('the onError hook is the caller\'s code too', () => {
-  /**
-   * Reports its request, as real adapters do before sending, then fails its
-   * first call with a provider's rate limit, so onError is asked.
-   */
   class RateLimitedOnce extends CountingAdapter {
     override async complete(...args: Parameters<MockAdapter['complete']>) {
       if (this.completeCalls++ === 0) {
@@ -261,15 +237,14 @@ describe('the onError hook is the caller\'s code too', () => {
     }
   }
 
-  /** Swallows what onRequest throws, as a logging wrapper might, then fails its first call with a rate limit. */
   class SwallowingRateLimitedOnce extends CountingAdapter {
     override async complete(...args: Parameters<MockAdapter['complete']>) {
-      try { args[1]?.onRequest?.(args[0]); } catch { /* swallowed */ }
+      try { args[1]?.onRequest?.(args[0]); } catch { }
       if (this.completeCalls++ === 0) throw rateLimitError('zz the provider says slow down');
       return MockAdapter.prototype.complete.call(this, args[0], { ...args[1], onRequest: undefined });
     }
     override async stream(...args: Parameters<MockAdapter['stream']>) {
-      try { args[2]?.onRequest?.(args[0]); } catch { /* swallowed */ }
+      try { args[2]?.onRequest?.(args[0]); } catch { }
       if (this.streamCalls++ === 0) throw rateLimitError('zz the provider says slow down');
       return MockAdapter.prototype.stream.call(this, args[0], args[1], { ...args[2], onRequest: undefined });
     }
@@ -336,8 +311,6 @@ describe('the configured logger and a model registry run beside the call, so com
 });
 
 describe('the configured logger\'s other warning sites: what its warn() throws leaves not retryable', () => {
-  /** Each round opens another XML block and stops on a stop sequence, so the
-   *  loop resumes until its resumption cap warns (as in continuation-spin-guards). */
   class EverDeeper extends CountingAdapter {
     override async stream(req: any, callbacks: any): Promise<any> {
       this.streamCalls++;
@@ -411,7 +384,6 @@ describe('stream() after emission: the caller\'s error is not retryable, a provi
     expect(error.cause).toBe(original);
   });
 
-  /** Answers with text, then a tool call, as content blocks: the native loop's pre-tool text and tool round. */
   class ToolUse extends CountingAdapter {
     override async stream(req: any, callbacks: any, options?: any): Promise<any> {
       this.streamCalls++;
@@ -446,8 +418,6 @@ describe('stream() after emission: the caller\'s error is not retryable, a provi
     expect(error.cause).toBe(original);
   });
 
-  // Each tracked callback, through an adapter that reaches it. ToolUse
-  // reports content blocks, which the native loop turns into block events.
   const native = { tools: [tool], toolMode: 'native' };
   const callbacks: Array<[string, () => CountingAdapter, () => NativeFormatter | undefined, Record<string, unknown>]> = [
     ['onResponse', () => new CountingAdapter(), () => undefined, {}],
@@ -468,8 +438,6 @@ describe('stream() after emission: the caller\'s error is not retryable, a provi
     });
   }
 
-  // Through the real AnthropicAdapter, whose stream handler lets a callback's
-  // error through, with its SDK client playing back a scripted stream.
   for (const name of ['onChunk', 'onUsage'] as const) {
     it(`${name} throws, through the Anthropic adapter`, async () => {
       const events = [

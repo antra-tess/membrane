@@ -1,15 +1,4 @@
-/**
- * A refusal's category, from the provider's response to the caller.
- *
- * Anthropic names why it refused in `stop_details.category` (such as
- * 'cyber'). The adapter reports it as `ProviderResponse.refusalCategory`, and
- * membrane's re-issue announces it on `RetryingEvent.category`. Until this
- * field, core read the category from `raw.response.stop_details`, a shape no
- * built-in adapter's raw response has (the Anthropic adapter's raw carries
- * `stop_details` at its top level), so a real refusal's retrying event never
- * carried its category. These tests run the real AnthropicAdapter over a
- * scripted SDK stream, and over a scripted `messages.create` for complete().
- */
+/** Anthropic names why it refused in `stop_details.category` (such as 'cyber'). */
 import { describe, it, expect } from 'vitest';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import { Membrane } from '../../src/membrane.js';
@@ -18,10 +7,9 @@ import type { NormalizedRequest, ProviderRequest, StreamEvent } from '../../src/
 
 const MODEL = 'claude-zz-1';
 
-/** The SDK's MessageStream as the adapter uses it: async-iterable events and a controller. */
 function fakeAnthropicStream(events: unknown[]) {
   return {
-    controller: { abort() { /* noop */ } },
+    controller: { abort() { } },
     [Symbol.asyncIterator]() {
       let i = 0;
       return {
@@ -34,7 +22,6 @@ function fakeAnthropicStream(events: unknown[]) {
   };
 }
 
-/** One response: some text, then the message_delta that stops it with `stop`. */
 function round(stop: Record<string, unknown>) {
   return [
     {

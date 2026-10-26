@@ -1,16 +1,4 @@
-/**
- * Regression tests for #20: the non-yielding native-tools streaming path
- * (`streamWithNativeTools`, reached through `Membrane.stream()` — note that
- * `complete()` is the non-streaming entry and never emits chunks) hardcoded
- * `meta.type = 'text'` on every chunk and never invoked `onBlock` — the same
- * bug #19 fixed on the yielding path.
- *
- * A caller wiring `stream()`'s onChunk to a UI therefore saw thinking_delta
- * chunks labelled as visible text, and got no block lifecycle at all. These
- * tests pin the fixed behaviour by scripting a provider that emits a thinking
- * block followed by a text block, the way Anthropic's SSE stream does
- * (content_block_start → deltas → content_block_stop, per index).
- */
+/** Anthropic's SSE stream sends each block as content_block_start, then its deltas, then content_block_stop, per index. */
 
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
@@ -26,7 +14,6 @@ import type {
   BlockEvent,
 } from '../../src/types/index.js';
 
-/** One provider block as the SSE stream presents it: start, deltas, stop. */
 interface ScriptedBlock {
   index: number;
   start: Record<string, unknown>;
@@ -49,7 +36,6 @@ class ScriptedAdapter implements ProviderAdapter {
   }
 }
 
-/** Native tool mode needs at least one tool declared. */
 function nativeRequest(): NormalizedRequest {
   return {
     messages: [{ participant: 'User', content: [{ type: 'text', text: 'hi' }] }],
@@ -120,13 +106,6 @@ describe('stream() native path: chunk metadata follows the provider block type (
   });
 });
 
-/**
- * The OpenAI Responses adapter fires `onContentBlock` ONCE per block, already
- * finalised, after the whole stream has been consumed (openai-responses-api.ts:
- * `parsed.content.forEach((block, index) => callbacks.onContentBlock?.(index, block))`).
- * There is no second callback to signal completion, so completion is
- * synthesised when the provider stream returns (#63 review, P1).
- */
 class SingleCallbackAdapter implements ProviderAdapter {
   readonly name = 'single-callback';
   constructor(private chunks: string[], private content: ProviderResponse['content']) {}

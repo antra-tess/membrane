@@ -1,19 +1,3 @@
-/**
- * A structured SSE error frame must keep its classification.
- *
- * `throwOnStreamErrorFrame` used to throw `new Error(string)`: the frame's
- * `code`/`type`/`status` survived only as prose inside the message, and every
- * adapter's `handleError` then re-derived a category by substring-matching
- * that prose. A mid-stream 429 whose frame carried `status: 429` rather than a
- * literal "429"-in-message therefore normalized to `unknown, retryable: false`
- * — the caller's retry policy never saw a rate limit it could wait out.
- *
- * The helper now classifies before throwing, using the same error
- * constructors the HTTP paths use, so the category and the retryable flag are
- * facts carried by the error rather than an accident of message wording.
- * Adapter `handleError` implementations already pass a MembraneError through
- * untouched, which is what lets the classification reach the caller.
- */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { throwOnStreamErrorFrame } from '../../src/providers/utils.js';
 import { MembraneError, classifyError, isOverloadedError } from '../../src/types/errors.js';
@@ -244,16 +228,6 @@ describe('classified stream errors reaching an adapter caller', () => {
   });
 });
 
-/**
- * The Responses API adapter does not use the SSE line loop the other adapters
- * share: it dispatches on `event.type` and carries its own two error-frame
- * throw sites. Those threw structureless `Error`s for the same reason the
- * shared helper did, so a `response.failed` or an `error` event whose code did
- * not happen to contain a substring `handleError` matches — `overloaded_error`,
- * `too_many_requests`, `permission_denied` — normalized to unknown and
- * non-retryable. Both sites now route through the one classification, so the
- * token lists have a single source of truth.
- */
 const zzResponsesRequest = {
   model: 'zz-model-1',
   maxTokens: 64,
@@ -334,14 +308,7 @@ describe('OpenAI Responses API error frames keep their classification', () => {
   });
 });
 
-/**
- * The Responses API's terminal-response check throws the same structured
- * payload from two reachable paths: the streaming one, where the terminal
- * frame (`response.completed`/`response.incomplete`) carries an `error`
- * object, and the non-streaming one, where a 200 body does. A 200 carrying an
- * error object never reaches an HTTP-status boundary classifier, so this
- * helper is the only lawful home for that classification.
- */
+/** The Responses API can carry an error object in a 200: on the streaming terminal frame (`response.completed`/`response.incomplete`) and in a non-streaming body. */
 function jsonResponseStub(payload: unknown): void {
   vi.stubGlobal(
     'fetch',

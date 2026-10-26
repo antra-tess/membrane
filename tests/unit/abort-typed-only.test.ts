@@ -1,15 +1,3 @@
-/**
- * A cancellation is a type, not a phrase.
- *
- * membrane's isAbortError treated any error whose message merely CONTAINED
- * "abort" as a user cancellation, so the streaming catch returned a
- * well-formed AbortedResponse{reason:'user'} instead of throwing. The real
- * error was destroyed — no stack, no classification, no rawRequest — and the
- * caller was told the human cancelled. The tool executor runs inside that
- * same try, so a host tool failing with "...aborted..." turned the whole turn
- * into a phantom cancellation.
- */
-
 import { describe, expect, it } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { MockAdapter } from '../../src/providers/mock.js';
@@ -98,8 +86,6 @@ describe('stream() abort detection is typed', () => {
 });
 
 describe('complete() abort detection is typed', () => {
-  // complete() shares stream()'s typed helpers; a message-reading arm on its
-  // path would turn these failures into cancellations.
   for (const message of ['zz-tool policy aborted the run', 'zz-upstream will abort idle connections']) {
     it(`rejects "${message}" with its classification, not as an abort`, async () => {
       const error = await new Membrane(new ThrowingCompleteAdapter(() => new Error(message)))

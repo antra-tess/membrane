@@ -1,23 +1,7 @@
 /**
- * A response that stops with `end_turn` while carrying a complete client
- * tool call, and the diagnostics that let one be reported.
- *
- * The provider contract is a `tool_use` stop for any response carrying a tool
- * call, and every native loop gated execution on it. Production Anthropic
- * responses broke the contract on 2026-10-19 (three times, two models): a
- * single complete tool_use block, `stop_reason: "end_turn"`, `stop_details`
- * null, message_delta received. Membrane returned the round as a finished
- * turn, nothing ran, and the caller dropped the turn without a word — and the
- * stream adapter had kept neither the message id nor the request id, so there
- * was nothing to report it with.
- *
- * Pinned here: a round whose calls are all complete runs as a `tool_use`
- * round on both native loops (and comes back from complete() as a tool_use
- * stop), recorded in details.anomalies with a warning; a round with an
- * incomplete call, or with a length/refusal stop, runs nothing as before; and
- * the Anthropic adapter keeps the response's id, request id and the
- * provider's own message_start / message_delta events (bounded), plus the
- * events and deltas it doesn't read or doesn't apply.
+ * Anthropic can answer with a single complete tool_use block and
+ * `stop_reason: "end_turn"`, with `stop_details` null and message_delta
+ * received.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
@@ -39,11 +23,10 @@ import type {
   ToolResult,
 } from '../../src/types/index.js';
 
-/** The SDK's MessageStream as the adapter uses it: async-iterable events,
- *  a controller, and the request id it records on connect. */
+/** The SDK's MessageStream records the request id on connect. */
 function fakeAnthropicStream(events: unknown[], requestId?: string) {
   return {
-    controller: { abort() { /* noop */ } },
+    controller: { abort() { } },
     ...(requestId ? { request_id: requestId } : {}),
     [Symbol.asyncIterator]() {
       let i = 0;
@@ -71,7 +54,6 @@ function messageStart(id: string, extra: Record<string, unknown> = {}) {
   };
 }
 
-/** A complete tool call: start, its whole arguments, stop. */
 function completeToolCall(index: number, id: string, args: string) {
   return [
     { type: 'content_block_start', index, content_block: { type: 'tool_use', id, name: 'zz_lookup', input: {} } },
@@ -80,7 +62,6 @@ function completeToolCall(index: number, id: string, args: string) {
   ];
 }
 
-/** A tool call whose block the stream never stopped, with whatever arguments arrived. */
 function unstoppedToolCall(index: number, id: string, args?: string) {
   return [
     { type: 'content_block_start', index, content_block: { type: 'tool_use', id, name: 'zz_lookup', input: {} } },
@@ -95,27 +76,20 @@ const argsDelta = (index: number, partial_json: string) => ({ type: 'content_blo
 const blockStop = (index: number) => ({ type: 'content_block_stop', index });
 const textDelta = (index: number, text: string) => ({ type: 'content_block_delta', index, delta: { type: 'text_delta', text } });
 
-/** A start of each kind of server tool call. */
 const serverCalls: Array<[string, Record<string, unknown>]> = [
   ['server_tool_use', { type: 'server_tool_use', id: 'srvtoolu_zz_t', name: 'web_search', input: {} }],
   ['mcp_tool_use', { type: 'mcp_tool_use', id: 'mcptoolu_zz_t', name: 'zz_tool', server_name: 'zz_server', input: {} }],
 ];
-/** A server tool call whose start carries no input, though the API always sends one. */
+/** The API always sends input in a server tool call's start; this one carries none. */
 const serverCallWithoutInput = { type: 'server_tool_use', id: 'srvtoolu_zz_t', name: 'web_search' };
 
 /**
- * Block events out of the API's order, each stream with what it must leave:
- * every tool call marked, each with its own arguments only; how many events,
- * from the break on, are kept rather than applied; and the calls the Bedrock
- * adapter reports, at each start and each stop it applied (the Anthropic
- * adapter reports each call applied at its start and once finished, a call
- * left open included, so its trace follows from the calls). These tests script
- * the SDK's stream, so its MessageStream doesn't run here, but each stream but
- * three is one it delivers: it parses every tool block's argument buffer as it
- * grows, so a fragment that left one invalid would throw there, before the
- * adapter. The three it doesn't are marked; Bedrock reads its stream itself.
+ * The SDK's MessageStream parses every tool block's argument buffer as it
+ * grows, so a fragment that left one invalid throws there, before the
+ * adapter. The three streams it doesn't deliver are marked; Bedrock reads its
+ * stream itself.
  */
-const outOfOrder: Array<[string, unknown[], Array<{ id: string; unparseableInput: string }>, number, string[]]> = [
+const outOfOrder: Array<[name: string, events: unknown[], markedCalls: Array<{ id: string; unparseableInput: string }>, eventsKeptFromBreak: number, bedrockReportedCalls: string[]]> = [
   ['a start while a block is open',
     [toolStart(0, 'toolu_zz_a'), argsDelta(0, '{"query":"a"}'), toolStart(1, 'toolu_zz_b'), argsDelta(1, '{"query":"b"}'), blockStop(1)],
     [{ id: 'toolu_zz_a', unparseableInput: '{"query":"a"}' }], 3, ['toolu_zz_a']],
@@ -128,8 +102,6 @@ const outOfOrder: Array<[string, unknown[], Array<{ id: string; unparseableInput
   ["arguments after a call's stop",
     [toolStart(0, 'toolu_zz_a'), blockStop(0), argsDelta(0, '{"query":"a"}')],
     [{ id: 'toolu_zz_a', unparseableInput: '{}' }], 1, ['toolu_zz_a', 'toolu_zz_a']],
-  // With no block open the Anthropic adapter's open index is -1, which an
-  // event's index can be too.
   ["arguments at index -1 after a call's stop",
     [toolStart(0, 'toolu_zz_a'), blockStop(0), argsDelta(-1, '{"query":"a"}')],
     [{ id: 'toolu_zz_a', unparseableInput: '{}' }], 1, ['toolu_zz_a', 'toolu_zz_a']],
@@ -148,8 +120,7 @@ const outOfOrder: Array<[string, unknown[], Array<{ id: string; unparseableInput
   ['a stop for a block never started, and a call after it',
     [toolStart(0, 'toolu_zz_a'), argsDelta(0, '{"query":"a"}'), blockStop(0), blockStop(1), toolStart(1, 'toolu_zz_b'), argsDelta(1, '{"query":"b"}'), blockStop(1)],
     [{ id: 'toolu_zz_a', unparseableInput: '{"query":"a"}' }], 4, ['toolu_zz_a', 'toolu_zz_a']],
-  // A tool call's deltas carry only its arguments (Anarchid's R1-1), as an
-  // input_json_delta whose partial_json is a string.
+  // A tool call's deltas carry only its arguments, as an input_json_delta whose partial_json is a string.
   ['a text delta in a tool call',
     [toolStart(0, 'toolu_zz_a'), textDelta(0, '{"query":"x"}'), blockStop(0)],
     [{ id: 'toolu_zz_a', unparseableInput: '' }], 2, ['toolu_zz_a']],
@@ -182,7 +153,6 @@ function finalText(id: string) {
   ];
 }
 
-/** The 2026-10-19 shape: one complete client tool call, stop_reason end_turn. */
 function toolCallStoppedWithEndTurn(id: string) {
   return [
     messageStart(id),
@@ -191,7 +161,6 @@ function toolCallStoppedWithEndTurn(id: string) {
   ];
 }
 
-/** An adapter whose SDK client serves one scripted stream per call. */
 function scriptedAnthropic(rounds: Array<{ events: unknown[]; requestId?: string }>) {
   const adapter = new AnthropicAdapter({ apiKey: 'zz-key', cacheKeepalive: { enabled: false } });
   let call = 0;
@@ -228,8 +197,6 @@ function captureWarnings(): string[] {
 }
 afterEach(() => { warn?.mockRestore(); warn = undefined; vi.unstubAllGlobals(); });
 
-/** An adapter that sets no provider token, as the mock adapter sets none:
- *  one scripted response, its blocks reported once each. */
 class TokenlessAdapter implements ProviderAdapter {
   readonly name = 'zz-tokenless';
   constructor(private readonly response: Pick<ProviderResponse, 'content' | 'stopReason' | 'stopSequence'>) {}
@@ -283,14 +250,14 @@ describe('tool calls the provider stopped with end_turn', () => {
     ]);
     const stream = new Membrane(adapter, { formatter: new NativeFormatter() }).streamYielding(request());
     const toolRounds: ToolCall[][] = [];
-    const roundStops: unknown[] = [];
+    const actedOnStops: unknown[] = [];
     let complete: any;
     for await (const event of stream as AsyncIterable<StreamEvent>) {
       if (event.type === 'tool-calls') {
         toolRounds.push(event.calls);
         stream.provideToolResults(answer(event.calls));
       } else if (event.type === 'usage') {
-        roundStops.push((event as any).round?.stopReason);
+        actedOnStops.push((event as any).round?.stopReason);
       } else if (event.type === 'complete') {
         complete = event.response;
         break;
@@ -304,8 +271,7 @@ describe('tool calls the provider stopped with end_turn', () => {
     expect(complete.stopReason).toBe('end_turn');
     expect(complete.details.anomalies).toHaveLength(1);
     expect(complete.details.anomalies[0]).toMatchObject({ round: 0, treatedAsToolUse: true, messageId: 'msg_zz_3', requestId: 'req_zz_3' });
-    // Each round's report carries the stop the loop acted on.
-    expect(roundStops).toEqual(['tool_use', 'end_turn']);
+    expect(actedOnStops).toEqual(['tool_use', 'end_turn']);
   });
 
   it('a call cut off before its block stopped runs nothing; the round stays end_turn, recorded untreated', async () => {
@@ -479,12 +445,9 @@ describe('tool calls the provider stopped with end_turn', () => {
 
     expect(onToolCalls).not.toHaveBeenCalled();
     expect(response.details.anomalies?.[0]).toMatchObject({ treatedAsToolUse: false, toolUseIds: ['toolu_zz_left'] });
-    // The next start broke block order and wasn't applied, so the open call
-    // is finalized as cut off with the arguments that arrived.
     expect(response.content.find((b: any) => b.type === 'tool_use')).toMatchObject({ unparseableInput: '{"query":"zz"}' });
   });
 
-  /** One stream through the Anthropic adapter: its response, block reports (by index, and by call id) and chunks. */
   async function anthropicStream(events: unknown[]) {
     const { adapter } = scriptedAnthropic([{ events }]);
     const reported: number[] = [];
@@ -527,14 +490,11 @@ describe('tool calls the provider stopped with end_turn', () => {
     expect(res.content).toMatchObject(expected.map((call) => ({ type: 'tool_use', ...call })));
     expect(res.content.map((b: any) => b.input)).toEqual(expected.map(() => ({})));
     expect(res.raw.provider_events.unhandled).toEqual(events.slice(-kept));
-    // Each call applied is reported when it starts and once finished; nothing after the break is.
     expect(reportedIds).toEqual(expected.flatMap(({ id }) => [id, id]));
     expect(warnings.filter((w) => w.includes('every tool_use block in the response is marked'))).toHaveLength(1);
   });
 
-  // A start is in order only at the next index (Anarchid's R1-3): before, a
-  // skipped index left a hole that parsing the content threw on, and a start
-  // at -1 dropped its block unseen.
+  // In the API's order, a block starts only at the next index.
   it.each([
     ['skips an index', 2],
     ['is negative', -1],
@@ -612,7 +572,6 @@ describe('tool calls the provider stopped with end_turn', () => {
     ]);
     expect(res.content).toMatchObject([{ type: 'text', text: 'zz first' }, { type: 'text', text: 'zz next' }]);
     expect(chunks).toEqual(['zz first', 'zz next']);
-    // Each block is reported when it starts and once finished: block 1 at the stream's end.
     expect(reported).toEqual([0, 0, 1, 1]);
     expect(res.raw.provider_events.unhandled).toHaveLength(3);
   });
@@ -688,9 +647,6 @@ describe('tool calls the provider stopped with end_turn', () => {
     expect(response.stopReason).toBe('end_turn');
     expect(response.details.anomalies).toBeUndefined();
 
-    // The same round through complete(): an adapter whose complete() reports
-    // no provider token. Re-adding a "missing token" clause to the gate makes
-    // both halves fail.
     class TokenlessCompleteAdapter extends TokenlessAdapter {
       override async complete(): Promise<ProviderResponse> {
         return { content: blocks as ProviderResponse['content'], stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 10 }, raw: {} };
@@ -803,13 +759,10 @@ describe('the Bedrock adapter: block events out of order', () => {
     expect(res.content).toHaveLength(expected.length);
     expect(res.content).toMatchObject(expected.map((call) => ({ type: 'tool_use', ...call })));
     expect(res.content.map((b: any) => b.input)).toEqual(expected.map(() => ({})));
-    // Each call applied is reported at its start, and at its stop when that was applied; nothing after the break is.
     expect(reported).toEqual(bedrockReports);
     expect(warnings.filter((w) => w.includes('every tool_use block in the response is marked'))).toHaveLength(1);
   });
 
-  // As in the Anthropic adapter, which stops reading at message_delta
-  // (Anarchid's R1-2): before, a stop there finished the call, unmarked.
   it.each([
     ['a stop', [toolStart(0, 'toolu_zz_l'), argsDelta(0, '{"query":"a"}'), endTurnDelta, blockStop(0)],
       [{ type: 'tool_use', id: 'toolu_zz_l', name: 'zz_lookup', input: {}, unparseableInput: '{"query":"a"}' }]],
@@ -824,11 +777,6 @@ describe('the Bedrock adapter: block events out of order', () => {
     expect(warnings.filter((w) => w.includes('block order') || w.includes('every tool_use block'))).toEqual([]);
   });
 
-  // Reading stops at the frame message_delta came in, whatever follows it in
-  // the same chunk, and the body is let go while the provider holds it open.
-  // Before, Bedrock read on: a second message_delta set the stop reason and
-  // usage again, an error event failed a finished response, a message_start
-  // set the input tokens again, and a stream left open was waited on.
   it.each([
     ['a second message_delta', { type: 'message_delta', delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { output_tokens: 9 } }],
     ['an error event', { type: 'error', error: { type: 'overloaded_error', message: 'zz overloaded' } }],
@@ -941,8 +889,7 @@ describe('Anthropic response diagnostics on raw', () => {
         { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'zz text' } },
         { type: 'content_block_delta', index: 0, delta: { type: 'zz_new_delta', payload: 'zz' } },
         { type: 'content_block_stop', index: 0, zz_stop_field: true },
-        // The SDK (0.52) yields only the event types it knows, so a new one
-        // reaches the adapter only through a later SDK; this pins the branch.
+        // The SDK (0.52) yields only the event types it knows, so a new one reaches the adapter only through a later SDK.
         { type: 'zz_new_event', detail: 'zz' },
         {
           type: 'message_delta',
@@ -976,7 +923,6 @@ describe('Anthropic response diagnostics on raw', () => {
       { type: 'content_block_stop', index: 0, zz_stop_field: true },
       { type: 'zz_new_event', detail: 'zz' },
     ]);
-    // Existing raw fields are unchanged, and content isn't duplicated.
     expect(res.raw.stop_reason).toBe('end_turn');
     expect(res.raw.content).toEqual([{ type: 'text', text: 'zz text' }]);
     expect(JSON.stringify(events)).not.toContain('zz text');

@@ -1,24 +1,4 @@
-/**
- * A stream whose LAST SSE event arrives without a trailing newline is complete,
- * not dropped.
- *
- * `SSELineParser.feed` keeps everything after the final `\n` buffered, and
- * exposes `flush()` for exactly this case. The four OpenAI-family loops never
- * called it, so a body ending `data: [DONE]` or with a final `finish_reason`
- * frame and no trailing newline left its terminal signal stuck in the buffer.
- * That was invisible until the terminal-event guard landed; now it turns a
- * completed turn into a retryable `network` MembraneError — the caller retries
- * a request the server already answered and pays for it twice.
- *
- * The tail has to drain through the SAME frame handler as the streamed lines:
- * a final frame commonly carries usage, `finish_reason` and (for a stalled
- * upstream) an error frame, none of which a terminal-only fixup would read.
- *
- * `gemini` and `openai-responses-api` already drained their trailing buffer;
- * the Gemini case below is a parity pin, green before this fix. `anthropic`
- * frames through the vendor SDK and `bedrock` through binary AWS event-stream
- * frames, neither of which has this first-party seam.
- */
+/** Bedrock streams binary AWS event-stream frames, not SSE lines, and the Anthropic adapter reads its stream through the vendor SDK, so neither is here. */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { OpenAIAdapter } from '../../src/providers/openai.js';
 import { OpenAICompatibleAdapter } from '../../src/providers/openai-compatible.js';

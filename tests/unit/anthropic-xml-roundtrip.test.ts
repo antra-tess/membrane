@@ -1,16 +1,7 @@
 /**
- * Round-trip fidelity tests for prefill/XML tool calls (membrane#36).
- *
- * In prefill mode the model's tool call IS generated text. Replaying a
- * synthesized paraphrase (`Participant>[tool]: {json}`) instead of the
- * original `<function_calls>` block:
- *   1. teaches the model a syntax the parser rejects (silent tool-call drop),
- *   2. rewrites the agent's own past turn.
- *
- * These tests pin the fix: parseAccumulatedIntoBlocks carries the verbatim
- * generation on the block (`rawXml`), and AnthropicXmlFormatter replays it
- * exactly. Legacy blocks without rawXml render in the canonical form the
- * parser and instructions agree on.
+ * In prefill mode the model's tool call is generated text, and the model
+ * writes what it sees in its history: a replayed paraphrase of a call teaches
+ * it a syntax the parser rejects.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -22,7 +13,6 @@ import type { NormalizedMessage, ContentBlock } from '../../src/types/index.js';
 // source file can't collide with any tooling that parses the same syntax.
 const A = 'antml:';
 
-// A generation with a large-int param and a multi-param invoke
 const GENERATION_XML = `<function_calls>
 <invoke name="channel-mode--set_channel_mode">
 <parameter name="channelId">1234567890123456789</parameter>
@@ -43,7 +33,7 @@ function buildAndRender(content: ContentBlock[]): string {
     { participant: 'antra', content: [{ type: 'text', text: 'set your wake gate please' }] },
     { participant: 'Rhys', content },
     { participant: 'antra', content: [{ type: 'text', text: 'thanks' }] },
-    { participant: 'Rhys', content: [] }, // completion target
+    { participant: 'Rhys', content: [] },
   ];
   const result = formatter.buildMessages(messages, { assistantParticipant: 'Rhys' });
   return result.messages
@@ -107,11 +97,9 @@ describe('AnthropicXmlFormatter replay', () => {
     const { blocks } = parseAccumulatedIntoBlocks(accumulated);
     const rendered = buildAndRender(blocks);
 
-    // Verbatim round-trip of the generation and the harness-placed results
     expect(rendered).toContain(GENERATION_XML);
     expect(rendered).toContain(RESULTS_XML);
 
-    // The invented bracket forms must be gone
     expect(rendered).not.toContain('>[channel-mode--set_channel_mode]');
     expect(rendered).not.toContain('<[tool_result]');
   });
@@ -134,20 +122,17 @@ describe('AnthropicXmlFormatter replay', () => {
   });
 
   it('replayed document keeps parser and instructions in agreement', () => {
-    // The core regression: after one replayed turn, the nearest example in
-    // the document must still be the syntax the parser accepts.
     const accumulated = `${GENERATION_XML}\n${RESULTS_XML}`;
     const { blocks } = parseAccumulatedIntoBlocks(accumulated);
     const rendered = buildAndRender(blocks);
 
-    // A model imitating the replayed example produces parseable calls
     const start = rendered.indexOf('<function_calls>');
     const end = rendered.indexOf('</function_calls>') + '</function_calls>'.length;
     const example = rendered.slice(start, end);
     const parsed = parseToolCalls(example);
     expect(parsed).not.toBeNull();
     expect(parsed!.calls[0].name).toBe('channel-mode--set_channel_mode');
-    expect(parsed!.calls[0].input.channelId).toBe('1234567890123456789'); // large int stays string
+    expect(parsed!.calls[0].input.channelId).toBe('1234567890123456789');
     expect(parsed!.calls[0].input.debounceMs).toBe(60000);
   });
 });
@@ -171,11 +156,9 @@ describe('legacy blocks (stored without rawXml)', () => {
     ];
     const rendered = buildAndRender(legacy);
 
-    // No bracket paraphrase
     expect(rendered).not.toContain('>[channel_open]');
     expect(rendered).not.toContain('<[tool_result]');
 
-    // Canonical, parseable reconstruction
     const start = rendered.indexOf('<function_calls>');
     const end = rendered.indexOf('</function_calls>') + '</function_calls>'.length;
     expect(start).toBeGreaterThanOrEqual(0);
@@ -185,8 +168,6 @@ describe('legacy blocks (stored without rawXml)', () => {
     expect(parsed!.calls[0].input.channelId).toBe('1234567890123456789');
     expect(parsed!.calls[0].input.options).toEqual({ mode: 'live' });
 
-    // Result renders as canonical function_results in the legacy
-    // convention: no ids on the wire, stdout element, raw content.
     expect(rendered).toContain('<function_results>');
     expect(rendered).not.toContain('tool_use_id=');
     expect(rendered).toContain('<stdout>');
@@ -240,7 +221,7 @@ describe('tool-result replay attribution (D2, Evander 2026-08-08)', () => {
     },
     { participant: 'Rhys', content: [{ type: 'text', text: 'The mode is debounced.' }] },
     { participant: 'antra', content: [{ type: 'text', text: 'thanks' }] },
-    { participant: 'Rhys', content: [] }, // completion target
+    { participant: 'Rhys', content: [] },
   ];
 
   it('replays results unlabeled inside the assistant flow (no user: attribution)', () => {
@@ -253,12 +234,9 @@ describe('tool-result replay attribution (D2, Evander 2026-08-08)', () => {
 
   it('continues the same assistant turn after results without a fresh label', () => {
     const doc = renderConversation(toolRoundMessages);
-    // The post-result prose belongs to the same turn: no "Rhys: " prefix
-    // between the results block and the continuation.
     const afterResults = doc.slice(doc.indexOf('</function_results>'));
     expect(afterResults).not.toContain('Rhys: The mode is debounced.');
     expect(afterResults).toContain('The mode is debounced.');
-    // The next real speaker after the turn is labeled normally.
     expect(doc).toContain('antra: thanks');
   });
 });

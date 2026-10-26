@@ -1,17 +1,3 @@
-/**
- * OpenAI-Compatible provider adapter
- * 
- * Generic adapter for any OpenAI-compatible API endpoint:
- * - Ollama (http://localhost:11434/v1)
- * - vLLM
- * - Together AI
- * - Groq
- * - Local inference servers
- * - Any other OpenAI-compatible endpoint
- * 
- * Uses the standard OpenAI chat completions format with tool_calls support.
- */
-
 import { unreportedUsage } from '../utils/usage.js';
 import { assertMessagePrefillSupported } from './request-capabilities.js';
 
@@ -37,10 +23,6 @@ import { toolUseInputFromText, textOnlyToolResultContent, openAIImagePart, creat
 import { requiresCompletionTokens, noTemperatureSupport, noStopSupport } from './openai.js';
 import { convertMcpMedia } from '../utils/mcp-media.js';
 
-// ============================================================================
-// Types
-// ============================================================================
-
 interface OpenAIContentPart {
   type: 'text' | 'image_url';
   text?: string;
@@ -58,17 +40,12 @@ interface OpenAIMessage {
   reasoning?: string;
   /** Same trace under the DeepSeek spelling, used e.g. by Xiaomi's official
    *  MiMo API in both messages and stream deltas. Read as an alias of
-   *  `reasoning`; `reasoning` wins when a backend sends both. */
+   *  `reasoning`; `reasoning` wins when a backend sends both, unless it is
+   *  blank and `reasoning_content` isn't. */
   reasoning_content?: string;
   reasoning_details?: unknown;
 }
 
-/**
- * The reasoning trace of a message or stream delta, under either spelling.
- * `reasoning` wins unless it is blank while `reasoning_content` has substance —
- * a whitespace-only `reasoning` must not hide the real trace. Whitespace is not
- * trimmed away otherwise: a lone ' ' or '\n' stream delta is part of the trace.
- */
 function reasoningOf(m: { reasoning?: unknown; reasoning_content?: unknown } | undefined): string | undefined {
   const reasoning = typeof m?.reasoning === 'string' ? m.reasoning : undefined;
   const alias = typeof m?.reasoning_content === 'string' ? m.reasoning_content : undefined;
@@ -79,15 +56,13 @@ function reasoningOf(m: { reasoning?: unknown; reasoning_content?: unknown } | u
 /**
  * Some OpenRouter backends (e.g. Parasail, Io Net) spill the tail of the
  * reasoning plus the closing `</think>` into the `content` channel instead of
- * keeping it all in `reasoning`. If a `</think>` appears with no matching
- * `<think>` before it, drop everything up to and including it — that prefix is
- * leaked reasoning, not answer text.
+ * keeping it all in `reasoning`.
  */
 function stripOrphanThinkClose(text: string): string {
   const close = text.indexOf('</think>');
   if (close === -1) return text;
   const open = text.indexOf('<think>');
-  if (open !== -1 && open < close) return text; // well-formed inline block — leave it
+  if (open !== -1 && open < close) return text;
   return text.slice(close + '</think>'.length).replace(/^\s+/, '');
 }
 
@@ -124,10 +99,6 @@ interface OpenAIResponse {
   };
 }
 
-// ============================================================================
-// Adapter Configuration
-// ============================================================================
-
 export interface OpenAICompatibleAdapterConfig {
   /** Base URL for the API (required, e.g., 'http://localhost:11434/v1') */
   baseURL: string;
@@ -145,9 +116,7 @@ export interface OpenAICompatibleAdapterConfig {
   extraHeaders?: Record<string, string>;
 }
 
-// ============================================================================
-// OpenAI-Compatible Adapter
-// ============================================================================
+const OPENAI_MAX_STOP_SEQUENCES = 4;
 
 export class OpenAICompatibleAdapter implements ProviderAdapter {
   readonly name: string;
@@ -155,8 +124,6 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   /**
    * NOT ESTABLISHED, and not establishable per-adapter: this fronts arbitrary
    * OpenAI-shaped third-party endpoints whose caching semantics vary by vendor.
-   * Moot today — the adapter never populates `cacheReadTokens`, so the warn
-   * never fires; it becomes live the moment cache reporting is added here.
    */
   readonly usageCacheConvention = 'unknown' as const;
   private baseURL: string;
@@ -170,15 +137,13 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     }
     
     this.name = config.providerName ?? 'openai-compatible';
-    this.baseURL = config.baseURL.replace(/\/$/, ''); // Remove trailing slash
+    this.baseURL = config.baseURL.replace(/\/$/, '');
     this.apiKey = config.apiKey ?? '';
     this.defaultMaxTokens = config.defaultMaxTokens ?? 4096;
     this.extraHeaders = config.extraHeaders ?? {};
   }
 
   supportsModel(_modelId: string): boolean {
-    // This is a generic adapter - it supports whatever the endpoint supports
-    // Model routing should be handled at a higher level
     return true;
   }
 
@@ -238,28 +203,19 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       const toolCalls = streamedToolCalls();
       let streamUsage: OpenAIResponse['usage'] | undefined;
 
-      // One frame handler for both the streamed lines and the EOF flush — the
-      // trailing buffer carries real terminal frames, not leftovers.
       const processDataLine = (data: string): void => {
         if (data === '[DONE]') {
           sawTerminalEvent = true;
           return;
         }
 
-        // Parse first: a line that isn't JSON is noise to ignore. Nothing
-        // after the parse is caught here, so an error there, a caller's
-        // callback included, fails the stream. What the handler can't read is
-        // dropped below by checks, not by a catch.
         let parsed: Record<string, any>;
         try {
           parsed = JSON.parse(data);
         } catch {
-          return; // Ignore parse errors (partial/keep-alive lines)
+          return;
         }
-        // JSON that isn't an object (`null`, a number, a string, an array)
-        // carries no event, so its frame is dropped.
         if (!isEventObject(parsed)) return;
-        // A provider event is progress (comments never reach here).
         options?.onProgress?.();
 
         throwOnStreamErrorFrame(parsed, this.name, openAIRequest);
@@ -278,9 +234,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
           reasoning += reasoningDelta;
         }
 
-        // Handle streaming tool calls
-        // streamedToolCalls places each entry: by its index, or, with none, by
-        // its id and name (antra-tess/membrane#159).
+        // Some providers send tool-call deltas without an index (antra-tess/membrane#159).
         if (Array.isArray(delta?.tool_calls)) {
           for (const tc of delta.tool_calls) toolCalls.add(tc);
         }
@@ -290,7 +244,6 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
           sawTerminalEvent = true;
         }
 
-        // Usage rides the final chunk when stream_options.include_usage is set
         if (parsed.usage) {
           streamUsage = parsed.usage;
         }
@@ -307,23 +260,19 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
           }
         }
 
-        // A final `data:` line that arrived without its trailing newline is still
-        // buffered here. Servers and proxies do close right after writing the
-        // last event, so dropping it would report a finished turn as a dropped
-        // connection at the guard below.
+        // A final `data:` line can arrive without its trailing newline: servers and
+        // proxies close right after writing the last event.
         for (const data of sseParser.flush()) {
           processDataLine(data);
         }
       } finally {
-        // A read loop that ends early, on a callback's error or any other,
-        // leaves the body unread: cancel it, so the provider stops sending
-        // and the connection is let go. After a full read it does nothing.
+        // An unread body holds the connection: cancel it, so the provider stops
+        // sending. After a full read it does nothing.
         void reader.cancel().catch(() => {});
       }
 
       assertTerminalEventObserved(sawTerminalEvent, this.name, openAIRequest);
 
-      // Build response with accumulated data
       const message: OpenAIMessage = {
         role: 'assistant',
         content: accumulated || null,
@@ -331,9 +280,6 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
 
       if (reasoning) message.reasoning = reasoning;
 
-      // The calls the stream placed: those with an index in index order (an
-      // index can skip a slot, and a hole would fail the response built from
-      // them), then those without one in the order they started.
       const placedToolCalls = toolCalls.calls();
       if (placedToolCalls.length > 0) {
         message.tool_calls = placedToolCalls;
@@ -354,7 +300,6 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       ...this.extraHeaders,
     };
     
-    // Only add Authorization header if we have an API key
     if (this.apiKey) {
       headers['Authorization'] = `Bearer ${this.apiKey}`;
     }
@@ -363,12 +308,8 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   }
 
   private buildRequest(request: ProviderRequest): any {
-    // Media in MCP's form becomes membrane's first, for a caller that builds
-    // a request directly (Membrane's own builds have converted it already,
-    // utils/mcp-media.ts).
     const messages = this.convertMessages(convertMcpMedia(request.messages as any[]));
     
-    // Handle system prompt (same as openrouter.ts)
     if (request.system) {
       if (typeof request.system === 'string') {
         messages.unshift({ role: 'system' as const, content: request.system });
@@ -386,9 +327,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     // OpenAI's own models keep their parameter surface when reached through
     // this adapter (e.g. baseURL https://api.openai.com/v1): GPT-5+ and the
     // o-series reject `max_tokens` ("Use 'max_completion_tokens' instead") and
-    // custom temperature/top_p, and some reject `stop`. Same model detection
-    // as OpenAIAdapter; every other model id keeps the legacy parameters that
-    // generic OpenAI-compatible servers expect.
+    // custom temperature/top_p, and some reject `stop`.
     const model = request.model;
     const maxTokens = request.maxTokens || this.defaultMaxTokens;
     const params: any = {
@@ -419,16 +358,14 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       params.repetition_penalty = request.repetitionPenalty;
     }
 
-    // OpenAI-compatible APIs may limit stop sequences (OpenAI: 4) — truncate to be safe
     if (request.stopSequences && request.stopSequences.length > 0 && !noStopSupport(model)) {
-      params.stop = request.stopSequences.slice(0, 4);
+      params.stop = request.stopSequences.slice(0, OPENAI_MAX_STOP_SEQUENCES);
     }
     
     if (request.tools && request.tools.length > 0) {
       params.tools = this.convertTools(request.tools as any[]);
     }
     
-    // Apply extra params (filter out internal membrane fields)
     if (request.extra) {
       const { normalizedMessages, prompt, ...rest } = request.extra as Record<string, unknown>;
       Object.assign(params, rest);
@@ -438,14 +375,11 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   }
 
   private convertMessages(messages: any[]): OpenAIMessage[] {
-    // Use flatMap to handle one-to-many expansion (multiple tool_results → multiple messages)
     return messages.flatMap(msg => {
-      // If it's already in OpenAI format, pass through
       if (msg.role && (typeof msg.content === 'string' || msg.content === null || msg.tool_calls)) {
         return [msg as OpenAIMessage];
       }
       
-      // Convert from Anthropic-style format
       if (Array.isArray(msg.content)) {
         const contentParts: OpenAIContentPart[] = [];
         const toolCalls: OpenAIToolCall[] = [];
@@ -454,21 +388,14 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
 
         for (const block of msg.content) {
           if (block.type === 'text') {
-            // A zero-width carrier (a provider item with no normalized form,
-            // such as an Anthropic server-tool block) has no text and no form
-            // on this wire: an empty part would only add a blank line.
             if (isRawItemCarrier(block)) continue;
             contentParts.push({ type: 'text', text: block.text });
           } else if (block.type === 'thinking') {
-            // Round-trip the reasoning trace back to the provider (OpenRouter
-            // accepts `reasoning` on a prior assistant turn), mirroring how the
-            // Anthropic adapter re-feeds signed thinking blocks.
+            // OpenRouter accepts `reasoning` on a prior assistant turn.
             if (typeof block.thinking === 'string') {
               reasoningText += (reasoningText ? '\n' : '') + block.thinking;
             }
           } else if (block.type === 'image') {
-            // Convert Anthropic-style image to OpenAI image_url with data URI,
-            // or to the placeholder for data these APIs don't accept
             const part = openAIImagePart(block.source);
             if (part) contentParts.push(part);
           } else if (block.type === 'tool_use') {
@@ -481,7 +408,6 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
               },
             });
           } else if (block.type === 'tool_result') {
-            // Collect ALL tool results - each becomes a separate message
             toolResults.push({
               role: 'tool' as const,
               tool_call_id: block.tool_use_id || block.toolUseId,
@@ -490,11 +416,6 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
           }
         }
 
-        // If we have tool results, emit them (possibly multiple) as
-        // role:'tool' messages — plus a FOLLOWING user message for any other
-        // content sharing the envelope (e.g. a mid-turn injected user message
-        // that mergeConsecutiveRoles folded into the tool_result envelope),
-        // instead of silently dropping it. Mirrors openai.ts / openrouter.ts.
         if (toolResults.length > 0) {
           const hasImagesInterloper = contentParts.some(p => p.type === 'image_url');
           const interloperText = hasImagesInterloper
@@ -512,12 +433,10 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
           return toolResults;
         }
 
-        // Skip messages with no usable content
         if (contentParts.length === 0 && toolCalls.length === 0) {
           return [];
         }
 
-        // Build message — use string content when there are no images (simpler, more compatible)
         const hasImages = contentParts.some(p => p.type === 'image_url');
         const textOnly = contentParts.filter(p => p.type === 'text').map(p => p.text!).join('\n');
 
@@ -546,7 +465,6 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
 
   private convertTools(tools: any[]): OpenAITool[] {
     return tools.map(tool => {
-      // Handle different input formats
       const inputSchema = tool.inputSchema || tool.input_schema || { type: 'object', properties: {} };
       
       return {
@@ -616,8 +534,6 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       providerStopReason: finishReason,
       stopSequence: undefined,
       usage: {
-        // Zeros only as the genuinely-absent fallback: an endpoint that
-        // ignores stream_options sends no usage frame.
         inputTokens: streamUsage?.prompt_tokens ?? 0,
         outputTokens: streamUsage?.completion_tokens ?? 0,
       },
@@ -633,7 +549,6 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
 
     const content: ContentBlock[] = [];
 
-    // Reasoning trace first (mirrors Anthropic thinking-block ordering).
     const reasoning = reasoningOf(message);
     if (typeof reasoning === 'string' && reasoning.trim()) {
       content.push({ type: 'thinking', thinking: reasoning } as ContentBlock);
@@ -660,7 +575,6 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   }
 
   private mapFinishReason(reason: string | undefined): string {
-    // No reason (or a server's null) is a plain end of turn.
     if (reason == null) return 'end_turn';
     switch (reason) {
       case 'stop':
@@ -672,20 +586,10 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       case 'content_filter':
         return 'refusal';
       default:
-        // Unrecognized reasons (a compatible server's own token) travel as
-        // the provider's own token: membrane's mapper reads them as end_turn,
-        // but discloses the token in details.stop.providerReason and logs it
-        // once, so the stop isn't taken for a clean one. 'error' never gets
-        // here: throwOnStreamErrorFrame throws on it first.
         return reason;
     }
   }
 
-  /**
-   * HTTP failures are classified at the fetch boundary, where status,
-   * headers and body are still live; this handles what is left — typed
-   * aborts and non-HTTP throwables — through the shared last-resort table.
-   */
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
     if (isDeadlineAbort(error)) return deadlineTimeoutError(error, rawRequest);
     if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
@@ -694,10 +598,6 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     return errorFromThrown(error, rawRequest);
   }
 }
-
-// ============================================================================
-// Content Conversion Utilities
-// ============================================================================
 
 /**
  * Convert normalized content blocks to OpenAI message format
@@ -715,7 +615,6 @@ export function toOpenAIMessages(
 
     for (const block of msg.content) {
       if (block.type === 'text') {
-        // A zero-width carrier holds a block this wire has no form for.
         if (isRawItemCarrier(block)) continue;
         textParts.push(block.text);
       } else if (block.type === 'thinking') {
@@ -739,7 +638,6 @@ export function toOpenAIMessages(
       }
     }
     
-    // Add main message
     if (textParts.length > 0 || toolCalls.length > 0 || reasoningText) {
       const message: OpenAIMessage = {
         role: msg.role as 'user' | 'assistant',
@@ -754,7 +652,6 @@ export function toOpenAIMessages(
       result.push(message);
     }
     
-    // Add tool results as separate messages
     for (const tr of toolResults) {
       result.push({
         role: 'tool',

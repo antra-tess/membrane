@@ -108,8 +108,6 @@ describe('one receipt per logical streaming round', () => {
       if (event.type === 'usage') usageEvents++;
       if (event.type === 'retrying') retries++;
     }
-    // XML mode intentionally surfaces refusal without retrying. Native mode
-    // retries internally, while raw logging still observes both attempts.
     expect(attempts()).toBe(mode === 'native' ? 2 : 1);
     expect(wire).toHaveLength(mode === 'native' ? 2 : 1);
     expect(retries).toBe(mode === 'native' ? 1 : 0);
