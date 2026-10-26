@@ -18,7 +18,7 @@ import { OpenAICompletionsAdapter } from '../../src/providers/openai-completions
 import { OpenAIResponsesAdapter } from '../../src/providers/openai-responses.js';
 import { OpenAIResponsesAPIAdapter } from '../../src/providers/openai-responses-api.js';
 import { OpenRouterAdapter } from '../../src/providers/openrouter.js';
-import { MembraneError, errorFromThrown, isOverloadedError, networkError, serializeError } from '../../src/types/errors.js';
+import { MembraneError, classifyError, errorFromThrown, isOverloadedError, networkError, serializeError } from '../../src/types/errors.js';
 import type { ProviderAdapter, ProviderRequest } from '../../src/types/provider.js';
 
 const request: ProviderRequest = { model: 'zz-model-1', messages: [{ role: 'user', content: 'zz-prompt' }], maxTokens: 16 };
@@ -88,43 +88,67 @@ describe("every adapter's error names the host it tried and what happened", () =
     expect(error.message).toBe("The request to bedrock-runtime.zz-region-1.amazonaws.com failed: the host name didn't resolve (ENOTFOUND).");
   });
 
-  it("a credential resolver's own failure doesn't name the adapter's host", async () => {
+  it("a credential resolver's own failure keeps its own text and doesn't name the adapter's host", async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}')));
-    const adapter = new OpenAIResponsesAPIAdapter({
+    const fetching = new OpenAIResponsesAPIAdapter({
       baseURL: BASE,
       credentials: async () => { throw nodeFailure('ECONNREFUSED', { address: '192.0.2.7', port: 443 }); },
     });
-    const error = await failure(adapter, 'complete');
-    expect(error.message).toBe('The request failed: the connection was refused (ECONNREFUSED at 192.0.2.7:443).');
+    expect((await failure(fetching, 'complete')).message).toBe('fetch failed');
+    const anthropic = new AnthropicAdapter({
+      baseURL: BASE,
+      credentials: async () => { throw nodeFailure('ECONNREFUSED', { address: '192.0.2.7', port: 443 }); },
+    });
+    const error = await failure(anthropic, 'complete');
+    expect(error.message).toBe('Credential resolution failed: fetch failed');
+  });
+
+  it("a credential resolver's rejection that isn't an object stays what it was", async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}')));
+    const adapter = new OpenAIResponsesAPIAdapter({ baseURL: BASE, credentials: () => Promise.reject('zz-resolver-refused') });
+    expect((await failure(adapter, 'complete')).message).toBe('zz-resolver-refused');
+  });
+
+  it.each([
+    ['complete', undefined, 'https://bedrock-runtime.zz-region-1.amazonaws.com/model/', '/invoke'],
+    ['stream', undefined, 'https://bedrock-runtime.zz-region-1.amazonaws.com/model/', '/invoke-with-response-stream'],
+    ['complete', 'https://zz-gateway.test/bedrock/', 'https://zz-gateway.test/bedrock/model/', '/invoke'],
+    ['stream', 'https://zz-gateway.test/bedrock/', 'https://zz-gateway.test/bedrock/model/', '/invoke-with-response-stream'],
+  ] as const)('bedrock %s with baseURL %s sends to %s<model>%s', async (entry, baseURL, start, end) => {
+    const sent: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (to: unknown) => { sent.push(String(to)); throw nodeFailure('ECONNREFUSED'); }));
+    await failure(new BedrockAdapter({ region: 'zz-region-1', accessKeyId: 'zz-access', secretAccessKey: 'zz-secret-access', ...(baseURL ? { baseURL } : {}) }), entry);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.startsWith(start) && sent[0]!.endsWith(end) && !sent[0]!.slice(start.length, -end.length).includes('/')).toBe(true);
   });
 });
 
-describe('plain words for each transport code, with the code', () => {
-  const words: Array<[string, string]> = [
-    ['ECONNREFUSED', 'the connection was refused'],
-    ['ConnectionRefused', 'the connection was refused'],
-    ['ENOTFOUND', "the host name didn't resolve"],
-    ['EAI_AGAIN', "the host name didn't resolve"],
-    ['ECONNRESET', 'the connection was reset'],
-    ['ConnectionReset', 'the connection was reset'],
-    ['EPIPE', 'the connection was closed'],
-    ['ECONNABORTED', 'the connection was closed'],
-    ['UND_ERR_SOCKET', 'the connection was closed'],
-    ['ConnectionClosed', 'the connection was closed'],
-    ['EHOSTUNREACH', "the host couldn't be reached"],
-    ['ENETUNREACH', "the host couldn't be reached"],
-    ['ETIMEDOUT', 'the connection timed out'],
-    ['UND_ERR_CONNECT_TIMEOUT', 'the connection timed out'],
-    ['UND_ERR_HEADERS_TIMEOUT', 'no response arrived in time'],
-    ['UND_ERR_BODY_TIMEOUT', 'the response stopped arriving'],
-    ['DEPTH_ZERO_SELF_SIGNED_CERT', "the server's certificate isn't trusted"],
-    ['SELF_SIGNED_CERT_IN_CHAIN', "the server's certificate isn't trusted"],
-    ['UNABLE_TO_GET_ISSUER_CERT', "the server's certificate isn't trusted"],
-    ['UNABLE_TO_GET_ISSUER_CERT_LOCALLY', "the server's certificate isn't trusted"],
-    ['UNABLE_TO_VERIFY_LEAF_SIGNATURE', "the server's certificate isn't trusted"],
-    ['CERT_HAS_EXPIRED', "the server's certificate isn't trusted"],
-    ['CERT_NOT_YET_VALID', "the server's certificate isn't trusted"],
-    ['ERR_TLS_CERT_ALTNAME_INVALID', "the server's certificate isn't trusted"],
+describe('plain words for each transport code, with the code, and the type it gives as before', () => {
+  const words: Array<[string, string, string]> = [
+    ['ECONNREFUSED', 'the connection was refused', 'network'],
+    ['ConnectionRefused', 'the connection was refused', 'network'],
+    ['ENOTFOUND', "the host name didn't resolve", 'network'],
+    ['EAI_AGAIN', "the host name didn't resolve", 'network'],
+    ['ECONNRESET', 'the connection was reset', 'network'],
+    ['ConnectionReset', 'the connection was reset', 'network'],
+    ['EPIPE', 'the connection was closed', 'network'],
+    ['ECONNABORTED', 'the connection was closed', 'network'],
+    ['UND_ERR_SOCKET', 'the connection was closed', 'network'],
+    ['ConnectionClosed', 'the connection was closed', 'network'],
+    ['EHOSTUNREACH', "the host couldn't be reached", 'network'],
+    ['ENETUNREACH', "the host couldn't be reached", 'network'],
+    ['ETIMEDOUT', 'the connection timed out', 'timeout'],
+    ['UND_ERR_CONNECT_TIMEOUT', 'the connection timed out', 'timeout'],
+    ['UND_ERR_HEADERS_TIMEOUT', 'no response arrived in time', 'timeout'],
+    ['UND_ERR_BODY_TIMEOUT', 'the response stopped arriving', 'timeout'],
+    ['DEPTH_ZERO_SELF_SIGNED_CERT', "the server's certificate isn't trusted", 'unknown'],
+    ['SELF_SIGNED_CERT_IN_CHAIN', "the server's certificate isn't trusted", 'unknown'],
+    ['UNABLE_TO_GET_ISSUER_CERT', "the server's certificate isn't trusted", 'unknown'],
+    ['UNABLE_TO_GET_ISSUER_CERT_LOCALLY', "the server's certificate isn't trusted", 'unknown'],
+    ['UNABLE_TO_VERIFY_LEAF_SIGNATURE', "the server's certificate isn't trusted", 'unknown'],
+    ['CERT_HAS_EXPIRED', "the server's certificate has expired", 'unknown'],
+    ['CERT_NOT_YET_VALID', "the server's certificate isn't valid yet", 'unknown'],
+    ['ERR_TLS_CERT_ALTNAME_INVALID', "the server's certificate is for another name", 'unknown'],
   ];
 
   it.each(words)('%s: "%s"', (code, said) => {
@@ -132,9 +156,20 @@ describe('plain words for each transport code, with the code', () => {
     expect(error.message).toBe(`The request to api.zz-provider.test failed: ${said} (${code}).`);
   });
 
-  it('a code with no words appears as itself', () => {
-    const error = errorFromThrown(nodeFailure('EPROTO'), undefined, 'https://api.zz-provider.test/v1');
-    expect(error.message).toBe('The request to api.zz-provider.test failed: EPROTO.');
+  it.each(words)('%s alone types the error as before', (code, _said, type) => {
+    expect(classifyError(Object.assign(new Error('zz-no-keyword'), { code })).type).toBe(type);
+  });
+
+  it("a code with no words follows the error's own text", () => {
+    expect(errorFromThrown(nodeFailure('EPROTO'), undefined, 'https://api.zz-provider.test/v1').message)
+      .toBe('The request to api.zz-provider.test failed: fetch failed (EPROTO).');
+    const closed = Object.assign(new Error('zz premature close'), { code: 'ERR_STREAM_PREMATURE_CLOSE' });
+    expect(networkError('Stream aborted by provider.', closed).message)
+      .toBe('The request failed: Stream aborted by provider (ERR_STREAM_PREMATURE_CLOSE).');
+    expect(networkError('', closed).message).toBe('The request failed: ERR_STREAM_PREMATURE_CLOSE.');
+    const mixed = new TypeError('fetch failed', { cause: Object.assign(new Error('zz'), { code: 'ECONNRESET', cause: Object.assign(new Error('zz'), { code: 'EPROTO' }) }) });
+    expect(errorFromThrown(mixed, undefined, 'https://api.zz-provider.test').message)
+      .toBe('The request to api.zz-provider.test failed: the connection was reset (ECONNRESET); fetch failed (EPROTO).');
   });
 });
 
@@ -162,6 +197,8 @@ describe('the addresses a code was met at', () => {
 
   it("the target's own address, on its default port, isn't repeated", () => {
     expect(errorFromThrown(nodeFailure('ECONNREFUSED', { address: '192.0.2.7', port: 443 }), undefined, 'https://192.0.2.7/v1').message)
+      .toBe('The request to 192.0.2.7 failed: the connection was refused (ECONNREFUSED).');
+    expect(errorFromThrown(nodeFailure('ECONNREFUSED', { address: '192.0.2.7', port: 80 }), undefined, 'http://192.0.2.7/v1').message)
       .toBe('The request to 192.0.2.7 failed: the connection was refused (ECONNREFUSED).');
     expect(errorFromThrown(nodeFailure('ECONNREFUSED', { address: '::1', port: 8080 }), undefined, 'http://[::1]:8080').message)
       .toBe('The request to [::1]:8080 failed: the connection was refused (ECONNREFUSED).');
@@ -243,10 +280,14 @@ describe('what stays as it was', () => {
     expect((sent as unknown as Record<symbol, unknown>)[Symbol.for('membrane.deadlineExpiry')]).toBe(true);
   });
 
-  it('a refused connection to a host on port 529 is not retried as an overload', () => {
-    const error = errorFromThrown(nodeFailure('ECONNREFUSED', { address: '192.0.2.7', port: 529 }), undefined, 'https://node-529.zz-provider.test:529');
-    expect(error.message).toContain('529');
-    expect(isOverloadedError(error.toErrorInfo())).toBe(false);
+  it('a connection refused or timed out at a host on port 529 is not retried as an overload', () => {
+    const refused = errorFromThrown(nodeFailure('ECONNREFUSED', { address: '192.0.2.7', port: 529 }), undefined, 'https://node-529.zz-provider.test:529');
+    expect(refused.message).toContain('529');
+    expect(isOverloadedError(refused.toErrorInfo())).toBe(false);
+    const slow = errorFromThrown(nodeFailure('UND_ERR_CONNECT_TIMEOUT'), undefined, 'https://node-529.zz-provider.test:529');
+    expect(slow).toMatchObject({ type: 'timeout', retryable: true });
+    expect(slow.message).toContain('529');
+    expect(isOverloadedError(slow.toErrorInfo())).toBe(false);
   });
 });
 

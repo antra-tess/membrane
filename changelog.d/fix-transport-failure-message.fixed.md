@@ -7,11 +7,13 @@
   Anthropic adapter, "fetch failed" through the others on Node, and the
   runtime's own text on Bun. It holds for every adapter's `network` and
   `timeout` errors whose causes carry a code, on Node and Bun, and each
-  attempt Node makes at a name with several addresses is read. A failure with
-  no code keeps its own text, and so does a certificate failure typed
-  `unknown` (through the fetch-based adapters on Bun). `type`, `retryable` and
-  `rawError` are unchanged. `networkError()` takes the host's URL as an
-  optional fourth argument.
+  attempt Node makes at a name with several addresses is read. A code without
+  plain words follows the error's own text, as in "fetch failed (EPROTO)".
+  Unchanged: the text of a failure whose causes carry no code, of a credential
+  resolver's own failure, and of a certificate failure typed `unknown`
+  (through the fetch-based adapters on Bun); and `type`, `retryable` and
+  `rawError`. `networkError()` takes the host's URL as an optional fourth
+  argument.
 - A `network` or `timeout` failure is never read as an overload by its
   message (`classifyFailure`, `isOverloadedError`), so a host or port that
   reads 529 doesn't move a connection failure onto the overloaded retry

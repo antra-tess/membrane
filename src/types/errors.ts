@@ -204,16 +204,17 @@ export function serverError(message: string, httpStatus?: number, raw?: unknown,
 }
 
 /**
- * When `raw`, or a cause down its chain, carries a transport failure's code,
- * the message says what failed instead of `message`: that the request to
- * `target`'s host and port failed (never its path, query or userinfo), what
- * happened, and each code once, with the addresses it was met at that aren't
- * the target's. Without `target` it names the addresses alone.
+ * When `raw`, or a cause down its chain, carries a code, the message says what
+ * failed: that the request to `target`'s host and port failed (never its path,
+ * query or userinfo), and each code once, in plain words for a transport code
+ * and after `message` for any other, with the addresses it was met at that
+ * aren't the target's. Without `target` it names no host, only those
+ * addresses.
  */
 export function networkError(message: string, raw?: unknown, rawRequest?: unknown, target?: string): MembraneError {
   return new MembraneError({
     type: 'network',
-    message: transportFailureText(raw, target) ?? message,
+    message: transportFailureText(raw, target, message) ?? message,
     retryable: true,
     rawError: raw,
     rawRequest,
@@ -426,9 +427,11 @@ const TRANSPORT_CODES: ReadonlyMap<string, { words: string; type?: 'network' | '
     ['timeout', 'the response stopped arriving', ['und_err_body_timeout']],
     [undefined, "the server's certificate isn't trusted", [
       'depth_zero_self_signed_cert', 'self_signed_cert_in_chain', 'unable_to_get_issuer_cert',
-      'unable_to_get_issuer_cert_locally', 'unable_to_verify_leaf_signature', 'cert_has_expired',
-      'cert_not_yet_valid', 'err_tls_cert_altname_invalid',
+      'unable_to_get_issuer_cert_locally', 'unable_to_verify_leaf_signature',
     ]],
+    [undefined, "the server's certificate has expired", ['cert_has_expired']],
+    [undefined, "the server's certificate isn't valid yet", ['cert_not_yet_valid']],
+    [undefined, "the server's certificate is for another name", ['err_tls_cert_altname_invalid']],
   ] as const).flatMap(([type, words, codes]) => codes.map((code) => [code, { words, type }] as const)),
 );
 /**
@@ -809,8 +812,9 @@ function renderBody(body: unknown): string {
  * path it arrived by, among errors already judged retryable: a non-retryable
  * error is never an overload. A status in hand decides: only 529 is an
  * overload. Only
- * a status-less error falls back to the message, with the same narrow tokens
- * as classifyError (`529` word-boundary anchored, exact `overloaded_error`).
+ * a status-less error other than a `network` or `timeout` one falls back to
+ * the message, with the same narrow tokens as classifyError (`529`
+ * word-boundary anchored, exact `overloaded_error`).
  */
 export function isOverloadedError(info: ErrorInfo): boolean {
   return classifyFailure(info) === 'overloaded';
@@ -904,8 +908,9 @@ export function failedElsewhere<E>(error: E): E {
  * Node puts the code two causes down, and for a name with several addresses,
  * each attempt's in an AggregateError's `errors`.
  */
-function transportFailureText(error: unknown, target?: string): string | undefined {
-  const tried = target === undefined || notFromTarget.has(error as object) ? undefined : targetOf(target);
+function transportFailureText(error: unknown, target: string | undefined, said: string): string | undefined {
+  if (notFromTarget.has(error as object)) return undefined;
+  const tried = target === undefined ? undefined : targetOf(target);
   const places = new Map<string, Set<string>>();
   for (const link of causeChain(error).flatMap((link) => [link, ...attemptsOf(link)])) {
     const code = (link as { code?: unknown }).code;
@@ -918,11 +923,18 @@ function transportFailureText(error: unknown, target?: string): string | undefin
     }
   }
   if (places.size === 0) return undefined;
-  const parts = [...places].map(([code, met]) => {
+  const parts: string[] = [];
+  const unworded: string[] = [];
+  for (const [code, met] of places) {
     const detail = met.size > 0 ? `${code} at ${[...met].join(', ')}` : code;
     const words = TRANSPORT_CODES.get(code.toLowerCase())?.words;
-    return words ? `${words} (${detail})` : detail;
-  });
+    if (words) parts.push(`${words} (${detail})`);
+    else unworded.push(detail);
+  }
+  if (unworded.length > 0) {
+    const own = said.replace(/\.+$/, '');
+    parts.push(own === '' ? unworded.join(', ') : `${own} (${unworded.join(', ')})`);
+  }
   return `The request${tried ? ` to ${tried.host}` : ''} failed: ${parts.join('; ')}.`;
 }
 
@@ -958,7 +970,7 @@ export function errorFromThrown(error: unknown, rawRequest?: unknown, target?: s
   const info = classifyError(error);
   info.rawRequest = rawRequest;
   if (info.type === 'network' || info.type === 'timeout') {
-    info.message = transportFailureText(error, target) ?? info.message;
+    info.message = transportFailureText(error, target, info.message) ?? info.message;
   }
   const typed = new MembraneError(info);
   return isSentRequestDeadline(error) || isDeadlineExpiry(error) ? deadlineExpired(typed) : typed;
