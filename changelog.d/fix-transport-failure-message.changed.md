@@ -17,4 +17,6 @@
 - A `network` or `timeout` failure is never read as an overload by its
   message (`classifyFailure`, `isOverloadedError`), so a host or port that
   reads 529 doesn't move a connection failure onto the overloaded retry
-  schedule.
+  schedule. A status-less `network` or `timeout` failure whose own text held
+  `529` or `overloaded_error` was read as an overload before, and now takes
+  the retryable schedule.

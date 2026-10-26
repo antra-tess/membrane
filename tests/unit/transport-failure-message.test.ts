@@ -20,6 +20,8 @@ import { OpenAIResponsesAPIAdapter } from '../../src/providers/openai-responses-
 import { OpenRouterAdapter } from '../../src/providers/openrouter.js';
 import { MembraneError, classifyError, errorFromThrown, isOverloadedError, networkError, serializeError } from '../../src/types/errors.js';
 import type { ProviderAdapter, ProviderRequest } from '../../src/types/provider.js';
+import { Membrane } from '../../src/membrane.js';
+import { MockAdapter } from '../../src/providers/mock.js';
 
 const request: ProviderRequest = { model: 'zz-model-1', messages: [{ role: 'user', content: 'zz-prompt' }], maxTokens: 16 };
 
@@ -126,7 +128,7 @@ describe("every adapter's error names the host it tried and what happened", () =
 describe('plain words for each transport code, with the code, and the type it gives as before', () => {
   const words: Array<[string, string, string]> = [
     ['ECONNREFUSED', 'the connection was refused', 'network'],
-    ['ConnectionRefused', 'the connection was refused', 'network'],
+    ['ConnectionRefused', "the connection was refused or the host name didn't resolve", 'network'],
     ['ENOTFOUND', "the host name didn't resolve", 'network'],
     ['EAI_AGAIN', "the host name didn't resolve", 'network'],
     ['ECONNRESET', 'the connection was reset', 'network'],
@@ -170,6 +172,26 @@ describe('plain words for each transport code, with the code, and the type it gi
     const mixed = new TypeError('fetch failed', { cause: Object.assign(new Error('zz'), { code: 'ECONNRESET', cause: Object.assign(new Error('zz'), { code: 'EPROTO' }) }) });
     expect(errorFromThrown(mixed, undefined, 'https://api.zz-provider.test').message)
       .toBe('The request to api.zz-provider.test failed: the connection was reset (ECONNRESET); fetch failed (EPROTO).');
+  });
+
+  it('codes with no words follow the worded ones, each with the addresses it was met at', () => {
+    const chain = Object.assign(new TypeError('fetch failed', {
+      cause: Object.assign(new Error('zz'), {
+        code: 'ECONNRESET',
+        cause: Object.assign(new Error('zz'), { code: 'ERR_ZZ_TWO', address: '192.0.2.9', port: 8443 }),
+      }),
+    }), { code: 'ERR_ZZ_ONE' });
+    expect(errorFromThrown(chain, undefined, 'https://api.zz-provider.test').message)
+      .toBe('The request to api.zz-provider.test failed: the connection was reset (ECONNRESET); fetch failed (ERR_ZZ_ONE, ERR_ZZ_TWO at 192.0.2.9:8443).');
+  });
+
+  it("a code the error's own text already names isn't named again", () => {
+    expect(errorFromThrown(bunFailure('EADDRNOTAVAIL', 'https://api.zz-provider.test/v1', 'zz socket unavailable'), undefined, 'https://api.zz-provider.test/v1').message)
+      .toBe('The request to api.zz-provider.test failed: EADDRNOTAVAIL: zz socket unavailable.');
+    const placed = Object.assign(new Error('EADDRNOTAVAIL: zz socket unavailable'), { code: 'EADDRNOTAVAIL', address: '192.0.2.9', port: 443 });
+    expect(errorFromThrown(placed, undefined, 'https://api.zz-provider.test/v1').message)
+      .toBe('The request to api.zz-provider.test failed: EADDRNOTAVAIL: zz socket unavailable (EADDRNOTAVAIL at 192.0.2.9:443).');
+    expect(errorFromThrown(nodeFailure('EPROTONOSUPPORT'), undefined, 'https://api.zz-provider.test').message.includes('(EPROTONOSUPPORT)')).toBe(true);
   });
 });
 
@@ -310,5 +332,18 @@ describe('through real sockets on this runtime', () => {
     expect(refused.message).toBe(`The request to 127.0.0.1:${refusedPort} failed: the connection was refused (ECONNREFUSED).`);
     const reset = await failure(make(`http://127.0.0.1:${resetPort}/v1`), 'complete');
     expect(reset.message).toBe(`The request to 127.0.0.1:${resetPort} failed: the connection was reset (ECONNRESET).`);
+  });
+});
+
+describe("a caller's own error", () => {
+  it('thrown from a stream callback through Membrane keeps its text and names no host', async () => {
+    const own = Object.assign(new Error('zz downstream socket closed'), { code: 'EPIPE' });
+    const membrane = new Membrane(new MockAdapter(), { retry: { maxRetries: 0 } });
+    const thrown = await membrane
+      .stream({ messages: [{ participant: 'user', content: [{ type: 'text', text: 'zz' }] }], config: { model: 'zz-model-1', maxTokens: 16 } }, { onChunk: () => { throw own; } })
+      .then(() => undefined, (error: unknown) => error);
+    expect(thrown).toBeInstanceOf(MembraneError);
+    expect((thrown as MembraneError).message).toBe('zz downstream socket closed');
+    expect((thrown as MembraneError & { cause?: unknown }).cause).toBe(own);
   });
 });

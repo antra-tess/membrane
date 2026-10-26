@@ -417,7 +417,8 @@ const RETRY_AFTER_PROSE = /\bretry after (\d+(?:\.\d+)?) ?(?:s|secs?|seconds?)(?
 /** Transport failure codes on an error or its `cause` (Node, undici, Bun). */
 const TRANSPORT_CODES: ReadonlyMap<string, { words: string; type?: 'network' | 'timeout' }> = new Map(
   ([
-    ['network', 'the connection was refused', ['econnrefused', 'connectionrefused']],
+    ['network', 'the connection was refused', ['econnrefused']],
+    ['network', "the connection was refused or the host name didn't resolve", ['connectionrefused']],
     ['network', "the host name didn't resolve", ['enotfound', 'eai_again']],
     ['network', 'the connection was reset', ['econnreset', 'connectionreset']],
     ['network', 'the connection was closed', ['epipe', 'econnaborted', 'und_err_socket', 'connectionclosed']],
@@ -923,17 +924,22 @@ function transportFailureText(error: unknown, target: string | undefined, said: 
     }
   }
   if (places.size === 0) return undefined;
+  const own = said.replace(/\.+$/, '');
   const parts: string[] = [];
   const unworded: string[] = [];
+  let followsOwn = false;
   for (const [code, met] of places) {
     const detail = met.size > 0 ? `${code} at ${[...met].join(', ')}` : code;
     const words = TRANSPORT_CODES.get(code.toLowerCase())?.words;
-    if (words) parts.push(`${words} (${detail})`);
-    else unworded.push(detail);
+    if (words) {
+      parts.push(`${words} (${detail})`);
+      continue;
+    }
+    followsOwn = true;
+    if (met.size > 0 || !own.split(/[^A-Za-z0-9_]+/).includes(code)) unworded.push(detail);
   }
-  if (unworded.length > 0) {
-    const own = said.replace(/\.+$/, '');
-    parts.push(own === '' ? unworded.join(', ') : `${own} (${unworded.join(', ')})`);
+  if (followsOwn) {
+    parts.push(unworded.length === 0 ? own : own === '' ? unworded.join(', ') : `${own} (${unworded.join(', ')})`);
   }
   return `The request${tried ? ` to ${tried.host}` : ''} failed: ${parts.join('; ')}.`;
 }

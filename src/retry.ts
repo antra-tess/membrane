@@ -66,8 +66,8 @@ const STATED_WAIT_CEILING_MS = 60_000;
 
 /**
  * An overloaded error that arrives mid-stream, after the 200, has no status,
- * so a failure with none, other than a connection failure, is read by its
- * message.
+ * so a failure with none, other than a `network` or `timeout` failure, is read
+ * by its message.
  */
 function isOverloadedFailure(facts: Pick<FailureFacts, 'httpStatus' | 'message' | 'type'>): boolean {
   if (facts.httpStatus !== undefined) return facts.httpStatus === 529;
