@@ -214,16 +214,7 @@ describe('YieldingStream', () => {
     });
   });
 
-  // Wire-boundary safety net — regression for the 2026-05-22 clerk 400.
-  // Background: NativeFormatter.buildMessages already ran the tool-pair
-  // normalizer, but `runNativeToolsYielding` → `buildNativeToolRequest`
-  // reimplemented message construction and bypassed it. An upstream
-  // context-manager bug that dropped a tool_result message produced two
-  // consecutive assistant envelopes with orphan tool_use blocks; the API
-  // rejected with 400 (`tool_use ids ... without tool_result blocks
-  // immediately after`). The fix wires normalize+merge into the streaming
-  // path too. These tests assert the wire request never carries the
-  // structural defects again.
+  // The Anthropic API refuses a tool_use whose tool_result isn't in the next message, with a 400 (`tool_use ids ... without tool_result blocks immediately after`).
   describe('tool-pair normalization at wire boundary (streaming-native path)', () => {
     function nativeRequest(messages: NormalizedRequest['messages']): NormalizedRequest {
       return {
@@ -264,9 +255,7 @@ describe('YieldingStream', () => {
         expect(wireMessages[i]!.role).not.toBe(wireMessages[i - 1]!.role);
       }
 
-      // Every tool_use must be followed *immediately* by a user envelope
-      // containing its tool_result. Set-membership alone wouldn't catch
-      // a regression that synthesizes the result in the wrong envelope.
+      // Every tool_use must be followed immediately by a user envelope holding its tool_result.
       for (let i = 0; i < wireMessages.length; i++) {
         const msg = wireMessages[i]!;
         if (msg.role !== 'assistant') continue;

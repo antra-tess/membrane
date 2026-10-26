@@ -48,7 +48,7 @@ export interface TextContent {
    * equivalent. Membrane's build for an adapter that declares
    * `replaysAnthropicServerBlocks` (AnthropicAdapter) sends one holding an
    * Anthropic server-tool block as that block, in the assistant turn that
-   * produced it (`utils/anthropic-server-blocks.ts`), unless the block can't
+   * produced it, unless the block can't
    * go alone there: a server call with no result after it in its turn, or a
    * result with no call before it, is left out and its message reported, and
    * the request's final message, if it's the assistant's, keeps its lone
@@ -61,7 +61,7 @@ export interface TextContent {
    * which are not read: a consumer that changes the block's content
    * (compression, redaction) must drop or replace `rawItem` too, or the
    * change won't reach the provider, and round reports count the block as
-   * carried when its item is (utils/fidelity.ts). A path that leaves out a
+   * carried when its item is. A path that leaves out a
    * zero-width carrier reports its message altered.
    */
   rawItem?: unknown;
@@ -133,17 +133,14 @@ export interface ToolUseContent {
    * Verbatim document text this call was parsed from in prefill/XML mode:
    * the full `<function_calls>…</function_calls>` block, shared by every
    * invoke parsed from that block. Prefill formatters replay it exactly
-   * instead of synthesizing a rendering — in prefill mode the context IS
-   * the document the agent authored, and a paraphrase of its own action
-   * both corrupts the record and teaches the model a syntax the parser
-   * does not accept (membrane#36). Analogous to `signature` on a thinking
-   * block. Absent on native-tools blocks and on legacy stored blocks.
+   * instead of synthesizing a rendering. Absent on native-tools blocks and on
+   * legacy stored blocks.
    *
    * Replayed in place of the block's other fields (`name`, `input`), which
    * the prefill path then doesn't read: a consumer that changes the call
    * (truncating its input, say) must drop or replace `rawXml` too, or the
    * change won't reach the provider, and round reports count the block as
-   * carried when its raw text is (utils/fidelity.ts).
+   * carried when its raw text is.
    */
   rawXml?: string;
   /**
@@ -185,10 +182,7 @@ export interface ToolUseContent {
 export interface ToolResultContent {
   type: 'tool_result';
   toolUseId: string;
-  /**
-   * Tool name, persisted so XML replay can reconstruct the legacy
-   * `<tool_name>` element byte-identically to the live injection.
-   */
+  /** Tool name; XML replay renders it as the `<tool_name>` element. */
   toolName?: string;
   content: string | ContentBlock[];
   isError?: boolean;
@@ -196,13 +190,13 @@ export interface ToolResultContent {
    * Verbatim document text this result was parsed from in prefill/XML mode:
    * the full `<function_results>…</function_results>` block as the harness
    * originally placed it in the document, shared by every result parsed
-   * from that block. Replayed exactly on the prefill path (membrane#36), in
+   * from that block. Replayed exactly on the prefill path, in
    * place of the block's other fields (`content`, `toolName`, `isError`): a
    * consumer that changes the result (truncating it, say) must drop or
    * replace `rawXml` too, or the change won't reach the provider, and round
-   * reports count the block as carried when its raw text is
-   * (utils/fidelity.ts). Where `rawXmlImagesAt` is set, the replay can also
-   * send the images the turn sent, from `content`, at that place (see there).
+   * reports count the block as carried when its raw text is. Where
+   * `rawXmlImagesAt` is set, the replay can also send the images the turn
+   * sent, from `content`, at that place (see there).
    */
   rawXml?: string;
   /**
@@ -225,9 +219,7 @@ export interface ToolResultContent {
    * Results with the same `rawXml` replay as one block, its text sent once,
    * for as many results as the parser reads from that text; more results
    * with the same text are another round's, and replay as a block of their
-   * own, as does a second result with this mark. The count is the parser's
-   * reading today, so it holds while the parser reads the text as the turn's
-   * parse did.
+   * own, as does a second result with this mark.
    */
   rawXmlImagesAt?: number;
   /** See {@link TextContent.rawItem}. */

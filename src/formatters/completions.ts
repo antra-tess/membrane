@@ -67,8 +67,6 @@ export interface CompletionsFormatterConfig extends FormatterConfig {
 
   /**
    * Add lowercased variants of participant stop sequences.
-   * Useful for models whose tokenizer doesn't normalize casing,
-   * allowing simmed names with different casing to still trigger stops.
    * Default: false
    */
   caseInsensitiveStops?: boolean;
@@ -205,7 +203,7 @@ export class CompletionsFormatter implements PrefillFormatter {
       maxParticipantsForStop: config.maxParticipantsForStop ?? 10,
       caseInsensitiveStops: config.caseInsensitiveStops ?? false,
       warnOnImageStrip: config.warnOnImageStrip ?? true,
-      // Completions models don't support images - always strip
+      // Base models take no images.
       unsupportedMedia: 'strip',
       warnOnStrip: config.warnOnStrip ?? true,
     };
@@ -257,8 +255,7 @@ export class CompletionsFormatter implements PrefillFormatter {
       if (hadImages) {
         hasStrippedImages = true;
       }
-      // Base models carry text only: every image, tool carrier and thinking
-      // block is left out, which alters the consumer message.
+      // Base models carry text only.
       if (leftOut) options.fidelity?.alter(index);
 
       // Skip empty messages.
@@ -328,7 +325,7 @@ export class CompletionsFormatter implements PrefillFormatter {
   }
 
   parseToolCalls(content: string): ToolCall[] {
-    // Base models don't have structured tool output
+    // Base models have no structured tool output.
     return [];
   }
 

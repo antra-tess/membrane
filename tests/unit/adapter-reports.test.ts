@@ -95,7 +95,7 @@ describe('AnthropicAdapter', () => {
 });
 
 describe('BedrockAdapter', () => {
-  it('stream(): reports the body\'s max_tokens and that it reports content before the send, then each content event', async () => {
+  it('stream(): reports the body\'s max_tokens and that it reports content before the send, then each content event up to message_delta, where reading stops', async () => {
     const o = observed();
     const atSend: number[] = [];
     vi.stubGlobal('fetch', vi.fn(async () => (atSend.push(o.sends.length), { ok: true, status: 200, body: streamBody([...EVENTS, { type: 'message_stop' }].map(chunkFrame)) })));

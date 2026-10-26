@@ -58,7 +58,8 @@ interface OpenAIMessage {
   reasoning?: string;
   /** Same trace under the DeepSeek spelling, used e.g. by Xiaomi's official
    *  MiMo API in both messages and stream deltas. Read as an alias of
-   *  `reasoning`; `reasoning` wins when a backend sends both. */
+   *  `reasoning`; `reasoning` wins when a backend sends both, unless it is
+   *  blank and `reasoning_content` isn't. */
   reasoning_content?: string;
   reasoning_details?: unknown;
 }
@@ -79,9 +80,7 @@ function reasoningOf(m: { reasoning?: unknown; reasoning_content?: unknown } | u
 /**
  * Some OpenRouter backends (e.g. Parasail, Io Net) spill the tail of the
  * reasoning plus the closing `</think>` into the `content` channel instead of
- * keeping it all in `reasoning`. If a `</think>` appears with no matching
- * `<think>` before it, drop everything up to and including it — that prefix is
- * leaked reasoning, not answer text.
+ * keeping it all in `reasoning`.
  */
 function stripOrphanThinkClose(text: string): string {
   const close = text.indexOf('</think>');
@@ -149,14 +148,14 @@ export interface OpenAICompatibleAdapterConfig {
 // OpenAI-Compatible Adapter
 // ============================================================================
 
+const OPENAI_MAX_STOP_SEQUENCES = 4;
+
 export class OpenAICompatibleAdapter implements ProviderAdapter {
   readonly name: string;
 
   /**
    * NOT ESTABLISHED, and not establishable per-adapter: this fronts arbitrary
    * OpenAI-shaped third-party endpoints whose caching semantics vary by vendor.
-   * Moot today — the adapter never populates `cacheReadTokens`, so the warn
-   * never fires; it becomes live the moment cache reporting is added here.
    */
   readonly usageCacheConvention = 'unknown' as const;
   private baseURL: string;
@@ -278,9 +277,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
           reasoning += reasoningDelta;
         }
 
-        // Handle streaming tool calls
-        // streamedToolCalls places each entry: by its index, or, with none, by
-        // its id and name (antra-tess/membrane#159).
+        // Some providers send tool-call deltas without an index (antra-tess/membrane#159).
         if (Array.isArray(delta?.tool_calls)) {
           for (const tc of delta.tool_calls) toolCalls.add(tc);
         }
@@ -307,17 +304,14 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
           }
         }
 
-        // A final `data:` line that arrived without its trailing newline is still
-        // buffered here. Servers and proxies do close right after writing the
-        // last event, so dropping it would report a finished turn as a dropped
-        // connection at the guard below.
+        // A final `data:` line can arrive without its trailing newline: servers and
+        // proxies close right after writing the last event.
         for (const data of sseParser.flush()) {
           processDataLine(data);
         }
       } finally {
-        // A read loop that ends early, on a callback's error or any other,
-        // leaves the body unread: cancel it, so the provider stops sending
-        // and the connection is let go. After a full read it does nothing.
+        // An unread body holds the connection: cancel it, so the provider stops
+        // sending. After a full read it does nothing.
         void reader.cancel().catch(() => {});
       }
 
@@ -386,9 +380,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     // OpenAI's own models keep their parameter surface when reached through
     // this adapter (e.g. baseURL https://api.openai.com/v1): GPT-5+ and the
     // o-series reject `max_tokens` ("Use 'max_completion_tokens' instead") and
-    // custom temperature/top_p, and some reject `stop`. Same model detection
-    // as OpenAIAdapter; every other model id keeps the legacy parameters that
-    // generic OpenAI-compatible servers expect.
+    // custom temperature/top_p, and some reject `stop`.
     const model = request.model;
     const maxTokens = request.maxTokens || this.defaultMaxTokens;
     const params: any = {
@@ -421,7 +413,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
 
     // OpenAI-compatible APIs may limit stop sequences (OpenAI: 4) — truncate to be safe
     if (request.stopSequences && request.stopSequences.length > 0 && !noStopSupport(model)) {
-      params.stop = request.stopSequences.slice(0, 4);
+      params.stop = request.stopSequences.slice(0, OPENAI_MAX_STOP_SEQUENCES);
     }
     
     if (request.tools && request.tools.length > 0) {
@@ -460,9 +452,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
             if (isRawItemCarrier(block)) continue;
             contentParts.push({ type: 'text', text: block.text });
           } else if (block.type === 'thinking') {
-            // Round-trip the reasoning trace back to the provider (OpenRouter
-            // accepts `reasoning` on a prior assistant turn), mirroring how the
-            // Anthropic adapter re-feeds signed thinking blocks.
+            // OpenRouter accepts `reasoning` on a prior assistant turn.
             if (typeof block.thinking === 'string') {
               reasoningText += (reasoningText ? '\n' : '') + block.thinking;
             }

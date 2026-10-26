@@ -1,11 +1,6 @@
 /**
- * Regression: a cache breakpoint must never land on a thinking block.
- *
- * The API rejects `cache_control` on thinking / redacted_thinking with
- * 400 "thinking.cache_control: Extra inputs are not permitted". The rule was
- * fixed in NativeFormatter (2026-07-01) but NOT in Membrane.buildNativeToolRequest
- * — the live Connectome path — so the 400 returned on 2026-07-14 the moment a
- * breakpoint landed on a thinking-terminated turn. One shared helper now.
+ * The API rejects `cache_control` on thinking and redacted_thinking blocks
+ * with a 400: "thinking.cache_control: Extra inputs are not permitted".
  */
 import { describe, it, expect } from 'vitest';
 import { lastCacheableBlockIndex } from './formatters/native.js';

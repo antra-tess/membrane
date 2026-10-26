@@ -51,11 +51,9 @@ export interface RetryConfig {
 
   /**
    * Separate, longer schedule for provider capacity errors (529
-   * overloaded_error). Capacity storms last minutes, not seconds — the
-   * standard schedule's 30s ceiling turns one into a dead turn. Overloaded
-   * retries are attempted whatever the base maxRetries says (mirroring the
-   * forced 429 retries), unless the call passes `retry: false`, with jitter
-   * so a fleet backing off doesn't re-create the stampede in sync.
+   * overloaded_error). Overloaded retries are attempted whatever the base
+   * maxRetries says (mirroring the forced 429 retries), unless the call
+   * passes `retry: false`, with jitter.
    *
    * maxRetries: 0 here disables this dedicated policy entirely: 529s then
    * follow the base retry config like any other retryable server error, on
@@ -246,9 +244,9 @@ export interface MembraneConfig {
 
   /**
    * Default for request.promptCaching when the request doesn't set it.
-   * Historical default is true (Anthropic API). Set false for transports
-   * that reject cache_control (e.g. Bedrock legacy Claude models, which 400
-   * with "your request did not allow prompt caching").
+   * Default: true. Set false for transports that reject cache_control (e.g.
+   * Bedrock legacy Claude models, which 400 with "your request did not allow
+   * prompt caching").
    */
   defaultPromptCaching?: boolean;
 

@@ -1,14 +1,8 @@
 /**
- * `openai-compatible` must capture a reasoning trace delivered as
- * `reasoning_content`, not only as `reasoning`.
- *
- * The adapter only read `message.reasoning` / `delta.reasoning` (the OpenRouter
- * spelling). Endpoints that follow the DeepSeek convention — Xiaomi's official
- * MiMo API (https://api.xiaomimimo.com/v1) is one, in both the non-streamed
- * message and every streamed delta — put the trace in `reasoning_content`, so
- * it was silently dropped: no thinking block, nothing persisted, nothing
- * re-sent on the next turn. `reasoning` keeps precedence when a backend sends
- * both, so OpenRouter-style responses are unchanged.
+ * OpenRouter delivers a reasoning trace as `reasoning`; endpoints that follow
+ * the DeepSeek convention, such as Xiaomi's MiMo API
+ * (https://api.xiaomimimo.com/v1), put it in `reasoning_content`, in the
+ * non-streamed message and in every streamed delta.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { OpenAICompatibleAdapter, fromOpenAIMessage } from '../../src/providers/openai-compatible.js';
@@ -91,8 +85,7 @@ describe('OpenAICompatibleAdapter reasoning_content (streamed)', () => {
   });
 
   it('keeps whitespace-only deltas that are part of the trace', async () => {
-    // A streamed trace is split at token boundaries: a lone ' ' or '\n' delta is
-    // real content. Trimming per delta would glue the words together.
+    // A streamed trace is split at token boundaries: a lone ' ' or '\n' delta is real content.
     stubFetchWithSseLines([
       '{"choices":[{"delta":{"reasoning_content":"zz step one,"}}]}',
       '{"choices":[{"delta":{"reasoning_content":" "}}]}',

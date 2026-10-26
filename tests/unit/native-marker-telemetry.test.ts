@@ -11,6 +11,8 @@ import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import type { NormalizedRequest, StreamEvent } from '../../src/types/index.js';
 
+const ANTHROPIC_CACHE_CONTROL_LIMIT = 4;
+
 function markerCountingAdapter() {
   return {
     name: 'zz-marker-telemetry',
@@ -101,7 +103,7 @@ describe('native paths count the request that shipped', () => {
       hooks: { beforeRequest: markerAddingHook(6) },
     });
     const response = await membrane.stream(nativeRequest(), { onChunk: () => {} });
-    expect((response as any).details.cache.markersInRequest).toBe(4);
+    expect((response as any).details.cache.markersInRequest).toBe(ANTHROPIC_CACHE_CONTROL_LIMIT);
   });
 
   it('runNativeToolsYielding reports the post-hook, post-clamp count', async () => {
@@ -111,7 +113,7 @@ describe('native paths count the request that shipped', () => {
     const events: StreamEvent[] = [];
     for await (const event of membrane.streamYielding(nativeRequest())) events.push(event);
     const complete = events.find((e) => e.type === 'complete') as any;
-    expect(complete.response.details.cache.markersInRequest).toBe(4);
+    expect(complete.response.details.cache.markersInRequest).toBe(ANTHROPIC_CACHE_CONTROL_LIMIT);
   });
 
   it('reports the hook REMOVING the only marker', async () => {

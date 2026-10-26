@@ -25,7 +25,7 @@ import type { ProviderAdapter, ProviderResponse } from '../../src/types/provider
 import type { BlockEvent, ChunkMeta, StreamCallbacks } from '../../src/types/streaming.js';
 import type { PrefillFormatter } from '../../src/formatters/types.js';
 
-/** A round's chunks; with `stop`, the provider stopped at that stop sequence, which it didn't send. */
+/** A round's chunks; a provider that stops at a stop sequence doesn't send it. */
 type Round = string[] | { chunks: string[]; stop: string };
 
 /**
@@ -474,7 +474,7 @@ describe.each([
   ['streamYielding', (adapter: ProviderAdapter, options: Options = {}) => viaYielding(adapter, { ...options, yielding: { emitTokens: true, emitBlocks: true } })],
   ['stream', viaStream],
 ] as const)('under the provider\'s typed blocks, through %s', (_name, run) => {
-  it('streams nothing the parser held back at a round\'s end, and a put-back stop as main sent it', async () => {
+  it('streams nothing the parser held back at a round\'s end, and a put-back stop at the parser\'s index 0, outside the provider\'s blocks', async () => {
     // The stop sits inside the thinking block the model opened, so it's put
     // back after the provider's block completed: main sent it then, labelled
     // with the parser's block and index 0, and still does. The provider's

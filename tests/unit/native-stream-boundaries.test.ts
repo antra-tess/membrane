@@ -1,27 +1,6 @@
 /**
- * Three boundaries of a native-mode stream that this PR's native construction
- * left open (greptile on #102: discussion_r4207037937, r4207037948,
- * r4207037963).
- *
- * - Stops. A provider that does not apply a request's stop sequences (the
- *   Responses API has no stop parameter; Chat Completions drops it for some
- *   models and sends at most four) still ends the accepted output at the
- *   stop, including in text it reports only in its returned output: no
- *   chunk, block event, returned block or replayed item carries the stop or
- *   anything after it (chunks already sent ahead of unstreamed text that
- *   holds a stop aside; see LocalStopSequences), and thinking is never
- *   scanned. The returned content decides where the attempt stops when an
- *   adapter's chunks don't match it (slimepriestess's review of #58): text a
- *   stop withheld while streaming is delivered at the end when that content
- *   holds no stop.
- * - prefillUserMessage. The caller's synthetic user text is the leading user
- *   turn wherever a native conversation needs one.
- * - Aborts. A block the provider finished delivering before an abort is kept
- *   in partialContent, and once the provider has returned, every block it
- *   returned is; a tool call whose arguments never finished is not.
- *
- * The Anthropic fixtures stream past the stop on purpose: they stand for any
- * provider that does not apply it.
+ * The Responses API has no stop parameter, and Chat Completions drops it for
+ * some models.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
@@ -308,12 +287,7 @@ describe('a request stop on a native stream the provider did not stop', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Stops where the returned text is not the streamed text: OpenAICompatibleAdapter
-// drops reasoning a backend leaked into the content channel (`…</think>`)
-// from what it returns, while its chunks carried it. The returned content
-// decides where the attempt stops (slimepriestess's review of #58).
-// ---------------------------------------------------------------------------
+// Some backends leak reasoning into the content channel (`…</think>`).
 
 /** An OpenAI-compatible chat stream of `deltas`, ending with finish_reason stop. */
 function compatibleResponse(deltas: string[]): Response {
@@ -375,8 +349,7 @@ describe('a request stop where the returned text is not the streamed text', () =
   }
 
   it.each(['stream', 'yielding'])('cuts at a fifth stop the adapter could not send (%s)', async path => {
-    // Chat Completions takes at most four stops, so the compatible adapter
-    // sends four. The fifth still ends the accepted output.
+    // Chat Completions takes at most four stops.
     const bodies = script(() => compatibleResponse(['one two ', 'five FIVE more']));
     const s = sink();
     const response = await run(path, compatible(), {

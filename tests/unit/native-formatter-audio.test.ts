@@ -1,14 +1,4 @@
-/**
- * Unit coverage for audio pass-through in the NativeFormatter.
- *
- * The formatter used to treat `audio` as unsupported media (throwing under the
- * default `unsupportedMedia: 'error'`), which meant audio never reached the
- * provider adapters even though Gemini (inlineData) and OpenRouter (input_audio)
- * can convert it. Audio blocks now pass through in the same shape as images:
- * `{ type: 'audio', source: { type: 'base64', media_type, data } }` — the
- * snake_case `media_type` the providers read (with camelCase fallback).
- * Documents remain unsupported media (error/strip as configured).
- */
+/** Gemini (inlineData) and OpenRouter (input_audio) take audio. */
 import { describe, it, expect, vi } from 'vitest';
 import { NativeFormatter } from '../../src/formatters/native.js';
 import type { NormalizedMessage } from '../../src/types/index.js';

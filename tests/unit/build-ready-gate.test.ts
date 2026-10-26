@@ -1,15 +1,4 @@
-/**
- * The `ready` flag must be READ at the wire boundary.
- *
- * `BuildOptions.pendingToolCallIds` is public API: a caller declares which
- * tool_use ids are still in flight, and the tool-pair normalizer answers with
- * `BuildResult.ready === false` instead of synthesizing a `[pending]` result
- * over a call that has not finished. The flag was written by two formatters
- * and read nowhere — so a consumer following Membrane's own example of
- * ignoring it built a request carrying an unmatched tool_use, which is exactly
- * the 400 family the normalizer exists to prevent, produced by using its
- * documented option.
- */
+/** A request carrying a tool_use with no matching tool_result is refused with a 400. */
 
 import { describe, it, expect, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';

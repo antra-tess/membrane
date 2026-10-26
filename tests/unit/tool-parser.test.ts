@@ -358,8 +358,7 @@ describe('formatToolResults', () => {
 
     expect(xml).toContain('<function_results>');
     expect(xml).toContain('</function_results>');
-    // Legacy Anthropic shape: no tool_use_id on the wire, tool_name +
-    // stdout elements, raw (unescaped) content.
+    // Legacy Anthropic shape: no tool_use_id on the wire, tool_name and stdout elements.
     expect(xml).not.toContain('tool_use_id');
     expect(xml).toContain('<result>');
     expect(xml).toContain('<tool_name>get_data</tool_name>');

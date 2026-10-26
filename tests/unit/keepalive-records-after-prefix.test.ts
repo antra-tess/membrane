@@ -1,23 +1,7 @@
 /**
- * The Anthropic adapter's cache keepalive records a request only once the
- * provider has its prefix: in the stream lane at `message_start`, and in the
- * complete lane once the response has arrived.
- *
- * Recorded before the send, a request whose call then failed was replayed
- * through its day, though the provider wasn't known to have cached it, and
- * one the provider refused for what its prefix holds had its replays refused
- * too. Three refusals in a row stop the keepalive for every lineage, so one
- * refused request could turn it off for the process. Now a call that fails
- * before the provider is known to have the prefix leaves its lineage's
- * earlier snapshot, and that snapshot's window, as they were. A failure is
- * made where the real SDK makes it: a refused or undelivered stream fails at
- * its iterator's first event, after messages.stream() has returned.
- *
- * A lineage's touch counts from the send of the call that's recorded, where
- * the cache's clock starts, and a refresh's from its own send.
- *
- * The SDK client is a stub, so nothing leaves the process, and the clock is
- * faked.
+ * The real SDK fails a refused or undelivered stream at its iterator's first
+ * event, after messages.stream() has returned. The provider's cache clock
+ * starts at a request's send.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Anthropic from '@anthropic-ai/sdk';

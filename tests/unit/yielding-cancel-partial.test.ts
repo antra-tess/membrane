@@ -178,9 +178,7 @@ describe('a cancelled streamYielding() turn reports what it had', () => {
           stream.provideToolResults(event.calls.map((call) => ({ toolUseId: call.id, content: 'zz ok' })));
           stream.cancel();
         }
-        // Still reading when the loop resumes and records those results: it
-        // records them as soon as its wait resolves, with no await between,
-        // so one turn of the event loop is enough.
+        // setImmediate runs after every pending microtask, so the loop resuming from its settled wait has recorded those results by then.
         await new Promise((resolve) => setImmediate(resolve));
       }
       const part = partOf(events);

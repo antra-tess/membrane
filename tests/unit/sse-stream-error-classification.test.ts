@@ -334,14 +334,7 @@ describe('OpenAI Responses API error frames keep their classification', () => {
   });
 });
 
-/**
- * The Responses API's terminal-response check throws the same structured
- * payload from two reachable paths: the streaming one, where the terminal
- * frame (`response.completed`/`response.incomplete`) carries an `error`
- * object, and the non-streaming one, where a 200 body does. A 200 carrying an
- * error object never reaches an HTTP-status boundary classifier, so this
- * helper is the only lawful home for that classification.
- */
+/** The Responses API can carry an error object in a 200: on the streaming terminal frame (`response.completed`/`response.incomplete`) and in a non-streaming body. */
 function jsonResponseStub(payload: unknown): void {
   vi.stubGlobal(
     'fetch',

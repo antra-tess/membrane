@@ -1,21 +1,7 @@
 /**
- * Streamed tool calls whose `tool_calls` entries carry no `index`
- * (antra-tess/membrane#159, part 2).
- *
- * OpenAI's API spec requires `index` on every entry; some OpenAI-compatible
- * servers are reported to leave it out. Every entry without one (absent or
- * `null`) used to go to slot 0, so two calls became one: the second's id and
- * name replaced the first's, and their argument strings ran together. Now such
- * an entry never takes a slot. It joins the call that has its id, or failing
- * that the current call (the one the last entry went to), unless it carries a
- * name and a new id while that call has an id. Entries with an index go to
- * their slots as on main, which stream-callback-errors.test.ts covers. What
- * this change adds for them is tested here: in a slot a piece continues the
- * latest call with its id, or else the last, a call that began without an index
- * moves into its slot by its id, and a slot can hold calls of different tools.
- * On every path, an entry that carries nothing is dropped, a piece that names a
- * tool other than its call's starts a call of its own, a call keeps the first
- * id a piece gives it, and every call comes back under an id of its own.
+ * OpenAI's API spec requires `index` on every `tool_calls` entry of a streamed
+ * delta; some OpenAI-compatible servers are reported to leave it out
+ * (antra-tess/membrane#159).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OpenAIAdapter } from '../../src/providers/openai.js';
@@ -109,7 +95,7 @@ for (const [name, make] of adapters) {
       expect((await calls([[piece('x', 'zz_a', '{"a":1}')], [piece('x', 'zz_b', '{"b":2}')], [piece('x_2', 'zz_c', '{"c":3}')]])).map((c: { id: string }) => c.id)).toEqual(['x', 'x_3', 'x_2']);
     });
 
-    it('an index of null counts as none', async () => {
+    it('an index of null counts as none, so two calls of one tool stay two', async () => {
       // Two calls of one tool: in one slot they would be one call, while with no index each id starts its own.
       const nullIndex = (id: string, args: string) => ({ index: null, ...piece(id, 'zz_read', args) });
       expect(await calls([[nullIndex('call_a', '{"x":1}')], [nullIndex('call_b', '{"y":2}')]])).toEqual([

@@ -40,12 +40,8 @@ type OpenRouterContentBlock =
   | { type: 'input_audio'; input_audio: { data: string; format: string } };
 
 /**
- * Map a media MIME type to the `format` string OpenRouter expects on an
- * `input_audio` part. OpenRouter follows the OpenAI Chat Completions shape and
- * documents these format values: wav, mp3, aiff, aac, ogg, flac, m4a, pcm16,
- * pcm24. Returns undefined for MIME types we don't have a mapping for, so the
- * caller can skip the block rather than send a malformed part (which model
- * actually accepts which format is the model's concern — this is just plumbing).
+ * OpenRouter's documented `format` values for an `input_audio` part: wav,
+ * mp3, aiff, aac, ogg, flac, m4a, pcm16, pcm24.
  */
 function audioMimeToFormat(mimeType: string): string | undefined {
   // Strip MIME parameters ("audio/mpeg; rate=16000") before matching.
@@ -152,14 +148,11 @@ export interface OpenRouterAdapterConfig {
 // ============================================================================
 
 /**
- * Which convention the tokens OpenRouter just handed back are in. OpenRouter
- * passes the routed provider's usage payload through, so an Anthropic-routed
- * call reports `cache_read_input_tokens` and `cache_creation_input_tokens`
- * (disjoint from prompt_tokens) while an OpenAI-routed one reports
- * `prompt_tokens_details.cached_tokens` (a subset of it). The field that
- * carried a number therefore identifies the convention: an Anthropic-shaped
- * field, read or write, makes the response cache-excluded, so Anthropic's
- * writes are never subtracted from prompt_tokens as an inclusive count's are.
+ * OpenRouter passes the routed provider's usage payload through, so an
+ * Anthropic-routed call reports `cache_read_input_tokens` and
+ * `cache_creation_input_tokens` (disjoint from prompt_tokens) while an
+ * OpenAI-routed one reports `prompt_tokens_details.cached_tokens` (a subset
+ * of it).
  */
 function resolveRoutedCacheConvention(
   anthropicShapedCacheRead: number | undefined,
@@ -169,6 +162,8 @@ function resolveRoutedCacheConvention(
   if (anthropicShapedCacheRead != null || anthropicShapedCacheWrite != null) return 'cache-excluded';
   return resolvedCacheRead != null ? 'cache-inclusive' : undefined;
 }
+
+const OPENAI_MAX_STOP_SEQUENCES = 4;
 
 export class OpenRouterAdapter implements ProviderAdapter {
   readonly name = 'openrouter';
@@ -260,9 +255,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
       let sawTerminalEvent = false;
       const toolCalls = streamedToolCalls();
       let streamUsage: OpenRouterResponse['usage'] | undefined;
-      // The model the provider actually served, echoed on every SSE
-      // chunk. Reporting the requested id instead hides alias
-      // resolution (and, on OpenRouter, which provider it routed to).
+      // The model the provider served, echoed on every SSE chunk.
       let servedModel: string | undefined;
 
       // One frame handler for both the streamed lines and the EOF flush — the
@@ -289,10 +282,8 @@ export class OpenRouterAdapter implements ProviderAdapter {
         // A provider event is progress (comments never reach here).
         options?.onProgress?.();
 
-        // OpenRouter delivers mid-stream failures (e.g. upstream 429s) as an
-        // SSE data line with an `error` payload. Silently ignoring it would
-        // yield a fake-successful empty completion — surface it instead so
-        // retry logic can handle it. Shared with every other SSE adapter.
+        // OpenRouter delivers mid-stream failures (e.g. upstream 429s) as an SSE
+        // data line with an `error` payload.
         throwOnStreamErrorFrame(parsed, 'OpenRouter', openRouterRequest);
 
         const delta = parsed.choices?.[0]?.delta;
@@ -325,9 +316,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
           }
         }
 
-        // Handle streaming tool calls
-        // streamedToolCalls places each entry: by its index, or, with none, by
-        // its id and name (antra-tess/membrane#159).
+        // Some providers send tool-call deltas without an index (antra-tess/membrane#159).
         if (Array.isArray(delta?.tool_calls)) {
           for (const tc of delta.tool_calls) toolCalls.add(tc);
         }
@@ -358,17 +347,14 @@ export class OpenRouterAdapter implements ProviderAdapter {
           }
         }
 
-        // A final `data:` line that arrived without its trailing newline is still
-        // buffered here. Servers and proxies do close right after writing the
-        // last event, so dropping it would report a finished turn as a dropped
-        // connection at the guard below.
+        // A final `data:` line can arrive without its trailing newline: servers and
+        // proxies close right after writing the last event.
         for (const data of sseParser.flush()) {
           processDataLine(data);
         }
       } finally {
-        // A read loop that ends early, on a callback's error or any other,
-        // leaves the body unread: cancel it, so the provider stops sending
-        // and the connection is let go. After a full read it does nothing.
+        // An unread body holds the connection: cancel it, so the provider stops
+        // sending. After a full read it does nothing.
         void reader.cancel().catch(() => {});
       }
 
@@ -382,9 +368,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
           : contentParts.filter(part => part.type === 'text').map(part => part.text).join('') || null,
       };
 
-      // The calls the stream placed: those with an index in index order (an
-      // index can skip a slot, and a hole would fail the response built from
-      // them), then those without one in the order they started.
+      // A provider's tool-call index can skip a slot.
       const placedToolCalls = toolCalls.calls();
       if (placedToolCalls.length > 0) {
         message.tool_calls = placedToolCalls;
@@ -465,7 +449,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
 
     // OpenAI-compatible APIs may limit stop sequences (OpenAI: 4) — truncate to be safe
     if (request.stopSequences && request.stopSequences.length > 0) {
-      params.stop = request.stopSequences.slice(0, 4);
+      params.stop = request.stopSequences.slice(0, OPENAI_MAX_STOP_SEQUENCES);
     }
     
     if (request.tools && request.tools.length > 0) {
@@ -509,8 +493,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
       
       // Convert from Anthropic-style format
       if (Array.isArray(msg.content)) {
-        // Check if any block has cache_control - if so, preserve the array format
-        // This is needed for Claude models through OpenRouter to use prompt caching
+        // Claude models through OpenRouter cache only with cache_control on array content blocks.
         const hasCache = msg.content.some((block: any) => block.cache_control);
 
         const toolCalls: OpenRouterToolCall[] = [];
@@ -552,13 +535,8 @@ export class OpenRouterAdapter implements ProviderAdapter {
             const part = openAIImagePart(block.source);
             if (part) contentBlocks.push(part);
           } else if (block.type === 'audio') {
-            // Audio input → OpenAI-style `input_audio` content part (sibling to
-            // the Gemini inlineData path). Like images, this forces the array
-            // content format. MIME (canonical `mediaType`, falling back to
-            // snake_case `media_type`, then `audio/mpeg`) is mapped to
-            // OpenRouter's `format`; unmappable types are skipped with a warning
-            // rather than sending a malformed part. Data is raw base64 (no
-            // data-uri prefix), matching the Gemini audio path.
+            // OpenRouter takes audio as an OpenAI-style `input_audio` part in array
+            // content, raw base64 with no data-URI prefix.
             hasAudio = true;
             // Migrate any already-collected textParts into contentBlocks
             // (we didn't know we'd need array format until hitting audio).

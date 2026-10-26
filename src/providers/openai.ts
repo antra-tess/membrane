@@ -102,7 +102,7 @@ export interface OpenAIAdapterConfig {
   /** API key (defaults to OPENAI_API_KEY env var) */
   apiKey?: string;
   
-  /** Base URL (default: https://api.openai.com/v1) - useful for Azure OpenAI */
+  /** Base URL (default: https://api.openai.com/v1) */
   baseURL?: string;
   
   /** Organization ID (optional) */
@@ -130,11 +130,9 @@ function gptGeneration(model: string): number | undefined {
 
 /**
  * GPT-5 and every later generation share the reasoning-model parameter
- * surface (max_completion_tokens, default-only temperature/top_p, no stop).
- * Matched by generation rather than by listing each release so a new one
- * (gpt-6-astra, 2026-09) does not fall through to the legacy parameters and
- * 400 at the wire: "Unsupported parameter: 'max_tokens' is not supported with
- * this model. Use 'max_completion_tokens' instead."
+ * surface (max_completion_tokens, default-only temperature/top_p, no stop);
+ * a legacy parameter 400s at the wire: "Unsupported parameter: 'max_tokens'
+ * is not supported with this model. Use 'max_completion_tokens' instead."
  */
 function isReasoningGenerationGpt(model: string): boolean {
   const gen = gptGeneration(model);
@@ -181,15 +179,7 @@ export function noTemperatureSupport(model: string): boolean {
   return isReasoningGenerationGpt(model) || NO_TEMPERATURE_MODELS.some(prefix => model.startsWith(prefix));
 }
 
-/**
- * Models that don't support stop sequences
- * 
- * NOTE: Verified via API testing 2026-02-01. Some models that previously
- * didn't support stop (o1, o3-mini) now do. Keep this list updated!
- * 
- * Models using v1/responses endpoint (gpt-5-pro, o1-pro, etc.) are not
- * included here as they use a different API path entirely.
- */
+/** Models that don't support stop sequences; o1 and o3-mini do. */
 const NO_STOP_MODELS = [
   // GPT-5+ chat models (all variants) are covered by isReasoningGenerationGpt
   // Reasoning models that still don't support stop
@@ -208,15 +198,12 @@ export function noStopSupport(model: string): boolean {
 // OpenAI Adapter
 // ============================================================================
 
+const OPENAI_MAX_STOP_SEQUENCES = 4;
+
 export class OpenAIAdapter implements ProviderAdapter {
   readonly name = 'openai';
 
-  /**
-   * Verified live 2026-08-25 (gpt-4o-mini, 1,732-token prompt): prompt_tokens
-   * stayed at 1732 across a cache hit reporting
-   * prompt_tokens_details.cached_tokens 1664 — the cached span is a SUBSET of
-   * prompt_tokens, not an addition to it.
-   */
+  /** `prompt_tokens` includes the cached span (`prompt_tokens_details.cached_tokens`): a SUBSET, not an addition. */
   readonly usageCacheConvention = 'cache-inclusive' as const;
   private apiKey: string;
   private baseURL: string;
@@ -267,7 +254,7 @@ export class OpenAIAdapter implements ProviderAdapter {
   ): Promise<ProviderResponse> {
     const openAIRequest = this.buildRequest(request);
     openAIRequest.stream = true;
-    // Request usage data in stream for cache metrics
+    // OpenAI streams usage, in the final chunk, only when include_usage asks for it.
     openAIRequest.stream_options = { include_usage: true };
     assertMessagePrefillSupported(openAIRequest.model, openAIRequest.messages, options, this.name, openAIRequest);
     options?.onRequest?.(openAIRequest);
@@ -297,9 +284,7 @@ export class OpenAIAdapter implements ProviderAdapter {
       let sawTerminalEvent = false;
       const toolCalls = streamedToolCalls();
       let streamUsage: OpenAIResponse['usage'] | undefined;
-      // The model the provider actually served, echoed on every SSE
-      // chunk. Reporting the requested id instead hides alias
-      // resolution (and, on OpenRouter, which provider it routed to).
+      // The model the provider served, echoed on every SSE chunk.
       let servedModel: string | undefined;
 
       // One frame handler for both the streamed lines and the EOF flush — the
@@ -335,9 +320,7 @@ export class OpenAIAdapter implements ProviderAdapter {
           callbacks.onChunk(delta.content);
         }
 
-        // Handle streaming tool calls
-        // streamedToolCalls places each entry: by its index, or, with none, by
-        // its id and name (antra-tess/membrane#159).
+        // Some providers send tool-call deltas without an index (antra-tess/membrane#159).
         if (Array.isArray(delta?.tool_calls)) {
           for (const tc of delta.tool_calls) toolCalls.add(tc);
         }
@@ -368,17 +351,14 @@ export class OpenAIAdapter implements ProviderAdapter {
           }
         }
 
-        // A final `data:` line that arrived without its trailing newline is still
-        // buffered here. Servers and proxies do close right after writing the
-        // last event, so dropping it would report a finished turn as a dropped
-        // connection at the guard below.
+        // A final `data:` line can arrive without its trailing newline: servers and
+        // proxies close right after writing the last event.
         for (const data of sseParser.flush()) {
           processDataLine(data);
         }
       } finally {
-        // A read loop that ends early, on a callback's error or any other,
-        // leaves the body unread: cancel it, so the provider stops sending
-        // and the connection is let go. After a full read it does nothing.
+        // An unread body holds the connection: cancel it, so the provider stops
+        // sending. After a full read it does nothing.
         void reader.cancel().catch(() => {});
       }
 
@@ -390,9 +370,7 @@ export class OpenAIAdapter implements ProviderAdapter {
         content: accumulated || null,
       };
 
-      // The calls the stream placed: those with an index in index order (an
-      // index can skip a slot, and a hole would fail the response built from
-      // them), then those without one in the order they started.
+      // A provider's tool-call index can skip a slot.
       const placedToolCalls = toolCalls.calls();
       if (placedToolCalls.length > 0) {
         message.tool_calls = placedToolCalls;
@@ -479,7 +457,7 @@ export class OpenAIAdapter implements ProviderAdapter {
     // Reasoning models (o1, o3, o4) don't support stop sequences
     // OpenAI limits stop sequences to 4 — truncate to fit
     if (request.stopSequences && request.stopSequences.length > 0 && !noStopSupport(model)) {
-      params.stop = request.stopSequences.slice(0, 4);
+      params.stop = request.stopSequences.slice(0, OPENAI_MAX_STOP_SEQUENCES);
     }
     
     if (request.tools && request.tools.length > 0) {
@@ -646,8 +624,7 @@ export class OpenAIAdapter implements ProviderAdapter {
       usage: {
         inputTokens: response.usage?.prompt_tokens ?? 0,
         outputTokens: response.usage?.completion_tokens ?? 0,
-        // OpenAI's automatic prompt caching - cached tokens are read from cache
-        // Note: OpenAI doesn't have separate "creation" tokens - it's automatic
+        // OpenAI has no separate cache-creation count: its caching is automatic.
         ...(typeof cachedTokens === 'number' ? { cacheReadTokens: cachedTokens } : {}),
       },
       ...unreportedUsage(response.usage?.prompt_tokens, response.usage?.completion_tokens),
@@ -750,7 +727,9 @@ export class OpenAIAdapter implements ProviderAdapter {
 // ============================================================================
 
 /**
- * Convert normalized content blocks to OpenAI message format
+ * Join normalized content's text blocks into OpenAI message content: their
+ * text, joined by newlines; '' when every text block is a zero-width carrier,
+ * and null when there is no text block.
  */
 export function toOpenAIContent(blocks: ContentBlock[]): string | null {
   // A zero-width carrier holds a block this wire has no form for, so it adds

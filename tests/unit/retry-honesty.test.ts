@@ -126,8 +126,7 @@ describe("membrane's retry wait honors retry-after (MAJOR-2)", () => {
   });
 
   it('a zero base delay stays zero when the backoff overflows, so a stated wait still stands', async () => {
-    // 1e308 squared is Infinity, so the third wait's backoff would be 0 times
-    // Infinity, which is NaN.
+    // 1e308 squared is Infinity, and 0 times Infinity is NaN.
     const adapter = new FailingAdapter(3, () => rateLimit(50));
     adapter.queueResponse('zz-recovered');
     const membrane = new Membrane(adapter, { retry: { retryDelayMs: 0, backoffMultiplier: 1e308 } });
@@ -252,7 +251,8 @@ describe('a stated wait of up to a minute is waited out, whatever the schedule\'
       expect(vi.getTimerCount()).toBe(1);
       // An hour past the first step of 2^31 - 1 ms (about 24.86 days), inside
       // the 25 days: the wait's second step is armed.
-      await vi.advanceTimersByTimeAsync(2_147_483_647 + 60 * 60 * 1000);
+      const platformTimerLimitMs = 2_147_483_647;
+      await vi.advanceTimersByTimeAsync(platformTimerLimitMs + 60 * 60 * 1000);
       expect(adapter.completeCalls).toBe(1);
       expect(vi.getTimerCount()).toBe(1);
       controller.abort();

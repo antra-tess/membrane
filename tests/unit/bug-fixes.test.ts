@@ -138,7 +138,7 @@ describe('Temperature enforcement for thinking', () => {
     const request = makeRequest({
       config: {
         model: 'claude-sonnet-4-5-20250929',
-        maxTokens: 1000,  // can't fit minimum 1024 budget below this
+        maxTokens: 1000,  // below Anthropic's minimum thinking budget of 1024
         temperature: 0.5,
         thinking: { enabled: true, budgetTokens: 5000 },
       },

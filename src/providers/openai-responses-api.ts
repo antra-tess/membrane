@@ -129,14 +129,15 @@ export interface OpenAIResponsesAPIAdapterConfig {
   mode?: 'api' | 'subscription';
   /** Request priority service in subscription mode (default: false). */
   fastMode?: boolean;
-  /** Called once if a subscription response reports a non-priority tier. If
-   * it throws, the error is logged with console.warn and the response stands. */
+  /** Called once if a subscription response to a request for the priority
+   * tier reports another tier. If it throws, the error is logged with
+   * console.warn and the response stands. */
   onFastModeFallback?: (serviceTier: string) => void;
   /** Subscription mode: base of the prompt-cache routing id sent as the
    * `session_id` header and as `prompt_cache_key`. Each request appends a digest
    * of its instructions and first input item, which groups requests by
-   * serialized head: requests that share a head share an id (and a prefix, so
-   * that is the right grouping), tools and later items are not considered.
+   * serialized head: requests that share a head share an id; tools and later
+   * items are not considered.
    * Streams that need isolation beyond that (same-head forks or subagents on
    * one adapter) should set `extra.prompt_cache_key`, which is used instead.
    * Defaults to a random id held for the adapter's lifetime, so a restart
@@ -215,12 +216,9 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
   readonly reportsContentAlterations = true;
 
   /**
-   * Reads `usage.input_tokens_details.cached_tokens` from OpenAI's account-wide
-   * automatic prompt caching — the same mechanism verified live on
-   * /v1/chat/completions on 2026-08-25 (prompt_tokens constant at 1732 across a
-   * hit reporting cached_tokens 1664, so cached is a subset). A same-day probe
-   * of /v1/responses did not itself produce a cache hit to confirm on that
-   * endpoint.
+   * Reads `usage.input_tokens_details.cached_tokens` from OpenAI's automatic
+   * prompt caching, whose cached span is a subset of the input count on
+   * /v1/chat/completions; no cache hit has confirmed it on /v1/responses.
    */
   readonly usageCacheConvention = 'cache-inclusive' as const;
 
@@ -367,9 +365,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
           throwOnStreamErrorFrame(failed, 'OpenAI Responses API', responsesRequest);
           throw new Error('OpenAI Responses API stream error (response_failed): Response failed');
         } else if (event.type === 'error') {
-          // The event's own `type` is the SSE event name ('error'), not a
-          // provider classification, so only code and message are handed over.
-          // The payload object is always present, so this always throws.
+          // The event's own `type` is the SSE event name ('error'), not a provider classification.
           throwOnStreamErrorFrame(
             { error: event.error ?? { code: event.code, message: event.message ?? 'Streaming request failed' } },
             'OpenAI Responses API',
@@ -393,12 +389,9 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
         reader.releaseLock();
       }
 
-      // A well-formed stream always ends with a terminal event
-      // (response.completed / response.incomplete; response.failed and error
-      // throw above). Reaching EOF without one means the connection was
-      // dropped mid-stream (proxy/LB close, early termination). Fabricating a
-      // 'completed' response here would persist a silently truncated turn
-      // with end_turn/zero usage — signal a retryable stream failure instead.
+      // A well-formed stream ends with a terminal event (response.completed or
+      // response.incomplete; response.failed and error throw above), so EOF
+      // without one is a dropped connection.
       if (!terminalResponse) {
         throw networkError(
           'OpenAI Responses API stream ended before a terminal response event ' +
@@ -454,11 +447,8 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
     if (this.project) headers.set('OpenAI-Project', this.project);
     if (this.subscription) {
       // The subscription backend keys its prompt cache on this header and
-      // ignores the body's prompt_cache_key: without it every response gets a
-      // fresh random key and a byte-stable prefix still reads cached_tokens 0
-      // (probed live 2026-09-21: 0 of 9.2k without, 9088 of 9256 with). Warm
-      // calls still miss sporadically whatever the id: 3 of 28 on a dedicated
-      // id, 3 of 13 on one shared by two interleaved prefixes.
+      // ignores the body's prompt_cache_key. Warm calls still miss sporadically,
+      // whatever the id.
       headers.set('session_id', headerSafeSessionId(String(request.prompt_cache_key)));
     }
     for (const [name, value] of Object.entries(this.extraHeaders)) headers.set(name, value);
@@ -536,11 +526,8 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
       responsesRequest.tools = this.convertTools(responsesRequest.tools, responsesRequest);
     }
 
-    // These invariants define the adapter's stateless native-item contract and
-    // cannot be overridden through provider params.
-    // The API takes native items as they are, but an input_image whose data:
-    // URL holds no image would be refused on every request, so it goes as the
-    // placeholder in either mode.
+    // An input_image whose data: URL holds no image would be refused on every
+    // request, so it goes as the placeholder in either mode.
     responsesRequest.input = this.subscription
       ? this.subscriptionInput(request.messages, onContentAltered)
       : nativeInputForRequest(request.messages, onContentAltered);
@@ -586,28 +573,10 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
   }
 
   /**
-   * Every function tool this converts reaches the wire with a boolean `strict`.
-   *
-   * Left out, strictness is whatever the provider defaults to, and strict
-   * validation treats every property as one the model must send. A tool schema
-   * written as plain JSON Schema means the opposite: a property outside
-   * `required` may be omitted. So an omitted or null `strict` is sent as
-   * `false`, stating what the schema means, as the Codex client (a plain
-   * `strict: bool` on every function tool) and pi's Responses conversion
-   * (default `false`) do. An explicit boolean is the caller's choice and is
-   * kept. Any other value is refused rather than coerced: true and false each
-   * change what the model may send, so neither is a safe guess.
-   *
-   * This holds on all three function paths: a flat Responses function, a
-   * nested Chat-style `{ type: 'function', function }` (whose `strict` is read
-   * from the function, or from the wrapper when the function's is omitted or
-   * null), and a definition built from `inputSchema`/`input_schema`/
-   * `parameters`. Every other tool passes through as the caller wrote it: a
-   * non-function tool, which has no such field, and a container such as a
-   * Responses namespace tool, whose member functions keep whatever `strict`
-   * they were given. Membrane builds no container tools, so one arrives only
-   * as a caller wrote it, in the API's own shape. A refusal carries
-   * `rawRequest`, the request as far as it was built, as its own.
+   * OpenAI's strict validation treats every property as one the model must
+   * send, where plain JSON Schema lets a property outside `required` be
+   * omitted, and the API applies its own default to a tool sent without
+   * `strict`.
    */
   private convertTools(tools: unknown[], rawRequest: unknown): unknown[] {
     return tools.map((rawTool: any, position) => {

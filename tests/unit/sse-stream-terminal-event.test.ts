@@ -1,19 +1,9 @@
 /**
- * A stream that ends without a terminal event must fail, not be reported as a
- * clean completion.
- *
- * The terminal signal has to be an OBSERVATION, not a default: `finish_reason`
- * / `[DONE]` / Gemini's `finishReason` / Anthropic's `message_delta` only ever
- * overwrite an initialised `'stop'` / `'end_turn'`. A graceful upstream close
- * with no terminal frame — proxy or LB idle timeout, an early FIN, a gateway
- * truncating the body — therefore yielded partial content wearing
- * `stopReason: 'end_turn'` plus (OpenAI family) a `raw.finish_reason: 'stop'`
- * that never came off the wire. Abrupt TCP resets already reject the read;
- * graceful closes did not.
- *
- * `openai-responses-api` is the one adapter that already refused this. Bedrock
- * guarded only the fully-empty case (0 blocks AND 0 in AND 0 out), so a stream
- * truncated after any content passed.
+ * Each provider ends a stream with a terminal signal (`finish_reason` /
+ * `[DONE]`, Gemini's `finishReason`, Anthropic's `message_delta`). A graceful
+ * upstream close without one (a proxy or load balancer idle timeout, an early
+ * FIN, a gateway truncating the body) ends the body cleanly, where an abrupt
+ * TCP reset rejects the read.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { OpenAIAdapter } from '../../src/providers/openai.js';

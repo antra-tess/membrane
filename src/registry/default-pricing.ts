@@ -52,7 +52,7 @@ export const ANTHROPIC_PRICING_LAST_VERIFIED = '2026-10-19';
  * then "starting December 1, 2026"), with no time zone. A day in Cloud
  * Billing's reports starts at midnight US and Canadian Pacific Time
  * (https://cloud.google.com/billing/docs/how-to/reports), so each change is
- * taken to start at Pacific midnight. That is inferred, not stated by Google.
+ * taken to start at Pacific midnight, an inference Google doesn't state.
  * Both dates fall in standard time, UTC-8.
  */
 const GOOGLE_FROM_2026_12_01 = '2026-12-01T00:00:00-08:00';
@@ -101,12 +101,9 @@ const GEMINI_3_6_FLASH: Omit<PricedRow, 'prefix'> = {
 };
 
 export const PRICING_TABLE: readonly PricingRow[] = [
-  // --------------------------------------------------------------------------
-  // Anthropic — https://platform.claude.com/docs/en/about-claude/pricing
-  // Retrieved 2026-10-19 (ANTHROPIC_PRICING_LAST_VERIFIED). Cache-write column
-  // is the 5-minute TTL bucket; the 1-hour bucket costs more and this table has
-  // no field for it.
-  // --------------------------------------------------------------------------
+  // Anthropic — https://platform.claude.com/docs/en/about-claude/pricing.
+  // The cache-write column is the 5-minute TTL bucket; the 1-hour bucket costs
+  // more and this table has no field for it.
   {
     // Fable 5.1 and Mythos 5.1 read their cache at 0.025x, a quarter of the
     // 5 pair's rate.
@@ -200,19 +197,13 @@ export const PRICING_TABLE: readonly PricingRow[] = [
     pricing: { inputPerMillion: 0.80, outputPerMillion: 4, cacheWritePerMillion: 1, cacheReadPerMillion: 0.08, currency: 'USD', asOf: ANTHROPIC_PRICING_LAST_VERIFIED },
   },
   {
-    // Fully retired: no longer listed on the price page as of 2026-10-19, so
-    // this is the last published rate rather than a current one.
+    // Fully retired: the last published rate, not a current one.
     prefix: 'claude-3-5-sonnet',
     pricing: { inputPerMillion: 3, outputPerMillion: 15, cacheWritePerMillion: 3.75, cacheReadPerMillion: 0.30, currency: 'USD', asOf: '2025-07-01' },
   },
 
-  // --------------------------------------------------------------------------
-  // OpenAI — https://platform.openai.com/docs/pricing (standard tier)
-  // Retrieved 2026-08-25. "Cached input" is OpenAI's discounted rate for the
-  // automatically-cached prompt prefix; note that OpenAI's prompt_tokens
-  // INCLUDES that span (see UsageCacheConvention), which membrane normalizes
-  // away before pricing, so cacheReadPerMillion is applied to a disjoint count.
-  // --------------------------------------------------------------------------
+  // OpenAI — https://platform.openai.com/docs/pricing (standard tier).
+  // "Cached input" is OpenAI's rate for the automatically cached prompt prefix.
   {
     prefix: 'gpt-6-astra',
     pricing: { inputPerMillion: 10, outputPerMillion: 50, cacheReadPerMillion: 1.00, currency: 'USD', asOf: '2026-09-06' },
@@ -284,24 +275,16 @@ export const PRICING_TABLE: readonly PricingRow[] = [
     pricing: { inputPerMillion: 2.50, outputPerMillion: 10, cacheReadPerMillion: 1.25, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
   },
 
-  // --------------------------------------------------------------------------
   // Google — https://ai.google.dev/gemini-api/docs/pricing (paid tier,
-  // Standard). Retrieved 2026-10-14, with the deprecations table at
-  // https://ai.google.dev/gemini-api/docs/deprecations. Google's published
-  // output price INCLUDES thinking tokens, which is why the gemini adapter
-  // folds thoughtsTokenCount into outputTokens. Cache rates are the
+  // Standard), and https://ai.google.dev/gemini-api/docs/deprecations. Google's
+  // published output price INCLUDES thinking tokens. Cache rates are the
   // context-caching per-token price and exclude Google's separate per-hour
-  // storage charge, which membrane does not model. Where a model has a
-  // >200k-token tier the smaller-prompt rate is used, so a longer prompt is
-  // underpriced. Where input costs more for audio, the text rate is used. A
-  // row's prefix also matches every id that extends it, so a new row needs a
-  // no-price row for each listed image, speech or audio id it would match
-  // (see the end of this section).
-  // --------------------------------------------------------------------------
+  // storage charge. Where a model has a >200k-token tier the smaller-prompt
+  // rate is used, so a longer prompt is underpriced. Where input costs more
+  // for audio, the text rate is used.
   {
-    // Introductory through November 30, 2026, then double. Google: "Implicit
-    // caching only (explicit caching is not supported)", so the
-    // context-caching price is what an implicitly cached span costs.
+    // Google: "Implicit caching only (explicit caching is not supported)", so
+    // the context-caching price is what an implicitly cached span costs.
     prefix: 'gemini-4-argon',
     pricing: { inputPerMillion: 2, outputPerMillion: 10, cacheReadPerMillion: 0.10, currency: 'USD', asOf: GOOGLE_PRICING_LAST_VERIFIED },
     changes: [
@@ -314,9 +297,7 @@ export const PRICING_TABLE: readonly PricingRow[] = [
     ...GEMINI_3_8_FLASH,
   },
   {
-    // Deprecated: Google routes every request for it to gemini-3.8-flash, so
-    // its rate follows 3.8 Flash's. Whichever of the two ids the response
-    // names as the model that served it, this table prices it the same.
+    // Deprecated: Google routes every request for it to gemini-3.8-flash.
     prefix: 'gemini-3.7-flash',
     ...GEMINI_3_8_FLASH,
   },
@@ -326,9 +307,7 @@ export const PRICING_TABLE: readonly PricingRow[] = [
     ...GEMINI_3_6_FLASH,
   },
   {
-    // Deprecated: Google routes every request for it to gemini-3.6-flash, so
-    // its rate follows 3.6 Flash's, as for gemini-3.7-flash above. Was priced
-    // here at 1.50/9, its own rate before the deprecation.
+    // Deprecated: Google routes every request for it to gemini-3.6-flash.
     prefix: 'gemini-3.5-flash',
     ...GEMINI_3_6_FLASH,
   },
@@ -367,11 +346,10 @@ export const PRICING_TABLE: readonly PricingRow[] = [
     pricing: { inputPerMillion: 0.30, outputPerMillion: 2.50, cacheReadPerMillion: 0.03, currency: 'USD', asOf: GOOGLE_PRICING_LAST_VERIFIED },
   },
   // Ids a text model's row above would otherwise price as text. An image
-  // model's output is priced by modality, images far above text (the gemini
-  // adapter asks for image output from any id containing "image"), and one
+  // model's output is priced by modality, images far above text, and one
   // output rate can't hold both. A speech model's output is audio, priced at
-  // its own rate, and the adapter never asks for audio. The native-audio
-  // model is a Live API model, its output priced by modality too.
+  // its own rate. The native-audio model is a Live API model, its output
+  // priced by modality too.
   { prefix: 'gemini-3.8-flash-tts', pricing: null },
   { prefix: 'gemini-3.8-flash-lite-tts', pricing: null },
   { prefix: 'gemini-3.1-flash-lite-image', pricing: null },

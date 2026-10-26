@@ -1,15 +1,4 @@
-/**
- * A keepalive refresh replays its request only through the last one-hour cache marker and the end of
- * the user turn at or after it.
- *
- * Driven through the real `Membrane` with `NativeFormatter` and the real `AnthropicAdapter` and its
- * keepalive; only the SDK client is a stub. The turn is shaped as a host sends it when its context
- * manager places every cache marker itself (`cacheMarkers: 'cm-owned'`, four messages marked with
- * `cacheBreakpoint`): the tool loop runs inside `streamYielding`, so each round's request is the
- * compiled messages plus the earlier rounds, which carry no marker, and the keepalive holds the last
- * round. A refresh of that request reads the compiled messages' cache entries; the rounds after them
- * are under no marker.
- */
+/** Anthropic caches a request's prefix only up to its last cache marker, so rounds after it are under no marker. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import { Membrane } from '../../src/membrane.js';

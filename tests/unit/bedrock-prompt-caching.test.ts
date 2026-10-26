@@ -1,17 +1,6 @@
 /**
- * Bedrock prompt caching (Connectome issue #35).
- *
- * Two Bedrock-specific behaviors that together made caching unusable there:
- *
- * 1. Bedrock accepts `cache_control: { type: 'ephemeral' }` but rejects the
- *    direct-API `ttl` extension as an extra input. buildRequest must strip
- *    the ttl (keeping the marker) wherever a breakpoint can land: message
- *    content blocks, system array blocks, and tool entries.
- *
- * 2. The stream parser must surface cache_creation_input_tokens /
- *    cache_read_input_tokens. Before 2026-07-31 only complete() did, so
- *    streamed calls reported zero cache activity forever and there was no
- *    way to observe whether caching worked at all.
+ * Bedrock accepts `cache_control: { type: 'ephemeral' }` but rejects the
+ * direct-API `ttl` extension as an extra input.
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
@@ -36,6 +25,8 @@ function buildRequest(request: unknown): Record<string, any> {
 //    bedrock-stream-stop-sequence.test.ts; the adapter reads lengths and
 //    headers but does not validate CRCs) ──
 
+const STRING_HEADER_VALUE_TYPE = 7;
+
 function stringHeader(name: string, value: string): Uint8Array {
   const nameBytes = new TextEncoder().encode(name);
   const valueBytes = new TextEncoder().encode(value);
@@ -43,7 +34,7 @@ function stringHeader(name: string, value: string): Uint8Array {
   let o = 0;
   out[o++] = nameBytes.length;
   out.set(nameBytes, o); o += nameBytes.length;
-  out[o++] = 7; // string type
+  out[o++] = STRING_HEADER_VALUE_TYPE;
   new DataView(out.buffer).setUint16(o, valueBytes.length, false); o += 2;
   out.set(valueBytes, o);
   return out;

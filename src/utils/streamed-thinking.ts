@@ -1,12 +1,7 @@
 import type { ContentBlock } from '../types/index.js';
 import type { ContentParseContext } from '../formatters/types.js';
 
-/**
- * Thinking is a provider block, not a delimiter in a text stream. Keep its
- * received snapshots/deltas at offsets in the visible text, so a plain
- * formatter never parses thinking and partial output still retains it.
- * Provider indices restart each round; completed spans keep their position.
- */
+/** Provider block indices restart each round. */
 export class StreamedThinking {
   private spans: { offset: number; block: ContentBlock }[] = [];
   private current = new Map<number, { offset: number; block: ContentBlock }>();

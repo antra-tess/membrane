@@ -1,12 +1,8 @@
 /**
- * A tool's schema reaches Gemini as JSON Schema (#185). Gemini's
- * `FunctionDeclaration.parameters` takes only its OpenAPI-subset `Schema`: a
- * `type` there is one value, and `$schema`, `$defs`, `$ref` and `const` are
- * unknown fields. So a schema that uses any of them, as agent-framework's own
- * tools (`type: ['string', 'null']`) and MCP servers' generated schemas do,
- * failed the whole generateContent call with 400 INVALID_ARGUMENT.
- * `parametersJsonSchema` takes the schema as JSON Schema, so the adapter sends
- * it there, unchanged.
+ * Gemini's `FunctionDeclaration.parameters` takes only its OpenAPI-subset
+ * `Schema`: a `type` there is one value, and `$schema`, `$defs`, `$ref` and
+ * `const` are unknown fields, which fail the whole generateContent call with
+ * 400 INVALID_ARGUMENT. `parametersJsonSchema` takes the schema as JSON Schema.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { GeminiAdapter } from '../../src/providers/gemini.js';
@@ -73,15 +69,15 @@ describe('GeminiAdapter tool schemas', () => {
       const bodies = recordBodies();
       // Taken before the call, so an adapter that edited the caller's schema
       // in place would differ from it.
-      const expected = structuredClone(schema);
+      const schemaBeforeTheCall = structuredClone(schema);
       await new GeminiAdapter({ apiKey: 'zz-key-not-used' }).complete(
         request([{ name: 'zz_tool', description: 'zz-description', inputSchema: schema }]),
       );
 
       const [declaration] = bodies[0]!.tools[0].functionDeclarations;
-      expect(declaration).toEqual({ name: 'zz_tool', description: 'zz-description', parametersJsonSchema: expected });
+      expect(declaration).toEqual({ name: 'zz_tool', description: 'zz-description', parametersJsonSchema: schemaBeforeTheCall });
       expect(declaration).not.toHaveProperty('parameters');
-      expect(schema).toEqual(expected);
+      expect(schema).toEqual(schemaBeforeTheCall);
     });
   }
 

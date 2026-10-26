@@ -30,11 +30,11 @@ import { AnthropicXmlFormatter } from '../../src/formatters/anthropic-xml.js';
 import type { ToolDefinition, NormalizedMessage } from '../../src/types/index.js';
 
 /** Every tool this file builds with `toolWith`, for the check that the two readings agree. */
-const fixtures: ToolDefinition[] = [];
+const everyToolBuilt: ToolDefinition[] = [];
 
 function toolWith(name: string, inputSchema: ToolDefinition['inputSchema']): ToolDefinition {
   const tool = { name, description: 'obviously-fake schema-form probe', inputSchema };
-  fixtures.push(tool);
+  everyToolBuilt.push(tool);
   return tool;
 }
 
@@ -133,7 +133,7 @@ describe('$ref into the tool\'s own definitions', () => {
     expect(parseParam(tool, 'fld1', '  {"ite1": 1}  ')).toBe('  {"ite1": 1}  ');
   });
 
-  it('follows a chain within the depth cap', () => {
+  it('follows a two-hop reference chain', () => {
     const tool = toolWith('zz_ref_chain_tool', {
       type: 'object',
       properties: { fld1: { $ref: '#/$defs/zz1' } },
@@ -271,7 +271,7 @@ describe('anyOf / oneOf unions', () => {
   });
 
   it('reads branches of ONE type as that type (literal unions)', () => {
-    // zod's union of literals: every branch is a string, so the parameter is.
+    // zod's encoding of a union of literals.
     const tool = toolWith('zz_literal_union_tool', {
       type: 'object',
       properties: {
@@ -362,10 +362,7 @@ describe('nullable declarations', () => {
 describe("OpenAPI's nullable: true beside a type (#143)", () => {
   // OpenAPI 3.0 and Gemini's dialect say a parameter may be null with
   // `nullable: true` beside its `type`, where JSON Schema names null in the
-  // type itself. Main read the type alone, so `{type: "string", nullable:
-  // true}` read as a plain string: the instructions didn't say it admits
-  // null, and a written null reached the tool as the four-character text
-  // "null".
+  // type itself.
   const tool = toolWith('zz_openapi_nullable_tool', {
     type: 'object',
     properties: {
@@ -481,11 +478,10 @@ describe("OpenAPI's nullable: true beside a type (#143)", () => {
 });
 
 describe('an enum or const beside a type that admits null (#150)', () => {
-  // The type says null is admitted; the enum or const beside it may leave null
-  // out, and the specifications let it decide (OpenAPI 3.0.3 on `nullable`:
-  // other constraints "may disallow the use of null as a value"; JSON Schema
-  // 2020-12 §6.1.2 on `enum`). Main marked `nullable="true"` from the type
-  // alone, and printed a null enum member as an empty item, `enum="a,b,"`.
+  // A type may admit null while the enum or const beside it leaves null out,
+  // and the specifications let it decide (OpenAPI 3.0.3 on `nullable`: other
+  // constraints "may disallow the use of null as a value"; JSON Schema
+  // 2020-12 §6.1.2 on `enum`).
   const tool = toolWith('zz_enum_nullable_tool', {
     type: 'object',
     properties: {
@@ -890,10 +886,7 @@ describe('values behind a $ref, in branches and across root alternatives', () =>
     expect(renderedTools(diamond)).toContain('<parameter name="fld1" type="string" enum="zz-a,zz-b">');
   });
 
-  // 300,000 values is the point: a union that spread them into `push` would
-  // throw RangeError past about 125,000 on Node 24. Reading them takes under
-  // a second alone but took longer than vitest's 5 s default on a loaded host,
-  // so the test states its own timeout.
+  // Spreading 300,000 values into `push` throws RangeError past about 125,000 arguments on Node 24.
   it('reads a very long enum whole', () => {
     const long = Array.from({ length: 300000 }, (_, index) => `zz-${index}`);
     const reading = readToolSchema({
@@ -917,13 +910,7 @@ describe('values behind a $ref, in branches and across root alternatives', () =>
 });
 
 describe('null beside several types, and declarations membrane cannot type (#143)', () => {
-  // A list of several types it can read has no one type, so it keeps the
-  // legacy guess; main gave it no null mark in the instructions, whether the
-  // list names null or `nullable: true` sits beside it.
-  // A declaration with a type name membrane doesn't know (Gemini's upper-case
-  // `STRING`), or an alternative it can't read, is left as it was: no type
-  // and no null mark. Both kinds keep the legacy guess, which reads a written
-  // null as null.
+  // Gemini names its types in upper case (`STRING`).
   const tool = toolWith('zz_unresolved_nullable_tool', {
     type: 'object',
     properties: {
@@ -1452,7 +1439,7 @@ function isOfType(value: unknown, type: string): boolean {
 describe("enum values the attribute can't show exactly (#176)", () => {
   // Each list puts the value it can't show second, so the check has to read
   // every value.
-  const withheld: Record<string, string[]> = {
+  const unshowableSecond: Record<string, string[]> = {
     fld1: ['zz-a', 'say "hi"'],
     fld2: ['zz-a', 'x,y'],
     fld3: ['zz-a', 'line1\nline2'],
@@ -1470,9 +1457,9 @@ describe("enum values the attribute can't show exactly (#176)", () => {
     type: 'object',
     properties: {
       ...Object.fromEntries(
-        Object.entries(withheld).map(([name, values]) => [name, { type: 'string', enum: values }])
+        Object.entries(unshowableSecond).map(([name, values]) => [name, { type: 'string', enum: values }])
       ),
-      fld1: { type: 'string', enum: withheld.fld1, description: 'zz-quote-description' },
+      fld1: { type: 'string', enum: unshowableSecond.fld1, description: 'zz-quote-description' },
       fld13: { type: 'string', enum: ['R&D', "it's", 'a<b', 'a>b'] },
       fld14: { type: 'string', enum: ['read only', 'read write'] },
       fld15: { type: 'string', enum: ['zz-red', 'zz-green'] },
@@ -1527,20 +1514,20 @@ describe("enum values the attribute can't show exactly (#176)", () => {
 
   it('still hands toolDefinitionForPrompt every value', () => {
     const { parameters } = toolDefinitionForPrompt(tool);
-    for (const [name, values] of Object.entries(withheld)) {
+    for (const [name, values] of Object.entries(unshowableSecond)) {
       expect(parameters[name]!.enum, name).toEqual(values);
     }
   });
 });
 
-describe("the instructions' values and the kinds reading agree", () => {
+describe("the instructions' values and the kinds reading agree, over every tool built above (keep it last)", () => {
   // Runs last, over every tool `toolWith` builds, so the values the line lists
   // can't drift from what its type and nullable mark say. A parameter of
   // several kinds renders no type, so its kinds aren't checked here; its own
   // tests pin its list.
   it("lists only values of a parameter's type, and null only where it's marked nullable", () => {
     let lists = 0;
-    for (const tool of fixtures) {
+    for (const tool of everyToolBuilt) {
       for (const [name, declaration] of readToolSchema(tool.inputSchema).parameters) {
         if (declaration.enum === undefined) continue;
         lists += 1;

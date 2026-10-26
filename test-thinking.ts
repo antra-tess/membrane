@@ -163,7 +163,7 @@ async function testThinkingWithTools() {
     tools,
     messages: [
       { role: 'user', content: 'What is 123 * 456? Use the calculate tool.' },
-      { role: 'assistant', content: response1.content },  // Include thinking blocks
+      { role: 'assistant', content: response1.content },  // With thinking on, Anthropic requires the assistant turn's thinking blocks passed back with its tool result.
       { 
         role: 'user', 
         content: [
@@ -195,8 +195,7 @@ async function testThinkingWithTools() {
 async function testRedactedThinking() {
   console.log('\n=== Test 4: Trying to Trigger Redacted Thinking ===\n');
   
-  // Redacted thinking typically happens with sensitive content
-  // Let's try a benign request and see what we get
+  // Anthropic returns a redacted_thinking block when its safety systems flag the reasoning.
   const response = await client.messages.create({
     model: 'claude-sonnet-4-20250514',
     max_tokens: 8000,

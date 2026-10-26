@@ -172,7 +172,7 @@ describe('keepalive terminal call receipts', () => {
 });
 
 describe('Anthropic adapter receipt integration', () => {
-  it.each(['success', 'error'] as const)('keeps a %s receipt when JSON serialization omits callable request fields', async outcome => {
+  it.each(['success', 'error'] as const)('keeps a %s receipt when JSON serialization omits callable request fields, serializing the caller\'s metadata once per call and not again for the receipt', async outcome => {
     const calls: KeepaliveCall[] = [];
     const requests: any[] = [];
     const metadataToJSON = vi.fn(() => ({ user_id: 'fixture' }));

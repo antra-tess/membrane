@@ -108,18 +108,8 @@ export function unreportedUsage(input: unknown, output: unknown): { unreportedUs
 }
 
 /**
- * Accumulates one turn's usage ACROSS ROUNDS, pricing each round under the
- * model that actually served it.
- *
- * A routed turn is not billed at one rate: OpenRouter re-picks a provider per
- * call and an alias can resolve to a new snapshot mid-turn. Every streaming
- * loop used to re-resolve pricing when the served model changed and then
- * recompute the WHOLE accumulated usage at that latest rate, retroactively
- * re-billing every earlier round — two 1M-token rounds at 1,000/M then
- * 10,000/M reported 20,000 against a real 11,000.
- *
- * The four tool loops (callback/yielding × XML/native) each carried their own
- * copy of the accumulate-and-price block; this is the single one they share.
+ * OpenRouter re-picks a provider per call, and an alias can resolve to a new
+ * snapshot mid-turn, so a turn's rounds can be priced at different rates.
  */
 export class TurnUsageAccumulator {
   private readonly rounds: TurnRoundUsage[] = [];

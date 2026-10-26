@@ -183,9 +183,7 @@ describe('toAnthropicContent: thinking signature', () => {
 
   // The API refuses a thinking block with no signature ("signature: Field
   // required") and one with an empty or made-up signature ("Invalid
-  // `signature` in `thinking` block"), so another provider's reasoning has no
-  // thinking form here, and as text the model would read it as what it said
-  // (#191).
+  // `signature` in `thinking` block").
   it('leaves out a thinking block with no signature', () => {
     const out = toAnthropicContent([
       { type: 'thinking', thinking: 'no sig' },

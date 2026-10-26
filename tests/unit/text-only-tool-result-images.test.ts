@@ -1,14 +1,4 @@
-/**
- * Images inside tool results on text-only tool-result wires.
- *
- * Chat Completions `role: 'tool'` messages (OpenAI, OpenRouter, OpenAI-
- * compatible servers) and Gemini `functionResponse.response` carry text only,
- * so these adapters JSON-stringify non-string tool_result content. Before this
- * fix an image block went through that stringify whole: its base64 payload
- * reached the model as prompt TEXT (a 300KB screenshot = ~400KB of input on
- * every request while it stayed in history). Image blocks are now replaced by a
- * constant placeholder first; everything else serializes exactly as before.
- */
+/** Chat Completions `role: 'tool'` messages (OpenAI, OpenRouter, OpenAI-compatible servers) and Gemini `functionResponse.response` carry text only. */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { NativeFormatter } from '../../src/formatters/native.js';

@@ -1,16 +1,7 @@
 /**
- * A routed turn can be served by DIFFERENT models on different rounds —
+ * A routed turn can be served by different models on different rounds:
  * OpenRouter re-picks a provider per call, and an alias can resolve to a new
- * snapshot mid-turn. Each streaming loop re-resolved pricing when the served
- * model changed and then recomputed the WHOLE accumulated usage at that latest
- * rate, so every earlier round was retroactively re-billed at the newest
- * model's price.
- *
- * Probe (sol, 2026-08-25): two rounds of 1M input tokens, round 1 served by a
- * model priced 1,000/M and round 2 by one priced 10,000/M. The bill is
- * 1,000 + 10,000 = 11,000; membrane reported 2M × 10,000/M = 20,000.
- *
- * Every one of the four tool loops carried the bug, so every one is probed.
+ * snapshot mid-turn.
  */
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';

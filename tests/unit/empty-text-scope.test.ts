@@ -117,9 +117,7 @@ describe('empty-text cleanup scope and ordering', () => {
   it('removes the invalid prefix block while retaining other formatted content', async () => {
     const { adapter, calls } = capture();
     await new Membrane(adapter, { formatter: new NativeFormatter() }).complete({ ...base, contextPrefix: ' \n\t' });
-    // Anthropic combines consecutive same-role messages. This transport
-    // cleanup preserves the formatter's synthetic content rather than adding
-    // a second, competing role-repair policy.
+    // Anthropic combines consecutive same-role messages.
     expect(calls[0].messages).toEqual([
       { role: 'user', content: [text('[continuing]')] },
       { role: 'user', content: [text('User: hello')] },

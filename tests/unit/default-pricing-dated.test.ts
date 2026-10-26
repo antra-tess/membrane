@@ -1,18 +1,13 @@
 /**
- * membrane #121. Google publishes some Gemini rates together with the date
- * they change: gemini-4-argon at 2/10 "through November 30, 2026" and 4/20
- * "starting December 1, 2026", the 3.6 and 3.8 Flash models at 0.75/3.75
- * through December 31 and 1.50/7.50 from January 1, 2027. A table edited at
- * each date would stay wrong for every caller still running the version
- * before the edit, so a row carries each published change and the table
- * prices at the moment it is asked.
+ * Google publishes some Gemini rates together with the date they change:
+ * gemini-4-argon at 2/10 "through November 30, 2026" and 4/20 "starting
+ * December 1, 2026", the 3.6 and 3.8 Flash models at 0.75/3.75 through
+ * December 31 and 1.50/7.50 from January 1, 2027. Some Gemini ids that a text
+ * model's row matches by prefix are image or speech models, whose output a
+ * text rate underprices.
  *
- * Some Gemini ids that a text model's row matched by prefix are image or
- * speech models, whose output a text rate underprices. A row with no price
- * now says so, and those ids read as unpriced.
- *
- * Every rate below was read off https://ai.google.dev/gemini-api/docs/pricing
- * (Standard, paid tier) on 2026-10-14.
+ * Every rate below is from https://ai.google.dev/gemini-api/docs/pricing
+ * (Standard, paid tier).
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
@@ -39,9 +34,7 @@ afterEach(() => {
   resetUnpricedModelWarnings();
 });
 
-// Google names no time zone; the table takes Pacific midnight, UTC-8 on both
-// dates. Each pair is the last millisecond before a change and its first, in
-// epoch milliseconds, as membrane's clock (Date.now) gives them.
+// Google names no time zone; the table takes Pacific midnight, UTC-8 on both dates.
 const BEFORE_DEC_1 = Date.parse('2026-12-01T07:59:59.999Z');
 const FROM_DEC_1 = Date.parse('2026-12-01T08:00:00.000Z');
 const BEFORE_JAN_1 = Date.parse('2027-01-01T07:59:59.999Z');
@@ -68,7 +61,7 @@ describe('every row of the table', () => {
       expect(read, `${row.prefix}: a dated row says when it was read`).toMatch(/^\d{4}-\d{2}-\d{2}$/);
       let previous = Date.parse(read);
       for (const change of row.changes) {
-        // An offset or Z, so the instant doesn't depend on the host's zone.
+        // With an offset or Z, Date parses the same instant in any host time zone.
         expect(change.from, row.prefix).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/);
         const from = Date.parse(change.from);
         expect(from, `${row.prefix}: ${change.from} comes after what precedes it`).toBeGreaterThan(previous);
@@ -178,13 +171,13 @@ describe('image, speech and audio models', () => {
 /** 1M input, 100k output and 500k cache-read tokens per round. */
 const ZZ_USAGE = { inputTokens: 1_000_000, outputTokens: 100_000, cacheReadTokens: 500_000 };
 /** ZZ_USAGE at gemini-4-argon's introductory rate: 2 + 1 + 0.05. */
-const ARGON_INTRO_TOTAL = 3.05;
+const ARGON_INTRO_TOTAL = 2 + 1 + 0.05;
 /** ZZ_USAGE at gemini-4-argon's rate from December 1: 4 + 2 + 0.10. */
-const ARGON_LATER_TOTAL = 6.10;
+const ARGON_LATER_TOTAL = 4 + 2 + 0.10;
 /** ZZ_USAGE at the 3.8 and 3.6 Flash introductory rate: 0.75 + 0.375 + 0.0375. */
-const FLASH_INTRO_TOTAL = 1.1625;
+const FLASH_INTRO_TOTAL = 0.75 + 0.375 + 0.0375;
 /** ZZ_USAGE at their rate from January 1: 1.50 + 0.75 + 0.075. */
-const FLASH_LATER_TOTAL = 2.325;
+const FLASH_LATER_TOTAL = 1.50 + 0.75 + 0.075;
 
 const zzTool: ToolDefinition = {
   name: 'zz-noop',

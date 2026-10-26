@@ -91,14 +91,12 @@ export interface ProviderCapabilities {
  * that reported `cached_tokens: 1664`, so cached is a SUBSET of the prompt.
  *
  * `cache-inclusive` describes the input count as a whole: every cached token,
- * read or written, is inside it, and membrane subtracts both to restate it.
- * `cache-excluded` counts are disjoint already: fresh input, cache writes and
- * cache reads are three parts of the prompt.
+ * read or written, is inside it. `cache-excluded` counts are disjoint already:
+ * fresh input, cache writes and cache reads are three parts of the prompt.
  *
- * `unknown` is a real epistemic state, not a default to lean on: it means no
- * one has established this adapter's convention, and membrane will pass the
- * counts through unchanged and warn the first time a cache read or write makes
- * the ambiguity bite.
+ * `unknown` means no one has established this adapter's convention: membrane
+ * passes the counts through unchanged and warns the first time a cache read or
+ * write makes the ambiguity bite.
  */
 export type UsageCacheConvention = 'cache-excluded' | 'cache-inclusive' | 'unknown';
 
@@ -121,8 +119,7 @@ export interface ModelPricing {
   /**
    * ISO date these rates were last checked against the provider's published
    * price page, surfaced to callers as {@link CostBreakdown.pricingAsOf}. A
-   * pricing source that cannot vouch for a date leaves it unset — better an
-   * absent freshness signal than a fabricated one.
+   * pricing source that cannot vouch for a date leaves it unset.
    */
   asOf?: string;
 }
@@ -202,13 +199,8 @@ export interface ProviderAdapter {
    * normalizes every response onto `cache-excluded` before any ratio or cost is
    * computed, and it can only do that if the adapter says what it is reporting.
    *
-   * OPTIONAL, defaulting to `'unknown'`: an adapter that declares nothing is in
-   * exactly the state `'unknown'` names, and treating it that way — pass the
-   * counts through untouched, warn once when a cache read makes the ambiguity
-   * bite — is the honest reading of silence. Requiring it would also stop every
-   * external custom adapter compiling for a fact membrane can already say it
-   * does not know. Declare it: `'unknown'` is a real epistemic state, not a
-   * resting place.
+   * Optional, defaulting to `'unknown'`: membrane passes the counts through
+   * untouched and warns once when a cache read makes the ambiguity bite.
    */
   usageCacheConvention?: UsageCacheConvention;
 
@@ -245,13 +237,8 @@ export interface ProviderAdapter {
    * up to the final body, passthrough parameters and cleanup included.
    *
    * Declaring it also commits the adapter to leaving the supplied
-   * ProviderRequest unchanged: it derives its wire body as a separate object
-   * and never mutates the request, its messages or their blocks. Membrane
-   * reuses one request across refusal-retry attempts and attributes reports
-   * by the identity of the blocks it built, so an adapter that edited the
-   * request in place would change what later attempts carry without any
-   * report saying so. The built-in declaring adapters build their bodies
-   * this way.
+   * ProviderRequest unchanged: it never mutates the request, its messages or
+   * their blocks.
    *
    * Round reports (UsageEvent.round) rely on it: an adapter that doesn't
    * declare it leaves a round's fidelity 'unknown'. Decorators must forward
@@ -322,7 +309,8 @@ export interface ProviderRequest {
 
   /**
    * Extended-thinking config (Anthropic). Presence with a `type` other than
-   * `'disabled'` enables thinking, which strips custom sampling parameters.
+   * `'disabled'` enables thinking, which strips custom temperature and top_k,
+   * and a top_p below 0.95.
    */
   thinking?: { type?: string; [key: string]: unknown };
 
@@ -333,12 +321,7 @@ export interface ProviderRequest {
 export interface ProviderRequestContext {
   formatterName: string;
   toolMode: 'native' | 'xml';
-  /** Whether the request's `tools` holds any. Only the prompt transports'
-   *  check (assertPromptToolSupport) reads it, and a request carrying a
-   *  system change never reaches it: membrane refuses that request unless
-   *  its formatter and adapter send system changes, which no prompt
-   *  transport does. So it reads `tools` alone, not the tools as the
-   *  request's changes leave them. */
+  /** Whether the request's `tools` holds any. */
   toolsDeclared: boolean;
   /** An XML streaming runner may manufacture prefill on a later continuation. */
   requiresAssistantPrefill: boolean;
@@ -378,10 +361,9 @@ export interface ProviderRequestOptions {
   /** Build/protocol facts for validation against the adapter's final model/body.
    * Not provider JSON. Decorators forward this context with the other options. */
   requestContext?: ProviderRequestContext;
-  /** Current normalized participant messages for prompt serialization. Native
-   * loops pass them outside ProviderRequest so opaque message metadata is not
-   * serialized by semantic receipts. Explicit extra.prompt/normalizedMessages
-   * retain precedence in OpenAICompletionsAdapter. */
+  /** Current normalized participant messages for prompt serialization.
+   * Explicit extra.prompt/normalizedMessages retain precedence in
+   * OpenAICompletionsAdapter. */
   promptMessages?: import('./message.js').NormalizedMessage[];
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -417,7 +399,7 @@ export interface ProviderRequestOptions {
   /**
    * What this attempt sends (see SendReport), reported once per attempt
    * beside `onRequest`, before the request goes out. Decorators forward it
-   * with the other options, so a router reports for the adapter it picked.
+   * with the other options.
    */
   onSend?: (send: SendReport) => void;
   /** Report the final API request body immediately before sending it.
@@ -425,12 +407,7 @@ export interface ProviderRequestOptions {
    * Decorators forward it; raw logging observes each attempt, even when
    * a refusal retry shares its logical cache receipt with an earlier attempt. */
   onRequest?: (rawRequest: unknown) => void;
-  /**
-   * Wrap native thinking deltas in <thinking>...</thinking> tags on the
-   * onChunk stream. Used by the XML formatter path so its tag-based parser
-   * tracks thinking blocks; without this, native thinking content streams
-   * indistinguishably from visible text.
-   */
+  /** Wrap native thinking deltas in <thinking>...</thinking> tags on the onChunk stream. */
   wrapThinkingTags?: boolean;
   /**
    * Called when the adapter did not carry some message content of this
@@ -454,8 +431,7 @@ export interface ProviderInputTransformation {
   path?: string;
   /**
    * The request's own block object at that path, when the adapter could
-   * resolve it (as `ProviderRequestOptions.onContentAltered` takes one), so
-   * membrane can say which message it came from.
+   * resolve it (as `ProviderRequestOptions.onContentAltered` takes one).
    */
   block?: unknown;
 }
@@ -568,12 +544,12 @@ export interface StreamCallbacks {
   onChunk: (chunk: string) => void;
   /**
    * A provider content block, by its position in the response. Built-in
-   * adapters follow one of two conventions, and Membrane's native loops rely
-   * on them to tell a finished block from one still arriving:
+   * adapters follow one of two conventions:
    * - paired (Anthropic, Bedrock): once when the block starts, with its start
    *   payload, and again when it is finished, with the final payload. A start
    *   payload is not the block's content: a tool call's `input` there is an
-   *   empty placeholder until its arguments have arrived.
+   *   empty placeholder until its arguments have arrived, and Bedrock's adapter
+   *   goes on changing the start payload's object as the block streams.
    * - single-final (OpenAI Responses): once per block, already finished,
    *   after the terminal response has been parsed successfully.
    * Images (OpenRouter) are reported once, when received.

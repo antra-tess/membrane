@@ -2,11 +2,8 @@
  * Gemini reports the prompt tokens its built-in tools add in
  * `usageMetadata.toolUsePromptTokenCount`, a field disjoint from
  * `promptTokenCount`: Google defines `totalTokenCount` as "prompt + tool-use
- * prompt + thoughts + response candidates". The adapter didn't read it, so
- * every response that reported the field failed the reconciliation check and
- * warned, and its tool-use tokens were in none of membrane's usage fields,
- * though Google bills code execution's, URL context's and file search's as
- * input (#120).
+ * prompt + thoughts + response candidates", and bills code execution's, URL
+ * context's and file search's tool-use tokens as input.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { GeminiAdapter, resetPromptExcludesCacheWarning } from '../../src/providers/gemini.js';

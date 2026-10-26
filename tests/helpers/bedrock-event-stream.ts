@@ -1,9 +1,8 @@
 /**
- * AWS event-stream frame crafting for Bedrock streaming tests.
- *
- * Format: totalLen(4) | headersLen(4) | preludeCRC(4) | headers | payload | msgCRC(4)
- * The adapter reads lengths and headers but does not validate CRCs.
+ * AWS event-stream frame: totalLen(4) | headersLen(4) | preludeCRC(4) | headers | payload | msgCRC(4)
  */
+
+const STRING_HEADER_VALUE_TYPE = 7;
 
 export function stringHeader(name: string, value: string): Uint8Array {
   const nameBytes = new TextEncoder().encode(name);
@@ -12,7 +11,7 @@ export function stringHeader(name: string, value: string): Uint8Array {
   let o = 0;
   out[o++] = nameBytes.length;
   out.set(nameBytes, o); o += nameBytes.length;
-  out[o++] = 7; // string type
+  out[o++] = STRING_HEADER_VALUE_TYPE;
   new DataView(out.buffer).setUint16(o, valueBytes.length, false); o += 2;
   out.set(valueBytes, o);
   return out;

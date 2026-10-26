@@ -284,7 +284,7 @@ describe('AnthropicXmlFormatter', () => {
         promptCaching: true,
       });
 
-      // First message should be user role (required by Claude Messages API)
+      // The Claude Messages API requires the first message to be the user's.
       expect(result.messages.length).toBeGreaterThanOrEqual(3);
       expect(result.messages[0]?.role).toBe('user');
       expect(result.messages[0]?.content).toBe('[Start]');
@@ -1094,12 +1094,7 @@ describe('NativeFormatter > tool blocks', () => {
   });
 
   it('inverse: tool_use in a user-participant message is re-roled to assistant', () => {
-    // This is the postmortem case at the formatter level: a participant
-    // tagged with the human role (or with an unknown participant in
-    // multiuser mode that maps to user) is carrying a tool_use block.
-    // Pre-normalizer, this would ship `{role:'user', content:[tool_use]}`
-    // and the API would 400. Post-normalizer, the tool_use lands on the
-    // assistant side and the result is API-valid.
+    // The API refuses a tool_use in a user-role message with a 400.
     const formatter = new NativeFormatter();
     const messages: NormalizedMessage[] = [
       {

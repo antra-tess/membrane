@@ -1,8 +1,6 @@
 /**
- * Request Sanitization Tests
- *
- * Ensures internal membrane fields are not leaked to provider APIs.
- * This prevents 400 errors from providers rejecting unknown parameters.
+ * Providers reject unknown request parameters, such as membrane's internal
+ * `normalizedMessages`, with a 400.
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';

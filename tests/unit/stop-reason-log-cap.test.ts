@@ -1,9 +1,4 @@
-/**
- * The once-per-reason log of unmapped stop reasons remembers each reason it
- * logged. A server can send a fresh token on every response, so that memory
- * stops growing at a cap and says so once. Its own file: the memory is
- * process-wide, and this case fills it.
- */
+/** vitest isolates each test file, so this case, which fills the process-wide memory of logged stop reasons, has a file of its own. */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';

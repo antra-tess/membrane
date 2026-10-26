@@ -1,19 +1,8 @@
 /**
- * Anthropic request guards
- *
- * Two wire-boundary repairs in the Anthropic adapter, both of which
- * previously produced a non-retryable 400 that killed the whole turn:
- *
- * 1. Temperature stripping for the models listed as rejecting sampling
- *    parameters, each by its own id (Opus 4.7, 4.8, 5 and 5.5, Sonnet 5 and
- *    5.5, Haiku 5.5, Fable 5 and 5.1, Mythos 5, 5.1 and preview, some of which take
- *    only a top_p near 1). Haiku 4.5 ACCEPTS temperature and must be
- *    forwarded, and so is an unlisted later version. Through Membrane, a
- *    request's config already loses them for every Fable and Mythos id.
- *
- * 2. Root-level oneOf/anyOf/allOf in a tool's input schema (legal MCP,
- *    illegal for Anthropic tools) is flattened into a single object schema
- *    via `flattenRootSchemaUnion` before the request is shipped.
+ * Anthropic refuses sampling parameters for the models NO_TEMPERATURE_MODELS
+ * lists, some of which take only a top_p near 1; Haiku 4.5 accepts
+ * temperature. Root-level oneOf/anyOf/allOf in a tool's input schema is legal
+ * MCP and illegal for Anthropic tools.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -152,12 +141,9 @@ describe('AnthropicAdapter: sampling-parameter model gate', () => {
   });
 
   it('strips temperature, top_p and top_k for claude-haiku-5-5, each on its own', async () => {
-    // With no thinking config, the API refused temperature 0.2, top_k 40 and
-    // top_p 0.9 for Haiku 5.5 with a 400 ("`temperature` is deprecated for
-    // this model", and likewise for the other two), and took a top_p of 0.99.
-    // A listed model loses every top_p, 0.99 included, at the top level and
-    // through `extra`. Each is sent on its own, since a top_p beside a
-    // temperature is dropped anyway.
+    // With no thinking config, the API refuses temperature, top_k and top_p for
+    // Haiku 5.5 with a 400 ("`temperature` is deprecated for this model", and
+    // likewise for the other two), and accepts a top_p of 0.99.
     const { adapter, captured } = captureAdapter();
 
     await adapter.complete({ ...baseRequest, model: 'claude-haiku-5-5', temperature: 0.2 } as any);
@@ -174,12 +160,9 @@ describe('AnthropicAdapter: sampling-parameter model gate', () => {
   });
 
   it('strips temperature, top_p and top_k for claude-opus-5 and claude-opus-5-5, each on its own', async () => {
-    // With no thinking config, the API refused temperature 0.2, top_k 40 and
-    // top_p 0.9 for both with a 400 ("`temperature` is deprecated for this
-    // model", and likewise for the other two), and took a top_p of 0.99, as
-    // for Haiku 5.5. Each is listed by its own id, which covers its dated
-    // snapshots. As for every listed model, every top_p goes, 0.99 included, at the top
-    // level and through `extra`, with a thinking config or without one.
+    // With no thinking config, the API refuses temperature, top_k and top_p for
+    // both with a 400 ("`temperature` is deprecated for this model", and
+    // likewise for the other two), and accepts a top_p of 0.99.
     const { adapter, captured } = captureAdapter();
     const thinking = { type: 'adaptive', display: 'omitted' };
 
@@ -487,7 +470,7 @@ describe('flattenRootSchemaUnion', () => {
     expect([...result.required].sort()).toEqual(['a', 'b']);
   });
 
-  it('merges all root union keys when multiple combinators are present at once', () => {
+  it('merges all root union keys when multiple combinators are present at once, requiring the union of what each combinator requires in every variant', () => {
     const schema = {
       oneOf: [
         { type: 'object', properties: { a: { type: 'string' } }, required: ['a'] },
@@ -576,7 +559,7 @@ describe('flattenRootSchemaUnion', () => {
     expect(flattenRootSchemaUnion('not a schema')).toBe('not a schema');
   });
 
-  it('merges a variant property named like an Object.prototype member', () => {
+  it('merges a variant property named like an Object.prototype member, and drops a required name only the prototype carries', () => {
     // `key in properties` found `constructor`/`toString` on the prototype of the
     // merged object, so such a variant property was never merged, and a
     // required key naming one survived the "only properties it carries" filter

@@ -56,9 +56,11 @@ export interface FailureFacts {
 }
 
 /**
- * One class's schedule. A retry after `attempt` tries waits
- * `min(firstDelayMs × multiplier^(attempt − 1), maxDelayMs)`, a zero
- * `firstDelayMs` staying zero.
+ * One class's schedule. `attempt` counts the tries made so far, the first
+ * send included, so the first retry is after attempt 1. Its un-jittered step
+ * after `attempt` tries is `min(firstDelayMs × multiplier^(attempt − 1),
+ * maxDelayMs)`, a zero `firstDelayMs` staying zero; delayFor and
+ * retryDecision say how the wait is drawn from it.
  */
 export interface RetrySchedule {
   /** The most tries in all, the first send included; `null` for no bound. */
@@ -71,8 +73,8 @@ export interface RetrySchedule {
   statedWaitCeilingMs: number | null;
 }
 
-/** A call path's schedules. A class with none isn't retried, except as
- *  retryDecision says for `overloaded`. */
+/** A call path's schedules. A class with none isn't retried, except
+ *  `overloaded`, which then takes the `retryable` schedule, unjittered. */
 export type RetrySettings = Partial<Record<RetryClass, RetrySchedule>>;
 
 export type RetryDecision =
@@ -85,18 +87,14 @@ export type RetryDecision =
 const OVERLOADED_PATTERN = /\b529\b|overloaded_error/i;
 
 /**
- * The longest stated wait waited out on a schedule whose own maxDelayMs is
- * shorter: a minute. AnthropicAdapter's SDK client, whose retries membrane
- * took over, waited out a stated wait under a minute (SDK 0.52's
- * `retryRequest`).
+ * The Anthropic SDK's own client (0.52's `retryRequest`) waits out a stated
+ * wait only when it's under a minute.
  */
 const STATED_WAIT_CEILING_MS = 60_000;
 
 /**
- * Whether a retryable failure is a provider capacity error: by its status
- * when it has one (a 529), and by its message only when it has none, such as
- * an overloaded error that arrives mid-stream, after the 200. classifyFailure
- * asks it only once a failure is known to be retryable.
+ * An overloaded error that arrives mid-stream, after the 200, has no status,
+ * so a failure with none is read by its message.
  */
 function isOverloadedFailure(facts: Pick<FailureFacts, 'httpStatus' | 'message'>): boolean {
   if (facts.httpStatus !== undefined) return facts.httpStatus === 529;
@@ -134,8 +132,8 @@ function isAttempt(attempt: number): boolean {
   return Number.isInteger(attempt) && attempt >= 1;
 }
 
-/** A schedule's un-jittered step after `attempt` tries. A zero first delay
- *  stays zero: times a power that overflowed to Infinity it would be NaN. */
+/** A zero first delay stays zero: times a power that overflowed to Infinity
+ *  it would be NaN. */
 function stepOf(schedule: RetrySchedule, attempt: number): number {
   return schedule.firstDelayMs === 0
     ? 0
@@ -152,18 +150,19 @@ function waitOf(stepMs: number, jitter: boolean, random: () => number): number {
 /**
  * How long to wait before a retry after `attempt` tries, with no stated wait:
  * `nominalMs` is the schedule's un-jittered step, and `delayMs` the wait, the
- * same as `nominalMs` but on the overloaded class, where it's a whole number
- * of milliseconds in `[floor(nominalMs/2), nominalMs)` drawn with `random`
- * (Math.random by default), or 0 for a zero step.
- * It answers "how long" alone, not "whether": a caller that holds rather than
- * gives up, such as a storm, asks it for each held call's own draw. It throws
- * for a class with no schedule, an attempt that isn't a whole number of at
- * least 1, or a schedule whose numbers give no finite step.
+ * same as `nominalMs` but on the overloaded class with its own schedule,
+ * where it's a whole number of milliseconds in `[floor(nominalMs/2),
+ * nominalMs)` drawn with `random` (Math.random by default), or 0 for a zero
+ * step. An overloaded failure with no overloaded schedule takes the
+ * `retryable` one, unjittered.
+ * It answers "how long" alone, not "whether". It throws for a class with no
+ * schedule, an attempt that isn't a whole number of at least 1, or a schedule
+ * whose numbers give no finite step.
  *
  * A wait can be longer than one setTimeout holds (2^31 − 1 ms, about 24.8
  * days), wherever a schedule's maxDelayMs is: Node and Bun run such a timer
  * at once, so a caller that sleeps `delayMs` with a single setTimeout retries
- * at once. Sleep it in chunks, as membrane's own sleep does.
+ * at once. Sleep it in chunks.
  */
 export function delayFor(
   cls: RetryClass,
@@ -181,26 +180,25 @@ export function delayFor(
 
 /**
  * Whether a call that failed in class `cls`, after `attempt` tries, is sent
- * again, and after how long. Not when its class has no schedule, when its
- * attempts are spent, or when the provider's stated wait is past its
- * schedule's ceiling or is Infinity: then the stated wait goes back as
- * `statedWaitMs`, for the caller to wait out or to end on. Otherwise the wait
- * is the backoff, or the stated wait where that's longer: a stated wait never
- * shortens the backoff, even where a schedule's maxDelayMs is past its
- * ceiling. A stated wait is read as a number, so a numeric string, which
- * another adapter's error might carry, counts as its number; one that reads as
- * NaN counts as none. A zero or negative one loses to the backoff, so it can't
- * make the retries spin.
+ * again, and after how long. An overloaded failure with no overloaded
+ * schedule is retried on the `retryable` schedule, unjittered. Not when its
+ * class has no schedule, when its attempts are spent, or when the provider's
+ * stated wait is past its schedule's ceiling or is Infinity: then the stated
+ * wait goes back as `statedWaitMs`, for the caller to wait out or to end on.
+ * Otherwise the wait is the backoff, or the stated wait where that's longer:
+ * a stated wait never shortens the backoff, even where a schedule's
+ * maxDelayMs is past its ceiling. A stated wait is read as a number, so a
+ * numeric string counts as its number; one that reads as NaN counts as none.
+ * A zero or negative one loses to the backoff.
  *
  * It fails closed: an attempt that isn't a whole number of at least 1, and a
  * wait that isn't a finite number (from a schedule's numbers), end the
- * retries, since a NaN wait would run at once.
+ * retries.
  *
  * Under a `null` ceiling a stated wait can be longer than one setTimeout
  * holds (2^31 − 1 ms, about 24.8 days), and so can a schedule's maxDelayMs:
  * Node and Bun run such a timer at once, so a caller that sleeps `delayMs`
- * with a single setTimeout retries at once. Sleep it in chunks, as membrane's
- * own sleep does.
+ * with a single setTimeout retries at once. Sleep it in chunks.
  */
 export function retryDecision(
   cls: RetryClass,
@@ -238,9 +236,8 @@ export function retryDecision(
  *   then retried as any other retryable failure;
  * - `deadline` and `final`: none.
  * A schedule's stated-wait ceiling is a minute, or its maxDelayMs where
- * that's longer. It takes a complete RetryConfig, as Membrane's constructor
- * resolves and checks one from MembraneConfig.retry; it fills and checks
- * nothing itself.
+ * that's longer. It takes a complete RetryConfig; it fills and checks nothing
+ * itself.
  */
 export function membraneRetrySettings(config: RetryConfig): RetrySettings {
   const base = {
@@ -267,9 +264,9 @@ export function membraneRetrySettings(config: RetryConfig): RetrySettings {
   };
 }
 
-/** Membrane's settings for its default retry config (DEFAULT_RETRY_CONFIG),
- *  for a layer that starts from membrane's own numbers. Frozen, schedules and
- *  all, since every importer in a process shares it: spread it to change it. */
+/** Membrane's settings for its default retry config (DEFAULT_RETRY_CONFIG).
+ *  Frozen, schedules and all: to change it, spread it and replace whole
+ *  schedules, since a schedule's own numbers can't be edited in place. */
 export const MEMBRANE_RETRY_SETTINGS: { readonly [K in RetryClass]?: Readonly<RetrySchedule> } = Object.freeze(
   Object.fromEntries(
     Object.entries(membraneRetrySettings(DEFAULT_RETRY_CONFIG)).map(([cls, schedule]) => [cls, Object.freeze(schedule)]),

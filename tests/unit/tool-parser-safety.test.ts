@@ -170,7 +170,7 @@ describe('F9 · a contained call is filtered before legacy results are paired', 
     `<thinking>zz musing: I could call ${shadowedCall} but I will not.\n</thinking>\n` +
     `zz_bot: calling the real one\n${liveCall}\n${legacyResult}`;
 
-  it('pairs the legacy result with the surviving call, not the quoted one', () => {
+  it('pairs the legacy result with the surviving call, not the quoted one before it', () => {
     const { blocks, toolResults } = parseAccumulatedIntoBlocks(shadowedTurn);
 
     const emittedCalls = blocks.filter((b) => b.type === 'tool_use') as Array<{ id: string; name: string }>;
@@ -190,7 +190,7 @@ describe('F9 · a contained call is filtered before legacy results are paired', 
     }
   });
 
-  it('pairs by tool_name against surviving calls only', () => {
+  it('pairs by containment order when the quoted call has the live call\'s name', () => {
     // The quoted call wears the SAME name as the live one, so the tool_name
     // disambiguator cannot rescue the pairing — only containment order can.
     const quotedTwin = toolBlock(`<invoke name="zz_live_tool"/>`);

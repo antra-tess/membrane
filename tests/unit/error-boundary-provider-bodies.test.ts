@@ -1,14 +1,10 @@
 /**
- * Real provider error bodies at the shared boundary, from review of #56.
- *
- * The status-guarded classifier must read each form a provider actually
- * sends: a context overflow in Anthropic's and Gemini's own words (and inside
- * OpenRouter's wrapper), a bad Google key that arrives as a 400, a refusal of
- * the account or its credential that Anthropic sends as a 400, a Gemini quota
- * no retry can outlast, a retry hint stated only in prose, Bedrock's exception
- * type in a header, and transport failures that carry no status at all.
- * Anything typed wrongly here reaches agent-framework's poison-history
- * breaker as `invalid_request`, or is retried for nothing.
+ * Providers' error bodies as they send them: a context overflow in
+ * Anthropic's and Gemini's own words (and inside OpenRouter's wrapper), a bad
+ * Google key as a 400, a refusal of the account or its credential that
+ * Anthropic sends as a 400, a Gemini quota no retry can outlast, a retry hint
+ * stated only in prose, Bedrock's exception type in a header, and transport
+ * failures that carry no status at all.
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -300,8 +296,7 @@ describe('a refusal of the account or its credential sent as a 400 is auth', () 
     expect(error.type).toBe('auth');
     expect(error.retryable).toBe(false);
     expect(error.httpStatus).toBe(400);
-    // The code is the router's own, and OpenRouter's is a number: the
-    // upstream's invalid_request_error stays in rawError.
+    // The code is the router's own, and OpenRouter's is a number.
     expect(error.providerErrorCode).toBeUndefined();
   });
 });

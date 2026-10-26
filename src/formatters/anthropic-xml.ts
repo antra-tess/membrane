@@ -49,7 +49,7 @@ import { holdsContent, isRawItemCarrier } from '../utils/fidelity.js';
 export interface AnthropicXmlFormatterConfig extends FormatterConfig {
   /**
    * How to handle tool definitions:
-   * - 'xml': Inject into conversation as XML (prefill mode)
+   * - 'xml': Inject them as XML (prefill mode), where `toolInjectionMode` says
    * - 'native': Pass to API as native tools
    * Default: 'xml'
    */
@@ -192,7 +192,7 @@ function holdsImage(block: ToolResultContent): boolean {
  * once, as they always did, and results once for each marked result in the
  * run, or once if none is marked (renderToolResultRun).
  */
-function rawXmlCount(rawXml: string, kind: 'results' | 'calls', memo: Map<string, number>): number {
+function rawXmlGroupCapacity(rawXml: string, kind: 'results' | 'calls', memo: Map<string, number>): number {
   let count = memo.get(rawXml);
   if (count === undefined) {
     const parsed = parseAccumulatedIntoBlocks(rawXml);
@@ -205,6 +205,10 @@ function rawXmlCount(rawXml: string, kind: 'results' | 'calls', memo: Map<string
 // ============================================================================
 // Anthropic XML Formatter
 // ============================================================================
+
+function escapeLayoutNewlines(value: string): string {
+  return `${value.startsWith('\n') ? '\n' : ''}${value}${value.endsWith('\n') ? '\n' : ''}`;
+}
 
 export class AnthropicXmlFormatter implements PrefillFormatter {
   /** buildMessages records every consumer message it doesn't carry verbatim (utils/fidelity.ts). */
@@ -426,7 +430,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
           const last = k === segments.length - 1;
           currentConversation.push(`${k === 0 ? prefix : ''}${segments[k]}${last ? this.config.messageDelimiter : ''}`);
           if (last) break;
-          // Assistant content can't end in whitespace, as the live split trims it.
+          // Trimmed as the live split sent it: the prompt cache matches a prefix byte for byte.
           providerMessages.push({ role: 'assistant', content: currentConversation.join(joiner).trimEnd() });
           providerMessages.push({ role: 'user', content: splitImages[k]! });
           currentConversation = [];
@@ -557,8 +561,8 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
       });
     }
 
-    // Ensure first message is user role (required by Claude Messages API,
-    // strictly enforced by Bedrock and older Claude models)
+    // The Claude Messages API requires the first message to be the user's
+    // (Bedrock and older Claude models enforce it strictly).
     if (providerMessages.length > 0 && providerMessages[0]!.role !== 'user') {
       if (prefillUserMessage) {
         // Explicit custom prefill user message from config
@@ -756,19 +760,9 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
   }
 
   /**
-   * Render a run of consecutive tool_use blocks back into the document.
-   *
-   * Round-trip fidelity (membrane#36): in prefill mode the model's tool call
-   * IS generated text — replaying anything other than that text rewrites the
-   * agent's own past turn and teaches the model a syntax the parser rejects.
-   * Blocks carrying `rawXml` are replayed verbatim (deduped: every invoke
-   * parsed from one <function_calls> block shares the same rawXml, so its
-   * text goes out once for as many calls as the parser reads from it
-   * (rawXmlCount), and more calls with the same text are another round's
-   * block). Legacy
-   * blocks stored without rawXml can only be reconstructed — we emit the
-   * canonical <function_calls> form, which at least agrees with the parser
-   * and the injected instructions.
+   * In prefill mode a tool call is text the model generated, so it's replayed
+   * as that text (antra-tess/membrane#36); a block stored without it can only
+   * be reconstructed.
    */
   private renderToolUseRun(run: ToolUseContent[]): string[] {
     const out: string[] = [];
@@ -790,7 +784,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         // One block's calls share its text, which goes out once, for as
         // many calls as the text holds; more calls with the same text are
         // another round's.
-        if (block.rawXml !== lastRaw || inBlock >= rawXmlCount(block.rawXml, 'calls', counts)) {
+        if (block.rawXml !== lastRaw || inBlock >= rawXmlGroupCapacity(block.rawXml, 'calls', counts)) {
           out.push(block.rawXml);
           inBlock = 0;
         }
@@ -840,7 +834,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
       // round's, stored beside it, and start a group of their own, and so does
       // a second marked result: a mark is its own round's. The count is read
       // only when the next block shares the text.
-      const cap = run[i + 1]?.rawXml === block.rawXml ? rawXmlCount(block.rawXml, 'results', counts) : 1;
+      const cap = run[i + 1]?.rawXml === block.rawXml ? rawXmlGroupCapacity(block.rawXml, 'results', counts) : 1;
       let end = i + 1;
       let marked = typeof block.rawXmlImagesAt === 'number';
       while (end < run.length && end - i < cap && run[end]!.rawXml === block.rawXml) {
@@ -881,7 +875,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
       for (const [name, value] of Object.entries(block.input)) {
         const text =
           typeof value === 'string'
-            ? `${value.startsWith('\n') ? '\n' : ''}${value}${value.endsWith('\n') ? '\n' : ''}`
+            ? escapeLayoutNewlines(value)
             : JSON.stringify(value);
         lines.push(`<parameter name="${name}">${text}</parameter>`);
       }
@@ -892,11 +886,8 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
   }
 
   private formatToolDefinitionsXml(tools: ToolDefinition[]): string {
-    // Each parameter's type, nullability and requiredness come from the SAME
-    // reading of the schema the XML parameter parser applies, so what the model
-    // is told a parameter is and how its value is parsed cannot drift apart.
-    // One difference is deliberate: a null the schema's other keywords leave
-    // out isn't marked, though the parser still reads it (#150).
+    // A null the schema's other keywords leave out isn't marked, though the
+    // parser still reads it (antra-tess/membrane#150).
     return formatToolDefinitions(tools.map(toolDefinitionForPrompt));
   }
 

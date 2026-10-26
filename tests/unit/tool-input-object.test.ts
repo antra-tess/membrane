@@ -54,8 +54,7 @@ const openAICall = (args: string) => ({
   tool_calls: [{ id: 'call_zz', type: 'function' as const, function: { name: 'zz_tool', arguments: args } }],
 });
 
-// The helper tests compare with toStrictEqual: a marker key set to undefined
-// is a defect too.
+// toStrictEqual, unlike toEqual, fails on a key set to undefined where the expected object has none.
 describe('toolUseInputFromText', () => {
   it('keeps arguments that are a JSON object, unmarked', () => {
     expect(toolUseInputFromText('{"a":1}')).toStrictEqual({ input: { a: 1 } });

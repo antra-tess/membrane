@@ -81,7 +81,7 @@ describe('parameter values are byte-untouched on the READ polarity', () => {
     });
   }
 
-  it('preserves leading and trailing whitespace around ordinary content', () => {
+  it('keeps the spaces around ordinary content, dropping one framing newline on each side', () => {
     // One newline on each side is layout (the framing results are written
     // in); the spaces inside it are content.
     expect(parsedParam(`\n  ${zzMarkup}  \n`)).toBe(`  ${zzMarkup}  `);

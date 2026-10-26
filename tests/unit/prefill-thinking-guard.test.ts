@@ -1,9 +1,4 @@
-/**
- * XML prefill carries thinking as literal text rather than a second API channel.
- * Strip both the top-level and extra copies, preserving the caller's input.
- * The provider's acceptance of thinking plus prefill is model-dependent:
- * the original and maintainer probes found haiku-4-5 accepts the combination.
- */
+/** Whether the API accepts thinking beside an assistant prefill depends on the model: Haiku 4.5 accepts the combination. */
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { thinkingEnabled } from '../../src/providers/anthropic.js';

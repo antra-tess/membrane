@@ -1,13 +1,8 @@
 /**
- * Interleaved-thinking beta gating: which models need the
- * `interleaved-thinking-2025-05-14` flag when thinking is enabled.
- * Native from Opus/Sonnet 4.6 onward; beta-only on earlier Claude 4.
- *
- * Also covers the delivery mechanics on both adapters: the Anthropic
- * adapter's per-request header (including the oauth default-beta re-carry —
- * the SDK REPLACES same-key default headers rather than merging, so dropping
- * the default there breaks subscription auth) and the Bedrock adapter's
- * `anthropic_beta` body field.
+ * Claude 4 models before Opus/Sonnet 4.6 need the
+ * `interleaved-thinking-2025-05-14` beta flag for interleaved thinking; 4.6
+ * onward have it natively. The SDK replaces a same-key default header rather
+ * than merging it, and Bedrock takes the flag in the body's `anthropic_beta`.
  */
 
 import { describe, it, expect } from 'vitest';

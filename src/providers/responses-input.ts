@@ -5,6 +5,13 @@ import type { OpenAIResponsesInputItem } from './openai-responses-api.js';
 
 type JsonObject = Record<string, unknown>;
 
+function isNormalizedPart(block: unknown): boolean {
+  return isObject(block) && (
+    ['text', 'image', 'tool_use', 'tool_result', 'redacted_thinking'].includes(asString(block.type))
+    || carriesAnthropicServerBlock(block)
+  );
+}
+
 /**
  * Most agent turns arrive already formatted as provider-native Responses
  * items. Internal maintenance calls, however, can bypass that formatter and
@@ -38,12 +45,7 @@ export function normalizeResponsesInput(
     // must survive replay verbatim. Only translate normalized content blocks
     // and Anthropic server-tool blocks, which are left out below, and decide
     // an input_image whose data: URL holds no accepted image.
-    if (Array.isArray(rawMessage.content) && !rawMessage.content.some((block) =>
-      isObject(block) && (
-        ['text', 'image', 'tool_use', 'tool_result', 'redacted_thinking'].includes(asString(block.type))
-        || carriesAnthropicServerBlock(block)
-      )
-    )) {
+    if (Array.isArray(rawMessage.content) && !rawMessage.content.some(isNormalizedPart)) {
       const content = nativeParts(rawMessage.content, onDropped);
       output.push(content === rawMessage.content ? rawMessage : { ...rawMessage, content });
       continue;
@@ -122,9 +124,7 @@ function normalizeStandaloneItem(item: JsonObject, onDropped?: (block?: unknown)
   }
   if (item.type === 'tool_result') {
     const { output, loses } = responsesToolOutput(item.content);
-    // A nested value the output can't carry is stringified or replaced by a
-    // note or the placeholder, and a function_call_output has no error flag,
-    // so a failed result reads as a plain one.
+    // A function_call_output has no error flag, so a failed result reads as a plain one.
     if (loses || item.isError === true || item.is_error === true) onDropped?.(item);
     return {
       type: 'function_call_output',
@@ -142,12 +142,8 @@ function normalizeStandaloneItem(item: JsonObject, onDropped?: (block?: unknown)
   return item;
 }
 
-/** Replay a captured reasoning carrier as a Responses input item.
- *
- * Prefer the provider-native item verbatim when the block still carries it
- * (`rawItem` from response parsing). Otherwise reconstruct the minimum the
- * Responses API accepts: `summary` is a REQUIRED field on reasoning input
- * items (empty array = "no summaries") — omitting it 400s with
+/** `summary` is a required field on a Responses reasoning input item (an
+ * empty array means no summaries); omitting it 400s with
  * "Missing required parameter: 'input[N].summary'". */
 function reasoningInputItem(block: JsonObject): unknown {
   const raw = block.rawItem;
@@ -156,22 +152,9 @@ function reasoningInputItem(block: JsonObject): unknown {
 }
 
 /**
- * A tool result's content as a Responses `function_call_output` carries it,
- * and whether that loses something on the way.
- *
- * A string goes as it is. Content with an image goes as an array of native
- * input_text / input_image parts: Responses accepts `output` as a string OR
- * an array of those parts, and stringifying an image-bearing result hands
- * the model its base64 as TEXT — no vision, and ~1 token per 2 base64 chars
- * (a 760 KB snapshot ≈ 500k input tokens; probed live on the Codex backend
- * 2026-10-02: array form = 526 tokens and the model describes the image).
- * Any other content keeps the legacy JSON string form, which carries its
- * text, so existing replay bytes don't change.
- *
- * It loses something when a nested block is neither text nor an image the
- * output can carry (it is JSON-stringified, replaced by a note or left out),
- * or when an image's data is none the API accepts (it becomes the
- * placeholder). Each image is decided once, so its warning prints once.
+ * Responses accepts a `function_call_output`'s `output` as a string or as an
+ * array of input_text / input_image parts. A stringified image reaches the
+ * model as base64 text: no vision, and about a token per two characters.
  */
 export function responsesToolOutput(content: unknown): { output: unknown; loses: boolean } {
   if (typeof content === 'string') return { output: content, loses: false };

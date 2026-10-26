@@ -171,7 +171,7 @@ describe('NativeFormatter', () => {
 });
 
 describe('a server block and an image in one request', () => {
-  // Real 1x1 PNG, and text bytes labelled as one, which no request can carry as an image.
+  // NOTES is text bytes labelled image/png, which no request can carry as an image.
   const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==';
   const NOTES = Buffer.from('notes: buy milk').toString('base64');
   const image = (data: string): ContentBlock => ({ type: 'image', source: { type: 'base64', mediaType: 'image/png', data } }) as ContentBlock;
@@ -739,8 +739,7 @@ describe('a server call and its result go out together, or not at all', () => {
     const c1 = call('a'); const r1 = result('a'); const c2 = call('b'); const r3 = result('c');
     const upload = { type: 'container_upload', file_id: 'zz-file' };
     const turn = [c1, r1, c2, r3, upload, answer];
-    // The API refuses container_upload in any assistant turn, so it never goes,
-    // whatever it carries.
+    // The API refuses container_upload in any assistant turn.
     expect([...unpairedServerBlocks(turn, false)]).toEqual([c2, r3, upload]);
     const naming = { type: 'container_upload', file_id: 'zz-file', tool_use_id: 'a' };
     expect([...unpairedServerBlocks([c1, naming, r1], false)]).toEqual([naming]);
@@ -834,8 +833,7 @@ describe('a server call and its result go out together, or not at all', () => {
   });
 
   it('NativeFormatter sends a pair stored twice, in two assistant messages that merge into one turn, once', () => {
-    // As a retry that stores the same turn again leaves it. The API takes each
-    // id once per turn as sent, so the second copy goes, and its message is named.
+    // The API takes each id once per turn as sent.
     const notes = new FidelityNotes();
     const built = new NativeFormatter().buildMessages([
       { participant: 'User', content: [say('zz ask')] },

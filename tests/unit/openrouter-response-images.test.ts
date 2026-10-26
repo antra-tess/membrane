@@ -71,7 +71,7 @@ describe('OpenRouter image normalization', () => {
 });
 
 describe('OpenRouter complete transport', () => {
-  it.each(['content', 'images'])('returns images from %s beside text with usage and model intact', async where => {
+  it.each(['content', 'images'])('returns images from %s beside text with usage and model intact, without fetching a remote image', async where => {
     const message = where === 'content'
       ? { role: 'assistant', content: [text('Here'), imagePart(dataUrl), imagePart(remoteUrl)] }
       : { role: 'assistant', content: 'Here', images: [{ image_url: { url: dataUrl } }, { image_url: { url: remoteUrl } }] };

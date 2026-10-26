@@ -1,11 +1,4 @@
-/**
- * Continuation spin guards (issue #39): no-progress abort, continuation
- * round cap, and round telemetry. Reproduces the Ash 2026-07-26 shape —
- * a stream that stops on 'stop_sequence' with the stopSequence field
- * missing, inside a model-opened block, making ~1 char of progress per
- * round — and asserts the turn now ends with stopReason 'no_progress'
- * instead of re-sending the full context forever.
- */
+/** A provider stream can stop on 'stop_sequence' with the stopSequence field missing. */
 
 import { describe, it, expect, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
@@ -80,6 +73,8 @@ const ASH_SPIN: ScriptedRound[] = [
 ];
 
 describe('stall guard (consecutive no-progress resumptions)', () => {
+  const STALLED_RESUMPTIONS_THAT_END_A_SPIN = 3;
+
   it('ends the spin with stopReason no_progress on stream()', async () => {
     const adapter = new ScriptedAdapter(ASH_SPIN);
     const logger = mockLogger();
@@ -88,7 +83,7 @@ describe('stall guard (consecutive no-progress resumptions)', () => {
     expect('stopReason' in response && response.stopReason).toBe('no_progress');
     // Round 1 + three consecutive stalled resumptions. Not 43. (A single
     // short repeated round is low progress, not proof of none — hence 3.)
-    expect(adapter.streamCalls).toBe(4);
+    expect(adapter.streamCalls).toBe(1 + STALLED_RESUMPTIONS_THAT_END_A_SPIN);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('no progress'));
   });
 
@@ -104,10 +99,10 @@ describe('stall guard (consecutive no-progress resumptions)', () => {
       }
     }
     expect(finalStopReason).toBe('no_progress');
-    expect(adapter.streamCalls).toBe(4);
+    expect(adapter.streamCalls).toBe(1 + STALLED_RESUMPTIONS_THAT_END_A_SPIN);
   });
 
-  it('does not fire while rounds are making progress', async () => {
+  it('does not fire while rounds are making progress inside a function_calls block left unclosed', async () => {
     // Progressing rounds inside a model-opened block, then a natural finish.
     // (No </function_calls> in the text — that would engage the real
     // tool-stop machinery and, amusingly, re-create the exact spin shape
@@ -196,7 +191,8 @@ describe('resumption round cap', () => {
 
 describe('tool rounds are not resumptions', () => {
   it('a long legitimate tool chain runs past the resumption cap untouched', async () => {
-    const TOOL_ROUNDS = 30; // well past the default resumption cap of 24
+    const DEFAULT_RESUMPTION_CAP = 24;
+    const TOOL_ROUNDS = DEFAULT_RESUMPTION_CAP + 6;
     const script: ScriptedRound[] = [
       ...Array.from({ length: TOOL_ROUNDS }, (_, i) => ({
         text: `<function_calls>\n<invoke name="step"><parameter name="n">${i}</parameter></invoke>\n`,

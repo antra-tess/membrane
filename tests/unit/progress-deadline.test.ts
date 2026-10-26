@@ -78,8 +78,7 @@ function liveResponse(init: RequestInit | undefined, script: (io: Io) => Promise
     start(c) { controller = c; },
     cancel() { torn[index] = true; done = true; release(); },
   });
-  // The platform's fetch rejects a body read with the signal's own reason
-  // (pinned against a real server in adapter-timeout-identity.test.ts).
+  // The platform's fetch rejects a body read with the signal's own reason.
   init?.signal?.addEventListener('abort', () => {
     torn[index] = true;
     stop(init.signal!.reason as Error);
@@ -110,7 +109,7 @@ afterEach(() => {
   torn.length = 0;
 });
 
-// Anthropic SSE, through the real SDK parser (which drops `ping` events).
+// The Anthropic SDK's stream parser drops `ping` events.
 const message = {
   id: 'msg_test', type: 'message', role: 'assistant', model: REQUEST.config.model,
   content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 0 },
@@ -671,7 +670,7 @@ describe('every streaming adapter reports progress once per parsed event', () =>
   ] as never;
 
   for (const [name, build] of adapters) {
-    it(`${name}: three data frames, three reports`, async () => {
+    it(`${name}: three data frames parse to an object, three reports`, async () => {
       stubFetch(() => rawSseResponse(sseBody));
       let progress = 0;
       const adapter = build() as unknown as {

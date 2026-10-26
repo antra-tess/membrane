@@ -613,8 +613,7 @@ await runTest('Test 10: Cache breakpoints - second call should hit cache', async
 await delay(1500);
 
 await runTest('Temperature enforcement: complete() with thinking enabled', async () => {
-  // This test verifies that complete() forces temperature=1 for thinking.
-  // Without the fix, Anthropic API would return 400 for temperature != 1 with thinking.
+  // The Anthropic API rejects temperature != 1 with thinking enabled.
   let capturedRequest: any;
 
   const request: NormalizedRequest = {
@@ -651,7 +650,7 @@ await runTest('Temperature enforcement: complete() with thinking enabled', async
 
 await delay(1500);
 
-await runTest('Stop sequence in native mode streaming', async () => {
+await runTest('Stop sequence in native mode streaming, with a tool registered to take the native-tools stream path', async () => {
   // Use native tool mode with a tool present to activate streamWithNativeTools path
   const request: NormalizedRequest = {
     messages: [

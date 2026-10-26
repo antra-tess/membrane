@@ -295,7 +295,7 @@ describe('IncrementalXmlParser', () => {
       expect(closingTag).toBeUndefined();
     });
 
-    it('should track block content correctly for tool calls', () => {
+    it('should keep only parameter values, not invoke or parameter tags, in a tool call block\'s content', () => {
       parser.processChunk('<function_calls>');
       parser.processChunk('<invoke name="config_read">');
       parser.processChunk('<parameter name="key">value</parameter>');
@@ -502,8 +502,7 @@ describe('IncrementalXmlParser', () => {
       expect(parser.isInsideBlock()).toBe(true);
       expect(parser.getDepths().thinking).toBe(2);
 
-      // 2. Model generates a short response and hits a stop sequence
-      //    (stop sequence consumes the matched text, so we don't include it)
+      // A provider's response leaves out the stop sequence it matched.
       const modelResponse = ' I aim to be helpful. Is there something I can help with?';
       parser.push(modelResponse);
 

@@ -1,40 +1,15 @@
 /**
- * One recount of the cache_control markers actually present on a wire
- * request, plus the clamp that keeps that count legal.
- *
  * Anthropic accepts at most 4 cache_control breakpoints per request and
  * rejects the fifth with a non-retryable 400 ("A maximum of 4 blocks with
- * cache_control may be provided. Found 5." — measured live 2026-08-25).
- * Markers arrive from many sites (context strategy breakpoints, block-level
- * passthrough on imported histories, the tools/system fallback, the floating
- * tool-loop marker, caller-marked system blocks, and any beforeRequest hook),
- * and every one of them is invisible to the others' running tallies. The
- * only trustworthy number is a recount of the constructed artifacts, so this
- * module owns it and every site calls it.
- *
- * A marker can also ride a block NESTED inside another block's content array
- * (`tool_result.content` is `string | ContentBlock[]`, passed through to the
- * wire verbatim), so discovery recurses. A belt that cannot see a marker
- * cannot clamp it, and a top-level-only count would report four while five
- * shipped — the request rejected outright with the belt's blessing.
+ * cache_control may be provided. Found 5."). A marker can also ride a block
+ * nested in another block's content (`tool_result.content`), which reaches
+ * the wire as it is.
  */
 
 /** Anthropic's hard limit on cache_control breakpoints per request. */
 export const MAX_CACHE_BREAKPOINTS = 4;
 
-/**
- * How many levels of nested `content` arrays marker discovery descends below
- * a top-level block.
- *
- * A marker can ride a block inside another block's own content array —
- * `ToolResultContent.content` is typed `string | ContentBlock[]` and every
- * builder passes it through verbatim, so a caller-built tool_result whose
- * members carry `cache_control` puts real markers on the wire. The API's own
- * nesting is one level deep; 4 is headroom for shapes it grows later, and it
- * is also what makes this walk TOTAL — a caller-built structure that points
- * back at itself terminates at the cap instead of hanging the request.
- * Markers below the cap are outside the belt's reach, by construction.
- */
+/** The API's own content nesting is one level deep; this cap is above it. */
 export const MAX_NESTED_CONTENT_DEPTH = 4;
 
 /**
@@ -74,18 +49,7 @@ export interface WireCacheSurfaces {
   tools?: unknown;
 }
 
-/**
- * Every marker-bearing block on the request, in WIRE ORDER (tools, then
- * system blocks, then message blocks) and, within each, in DOCUMENT order —
- * a block before anything nested inside its own content. Order is what makes
- * "deepest" mean anything: a deeper marker caches a longer prefix.
- *
- * ONE walk serves both the count and the clamp's strip, so a marker the
- * counter can see is always a marker the clamp can strip. A collector that
- * stopped at the top level would count four while five rode to the wire, and
- * the provider would reject the request the belt just declared legal. The
- * Anthropic adapter's keepalive reads a request's breakpoints through it too.
- */
+/** Anthropic's cache prefix runs tools, then system, then messages, so a deeper marker caches a longer prefix. */
 export function collectMarkedBlocks(surfaces: WireCacheSurfaces): Array<Record<string, unknown>> {
   const marked: Array<Record<string, unknown>> = [];
   const collectIfMarked = (candidate: unknown) =>
@@ -184,20 +148,9 @@ export function assertCacheMarkersWithinLimit(
 }
 
 /**
- * Bring a request inside the breakpoint budget, in place, at the last exit
- * before the adapter call. Two repairs, both loud:
- *
- *  1. a marker riding a thinking / redacted_thinking block is stripped — the
- *     API rejects those outright ("thinking.cache_control: Extra inputs are
- *     not permitted"), and the three builders' `lastCacheableBlockIndex`
- *     discipline is only as good as its last caller. This is the runtime
- *     assertion; a fourth builder can no longer repeat that history.
- *  2. markers past the limit are dropped SHALLOWEST-FIRST, keeping the 4
- *     deepest — the deepest marker caches the longest prefix, and every
- *     shallower prefix it subsumes.
- *
- * Dropping loudly beats a 400: the request still ships, cached less than the
- * caller asked for, with the overspend named.
+ * The API rejects `cache_control` on thinking and redacted_thinking blocks
+ * ("thinking.cache_control: Extra inputs are not permitted"), and the deepest
+ * marker caches the longest prefix.
  */
 export function clampCacheMarkers(
   surfaces: WireCacheSurfaces,

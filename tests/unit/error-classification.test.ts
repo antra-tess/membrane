@@ -1,12 +1,7 @@
 /**
- * Regression tests for transient-error classification.
- *
- * overloaded_error (Anthropic 529) most commonly arrives MID-STREAM as an
- * SSE `error` event, which the SDK rethrows as APIError with
- * status === undefined (sdk core/streaming.js). Before the fix, that fell
- * through every status branch in handleError into
- * `unknown, retryable: false` — so framework-level retry policies
- * (exponential backoff) never fired and the inference failed ungracefully.
+ * overloaded_error (Anthropic 529) most commonly arrives mid-stream as an SSE
+ * `error` event, which the SDK rethrows as APIError with status === undefined
+ * (sdk core/streaming.js).
  */
 
 import { describe, it, expect } from 'vitest';
@@ -164,12 +159,8 @@ describe('Anthropic handleError: context-length heuristic gated on HTTP 400 (iss
 });
 
 describe('Anthropic handleError: abort classification (fleet incident 2026-07-20)', () => {
-  // The SSE idle watchdog aborts a stalled stream via AbortController; the
-  // SDK surfaces that as APIUserAbortError ("Request was aborted."), whose
-  // .name is NOT 'AbortError'. Before the fix it fell through to
-  // `unknown, retryable: false`, and membrane's message-sniffing then
-  // relabeled it a *user* abort — terminal, never retried, and reported as
-  // "Stream aborted: user" on agents nobody touched (Cairn, 2026-07-20).
+  // The SDK surfaces an abort through AbortController as APIUserAbortError
+  // ("Request was aborted."), whose .name is not 'AbortError'.
   it('classifies the real SDK APIUserAbortError as abort, not unknown', () => {
     const err = handleError(new Anthropic.APIUserAbortError());
     expect(err.type).toBe('abort');

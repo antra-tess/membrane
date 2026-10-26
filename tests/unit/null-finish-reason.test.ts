@@ -1,12 +1,7 @@
 /**
- * A server that ends a choice or candidate with `finish_reason: null` (or
- * Gemini's `finishReason: null`) gave no reason, which is a plain end of turn.
- * The OpenAI-completions and Gemini adapters returned the null as their stop
- * reason, and membrane's log line for an unmapped stop reason read its
- * `length`, so the first such complete() in a process failed. Each file runs
- * in a module of its own, so these are the first stop reasons this process
- * logs; the adapter tests also check each adapter's own reading, which a stop
- * reason already in membrane's logged set can't hide.
+ * A server can end a choice or candidate with `finish_reason: null` (or
+ * Gemini's `finishReason: null`). Vitest runs each file in a module of its
+ * own, so these are the first stop reasons this process logs.
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -107,7 +102,7 @@ describe('a null finish reason is no finish reason', () => {
   // A control: the stream reads a finish reason only when it's truthy, so a
   // null one never reached the mapper there. After [DONE] the mapper reads the
   // missing one, which pins the guard's undefined half for this adapter.
-  it('openai-completions stream()', async () => {
+  it('openai-completions stream(), which skips a null finish reason and maps the missing one after [DONE]', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.stubGlobal('fetch', sse([
       { id: 'zz-cmpl-1', choices: [{ text: 'zz-done', finish_reason: null, index: 0 }] },

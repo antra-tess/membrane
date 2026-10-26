@@ -26,6 +26,8 @@ import type {
 import type { StreamCallbacks } from '../../src/types/streaming.js';
 
 /** Always 529s, so the turn spends its life in the backoff window. */
+const slowConsumerPause = () => new Promise((resolve) => setTimeout(resolve, 20));
+
 class OverloadedAdapter implements ProviderAdapter {
   readonly name = 'zz-overloaded';
   calls = 0;
@@ -403,7 +405,7 @@ describe('a cancelled yielding stream reports one abort', () => {
       // does, is still reading when the provider's rejection arrives.
       for await (const event of stream) {
         events.push(event);
-        await new Promise((resolve) => setTimeout(resolve, 20));
+        await slowConsumerPause();
       }
       const aborted = events.filter((e) => e.type === 'aborted');
       expect(aborted).toHaveLength(1);
@@ -424,7 +426,7 @@ describe('a cancelled yielding stream reports one abort', () => {
         stream.cancel();
       }
       // Still reading when the loop comes round again after the results.
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await slowConsumerPause();
     }
     expect(events.filter((e) => e.type === 'aborted')).toHaveLength(1);
     expect(adapter.calls).toBe(1);

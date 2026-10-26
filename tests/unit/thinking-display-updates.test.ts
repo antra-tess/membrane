@@ -2,13 +2,11 @@
  * `thinking.display: 'updates'` (Anthropic beta
  * `thinking-display-updates-2026-08-18`).
  *
- * On Fable 5 / 5.1, Mythos 5.1, Opus 5.5 and Sonnet 5.5 the notes the model
- * writes between tool calls come back as signed `thinking` blocks placed
- * before the `tool_use` they introduce, empty under the default 'omitted'.
- * 'updates' returns their text while reasoning stays hidden. Membrane builds
- * the config (Fable and Mythos included, which otherwise get no config for a
- * display alone), and both Anthropic-shaped adapters add the beta whenever
- * the body they send carries the value. Without the beta the API rejects it.
+ * On Fable 5 / 5.1 and Mythos 5.1, and on Opus 5.5 and Sonnet 5.5 for notes
+ * longer than a sentence or two, the notes the model writes between tool
+ * calls come back as signed `thinking` blocks placed before the `tool_use`
+ * they introduce, empty under the default 'omitted'. 'updates' returns their
+ * text while reasoning stays hidden. Without the beta the API rejects it.
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
@@ -75,7 +73,7 @@ describe('membrane builds the config', () => {
   });
 
   it('sends a model whose thinking is always on an adaptive config for updates, where another display alone sends none', async () => {
-    // `enabled` doesn't matter to these models: they think either way.
+    // These models think whatever `enabled` says.
     expect((await sent({ model: 'claude-fable-5-1', thinking: { enabled: false, display: 'updates' } })).thinking)
       .toEqual({ type: 'adaptive', display: 'updates' });
     expect((await sent({ model: 'claude-mythos-5-1', thinking: { enabled: true, display: 'updates' } })).thinking)
@@ -159,11 +157,11 @@ describe('a progress update comes back as a thinking block', () => {
     const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
     (adapter as any).client = { withOptions() { return this; }, messages: { stream: async () => fakeStream([
       { type: 'message_start', message: { model: 'claude-opus-5-5', usage: { input_tokens: 9 } } },
-      // Reasoning, hidden under 'updates': no text, a signature.
+      // Under 'updates', hidden reasoning comes as a thinking block with no text and a signature.
       { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } },
       { type: 'content_block_delta', index: 0, delta: { type: 'signature_delta', signature: 'SIG-R' } },
       { type: 'content_block_stop', index: 0 },
-      // The progress note: text, then its own signature.
+      // A progress note streams its text, then its own signature.
       { type: 'content_block_start', index: 1, content_block: { type: 'thinking', thinking: '' } },
       { type: 'content_block_delta', index: 1, delta: { type: 'thinking_delta', thinking: 'Found the config; checking the loader next.' } },
       { type: 'content_block_delta', index: 1, delta: { type: 'signature_delta', signature: 'SIG-U' } },

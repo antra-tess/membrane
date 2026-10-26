@@ -31,7 +31,7 @@ export interface MockAdapterConfig {
   /** If true, echo back the last user message */
   echoMode?: boolean;
 
-  /** Queue of responses to return (FIFO, then falls back to default) */
+  /** Queue of responses to return first (FIFO); after it, responseGenerator, echoMode, then defaultResponse */
   responseQueue?: string[];
 
   /** Function to generate response based on request */

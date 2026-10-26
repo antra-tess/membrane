@@ -117,15 +117,7 @@ describe('cacheBreakpoint → cache_control in the raw request', () => {
   });
 });
 
-// Imported/seeded conversations can carry stale request-time cache_control on
-// stored text blocks (Arc exports do). On the NATIVE path those blocks are
-// passed through verbatim, so membrane must COUNT them as message breakpoints
-// and skip its own system/tools fallback — that addition is the part membrane
-// controls. Membrane deliberately does NOT strip excess markers: >4 is a data
-// defect (fix it at ingest), and a loud 400 beats silently dropping someone's
-// cache breakpoints. First seen live: Sill 2026-07-25, 3 markers + 2 stale
-// = 5 -> 400 on every inference; root cause fixed in the ingest converter.
-// Ported from the legacy test/ addition in PR #41, which predated this suite.
+// Anthropic accepts at most 4 cache_control breakpoints per request and 400s the fifth.
 describe('block-level cache_control passthrough (native path)', () => {
   it('preserves passthroughs verbatim and counts them, suppressing the system fallback', () => {
     const staleCache = { type: 'ephemeral', ttl: '1h' };

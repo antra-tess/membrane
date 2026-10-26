@@ -3,14 +3,7 @@ import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import { createProgressDeadline } from '../../src/providers/utils.js';
 import type { ProviderRequest } from '../../src/types/index.js';
 
-/**
- * Idle-watchdog regressions through the real SDK SSE parser. The SDK drops
- * `ping` events before the adapter sees them, so a body that only carries
- * keepalives must still count as live transport after the first SDK event. The
- * first-event deadline remains fixed even when pre-event bytes arrive. Timings
- * are scaled fixture inputs only: the ratios (pings every ~IDLE/5, runs of
- * 4x IDLE) are wide so loaded machines do not turn them into races.
- */
+/** The Anthropic SDK drops `ping` SSE events before the adapter sees them. */
 const IDLE_MS = 150;
 const PING_MS = 30;
 const LIVE_MS = 4 * IDLE_MS;
@@ -305,14 +298,14 @@ describe('Anthropic stream setup and alternate SDK response bodies', () => {
     const encoder = new TextEncoder();
     // message_delta is the adapter's terminal event; it intentionally closes
     // the transport before any later message_stop frame.
-    const bytes = encoder.encode(messageStart() + ping() + answer().slice(0, -1).join(''));
+    const answerThroughMessageDelta = answer().slice(0, -1);
+    const bytes = encoder.encode(messageStart() + ping() + answerThroughMessageDelta.join(''));
     let consumed = 0;
     const calls = stubFetch(() => {
       const response = new Response(null, { headers: {
         'content-type': 'text/event-stream', 'request-id': 'req_async_fixture',
       } });
-      // SDK 0.52 shims accepts async iterables. Split every byte to also cover
-      // framing boundaries and preserve the exact encoded stream.
+      // The SDK's shims (0.52) accept an async-iterable body.
       Object.defineProperty(response, 'body', { value: {
         async *[Symbol.asyncIterator]() {
           for (const byte of bytes) { consumed++; yield Uint8Array.of(byte); }

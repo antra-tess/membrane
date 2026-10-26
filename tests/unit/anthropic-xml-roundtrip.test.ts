@@ -1,16 +1,7 @@
 /**
- * Round-trip fidelity tests for prefill/XML tool calls (membrane#36).
- *
- * In prefill mode the model's tool call IS generated text. Replaying a
- * synthesized paraphrase (`Participant>[tool]: {json}`) instead of the
- * original `<function_calls>` block:
- *   1. teaches the model a syntax the parser rejects (silent tool-call drop),
- *   2. rewrites the agent's own past turn.
- *
- * These tests pin the fix: parseAccumulatedIntoBlocks carries the verbatim
- * generation on the block (`rawXml`), and AnthropicXmlFormatter replays it
- * exactly. Legacy blocks without rawXml render in the canonical form the
- * parser and instructions agree on.
+ * In prefill mode the model's tool call is generated text, and the model
+ * writes what it sees in its history: a replayed paraphrase of a call teaches
+ * it a syntax the parser rejects.
  */
 
 import { describe, it, expect } from 'vitest';

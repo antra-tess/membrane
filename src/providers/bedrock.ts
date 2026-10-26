@@ -26,7 +26,7 @@ import {
   withRawRequest,
 } from '../types/index.js';
 import { errorFromThrown } from '../types/errors.js';
-import { stripEmptyTextRequest } from '../utils/empty-text.js';
+import { stripEmptyTextAfterPassthrough } from '../utils/empty-text.js';
 import { isUnsignedThinking } from '../utils/thinking-carriers.js';
 import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, streamIndex, isEventObject, isToolCallBlock, isToolCallArgumentsDelta, contentOfAnthropicEvent } from './utils.js';
 import {
@@ -54,7 +54,7 @@ export interface BedrockAdapterConfig {
   /** AWS secret access key */
   secretAccessKey?: string;
 
-  /** AWS region (defaults to us-west-2) */
+  /** AWS region (defaults to AWS_REGION, then us-west-2) */
   region?: string;
 
   /** AWS session token (for temporary credentials) */
@@ -63,16 +63,14 @@ export interface BedrockAdapterConfig {
   /** Default max tokens */
   defaultMaxTokens?: number;
 
-  /** Anthropic API version header (defaults to 2023-06-01) */
+  /** Anthropic API version, sent as the `anthropic_version` body field (defaults to bedrock-2023-05-31) */
   anthropicVersion?: string;
 
   /**
-   * Endpoint override (no trailing slash), e.g. an inference gateway leg
-   * like `https://gate.animalabs.ai/bedrock/apse1`. Defaults to
-   * `https://bedrock-runtime.{region}.amazonaws.com`. When pointing at a
-   * gateway, set accessKeyId to the gate token — the gateway reads it from
-   * the SigV4 Credential field, discards the client signature, and re-signs
-   * with real AWS creds that never leave the gateway box.
+   * Endpoint override (no trailing slash), e.g. an inference gateway's leg.
+   * Defaults to `https://bedrock-runtime.{region}.amazonaws.com`. When
+   * pointing at a gateway, set accessKeyId to the gate token; the constructor
+   * still requires a non-empty secretAccessKey.
    */
   baseURL?: string;
 }
@@ -156,7 +154,7 @@ interface BedrockStreamEvent {
     partial_json?: string;
     stop_reason?: string;
     stop_sequence?: string;
-    /** On a refusal's message_delta, if Bedrock passes it on (see BedrockMessageResponse.stop_details). */
+    /** On a refusal's message_delta, if Bedrock passes it on. */
     stop_details?: unknown;
   };
   message?: BedrockMessageResponse;
@@ -304,15 +302,18 @@ async function signRequest(
 // Bedrock Adapter
 // ============================================================================
 
+const AWS_EVENTSTREAM_STRING_HEADER_TYPE = 7;
+
 export class BedrockAdapter implements ProviderAdapter {
   readonly name = 'bedrock';
   /**
    * Reports what it leaves out: whitespace-only text its cleanup removes, an
    * image whose data the API doesn't accept, which goes as the placeholder
-   * (at the top level or nested in a tool result), and a passthrough
-   * `messages` that replaces the built ones. Otherwise it carries message
-   * content as built, nested tool-result blocks included; only wire fields
-   * (sourceUrl, cache ttl, media_type spelling) change.
+   * (at the top level or nested in a tool result), a thinking block with no
+   * signature, media with no source object, and a passthrough `messages` that
+   * replaces the built ones. Otherwise it carries message content as built,
+   * nested tool-result blocks included; only wire fields (sourceUrl, cache
+   * ttl, media_type spelling) change.
    */
   readonly reportsContentAlterations = true;
   readonly cacheReceiptBasis = 'wire-request' as const;
@@ -321,8 +322,7 @@ export class BedrockAdapter implements ProviderAdapter {
    * Bedrock serves Anthropic models over the Anthropic Messages payload shape
    * and this adapter reads Anthropic's own field names
    * (`cache_read_input_tokens` / `cache_creation_input_tokens`), so it inherits
-   * the convention verified live against api.anthropic.com on 2026-08-25.
-   * Derived from the wire contract, not measured against Bedrock directly.
+   * the Anthropic API's convention; not measured against Bedrock directly.
    */
   readonly usageCacheConvention = 'cache-excluded' as const;
 
@@ -354,10 +354,9 @@ export class BedrockAdapter implements ProviderAdapter {
   }
 
   /**
-   * Cross-region inference-profile prefix for this adapter's region.
    * Claude 4-era models on Bedrock reject on-demand invocation of the
    * direct id ("Invocation ... with on-demand throughput isn't supported")
-   * and require the profile form — verified live 2026-07-31.
+   * and require the cross-region inference-profile form.
    */
   private inferenceProfilePrefix(): string {
     if (this.region.startsWith('eu-')) return 'eu.';
@@ -384,11 +383,8 @@ export class BedrockAdapter implements ProviderAdapter {
 
     const profile = this.inferenceProfilePrefix();
 
-    // Map common Claude model IDs to Bedrock format. The 3.x entries keep
-    // their historical direct-id form (those models predate inference
-    // profiles; all are EOL on Bedrock as of 2026-07 anyway, so the exact
-    // shape is moot). 4-era entries use the profile form — the direct id
-    // no longer invokes.
+    // 3.x models predate inference profiles and keep the direct id; 4-era
+    // models take the profile form, since the direct id no longer invokes.
     const modelMap: Record<string, string> = {
       'claude-3-5-sonnet-20241022': 'anthropic.claude-3-5-sonnet-20241022-v2:0',
       'claude-3-5-sonnet-latest': 'anthropic.claude-3-5-sonnet-20241022-v2:0',
@@ -461,26 +457,12 @@ export class BedrockAdapter implements ProviderAdapter {
       if (copy !== original && copy !== null && typeof copy === 'object') originals.set(copy as object, original);
       return copy;
     };
-    // Strip provider-specific fields (e.g., sourceUrl for Gemini) from image blocks
-    // before sending to Bedrock/Anthropic, which rejects extra inputs.
-    //
-    // Same treatment for cache_control.ttl: Bedrock's prompt cache runs at the
-    // fixed default (5m) TTL — the ttl field is a direct-API extension and
-    // Bedrock rejects it as an extra input. The marker itself is fine and
-    // caching works without the field, so strip just the ttl and keep the
-    // breakpoint. Transport quirks belong to the transport, not to every
-    // caller that sets cacheTtl. (Connectome issue #35.)
-    // Bedrock is strict about the wire shape of image sources: internal blocks
-    // carry camelCase `mediaType`, the API requires snake_case `media_type`.
-    // The Anthropic adapter converts on both paths (top-level images in its
-    // buildRequest, nested ones through toAnthropicToolResultContent); without
-    // the same conversion here a tool-returned image 400s with
-    // "media_type: Field required" mid-turn
-    // (observed on eidoverse snapshot results, 2026-08-08). Applies to
-    // top-level image blocks AND images nested inside tool_result content.
-    // Data that is no image the API accepts goes as imageForRequest's
-    // placeholder text instead, keeping any cache breakpoint the image
-    // carried; `onPlaceholder` hears each one.
+    // Bedrock rejects extra inputs on an image block (e.g. Gemini's
+    // sourceUrl), and rejects cache_control.ttl as one: its prompt cache runs at
+    // the fixed default (5m) TTL, and the marker without the ttl works.
+    // It requires snake_case `media_type` on an image source, where membrane
+    // writes `mediaType`: without it a tool-returned image 400s with
+    // "media_type: Field required".
     const toWireImage = (block: any, onPlaceholder: () => void): any => {
       const source = block.source;
       if (source?.type === 'url') {
@@ -526,9 +508,7 @@ export class BedrockAdapter implements ProviderAdapter {
             return [];
           }
           if (isUnsignedThinking(block)) {
-            // Another provider's reasoning has no signature, and the
-            // Anthropic API refuses a thinking block without a valid one
-            // (#191): left out, and reported, as the Anthropic adapter does.
+            // The API refuses a thinking block without a valid signature.
             onContentAltered?.(original);
             return [];
           }
@@ -566,10 +546,9 @@ export class BedrockAdapter implements ProviderAdapter {
       messages: sanitizedMessages as BedrockMessageRequest['messages'],
     };
 
-    // Handle system prompt
-    // Claude 3 Sonnet (20240229) on Bedrock intermittently rejects the array content-block
-    // format for system prompts via APAC cross-region inference. Flatten to a plain string
-    // for this model to avoid the "system: Input should be a valid string" validation error.
+    // Claude 3 Sonnet (20240229) on Bedrock intermittently rejects the array
+    // content-block form for system prompts via APAC cross-region inference
+    // ("system: Input should be a valid string").
     if (request.system) {
       const needsFlatten = bedrockModelId?.includes('claude-3-sonnet-20240229') ?? false;
       if (needsFlatten && Array.isArray(request.system)) {
@@ -628,12 +607,8 @@ export class BedrockAdapter implements ProviderAdapter {
       throw invalidRequestError('Bedrock anthropic_beta must be an array of strings.');
     }
 
-    // Interleaved thinking on pre-4.6 Claude 4: same gate as the Anthropic
-    // adapter, but bedrock-runtime takes betas as the `anthropic_beta` body
-    // field rather than an HTTP header. Runs after the extra-assign so a
-    // consumer-supplied anthropic_beta is merged (Set-deduped), not clobbered.
-    // The gate only matches Claude 4 <4.6 ids, so legacy 3.x models (which
-    // reject unknown beta flags) never receive the field.
+    // bedrock-runtime takes betas in the `anthropic_beta` body field, not an
+    // HTTP header, and legacy 3.x models refuse unknown beta flags.
     if (thinkingEnabled(request) && needsInterleavedThinkingBeta(request.model)) {
       const existing = params.anthropic_beta ?? [];
       params.anthropic_beta = [...new Set([...existing, INTERLEAVED_THINKING_BETA])];
@@ -649,7 +624,7 @@ export class BedrockAdapter implements ProviderAdapter {
       params.anthropic_beta = [...new Set([...existing, THINKING_DISPLAY_UPDATES_BETA])];
     }
 
-    stripEmptyTextRequest(params, onContentAltered
+    stripEmptyTextAfterPassthrough(params, onContentAltered
       ? (dropped) => onContentAltered(dropped !== null && typeof dropped === 'object' ? originals.get(dropped) ?? dropped : dropped)
       : undefined);
     return params;
@@ -740,23 +715,12 @@ export class BedrockAdapter implements ProviderAdapter {
 
     // Parse the binary event stream
     const contentBlocks: Array<{ type: string; text?: string; thinking?: string; signature?: string }> = [];
-    // Indices of blocks content_block_stop finalized. A tool call truncated by
-    // max_tokens never gets one, as in the Anthropic adapter.
+    // A tool call truncated by max_tokens never gets a content_block_stop.
     const stoppedBlocks = new Set<number>();
     let currentBlockIndex = -1;
     // Block events come in the API's order: a start while no block is open,
     // at the next index, then that block's deltas (a tool call's carry only
-    // its arguments: isToolCallBlock, isToolCallArgumentsDelta) and its stop.
-    // A start above the next index is placed, as it always was, and the slots
-    // it skips fail the call below as lost blocks; the Anthropic adapter takes
-    // that start as out of order instead. A stream that ends with a block
-    // open, as a max_tokens cut does, is in order. Reading stops at
-    // message_delta, as in the Anthropic adapter, so a block still open there
-    // is cut off in both. The first event that isn't in order
-    // means the stream can't vouch for which call any arguments belong to:
-    // no later block event is applied, a block still open stays unstopped
-    // (marked below), and every tool_use block in the response is marked,
-    // with one warning.
+    // its arguments) and its stop.
     let blockOrderBroken = false;
     // A start that names no block, while none is open, is skipped as it
     // always was: until the next start, the deltas and stop after it join no
@@ -781,9 +745,7 @@ export class BedrockAdapter implements ProviderAdapter {
     let cacheCreationTokens: number | undefined;
     let cacheReadTokens: number | undefined;
     let stopReason: string | undefined;
-    // A refusal's details, from its message_delta, as AnthropicAdapter's
-    // stream reads them. AWS's page doesn't show them in the stream, so they
-    // may never come; the reader leaves the category out when they don't.
+    // AWS's page doesn't show a refusal's details in the stream, so they may never come.
     let stopDetails: unknown;
     let sawTerminalEvent = false;
     let stopSequence: string | undefined;
@@ -845,7 +807,7 @@ export class BedrockAdapter implements ProviderAdapter {
             const valueType = buffer[headerOffset]!;
             headerOffset += 1;
 
-            if (valueType === 7) {
+            if (valueType === AWS_EVENTSTREAM_STRING_HEADER_TYPE) {
               // String type
               const valueLength = new DataView(buffer.buffer, buffer.byteOffset + headerOffset, 2).getUint16(0, false);
               headerOffset += 2;
@@ -1041,9 +1003,7 @@ export class BedrockAdapter implements ProviderAdapter {
                 if (eventData.usage) {
                   outputTokens = eventData.usage.output_tokens;
                   if (typeof eventData.usage.output_tokens === 'number') outputReported = true;
-                  // message_delta carries cumulative cache metrics — use as
-                  // authoritative when present (same contract as the
-                  // Anthropic adapter).
+                  // message_delta carries cumulative cache metrics.
                   if (eventData.usage.cache_creation_input_tokens != null) {
                     cacheCreationTokens = eventData.usage.cache_creation_input_tokens;
                   }
@@ -1077,9 +1037,8 @@ export class BedrockAdapter implements ProviderAdapter {
         }
       }
     } finally {
-      // A read loop that ends early, on a callback's error or any other,
-      // leaves the body unread: cancel it, so the provider stops sending and
-      // the connection is let go. After a full read it does nothing.
+      // An unread body holds the connection: cancel it, so the provider stops
+      // sending. After a full read it does nothing.
       void reader.cancel().catch(() => {});
       reader.releaseLock();
     }

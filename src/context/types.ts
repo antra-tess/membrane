@@ -39,7 +39,12 @@ export interface ContextConfig {
     unit?: 'messages' | 'tokens';
   };
   
-  /** Hard limits (always enforced) */
+  /**
+   * Hard limits, checked on every call. Truncation to meet them keeps at least
+   * the newest message and doesn't split a tool call from its result where it
+   * can avoid it, so the window can still exceed a limit, which
+   * `ContextInfo.residualOverflow` then reports.
+   */
   limits?: {
     /** Maximum characters (default: 500000) */
     maxCharacters?: number;
@@ -56,7 +61,7 @@ export interface ContextConfig {
     /** Enable caching (default: true) */
     enabled?: boolean;
     
-    /** Number of cache points (default: 1, max: 4 for Anthropic) */
+    /** Number of cache points (default: 1); the module places at most 3 */
     points?: 1 | 2 | 3 | 4;
     
     /** Minimum tokens before caching (default: 1024) */
@@ -79,12 +84,9 @@ export interface ContextConfig {
 }
 
 /**
- * Thrown by `processContext` when messages do not carry stable identity.
- *
- * The module keys continuity detection, marker stability and the
- * `cachedStartMessageId` fetch anchor off `metadata.sourceId`. Without it
- * every call sees a brand-new conversation, so rolling and caching are
- * silently disabled — the module refuses rather than degrade invisibly.
+ * Thrown by `processContext` when messages do not carry stable identity: the
+ * module keys continuity detection, marker stability and the
+ * `cachedStartMessageId` fetch anchor off `metadata.sourceId`.
  */
 export class MembraneContextIdentityError extends Error {
   constructor(
@@ -121,13 +123,11 @@ export interface ContextState {
   
   /**
    * First message ID of the cached window.
-   * 
+   *
    * Use this to anchor your message fetch window - fetch from this message ID
-   * onwards to ensure cache stability. Only changes when a roll occurs.
-   * 
-   * This helps callers maintain stable fetch windows:
-   * - Discord bots can use this as the `after` parameter when fetching messages
-   * - Other message sources can use it as a pagination cursor
+   * onwards to ensure cache stability. It changes when a roll occurs, and is
+   * unset when a new conversation or branch switch resets the state, until the
+   * next roll.
    */
   cachedStartMessageId?: string;
 }
@@ -194,10 +194,7 @@ export interface ContextInfo {
     actual: number;
   };
   
-  /**
-   * First message ID of the cached window.
-   * Useful for callers to anchor their message fetch window.
-   */
+  /** First message ID of the cached window. */
   cachedStartMessageId?: string;
 }
 
@@ -234,7 +231,7 @@ export type ContextToolCallback = (
 
 /**
  * Callback for pre-tool content notification.
- * Called with content that appeared before tool calls (useful for UI preview).
+ * Called with content that appeared before tool calls.
  */
 export type ContextPreToolCallback = (content: string) => Promise<void> | void;
 
@@ -263,10 +260,7 @@ export interface ContextStreamOptions {
    */
   onUsage?: (usage: BasicUsage) => void;
   
-  /**
-   * Maximum tool execution depth (default: 10).
-   * Prevents infinite tool loops.
-   */
+  /** Maximum tool execution depth (default: 10). */
   maxToolDepth?: number;
 }
 
@@ -288,6 +282,9 @@ export function createInitialState(): ContextState {
   };
 }
 
+const CHARS_PER_TOKEN = 4;
+const ESTIMATED_IMAGE_TOKENS = 1500;
+
 /**
  * Default token estimator (chars / 4)
  */
@@ -303,10 +300,10 @@ export function defaultTokenEstimator(message: NormalizedMessage): number {
       chars += content.length;
     } else if (block.type === 'image') {
       // Images: ~1500 tokens regardless of size (Anthropic)
-      chars += 6000; // 1500 * 4
+      chars += ESTIMATED_IMAGE_TOKENS * CHARS_PER_TOKEN; // 1500 * 4
     }
   }
-  return Math.ceil(chars / 4);
+  return Math.ceil(chars / CHARS_PER_TOKEN);
 }
 
 /**

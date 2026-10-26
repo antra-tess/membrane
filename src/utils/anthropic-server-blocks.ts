@@ -1,22 +1,10 @@
 /**
- * Anthropic server-tool blocks: the content blocks the Messages API returns
- * in an assistant turn for a tool it runs itself (web search, web fetch, code
- * execution, tool search, the MCP connector) and for a file it puts in the
- * code-execution container. Membrane has no normalized ContentBlock for them,
- * so response parsing keeps each one verbatim on a zero-width carrier,
- * `{ type: 'text', text: '', rawItem: <the block> }`.
- *
- * They are part of the turn as the model produced it. When signed thinking
- * sits in the same turn, the API refuses the turn with the blocks left out
- * ("thinking ... blocks in the latest assistant message cannot be modified"),
- * and a model replayed without its search results no longer has them. So
- * Membrane sends each one back in its carrier's place, in the assistant turn
- * that produced it, through an adapter that declares
- * replaysAnthropicServerBlocks (AnthropicAdapter), unless the API refuses it
- * there (unpairedServerBlocks: a lone call or result, a second block with an
- * id, an id that isn't a string, and `container_upload`).
- * Its other builds, Bedrock's included, and request shapes for other wires
- * leave it out.
+ * When signed thinking sits in an assistant turn with Anthropic server-tool
+ * blocks (web search, web fetch, code execution, tool search, the MCP
+ * connector, `container_upload`), the API refuses the turn sent back with
+ * the blocks left out ("thinking ... blocks in the latest assistant message
+ * cannot be modified"), and a model replayed without its search results no
+ * longer has them.
  */
 
 import type { ContentBlock } from '../types/content.js';
@@ -76,18 +64,8 @@ export function carriesAnthropicServerBlock(block: unknown): boolean {
 }
 
 /**
- * What an Anthropic-shaped request sends for `block` when it is an Anthropic
- * server-tool block, or a zero-width carrier holding one: a copy of that
- * block, without any `cache_control` stored on it or on its carrier. A
- * marker is the request's own, placed by the builder, so a stale one kept in
- * history isn't sent and doesn't count toward the four-marker limit, as it
- * never did while carriers were dropped. Because it's a copy, a breakpoint
- * the builder places marks it and never the stored item. A server call whose
- * streamed input didn't arrive whole carries `unparseableInput` (the
- * Anthropic adapter marks it, as it marks a tool_use); it goes out as stored,
- * with the start's input, as a marked tool_use does, and without the marker,
- * which is membrane's record, not the API's field. Undefined for every other
- * block.
+ * A `cache_control` stored on a server block or its carrier isn't sent: the
+ * request's markers are its builder's, and Anthropic takes at most four.
  */
 export function anthropicServerBlockFor(block: unknown): AnthropicServerBlock | undefined {
   const item = serverBlockOf(block);
@@ -100,21 +78,15 @@ export function anthropicServerBlockFor(block: unknown): AnthropicServerBlock | 
 const ANTHROPIC_SERVER_CALL_TYPES: ReadonlySet<string> = new Set(['server_tool_use', 'mcp_tool_use']);
 
 /**
- * The Anthropic server-tool blocks of one assistant turn that can't go out.
- * The API refuses a server call that has no result after it in its turn, and
- * a result whose call isn't before it in its turn, so a request that replays
- * either alone fails, and so does every later request that replays the turn
- * (measured with count_tokens on claude-haiku-4-5 for web search's, web
- * fetch's, bash code execution's, tool search's and the MCP connector's
- * pairs). It takes each id once per turn: a second call with a call's id, or
- * a second result for one call, is refused ("ids must be unique per assistant
- * turn"), so the first call of an id and the first result after it pair, and
- * every later block with that id goes. It refuses a call whose `id`, or a
- * result whose `tool_use_id`, isn't a string, in any turn, and
- * `container_upload` in any assistant turn, so those never go. With
- * `lastTurn`, the turn keeps its lone calls: a paused turn (`pause_turn`) is
- * resumed by sending it back as it is, as the request's final message, where
- * the API takes a lone call.
+ * The API refuses a server call that has no result after it in its turn,
+ * and a result whose call isn't before it in its turn, so a request that
+ * replays either alone fails, and so does every later request that replays
+ * the turn. Ids must be unique per assistant turn: a second call with a
+ * call's id, or a second result for one call, is refused. It refuses a call
+ * whose `id`, or a result whose `tool_use_id`, isn't a string, in any turn,
+ * and `container_upload` in any assistant turn. A paused turn
+ * (`pause_turn`) is resumed by sending it back as it is, as the request's
+ * final message, where the API takes a lone call.
  */
 export function unpairedServerBlocks(turn: readonly unknown[], lastTurn: boolean): Set<unknown> {
   const unpaired = new Set<unknown>();

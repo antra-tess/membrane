@@ -86,9 +86,9 @@ export interface OpenAICompletionsAdapterConfig {
   extraHeaders?: Record<string, string>;
 
   /**
-   * Name of the assistant participant (default: 'Assistant')
-   * Used to identify which messages are from the assistant and to
-   * add the final prompt prefix for completion.
+   * Name of the assistant participant (default: 'Assistant'). The prompt
+   * ends with it as the completion's prefix (`Name:`), and it gets no stop
+   * sequence of its own among the participant ones.
    */
   assistantName?: string;
 
@@ -123,10 +123,7 @@ export interface OpenAICompletionsAdapterConfig {
 export class OpenAICompletionsAdapter implements ProviderAdapter {
   readonly name: string;
 
-  /**
-   * NOT ESTABLISHED: legacy /v1/completions against arbitrary vendors. Moot
-   * today — the adapter never populates `cacheReadTokens`.
-   */
+  /** NOT ESTABLISHED: legacy /v1/completions against arbitrary vendors. */
   readonly usageCacheConvention = 'unknown' as const;
   private baseURL: string;
   private apiKey: string;
@@ -209,14 +206,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
       let sawTerminalEvent = false;
       let streamUsage: CompletionsResponse['usage'] | undefined;
 
-      // Post-facto truncation of the adapter's own eotToken.
-      // The adapter serializes the prompt with this.eotToken and sends it as an
-      // API stop string, but some backends leak the stop string into streamed
-      // output. Since the bot-level formatter may use a different (or empty)
-      // turn-end token, downstream post-facto checks can't be relied on to
-      // catch it — the layer that introduced the token must truncate it.
-      // emittedLen tracks how much of `accumulated` has been emitted; a tail of
-      // eot.length-1 chars is held back in case the token is split across chunks.
+      // Some backends leak the eotToken, sent as an API stop string, into streamed output.
       const eot = this.eotToken;
       let emittedLen = 0;
       let eotFound = false;
@@ -306,11 +296,8 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
           if (eotFound) break;
         }
 
-        // A final `data:` line that arrived without its trailing newline is still
-        // buffered here. Servers and proxies do close right after writing the
-        // last event, so dropping it would report a finished turn as a dropped
-        // connection at the guard below. A stream already ended by the eotToken
-        // has nothing left to read.
+        // A final `data:` line can arrive without its trailing newline: servers and
+        // proxies close right after writing the last event.
         if (!eotFound) {
           for (const data of sseParser.flush()) {
             processDataLine(data);
@@ -323,11 +310,9 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
           callbacks.onChunk(accumulated.slice(emittedLen));
         }
       } finally {
-        // A read loop that ends early, at the end-of-turn token, on a
-        // callback's error or any other, leaves the body unread: cancel it,
-        // without waiting on a cancel that may never settle, so the provider
-        // stops sending and the connection is let go. After a full read it
-        // does nothing.
+        // An unread body holds the connection: cancel it, without waiting on a
+        // cancel that may never settle, so the provider stops sending. After a full
+        // read it does nothing.
         void reader.cancel().catch(() => {});
       }
 
@@ -545,8 +530,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
     const choice = response.choices[0];
     let text = choice?.text ?? '';
 
-    // Post-facto truncation of the adapter's own eotToken — some backends
-    // leak the stop string into the output (see stream() for details)
+    // Some backends leak the eotToken into the output.
     if (this.eotToken) {
       const idx = text.indexOf(this.eotToken);
       if (idx !== -1) {
@@ -586,8 +570,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
       providerStopReason: finishReason,
       stopSequence: undefined,
       usage: {
-        // Zeros only as the genuinely-absent fallback: an endpoint that
-        // ignores stream_options sends no usage frame.
+        // An endpoint that ignores stream_options sends no usage frame.
         inputTokens: streamUsage?.prompt_tokens ?? 0,
         outputTokens: streamUsage?.completion_tokens ?? 0,
       },

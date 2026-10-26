@@ -106,17 +106,19 @@ async function driveCallback(
   return contexts;
 }
 
-function assertDeltaShape(contexts: ToolContext[]) {
-  expect(contexts).toHaveLength(3);
+const ROUNDS = 3;
 
-  for (let n = 1; n <= 3; n++) {
+function assertDeltaShape(contexts: ToolContext[]) {
+  expect(contexts).toHaveLength(ROUNDS);
+
+  for (let n = 1; n <= ROUNDS; n++) {
     const ctx = contexts[n - 1]!;
     const delta = ctx.roundPreamble;
     expect(delta, `round ${n} roundPreamble present`).toBeDefined();
 
     // This round's own prose, and only this round's.
     expect(delta).toContain(`ROUND_${n}_PROSE`);
-    for (let m = 1; m <= 3; m++) {
+    for (let m = 1; m <= ROUNDS; m++) {
       if (m !== n) {
         expect(delta, `round ${n} delta must not contain round ${m} text`).not.toContain(
           `ROUND_${m}_PROSE`,
@@ -138,20 +140,20 @@ function assertDeltaShape(contexts: ToolContext[]) {
   // …while the legacy cumulative field still repeats it (compatibility —
   // and the measured shape of the bug: r1 in rounds 1, 2 and 3 = 3 copies).
   const allPreambles = contexts.map((c) => c.preamble).join('\n');
-  expect(allPreambles.split('ROUND_1_PROSE').length - 1).toBe(3);
+  expect(allPreambles.split('ROUND_1_PROSE').length - 1).toBe(ROUNDS);
   expect(contexts[2]!.preamble).toContain('ROUND_1_PROSE');
   expect(contexts[2]!.preamble).toContain('<function_results');
 }
 
 describe('ToolContext.roundPreamble (XML per-round delta)', () => {
   it('yielding path: delta contains exactly this round, no injected results, no prefill', async () => {
-    const membrane = new Membrane(makeAdapter(3));
+    const membrane = new Membrane(makeAdapter(ROUNDS));
     const contexts = await driveYielding(membrane, makeRequest());
     assertDeltaShape(contexts);
   });
 
   it('callback path (streamWithXmlTools): same delta contract', async () => {
-    const membrane = new Membrane(makeAdapter(3));
+    const membrane = new Membrane(makeAdapter(ROUNDS));
     const contexts = await driveCallback(membrane, makeRequest());
     assertDeltaShape(contexts);
   });

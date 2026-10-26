@@ -1,14 +1,8 @@
 /**
- * The model that served a request is frequently not the one that was asked
- * for: aliases resolve to dated snapshots (a live 2026-08-25 call asking for
- * `gpt-4o-mini` was served by `gpt-4o-mini-2024-07-18`), and OpenRouter routes
- * to whichever provider it picked. `complete()` reported that resolved model as
- * `details.model.actual`; the streaming paths echoed the REQUESTED id back
- * under a `// TODO: get from response` and discarded the value the adapter was
- * already handing them.
- *
- * Pricing had the mirror of the same bug: it was always resolved from the
- * requested id, so an alias priced against a string the provider replaced.
+ * The model that serves a request is often not the one asked for: aliases
+ * resolve to dated snapshots (a request for `gpt-4o-mini` can be served by
+ * `gpt-4o-mini-2024-07-18`), and OpenRouter routes to whichever provider it
+ * picks.
  */
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';

@@ -144,9 +144,7 @@ describe('schema-typed parameter parsing', () => {
   });
 
   it('keeps an integer too large for a JavaScript number as its digits, whatever the declaration', () => {
-    // Snowflake-sized ids round when JSON.parse'd. The legacy guess and a
-    // number declaration always kept the digits; an object/array/boolean
-    // declaration JSON-parsed them into a rounded number instead.
+    // Snowflake-sized ids round when JSON.parse'd.
     const digits = '1234567890123456789';
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {

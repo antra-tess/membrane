@@ -1,15 +1,4 @@
-/**
- * AnthropicXmlFormatter cache budget.
- *
- * This is the prefill (Connectome-style) builder. It attaches cache_control at
- * five sites — system, contextPrefix, hasCacheMarker flushes, cacheBreakpoint
- * flushes, and the CLI-simulation system block — and until now compared the
- * total to nothing at all, so three marked messages on a prefill turn put five
- * markers on the wire and the API rejected the request outright.
- *
- * It also flattened a caller-marked system ARRAY into one text block, silently
- * discarding every per-block cache_control the caller placed.
- */
+/** The Anthropic API refuses a request carrying more than four cache_control markers. */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { AnthropicXmlFormatter } from '../../src/formatters/anthropic-xml.js';
 import { countWireCacheMarkers, MAX_CACHE_BREAKPOINTS } from '../../src/utils/cache-marker-budget.js';
@@ -39,7 +28,7 @@ afterEach(() => {
 });
 
 describe('AnthropicXmlFormatter: breakpoint budget', () => {
-  it('clamps a system + contextPrefix + three-breakpoint build to 4 markers', () => {
+  it('clamps a system + contextPrefix + three-breakpoint build to 4 markers, dropping the shallowest first', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const result = build(
       [
@@ -131,7 +120,7 @@ describe('AnthropicXmlFormatter: caller-marked system array', () => {
   });
 
   it('injects system-mode tools into the last block, keeping the earlier blocks marked', () => {
-    const result = build([message('zzOperator', 'zz hello'), message('Claude', '')], {
+    const conversationModeResult = build([message('zzOperator', 'zz hello'), message('Claude', '')], {
       systemPrompt: [markedSystemBlock('zz stable preamble'), markedSystemBlock('zz tail')],
       tools: [{ name: 'zz_shell', description: 'zz run', inputSchema: { type: 'object' } }],
     });
@@ -150,6 +139,6 @@ describe('AnthropicXmlFormatter: caller-marked system array', () => {
     expect(blocks[1].text).toContain('available_tools');
     expect(blocks.filter((b) => b.cache_control)).toHaveLength(2);
     // Conversation-mode injection leaves the system blocks alone.
-    expect((result.systemContent as any[])[1].text).toBe('zz tail');
+    expect((conversationModeResult.systemContent as any[])[1].text).toBe('zz tail');
   });
 });

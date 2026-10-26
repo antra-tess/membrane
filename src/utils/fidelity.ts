@@ -5,10 +5,9 @@ import type { ContentBlock } from '../types/content.js';
  * Request fidelity: what a request build carried of the consumer's messages.
  *
  * A consumer that needs to know whether a message it handed to membrane
- * reached the provider verbatim (agent-framework's receipt clocks, for one)
- * reads the round report on the `usage` event (`RoundReport.altered`,
- * `RoundReport.fidelity`). That report is assembled from notes the request
- * builders record here while they convert messages.
+ * reached the provider verbatim reads the round report on the `usage` event
+ * (`RoundReport.altered`, `RoundReport.fidelity`). That report is assembled
+ * from notes the request builders record here while they convert messages.
  *
  * An alteration is any non-empty consumer block not carried verbatim: a
  * placeholder substituted for an image, an image or block stripped, an
@@ -17,61 +16,34 @@ import type { ContentBlock } from '../types/content.js';
  * removed by a cleanup policy. Removing an exactly empty text block ('') that
  * holds no raw form carries nothing and is not an alteration; neither is the
  * faithful rendering of harness or attempt blocks, a block moved between
- * provider messages or within one (the tool-pair rule puts a message's
- * tool_result blocks first), the participant-name prefix a multiuser
+ * provider messages or within one, the participant-name prefix a multiuser
  * conversation puts on a message's text, an image's media type written as
  * its bytes declare it, or a block membrane adds of its own (a synthetic
  * result for a stranded call).
  *
  * Raw forms. Some blocks and messages carry the provider-native form they
- * were derived from, and the paths that understand it send that form in
- * place of the other fields:
- *   - the OpenAI Responses formatter sends a block's object `rawItem` (blocks
- *     of one message whose items share a type and id, or are identical
- *     without one, go out as that item once; a later block whose item under
- *     the same type and id differs isn't carried), and sends a message's
- *     `metadata.openaiResponsesItems` array in place of its content (nothing,
- *     for an empty array);
- *   - the Responses API adapter's input normalization sends a
- *     `redacted_thinking` block's reasoning `rawItem`, and rebuilds every
- *     other block from its fields;
- *   - the Anthropic XML formatter sends `rawXml` in place of a tool_use's or
- *     tool_result's fields (consecutive blocks sharing it, once for as many
- *     results or calls as the parser reads from it, a second marked result
- *     starting another). A result
- *     whose `rawXmlImagesAt` marks where an XML tool loop split its block to
- *     send its images goes out split there, with the images from its content
- *     that a split sends, and the images are carried with the raw text. When
- *     the mark no longer falls where a result or error in the block closes,
- *     or no image it holds can be sent, the raw text goes whole
- *     (ToolResultContent.rawXmlImagesAt);
- *   - NativeFormatter sends an Anthropic server-tool block, bare or on a
- *     zero-width carrier, as that block, in an assistant turn, when the build
- *     replays server blocks (`BuildOptions.anthropicServerBlocks`, see
- *     utils/anthropic-server-blocks.ts), except a call or result that can't
- *     go alone in its turn, which it leaves out (unpairedServerBlocks; the
- *     request's final assistant message keeps its lone calls).
- * Where a raw form is sent, it is the content of the block or message it is
- * attached to: that is carried verbatim when its raw form is, and the fields
- * it stands in for (text, input, result content, a message's blocks) are not
- * compared with it. A consumer that edits content under a raw form
- * (compression, redaction) has to drop or replace the raw form too, or the
- * edit doesn't reach the provider and nothing here reports it. Elsewhere the
- * raw form isn't sent and the block's fields are what is carried, so a
- * zero-width carrier (exactly empty text holding an object `rawItem`, whose
- * item is all of its content) alters its message wherever a path leaves it
- * out.
+ * were derived from (a block's `rawItem` or `rawXml`, a message's
+ * `metadata.openaiResponsesItems`, an Anthropic server-tool block on a
+ * zero-width carrier), and the paths that understand it send that form in
+ * place of the other fields. Where a raw form is sent, it is the content of
+ * the block or message it is attached to: that is carried verbatim when its
+ * raw form is, and the fields it stands in for (text, input, result content,
+ * a message's blocks) are not compared with it. A consumer that edits content
+ * under a raw form (compression, redaction) has to drop or replace the raw
+ * form too, or the edit doesn't reach the provider and nothing here reports
+ * it. Elsewhere the raw form isn't sent and the block's fields are what is
+ * carried, so a zero-width carrier (exactly empty text holding an object
+ * `rawItem`, whose item is all of its content) alters its message wherever a
+ * path leaves it out.
  *
  * Builders record alterations by the index of the message in the array they
  * were handed, and register the blocks they emit (`own`), so an adapter that
  * reports altering a block (`ProviderRequestOptions.onContentAltered`) is
  * attributed to the message that block came from. When content changes in a
- * way no index can be attached to (an image opt-in shedding replaced after
- * role merging, a beforeRequest hook that changed either of its arguments),
- * the notes are marked unattributed; when any part of the build or transport
- * does not report alterations at all, they are marked uninstrumented. Either
- * makes the round's fidelity 'unknown', so an empty alteration list is never
- * mistaken for proof.
+ * way no index can be attached to, the notes are marked unattributed; when
+ * any part of the build or transport does not report alterations at all,
+ * they are marked uninstrumented. Either makes the round's fidelity
+ * 'unknown', so an empty alteration list is never mistaken for proof.
  */
 export class FidelityNotes {
   /** Indices, in the builder's input messages, whose content was not carried verbatim. */
@@ -82,11 +54,7 @@ export class FidelityNotes {
   uninstrumented = false;
   /**
    * A beforeRequest hook changed, in place, one of the objects it was handed.
-   * The provider request shares structure with membrane's retained build
-   * state (an XML stream's prefill messages) or with the consumer's own
-   * blocks, and later rounds are built from the normalized request (the
-   * native loop's working messages are its objects), so the change can
-   * outlive this round: loops keep later rounds unknown.
+   * The change can outlive this round, so loops keep later rounds unknown.
    */
   mutatedInPlace = false;
 
@@ -113,9 +81,7 @@ export class FidelityNotes {
   /**
    * An adapter altered `block` (or an unknown part, when absent). A block
    * this round's builder emitted for exactly one message is attributed to
-   * it. Anything else (an object the builder didn't emit, or one registered
-   * for several messages) can't say which message lost content, so the round
-   * is unattributed rather than letting an altered message look intact.
+   * it; anything else marks the round unattributed.
    */
   alterBlock(block?: unknown): void {
     const owner = this.ownerOf(block);

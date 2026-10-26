@@ -1,12 +1,6 @@
 /**
- * Adapter Request Sanitization Tests
- *
- * Tests that adapters properly filter internal membrane fields
- * before sending to the API. This prevents 400 errors from
- * providers rejecting unknown parameters like 'normalizedMessages'.
- *
- * Bug reference: membrane 0.5.2 incorrectly included normalizedMessages
- * in OpenRouter/OpenAI requests causing 400 errors.
+ * Providers reject unknown request parameters, such as membrane's internal
+ * `normalizedMessages`, with a 400.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';

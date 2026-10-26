@@ -1,14 +1,7 @@
 /**
- * Bedrock image source wire shape (2026-08-08, Princess).
- *
- * Internal image blocks carry camelCase `mediaType`; the Bedrock API requires
- * snake_case `media_type` and rejects the request with a 400
- * ("...image.source.base64.media_type: Field required") otherwise. The
- * Anthropic adapter converts on both content paths; buildRequest here must do
- * the same — for top-level image blocks AND for images nested inside
- * tool_result content (the path that actually fired: an eidoverse snapshot
- * tool result 400-ing every mid-turn continuation on the fleet's only
- * Bedrock resident with image-returning tools).
+ * The Bedrock API requires an image source's `media_type`, snake_case, and
+ * rejects a request without it with a 400 ("...image.source.base64.media_type:
+ * Field required").
  */
 
 import { describe, it, expect } from 'vitest';

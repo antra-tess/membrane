@@ -99,7 +99,8 @@ async function driveStream(
 
 describe('streamYielding maxToolDepth', () => {
   it('is uncapped by default — runs all scripted tool rounds', async () => {
-    const SCRIPTED = 25;
+    const DEFAULT_RESUMPTION_CAP = 24;
+    const SCRIPTED = DEFAULT_RESUMPTION_CAP + 1;
     const adapter = new MockAdapter({
       streamChunkDelayMs: 0,
       completeDelayMs: 0,
@@ -167,7 +168,7 @@ describe('streamYielding maxToolDepth', () => {
     expect(terminalEvent).toBe('complete');
   });
 
-  it('honors an explicit maxToolDepth=10 (the legacy cap)', async () => {
+  it('honors an explicit maxToolDepth=10 (the legacy cap), running depths 0 through 10', async () => {
     const adapter = new MockAdapter({
       streamChunkDelayMs: 0,
       completeDelayMs: 0,
@@ -187,7 +188,7 @@ describe('streamYielding maxToolDepth', () => {
     expect(terminalEvent).toBe('complete');
   });
 
-  it('honors a higher explicit maxToolDepth', async () => {
+  it('honors a higher explicit maxToolDepth, running depths 0 through it', async () => {
     const adapter = new MockAdapter({
       streamChunkDelayMs: 0,
       completeDelayMs: 0,

@@ -1,18 +1,14 @@
 /**
- * System changes (SystemChangeContent): a message of `system_change` blocks
- * goes out as a mid-conversation `role: 'system'` message, so a caller can
- * change the tools and system text the model is offered without editing the
- * request's `tools` or `system`, which would rewrite the whole cached prefix.
+ * Changing a request's `tools` or `system` rewrites the whole cached prefix.
  *
- * Wire shapes and rules are the Anthropic API's, as live runs showed them,
- * Oct 19 and 20 2026: `tool_removal` with a
- * `tool_reference` and `tool_addition` with a `tool_definition` (Opus 5.5,
- * Haiku 5.5), text blocks (Haiku 5.5, Sonnet 5), the inline-tools beta for
- * tool changes, a cache marker taken on any of those blocks (Haiku 5.5), and a
- * 400 with one of three wordings on a model without them (Opus 4.6, Haiku 4.5,
- * Sonnet 5 for tool changes). Placement follows the API's page: after a
- * user turn, a tool-result turn included, and before an assistant turn or at
- * the end.
+ * In the Anthropic API:
+ * `tool_removal` with a `tool_reference` and `tool_addition` with a
+ * `tool_definition` (Opus 5.5, Haiku 5.5), text blocks (Haiku 5.5, Sonnet 5),
+ * the inline-tools beta for tool changes, a cache marker taken on any of those
+ * blocks (Haiku 5.5), and a 400 with one of three wordings on a model without
+ * them (Opus 4.6, Haiku 4.5, Sonnet 5 for tool changes). A system message goes
+ * after a user turn, a tool-result turn included, and before an assistant turn
+ * or at the end.
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
@@ -269,7 +265,7 @@ describe('AnthropicAdapter and system changes', () => {
     ]);
   });
 
-  it('marks a 400 refusing the system change, keeping its classification, and no other 400', () => {
+  it('marks a 400 refusing the system change, keeping its classification, and not a 400 with other wording, a 500 with a refusal\'s wording, or an error whose rendered request quotes one', () => {
     const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
     const classify = (message: string, status = 400) =>
       (adapter as any).handleError(new Anthropic.APIError(status, { type: 'error', error: { type: 'invalid_request_error', message } }, undefined, new Headers()), { model: 'm' });
@@ -392,7 +388,8 @@ describe('system changes: placement edges, markers, names, the beta and refusals
 
   it('tools a change defines count as tools when the tool mode is chosen, and that refusal comes first, unflagged', async () => {
     // An adapter that doesn't send system changes, so its flagged refusal would come if the tool-mode check didn't come first.
-    const membrane = new Membrane(new RecordingAdapter(false), { formatter: new NativeFormatter() });
+    const sendsSystemChanges = false;
+    const membrane = new Membrane(new RecordingAdapter(sendsSystemChanges), { formatter: new NativeFormatter() });
     const xml: NormalizedRequest = { ...request([user('u0'), changes(change({ defineTools: [tool('get_weather')] }))]), tools: undefined, toolMode: 'xml' };
     let thrown: unknown;
     try {
@@ -520,15 +517,17 @@ describe('system changes: the empty-text cleanup, alterations, and the tools a r
   });
 
   /** Replies in script order through stream(), announcing each block as a provider does. */
+  const announceStartAndCompletion = (callbacks: StreamCallbacks, index: number, block: ContentBlock) => {
+    callbacks.onContentBlock?.(index, block);
+    callbacks.onContentBlock?.(index, block);
+  };
+
   class Scripted extends RecordingAdapter {
     constructor(private readonly replies: ContentBlock[][]) { super(true); }
     override async stream(req: ProviderRequest, callbacks: StreamCallbacks): Promise<ProviderResponse> {
       this.requests.push(req);
       const content = this.replies[this.requests.length - 1] ?? [text('done')];
-      content.forEach((block, index) => {
-        callbacks.onContentBlock?.(index, block);
-        callbacks.onContentBlock?.(index, block);
-      });
+      content.forEach((block, index) => announceStartAndCompletion(callbacks, index, block));
       const toolUse = content.some((b) => b.type === 'tool_use');
       return { content, stopReason: toolUse ? 'tool_use' : 'end_turn', usage: { inputTokens: 1, outputTokens: 1 }, model: req.model, raw: {} } as ProviderResponse;
     }
@@ -590,8 +589,7 @@ describe('system changes: turns as the API reads them, the float, and withdrawn 
     });
 
     it('an assistant turn of another provider\'s unsigned thinking alone is no point, since the adapter leaves the block out (#191)', () => {
-      // u0, aU, u2, a3: the adapter leaves aU out, so u0 and u2 are one user turn, and S goes before a3.
-      // Placed before aU, S would sit between u0 and u2 once aU is gone, where the API refuses a system message.
+      // u0 and u2 become one user turn, and the API refuses a system message inside a user turn.
       const unsigned: ContentBlock = { type: 'thinking', thinking: 'reasoning from another provider' };
       expect(shape(build([user('u0'), s, reply(unsigned), user('u2'), reply(text('a3'))])))
         .toEqual(['user:u0', 'assistant:thinking', 'user:u2', 'system:s', 'assistant:a3']);

@@ -1,20 +1,6 @@
 /**
- * Membrane is the one layer that retries.
- *
- *  - AnthropicAdapter's SDK client makes one attempt at each request a call
- *    makes: its own retries (two by default, invisible to membrane) are off
- *    on them, so with `retry: false` a 429 reaches the caller after one send,
- *    and `details.timing.attempts` and `retryDelaysMs` count every attempt.
- *    The cache keepalive's background replays keep the SDK's retries.
- *  - `retry: false` leaves a credential resolver's one resend after a 401,
- *    which is part of the attempt it follows.
- *  - What the SDK used to retry before delivery, membrane retries: a 5xx, a
- *    provider's 408 and a connection failure get the base schedule, three
- *    attempts by default, on every entry point. `maxRetries` still sets it.
- *  - A deadline that ran out on a sent request is the caller's: it isn't sent
- *    again. A connect timeout is, where the adapter can tell it apart.
- *  - The API's `x-should-retry` and `retry-after-ms`, which the SDK obeyed,
- *    are read where the adapter types the error.
+ * The Anthropic SDK retries a request twice by default, unseen by its caller,
+ * and obeys the API's `x-should-retry` and `retry-after-ms` headers.
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';

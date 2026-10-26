@@ -291,10 +291,7 @@ describe('OpenAIResponsesAPIAdapter', () => {
   });
 
   it('raises a retryable error when the stream ends without a terminal event', async () => {
-    // Deltas arrive, then the connection closes cleanly (proxy/LB drop) with
-    // no response.completed / response.incomplete / response.failed / error
-    // event. This must NOT be fabricated into a 'completed' response — that
-    // would permanently persist a truncated turn with end_turn and 0/0 usage.
+    // A proxy or load balancer can close the connection cleanly after the deltas, with no response.completed, response.incomplete, response.failed or error event.
     const events = [
       { type: 'response.output_item.added', output_index: 0, item: { type: 'message', id: 'msg_cut', role: 'assistant', status: 'in_progress', content: [] } },
       { type: 'response.output_text.delta', output_index: 0, content_index: 0, item_id: 'msg_cut', delta: 'Partial ans' },

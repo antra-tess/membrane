@@ -173,8 +173,7 @@ describe('native yielding: mid-turn injected messages', () => {
     expect(injectedIdx).toBeGreaterThan(resultIdx);
     expect(flat[injectedIdx]!.text).toContain('Antra: look left!');
 
-    // tool_use → tool_result adjacency intact: assistant tool_use envelope
-    // is immediately followed by a user envelope starting with tool_result
+    // The API requires an assistant tool_use to be followed at once by a user message that opens with its tool_result.
     const msgs = round2.messages;
     const tuIdx = msgs.findIndex((m: any) =>
       m.content?.some((b: any) => b.type === 'tool_use')

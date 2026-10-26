@@ -1,9 +1,4 @@
-/**
- * An empty system prompt is no system block. Under the default
- * `membrane-system` markers, with no message breakpoint, the native formatter
- * used to wrap `''` as `[{ type: 'text', text: '', cache_control }]`, a
- * cache-marked empty text block that the API doesn't cache.
- */
+/** The API doesn't cache a cache-marked empty text block. */
 import { describe, expect, it } from 'vitest';
 import { NativeFormatter, withoutEmptySystemText } from '../../src/formatters/native.js';
 import { Membrane } from '../../src/membrane.js';

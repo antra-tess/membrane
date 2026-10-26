@@ -1,15 +1,4 @@
-/**
- * Discarded refusal-retry spend is reported (A3 MAJOR-2 / A4 MAJOR 6).
- *
- * A refused attempt is a completed, billed provider call: full input tokens
- * plus the refusal's output. Both refusal-retry implementations kept only the
- * surviving attempt's usage, so response.usage under-reported real spend by
- * one whole call per retry — silently, on the exact path a fleet enables to
- * paper over probabilistic refusals.
- *
- * The response's own usage still describes the attempt that STANDS; the
- * discarded spend is reported beside it in details.usage.discardedAttempts.
- */
+/** A refused attempt is a completed, billed provider call: full input tokens plus the refusal's output. */
 
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';

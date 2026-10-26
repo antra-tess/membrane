@@ -1,14 +1,6 @@
 /**
  * Gemini reports reasoning tokens in `usageMetadata.thoughtsTokenCount`, a
- * field disjoint from `candidatesTokenCount`. The adapter used to read only
- * `candidatesTokenCount` into `outputTokens`, so a thinking model's generated
- * token count was reported as a small fraction of the real (billed) one.
- *
- * The numbers below are a live receipt taken 2026-08-25 against
- * gemini-3.5-flash-lite with `thinkingConfig.thinkingBudget = 512`:
- *   promptTokenCount 35, candidatesTokenCount 2, thoughtsTokenCount 228,
- *   totalTokenCount 265  (35 + 2 + 228 === 265 exactly).
- * Unfixed, membrane reported outputTokens = 2 of 230 generated (0.9%).
+ * field disjoint from `candidatesTokenCount`.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { GeminiAdapter } from '../../src/providers/gemini.js';

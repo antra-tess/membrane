@@ -32,14 +32,13 @@ import { readToolSchema, type ParameterDeclaration, type ToolSchemaReading } fro
  *
  * `tools` carries the declared schemas of the round's tools. When a parameter's
  * type is declared, the value is parsed according to that declaration instead
- * of guessed (see {@link parseParamValue}); without it the legacy guess stands,
- * so callers that cannot supply schemas keep their previous behaviour.
+ * of guessed; without it the legacy guess stands.
  */
 export interface ToolParseOptions {
   tools?: ToolDefinition[];
 }
 
-/** 16+ digits, no decimal: beyond Number.MAX_SAFE_INTEGER (Discord snowflakes). */
+/** 16 digits or more, no decimal: the first length that can pass Number.MAX_SAFE_INTEGER, as Discord snowflakes do. */
 const LARGE_INT_RE = /^\d{16,}$/;
 
 /** One tool's schema, read once per invoke. */
@@ -174,10 +173,8 @@ function matchesDeclaredType(value: unknown, declaredType: string): boolean {
 }
 
 /**
- * The legacy guess, for parameters with no usable declaration: trim, then
- * JSON.parse with the trimmed text as fallback. Large integers (Discord
- * snowflakes and the like) lose precision as JavaScript numbers, so they stay
- * strings.
+ * Unsigned integers of 16 digits or more (Discord snowflakes and the like)
+ * can lose precision as JavaScript numbers, so they stay strings.
  */
 function guessParamValue(value: string): unknown {
   const trimmed = value.trim();
@@ -266,10 +263,7 @@ function parseParamValue(
   }
 
   if (LARGE_INT_RE.test(trimmed)) {
-    // Digits past Number.MAX_SAFE_INTEGER come back rounded from JSON.parse,
-    // so they stay text, as they always have: for a number or integer
-    // declaration that is the value in the only exact form it has, and for any
-    // other declaration it is a kind mismatch on top.
+    // JSON.parse rounds digits past Number.MAX_SAFE_INTEGER, so they stay text.
     if (declaredType !== 'number' && declaredType !== 'integer') {
       warnParamType(
         schema.toolName,
@@ -344,9 +338,8 @@ const INVOKE_NAME_GROUP = 3;
 const INVOKE_BODY_GROUP = 4;
 const INVOKE_CLOSER_PREFIX_GROUP = 5;
 
-// Same pattern without /g, for the re-anchor read that runs INSIDE the outer
-// iteration: sharing the /g instance would clobber its lastIndex. Built from
-// the one source so the two can never drift apart.
+// Without /g: a /g regex's exec moves its lastIndex, and this read runs inside
+// the outer one's iteration.
 const INVOKE_REANCHOR_REGEX = new RegExp(INVOKE_REGEX.source);
 
 // An invoke OPENER on its own — the containment test one level below the
@@ -429,21 +422,8 @@ const PARAMETER_REGEX = /<(antml:)?parameter\s+name="([^"]+)">([\s\S]*?)<\/(antm
 const FUNCTION_CALLS_OPEN_REGEX = /<(antml:)?function_calls>/g;
 
 /**
- * One <function_calls> block, resolved to the span its calls may be read from.
- *
- * The block regexes are flat: first opener to first closer, with no nesting
- * check. When a max_tokens truncation leaves an unclosed block in the persisted
- * turn, the next round's closer splices onto that stale opener and the match
- * spans two rounds — so the stale invoke pairs with the NEW round's `</invoke>`
- * and one call is dispatched bearing the stale tool's name and everything
- * between as its argument, including intervening user text.
- *
- * A match whose inner content holds another opener is therefore REJECTED as a
- * block: no dispatch ever crosses an opener. The span is then re-anchored to
- * the innermost (last) opener inside it, which is where the live block actually
- * begins, so the real call still runs and the stale half falls out as ordinary
- * preceding text. Re-anchoring terminates: the re-anchored inner content holds
- * no opener by construction.
+ * A max_tokens truncation can leave an unclosed <function_calls> block in a
+ * stored turn, whose stale opener the next round's closer would then match.
  */
 interface ResolvedToolBlock {
   start: number;
@@ -511,10 +491,9 @@ function isFollowedByResults(text: string, afterPos: number): boolean {
 }
 
 /**
- * Parse tool calls from text containing XML function_calls blocks
- *
- * Uses "last-unexecuted-block" logic: finds the last function_calls block
- * that doesn't have function_results immediately following it.
+ * Parse tool calls from text containing XML function_calls blocks: the last
+ * function_calls block that doesn't have function_results immediately
+ * following it.
  *
  * `options.tools` supplies the round's declared schemas; parameter values of a
  * declared type are parsed by that type instead of guessed.
@@ -556,7 +535,6 @@ export function parseToolCalls(text: string, options?: ToolParseOptions): Parsed
 
 /**
  * Check if text contains an unclosed function_calls block
- * Used for false-positive stop sequence detection
  * Supports both plain and antml: prefixed tags
  */
 export function hasUnclosedToolBlock(text: string): boolean {
@@ -588,23 +566,14 @@ export function endsWithPartialToolBlock(text: string): boolean {
 // ============================================================================
 
 /**
- * Structural tags of the XML tool convention. Result content containing any
- * of these must be escaped or it would desync the document/stream parser;
- * everything else rides raw (legacy convention — full escapeXml put `&quot;`
- * entities in front of the model, which Claude-3-era models then reproduce
- * in their own output).
+ * Results matching this are entity-escaped. Escaping every result would put
+ * `&quot;` entities in front of the model, which Claude-3-era models
+ * reproduce in their own output.
  */
 const STRUCTURAL_TAG_RE =
   /<\/?(?:antml:)?(?:function_calls|function_results|invoke|result|stdout|error|tool_name)\b/;
 
-/** A tool-result image's data and the label it came with, whether it carries
- *  them in a `source` or MCP-style as `data` and `mimeType`. A `data:` URL
- *  holds its image inline, so its bytes and label are read from it; any other
- *  url source's image is at its URL, so none is read, not even data the
- *  source also carries, as the native path reads one
- *  (toolResultContentForRequest). The XML replay of a split (anthropic-xml's
- *  sentSplit) reads a stored result's images with it too, so the two read the
- *  same blocks as images. */
+/** A `data:` URL holds its image inline; any other URL's image is at the URL. */
 export function toolResultImage(block: unknown): { data: unknown; declared: unknown } {
   const b = block as { source?: { type?: unknown; url?: unknown; data?: unknown; mediaType?: unknown; media_type?: unknown }; data?: unknown; mimeType?: unknown };
   if (!b.source) return { data: b.data, declared: b.mimeType };
@@ -655,8 +624,7 @@ function renderResultContentString(result: ToolResult): string {
     if (block.type === 'text') {
       parts.push(block.text);
     } else if (block.type === 'image') {
-      // For XML mode, we can't embed images directly. The note says the
-      // model isn't seeing it, so the size isn't read as its contents.
+      // An XML result's text can't carry an image.
       parts.push(imageNote(block));
     }
   }
@@ -679,7 +647,7 @@ function renderResultContentString(result: ToolResult): string {
  * Errors render as <error>…</error> inside <function_results>. No
  * tool_use_id attributes on the wire (a Messages-API concept — the
  * store keeps the linkage on the blocks); content rides raw unless it
- * contains structural tags (then escaped, see STRUCTURAL_TAG_RE).
+ * contains structural tags (then escaped).
  */
 export function formatToolResults(results: ToolResult[]): string {
   const parts: string[] = ['<function_results>'];
@@ -761,13 +729,13 @@ export interface ToolDefinitionForPrompt {
 
 /**
  * A tool definition as the XML tool instructions present it, read from its
- * input schema by the same reading the XML parameter parser applies
- * ({@link readToolSchema}): the type the model is told a parameter has is the
- * type its value is parsed by, and a parameter the parser cannot type states
- * none. Its null mark is the reading's `instructedNullable`, which keywords
- * that leave null out withhold though the parse admits null (#150), and its
- * `enum` lists the values the reading finds behind `$ref`s, in branches and
- * across root alternatives as well as on the declaring node.
+ * input schema by the same reading the XML parameter parser applies: the
+ * type the model is told a parameter has is the type its value is parsed by,
+ * and a parameter the parser cannot type states none. Its null mark leaves
+ * out a null the schema's other keywords leave out, though the parse admits
+ * null (antra-tess/membrane#150), and its `enum` lists the values the reading
+ * finds behind `$ref`s, in branches and across root alternatives as well as
+ * on the declaring node.
  */
 export function toolDefinitionForPrompt(tool: ToolDefinition): ToolDefinitionForPrompt {
   const { parameters } = readToolSchema(tool.inputSchema);
@@ -813,9 +781,8 @@ function listsExactly(values: readonly string[]): boolean {
  * A parameter's `enum` values print raw, unlike its name and type, since the
  * parser doesn't decode entities in a value the model writes: an entity shown
  * here, such as `&quot;`, would be copied into the call and kept. Where the
- * attribute can't show every value exactly ({@link listsExactly}), the
- * parameter's line has no `enum` at all, rather than a list the model would
- * split wrongly.
+ * attribute can't show every value exactly, the parameter's line has no
+ * `enum` at all, rather than a list the model would split wrongly.
  */
 export function formatToolDefinitions(tools: ToolDefinitionForPrompt[]): string {
   const parts: string[] = ['<tools>'];
@@ -830,7 +797,7 @@ export function formatToolDefinitions(tools: ToolDefinitionForPrompt[]): string 
       if (param.type) attrs.push(`type="${escapeXml(param.type)}"`);
       if (param.nullable) attrs.push('nullable="true"');
       if (param.required) attrs.push('required="true"');
-      // `String` prints a null member as `null`; `join` alone printed it as an empty item (#150).
+      // `String` prints a null member as `null`, where `join` alone prints an empty item.
       const values = param.enum?.map(String);
       if (values && listsExactly(values)) attrs.push(`enum="${values.join(',')}"`);
       
@@ -1002,9 +969,8 @@ const FUNCTION_RESULTS_BLOCK_REGEX = /<(antml:)?function_results>([\s\S]*?)<\/(a
 const RESULT_REGEX = /<result\s+tool_use_id="([^"]+)">([\s\S]*?)<\/result>/g;
 const ERROR_REGEX = /<error\s+tool_use_id="([^"]+)">([\s\S]*?)<\/error>/g;
 
-// Legacy Anthropic convention — no ids on the wire; results pair
-// positionally with the preceding unmatched tool calls in document order
-// (optionally disambiguated by <tool_name>).
+// The legacy Anthropic convention has no ids on the wire: a result answers
+// the preceding unmatched call, in document order (optionally by <tool_name>).
 const LEGACY_RESULT_REGEX =
   /<result>\s*(?:<tool_name>([\s\S]*?)<\/tool_name>\s*)?<stdout>\n?([\s\S]*?)\n?<\/stdout>\s*<\/result>/g;
 const LEGACY_ERROR_REGEX = /<error>\n?([\s\S]*?)\n?<\/error>/g;
@@ -1140,9 +1106,7 @@ export function parseAccumulatedIntoBlocks(
     if (span.kind === 'calls') {
       const resolvedBlock = span.resolvedBlock;
       if (resolvedBlock.wasSpliced) splicedToolBlocks++;
-      // Verbatim document text of the whole block — carried on each parsed
-      // tool_use so prefill replay reproduces the generation exactly instead
-      // of synthesizing a paraphrase (membrane#36).
+      // Carried on each tool_use for verbatim prefill replay (antra-tess/membrane#36).
       const rawXml = resolvedBlock.fullMatch;
       const blockToolCalls: ContentBlock[] = [];
       const blockCalls: ToolCall[] = [];
@@ -1274,7 +1238,7 @@ export function parseAccumulatedIntoBlocks(
   }
 
   // Offsets are into processedText, which a synthetic opener may precede.
-  const opener = processedText.length - text.length;
+  const syntheticOpenerLength = processedText.length - text.length;
   const resultSpans: ResultSpan[] = [];
 
   // Build final blocks array, inserting text blocks between special blocks
@@ -1292,7 +1256,7 @@ export function parseAccumulatedIntoBlocks(
     // Add the special block(s)
     const result = firstResult.get(pos);
     if (result !== undefined && Array.isArray(pos.block)) {
-      resultSpans.push({ at: pos.start - opener, block: blocks.length, result, count: pos.block.length });
+      resultSpans.push({ at: pos.start - syntheticOpenerLength, block: blocks.length, result, count: pos.block.length });
     }
     if (Array.isArray(pos.block)) {
       blocks.push(...pos.block);

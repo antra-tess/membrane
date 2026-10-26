@@ -59,10 +59,9 @@ export interface ChatTransformOptions {
 // ============================================================================
 
 /**
- * Transform normalized request to chat format. Media in MCP's form is
- * converted to membrane's first (utils/mcp-media.ts), so it comes out as the
- * same media in membrane's form does. An image with no source object that
- * isn't MCP's form, with neither `data` nor `mimeType`, is left out.
+ * Transform normalized request to chat format. Media in MCP's form comes out
+ * as the same media in membrane's form does. An image with no source object
+ * that isn't MCP's form, with neither `data` nor `mimeType`, is left out.
  */
 export function transformToChat(
   request: NormalizedRequest,
@@ -93,7 +92,7 @@ export function transformToChat(
     messages.push({ role, content });
   }
   
-  // Ensure alternating roles (required by most providers)
+  // Most providers require alternating roles.
   const normalizedMessages = ensureAlternatingRoles(messages);
   
   // Build stop sequences

@@ -50,9 +50,8 @@ export function stubFetchWithRawSse(bodyChunks: string[]): ReturnType<typeof vi.
 }
 
 /**
- * The same `data: <line>` events as `sseResponse`, except the FINAL one is left
- * without its trailing newline — the tolerated shape a server or proxy produces
- * when it closes the connection right after writing the last event.
+ * A server or proxy that closes the connection right after writing the last
+ * event can leave that event without its trailing newline.
  */
 export function sseBodyWithUnterminatedTail(dataLines: string[]): string {
   const terminatedHead = dataLines.slice(0, -1).map((line) => `data: ${line}\n\n`).join('');

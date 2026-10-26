@@ -1,18 +1,8 @@
 /**
- * A provider error inside an HTTP 200 reaches the caller as an error on the
- * four OpenAI-style adapters, streamed or not (antra-tess/membrane#136).
- *
- * - A response whose first choice ends with finish_reason "error" and carries
- *   no `error` object read as an ordinary end_turn over the partial text.
- * - So did OpenRouter's documented non-streaming body for a generation that
- *   failed partway, which carries its `error` object on the choice, beside
- *   finish_reason "error" and the partial content.
- * - A non-streaming 200 whose body is only an `error` object, OpenRouter's
- *   documented non-streaming failure, failed in parseResponse on the missing
- *   `choices`: the caller got a TypeError's text, typed unknown and not
- *   retryable, in place of the provider's message and its retry class.
- * - A non-streaming 200 with an `error` object beside its choices returned
- *   the choices' content, where the same object in a stream frame failed it.
+ * OpenRouter documents two failures inside an HTTP 200: a generation that
+ * failed partway carries its `error` object on the choice, beside
+ * finish_reason "error" and the partial content; and a body that is only an
+ * `error` object.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { OpenAIAdapter } from '../../src/providers/openai.js';

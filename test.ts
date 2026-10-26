@@ -39,7 +39,7 @@ const calculatorTool = {
 };
 
 // Tool executor
-async function executeTool(call: ToolCall): Promise<ToolResult> {
+async function executeToolUnsafelyForDemo(call: ToolCall): Promise<ToolResult> {
   console.log(`\n  [Tool] Executing: ${call.name}`, call.input);
   
   if (call.name === 'echo') {
@@ -160,7 +160,7 @@ async function testToolExecution() {
       },
       onToolCalls: async (calls: ToolCall[], context: ToolContext) => {
         console.log(`\n\n  [Tool] Executing ${calls.length} tool(s) at depth ${context.depth}`);
-        const results = await Promise.all(calls.map(executeTool));
+        const results = await Promise.all(calls.map(executeToolUnsafelyForDemo));
         console.log('  [Tool] Results:', results.map(r => r.content).join(', '));
         console.log('\n  Continuing generation...\n');
         return results;

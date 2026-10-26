@@ -36,6 +36,8 @@ describe('overload policy reads a known status before prose', () => {
 
   // Base schedule waits 1ms; the overload schedule waits 50..100ms. Recording
   // the waits shows which schedule an actual public retry chose.
+  const OVERLOAD_STEP_MS = 100;
+  const OVERLOAD_JITTER_FLOOR_MS = OVERLOAD_STEP_MS / 2;
   function membrane(status: number) {
     let calls = 0;
     vi.stubGlobal('fetch', vi.fn(async (_url: unknown, init: { body: string }) => {
@@ -48,7 +50,7 @@ describe('overload policy reads a known status before prose', () => {
     }));
     const instance = new Membrane(new OpenAIAdapter({ apiKey: 'zz-key' }), {
       formatter: new NativeFormatter(),
-      retry: { maxRetries: 0, retryDelayMs: 1, overloaded: { retryDelayMs: 100, maxRetryDelayMs: 100, backoffMultiplier: 1 } },
+      retry: { maxRetries: 0, retryDelayMs: 1, overloaded: { retryDelayMs: OVERLOAD_STEP_MS, maxRetryDelayMs: OVERLOAD_STEP_MS, backoffMultiplier: 1 } },
     });
     const waits: number[] = [];
     (instance as any).sleep = async (ms: number) => { waits.push(ms); };
@@ -59,14 +61,14 @@ describe('overload policy reads a known status before prose', () => {
     await instance.complete(request);
     expect(calls()).toBe(2);
     expect(waits).toHaveLength(1);
-    expect(waits[0]).toBeLessThan(50);
+    expect(waits[0]).toBeLessThan(OVERLOAD_JITTER_FLOOR_MS);
   });
   it('callback stream keeps an explicit 429 on the rate-limit schedule despite overload prose', async () => {
     const { instance, waits, calls } = membrane(429);
     await instance.stream(request);
     expect(calls()).toBe(2);
     expect(waits).toHaveLength(1);
-    expect(waits[0]).toBeLessThan(50);
+    expect(waits[0]).toBeLessThan(OVERLOAD_JITTER_FLOOR_MS);
   });
   it('complete gives an explicit 503 no overload allowance from prose', async () => {
     const { instance, waits, calls } = membrane(503);

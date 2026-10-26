@@ -157,7 +157,7 @@ describe('refusalRetries — streamYielding()', () => {
 
     const retrying = events.filter((e) => e.type === 'retrying');
     expect(retrying).toEqual([{ type: 'retrying', attempt: 1, maxAttempts: 1, reason: 'refusal' }]);
-    // toEqual reads a key holding undefined as absent; the event has no key at all.
+    // toEqual reads a key holding undefined as absent.
     expect(Object.keys(retrying[0]!)).not.toContain('category');
   });
 

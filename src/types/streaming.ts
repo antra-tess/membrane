@@ -173,16 +173,12 @@ export type OnUsageCallback = (usage: BasicUsage) => void;
  */
 export type OnBlockCallback = (event: BlockEvent) => void;
 
-/**
- * Callback called with the raw provider request before it's sent.
- * Useful for logging/debugging.
- */
+/** Callback called with the raw provider request before it's sent. */
 export type OnRequestCallback = (rawRequest: unknown) => void;
 
 /**
  * Callback called with the raw provider response after each API call.
  * Called for each API request during multi-turn tool execution.
- * Useful for logging/debugging.
  */
 export type OnResponseCallback = (rawResponse: unknown) => void;
 
@@ -201,7 +197,7 @@ export interface StreamOptions {
    * Anthropic idle deadline after the first SDK event (default: 600000 ms).
    * Nonempty Web response-body bytes, including SSE keepalives, refresh it;
    * other SDK-supported bodies refresh it on SDK events. This does not bound
-   * total duration or generation progress. Parity with YieldingStreamOptions.
+   * total duration or generation progress.
    */
   idleTimeoutMs?: number;
 
@@ -220,8 +216,7 @@ export interface StreamOptions {
    * expect (Anthropic thinking with `display: "omitted"` sends no deltas
    * while it thinks, which can last minutes). An adapter that streams no
    * events, such as `OpenAIResponsesAdapter` (the Images API), can't renew
-   * it, so for it the deadline bounds the whole call. Parity with
-   * YieldingStreamOptions.
+   * it, so for it the deadline bounds the whole call.
    */
   progressTimeoutMs?: number;
 
@@ -233,8 +228,9 @@ export interface StreamOptions {
    * requests, whatever the error and whatever the config says: the failure is
    * thrown as it came, with the provider's advice on it (`retryable`, and a
    * stated wait on `retryAfterMs`), and `hooks.onError`, which is asked
-   * before each retry, isn't asked. For a caller whose own layer retries. One
-   * other send stays: the one resend with refreshed credentials that an
+   * before each retry, isn't asked. A deadline of the call's own ends it with
+   * an `AbortedResponse` whose reason is `'timeout'`, with retries on or off.
+   * One other send stays: the one resend with refreshed credentials that an
    * adapter with a credential resolver makes after an HTTP 401.
    */
   retry?: boolean;
@@ -259,7 +255,7 @@ export interface StreamOptions {
   /** Called with usage updates */
   onUsage?: OnUsageCallback;
 
-  /** Called for structured block events (thinking, tool_use, tool_result) */
+  /** Called for structured block events (text, thinking, tool_call, tool_result) */
   onBlock?: OnBlockCallback;
 
   /**
@@ -280,12 +276,9 @@ export interface StreamOptions {
 
   /**
    * Cap on AUTOMATIC false-positive stop-sequence resumptions per turn —
-   * membrane's own re-streams, not the caller's work. Tool rounds are
-   * deliberately not counted: they are governed by maxToolDepth and caller
-   * policy. Distinct from maxToolDepth on purpose: raising the tool budget
-   * for deep chains must not also raise how often a turn may re-send its
-   * full context on membrane's own initiative (issue #39). Exceeding it
-   * ends the turn with stopReason 'round_limit'. Default: 24.
+   * membrane's own re-streams, not the caller's work. Tool rounds are not
+   * counted: maxToolDepth bounds them. Exceeding it ends the turn with
+   * stopReason 'round_limit'. Default: 24.
    */
   maxResumptionRounds?: number;
 
@@ -295,8 +288,10 @@ export interface StreamOptions {
   // ---- Formatter Config ----
 
   /**
-   * Override the default formatter for this request.
-   * Useful for switching between prefill and native modes per-request.
+   * Override the instance's formatter for this request. On an adapter that
+   * needs native Responses input (`OpenAIResponsesAPIAdapter` outside
+   * subscription mode), an instance formatter that is
+   * `OpenAIResponsesFormatter` stays, and the override is ignored.
    */
   formatter?: PrefillFormatter;
 }
@@ -313,15 +308,6 @@ export interface CompleteOptions {
    * Re-issue the request when it ends with `stop_reason: 'refusal'`, up to
    * this many times. Default 0 (off); a value that isn't a finite number of
    * at least 0 asks for none.
-   *
-   * Safe and invisible on this path: nothing has been emitted to the caller
-   * yet, so a discarded attempt leaves no trace beyond its output tokens
-   * (the replay is cache-warm on input). The streaming equivalent needs the
-   * caller to handle `RetryingEvent` — see YieldingStreamOptions.
-   *
-   * Near the content-policy threshold a refusal is probabilistic rather than
-   * a property of the payload, so re-asking is the cheapest correct response
-   * — cheaper and far less invasive than rewriting the conversation.
    */
   refusalRetries?: number;
 
@@ -332,10 +318,10 @@ export interface CompleteOptions {
    * failed requests, whatever the error and whatever the config says: the
    * failure is thrown as it came, with the provider's advice on it
    * (`retryable`, and a stated wait on `retryAfterMs`), and `hooks.onError`,
-   * which is asked before each retry, isn't asked. For a caller whose own
-   * layer retries. Two sends stay: a refusal re-issue, which the call asks
-   * for with `refusalRetries`, and the one resend with refreshed credentials
-   * that an adapter with a credential resolver makes after an HTTP 401.
+   * which is asked before each retry, isn't asked. Two sends stay: a refusal
+   * re-issue, which the call asks for with `refusalRetries`, and the one
+   * resend with refreshed credentials that an adapter with a credential
+   * resolver makes after an HTTP 401.
    */
   retry?: boolean;
 
@@ -366,8 +352,10 @@ export interface CompleteOptions {
   onResponse?: OnResponseCallback;
 
   /**
-   * Override the default formatter for this request.
-   * Useful for switching between prefill and native modes per-request.
+   * Override the instance's formatter for this request. On an adapter that
+   * needs native Responses input (`OpenAIResponsesAPIAdapter` outside
+   * subscription mode), an instance formatter that is
+   * `OpenAIResponsesFormatter` stays, and the override is ignored.
    */
   formatter?: PrefillFormatter;
 }

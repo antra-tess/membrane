@@ -77,7 +77,7 @@ const BASE: NormalizedRequest = {
 };
 const requestFor = (mode: Mode): NormalizedRequest => ({ ...BASE, toolMode: mode });
 
-/** One turn of the event loop: enough for a loop resuming from a settled wait to run to its end, since it awaits nothing on the way. */
+/** setImmediate runs after every pending microtask, so one turn lets a loop resuming from a settled wait run to its end when it awaits nothing on the way. */
 const turn = () => new Promise((resolve) => setImmediate(resolve));
 
 /** The loop's builder as the stream holds it. markDone() releases it, so its absence shows the loop finished. */

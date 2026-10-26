@@ -1,49 +1,3 @@
-/**
- * OpenAI Images API provider adapter
- *
- * ⚠ DO NOT CONFUSE WITH THE RESPONSES API. Despite the filename and the class
- * name `OpenAIResponsesAdapter`, nothing in this file talks to OpenAI's
- * Responses API. The real Responses-API surfaces are:
- *
- *   - `src/formatters/openai-responses.ts` — the Responses input-item
- *     formatter (`function_call` / `function_call_output` items, item ids,
- *     encrypted reasoning), and
- *   - `src/providers/openai-responses-api.ts` — the Responses transport
- *     adapter (`readonly name = 'openai-responses-api'`).
- *
- * This file is the IMAGES adapter, and reviews or edits aimed at Responses
- * behaviour belong in those two. The names collide by history, not design.
- *
- * The rename is deferred, not forgotten. The cost lands outside this repo:
- * the original note here records consumer vendor configs matching an
- * `openairesponses-*` prefix — a consumer-side fact this repo cannot check,
- * carried forward as the reason of record. In-repo, `'openai-responses'` as
- * an adapter name is only telemetry (`details.model.provider`); the sole
- * behavioural read of an adapter name is `membrane.ts` matching
- * `'openai-responses-api'`, i.e. the OTHER adapter. Note also that
- * `'openai-responses'` is simultaneously the FORMATTER name, which
- * `Membrane.buildNativeToolRequest` and `Membrane.transformRequest` do
- * branch on — so check which of the two a name refers to before touching
- * either.
- *
- * Adapter for OpenAI's Images API endpoints, used for image generation
- * models like `gpt-image-1`:
- *
- * - `/v1/images/generations` — text-to-image (no image input)
- * - `/v1/images/edits` — image editing (accepts input images + prompt)
- *
- * The adapter automatically selects the right endpoint:
- * - If conversation contains images → uses /edits with images as data URLs
- * - If text-only → uses /generations
- *
- * Both endpoints:
- * - Take a single `prompt` string (not conversation messages) — see
- *   `promptFormat` for how the conversation is flattened into it
- * - Return base64-encoded images in `data[].b64_json`
- * - No streaming support (returns complete image)
- * - Support `size`, `quality`, `n`, `background`, `output_format`
- */
-
 import { unreportedUsage } from '../utils/usage.js';
 import { assertPromptToolSupport } from './request-capabilities.js';
 
@@ -142,10 +96,10 @@ export interface OpenAIResponsesAdapterConfig {
   defaultMaxTokens?: number;
 
   /**
-   * Whether to allow image editing via /v1/images/edits when images
-   * are present in the conversation context. When true (default),
-   * the adapter auto-detects images and routes to the edits endpoint.
-   * When false, always uses /v1/images/generations (text-only).
+   * Whether to allow image editing via /v1/images/edits. When true (default),
+   * a conversation holding a base64 image or generated image the edits
+   * endpoint takes goes to the edits endpoint. When false, always uses
+   * /v1/images/generations (text-only).
    */
   allowImageEditing?: boolean;
 
@@ -166,9 +120,10 @@ export interface OpenAIResponsesAdapterConfig {
   promptFormat?: 'legacy' | 'transcript';
 
   /**
-   * Maximum images attached to /v1/images/edits (API cap: 16). `'legacy'`
-   * keeps the first N in conversation order; `'transcript'` keeps the most
-   * recent N and marks the rest `[Image omitted]`.
+   * Maximum images attached to /v1/images/edits, from 1 to the API cap of 16
+   * (a value outside is clamped). `'legacy'` keeps the first N in conversation
+   * order; `'transcript'` keeps the most recent N and marks the rest
+   * `[Image omitted]`.
    */
   maxInputImages?: number;
 
@@ -195,10 +150,20 @@ export const DEFAULT_TRANSCRIPT_PREAMBLE =
 // OpenAI Images Adapter
 // ============================================================================
 
+/**
+ * Adapter for OpenAI's Images API, despite its name: `/v1/images/generations`
+ * for a text-only conversation, and `/v1/images/edits` when the conversation
+ * holds images it can attach (see `allowImageEditing`). Nothing here talks to
+ * the Responses API, whose transport is `OpenAIResponsesAPIAdapter`
+ * (`'openai-responses-api'`) and whose formatter is
+ * `OpenAIResponsesFormatter`; this adapter's name, `'openai-responses'`, is
+ * also that formatter's name. Both endpoints take a single `prompt` string
+ * (see `promptFormat`) and return base64 images, with no streaming.
+ */
 export class OpenAIResponsesAdapter implements ProviderAdapter {
   readonly name = 'openai-responses';
 
-  /** Images API adapter: it reports no token usage at all. */
+  /** Images API adapter: it reports input and output tokens, and no cache tokens. */
   readonly usageCacheConvention = 'cache-excluded' as const;
   private apiKey: string;
   private baseURL: string;
@@ -306,8 +271,7 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
     callbacks: StreamCallbacks,
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
-    // Images API doesn't support streaming — do a full request
-    // and emit any text content as a single chunk
+    // The Images API doesn't stream.
     const response = await this.complete(request, options);
 
     const blocks = response.content as ContentBlock[];

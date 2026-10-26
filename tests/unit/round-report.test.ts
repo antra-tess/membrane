@@ -81,7 +81,7 @@ const noopTool: ToolDefinition = {
   inputSchema: { type: 'object', properties: {} },
 };
 
-/** An image no provider accepts: every builder substitutes a placeholder. */
+/** An SVG image, which no provider accepts. */
 const svgImage: ContentBlock = {
   type: 'image',
   source: { type: 'base64', mediaType: 'image/svg+xml', data: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>').toString('base64') },
@@ -442,7 +442,7 @@ describe('usage at the adapter boundary: a reported 0 is 0, an unreported count 
     const request = { model: 'gemini-zz', maxTokens: 16, messages: [{ role: 'user', content: 'hi' }] } as any;
     vi.stubGlobal('fetch', respond({ promptTokenCount: 40, candidatesTokenCount: 2, totalTokenCount: 42, cachedContentTokenCount: 0 }));
     expect((await adapter.complete(request)).usage.cacheReadTokens).toBe(0);
-    // The shape real no-cache-hit calls return: the field is omitted.
+    // Gemini omits `cachedContentTokenCount` on a call with no cache hit.
     vi.stubGlobal('fetch', respond({ promptTokenCount: 40, candidatesTokenCount: 2, totalTokenCount: 42 }));
     const omitted = await adapter.complete(request);
     expect(omitted.usage.cacheReadTokens).toBe(0);
@@ -1059,7 +1059,7 @@ describe('slimepriestess\'s review of #104', () => {
   describe('a zero-width carrier is all raw form: a path that leaves it out alters its message, and one that sends its item carries it', () => {
     // How Anthropic's unconvertible response blocks (server-tool results) are kept.
     const carrier = (): ContentBlock => ({ type: 'text', text: '', rawItem: { type: 'web_search_tool_result', tool_use_id: 'srv_1', content: [] } }) as ContentBlock;
-    // The call the result answers: the API takes a result only after its call.
+    // The Anthropic API takes a server tool's result only after its call.
     const callCarrier = (): ContentBlock => ({ type: 'text', text: '', rawItem: { type: 'server_tool_use', id: 'srv_1', name: 'web_search', input: { query: 'zz' } } }) as ContentBlock;
     const conversations = {
       'beside text': (): NormalizedRequest['messages'] => [

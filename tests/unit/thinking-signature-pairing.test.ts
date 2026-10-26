@@ -1,17 +1,4 @@
-/**
- * Thinking-carrier pairing: provider-native thinking blocks carry the
- * signatures; parser-derived blocks carry the text. Merging them by INDEX
- * (the pre-fix behaviour) crosses the two lists the moment their shapes
- * differ, and the mispaired carrier is exported to the consumer's stored
- * history and shipped back next turn, where the API validates a signature
- * against content that never produced it.
- *
- * Three reachable shape differences, one test each:
- *   1. a signature-only (display:'omitted') block beside a visible one
- *   2. an XML-visible thinking block that no provider block produced
- *   3. a continuation split: two provider fragments, one spanning parsed
- *      block (parseAccumulatedIntoBlocks sees the CONCATENATED accumulation)
- */
+/** Anthropic validates a thinking block's signature against the content that produced it, so a signature on other text fails on the next turn. */
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import type { ContentBlock } from '../../src/types/index.js';

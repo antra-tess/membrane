@@ -1,7 +1,6 @@
 import { isSystemChangeContent, type ContentBlock } from '../types/content.js';
 
-// Keep the existing native colon encoding. Ordinary underscores are valid
-// wire characters; decoding every `__` would corrupt literal caller names.
+// Underscores are valid in wire tool names, so a caller's literal `__` stays as it is.
 export function sanitizeToolName(name: string): string {
   return name.replace(/:/g, '__');
 }

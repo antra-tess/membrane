@@ -256,7 +256,7 @@ class NativeBlockTracker {
    * Run after the provider stream has returned; idempotent, and a no-op for
    * paired-callback adapters.
    */
-  flush(): void {
+  flushAfterProviderReturn(): void {
     for (const index of this.started.keys()) {
       if (!this.completed.has(index)) this.complete(index, this.lastSeen.get(index));
     }
@@ -408,8 +408,8 @@ function parseUpToStop(
 ): { found: { stop: string; at: number } | undefined; head: string; emissions: ProcessChunkResult['emissions'] } {
   const before = parser.getAccumulated();
   const text = before + chunk;
-  // The stop that ends first, where a provider applying the request's stops
-  // would end, whatever order they're listed in.
+  // A provider applying the request's stops ends at the earliest one, whatever
+  // order they're listed in.
   const found = firstStop(text.slice(checkFrom), stops);
   if (!found) return { found, head: text, emissions: parser.processChunk(chunk).emissions };
   // Where the accepted text ends and the stop begins.
@@ -465,6 +465,11 @@ function refusalBudget(asked: number | undefined): number {
   return typeof asked === 'number' && Number.isFinite(asked) ? Math.max(0, asked) : 0;
 }
 
+function persistImageSplit(prefillResult: BuildResult, messages: BuildResult['messages'], seam: number): void {
+  prefillResult.messages = messages;
+  prefillResult.accumulatedBaseOffset = seam;
+}
+
 export class Membrane {
   private adapter: ProviderAdapter;
   private registry?: ModelRegistry;
@@ -507,9 +512,7 @@ export class Membrane {
     // refusal is a successful HTTP call with an unwanted verdict, and letting
     // it consume error retries would couple two unrelated budgets.
     let refusalRetriesUsed = 0;
-    // Spend on attempts we threw away. A refused attempt is a completed,
-    // billed HTTP call; reporting only the surviving attempt's usage
-    // under-reports the turn by one full call per retry.
+    // A refused attempt is a completed, billed HTTP call.
     let discardedUsage: DiscardedAttemptsUsage | undefined;
     // The waits before each pass that sent the request again, in order.
     const retryDelaysMs: number[] = [];
@@ -545,8 +548,8 @@ export class Membrane {
           ? this.wireReceiptGuard(options.signal)
           : undefined;
 
-        // One progress deadline per provider call. A non-streaming call
-        // reports no progress before its response, so this bounds the call.
+        // A non-streaming call reports no progress before its response, so the
+        // progress deadline bounds the whole call.
         const progress = createProgressDeadline(
           receiptGuard ? receiptGuard.signal : options.signal,
           options.progressTimeoutMs,
@@ -640,10 +643,8 @@ export class Membrane {
         return response;
 
       } catch (error) {
-        // The caller's signal fired: a cancellation, whatever the in-flight
-        // error is named (AbortSignal.timeout() rejects with a TimeoutError),
-        // a refused build included, and never retried. The error stays on it
-        // as evidence. stream()'s paths judge the signal first too.
+        // The caller's signal fired, whatever the in-flight error is named:
+        // AbortSignal.timeout() rejects with a TimeoutError.
         if (options.signal?.aborted) {
           const cancelled = isTypedAbortError(error)
             ? this.attachRawRequest(error, rawRequest)
@@ -822,24 +823,11 @@ export class Membrane {
   }
 
   /**
-   * Select the ACTIVE formatter for a request: the one instance that resolves
-   * its tool mode, builds its provider request, and parses its stream.
-   *
-   * A per-request override (`CompleteOptions.formatter` /
-   * `StreamOptions.formatter`) wins over the instance formatter, with ONE
-   * transport exception: the Responses adapter's input is a provider-native
-   * item array, and a generic override (for example Context Manager's
-   * NativeFormatter) produces Anthropic-style `{ role, content: [{ type:
-   * 'text' }] }` envelopes the Responses API rejects before inference — so a
-   * configured Responses formatter stays authoritative there. Subscription
-   * mode accepts normalized envelopes, so its capability allows the override
-   * (including participant labels supplied by maintenance formatters).
-   *
-   * The exception is why this selection is a method rather than a `??` at each
-   * call site: while it lived inside transformRequest alone, the BUILD honored
-   * it and every other formatter reader resolved against a different instance,
-   * which is the split resolveToolMode exists to prevent, one layer down.
-   * Every entry point selects once, here, and threads the result.
+   * A per-request formatter override wins, except over a Responses formatter on
+   * an adapter that needs native Responses input: that input is a native item
+   * array, and the Responses API rejects the
+   * Anthropic-style `{ role, content: [{ type: 'text' }] }` envelopes a generic
+   * formatter builds, before inference. Subscription mode accepts them.
    */
   private resolveActiveFormatter(requestFormatter?: PrefillFormatter): PrefillFormatter {
     const requiresNativeInput = this.adapter.requiresNativeResponsesInput
@@ -957,7 +945,7 @@ export class Membrane {
 
     // Track non-text content blocks from provider (e.g., generated_image from Gemini)
     // These can't be handled by the text-based XML parser, so we capture and append them
-    const extraContentBlocks: ContentBlock[] = [];
+    const providerImageBlocks: ContentBlock[] = [];
 
     // Native thinking blocks from the provider (with signatures). The parser
     // derives signature-less thinking blocks from <thinking> text (via
@@ -1047,7 +1035,7 @@ export class Membrane {
       // Tool execution loop
       while (toolDepth <= maxToolDepth) {
 
-        // Track if we manually detected a stop sequence (API doesn't always stop)
+        // The provider doesn't always stop at a stop sequence.
         let detectedStopSequence: string | null = null;
         let truncatedAccumulated: string | null = null;
 
@@ -1055,7 +1043,7 @@ export class Membrane {
         // Also the round's progress baseline: XML we pushed ourselves at the
         // end of the previous round (tool results, closing tags) sits below
         // this index and doesn't count as model progress.
-        const checkFromIndex = parser.getAccumulated().length;
+        const streamedFrom = parser.getAccumulated().length;
 
         let typedCallbacks = false;
         let sawChunk = false;
@@ -1125,7 +1113,7 @@ export class Membrane {
               // the text before a stop: the stop is found in the round's new
               // text first, so what goes out up to it is labelled by the block
               // each piece belongs to, as on every other chunk.
-              const { found, head, emissions } = parseUpToStop(parser, chunk, checkFromIndex, prefillResult.stopSequences);
+              const { found, head, emissions } = parseUpToStop(parser, chunk, streamedFrom, prefillResult.stopSequences);
               if (found) {
                 detectedStopSequence = found.stop;
                 truncatedAccumulated = head;
@@ -1157,7 +1145,7 @@ export class Membrane {
           }
         );
 
-        if (typedCallbacks) tracker.flush();
+        if (typedCallbacks) tracker.flushAfterProviderReturn();
         rounds++;
         providerCalls += streamResult.providerCalls;
         retryDelaysMs.push(...streamResult.retryDelaysMs);
@@ -1178,10 +1166,9 @@ export class Membrane {
         // Capture non-text content blocks from provider response (e.g., generated_image from Gemini)
         // The XML parser only handles text — binary content blocks need to be preserved separately
         if (Array.isArray(streamResult.content)) {
-          this.captureProviderImageBlocks(streamResult.content, extraContentBlocks);
-          // Native thinking blocks carry the signature (encrypted full
-          // reasoning) — captured so consumers can persist and round-trip
-          // them for reasoning continuity.
+          this.captureProviderImageBlocks(streamResult.content, providerImageBlocks);
+          // A native thinking block's signature is its encrypted full reasoning, which
+          // a consumer sends back on later turns.
           this.captureProviderThinkingBlocks(streamResult.content, providerThinkingBlocks);
         }
 
@@ -1194,9 +1181,8 @@ export class Membrane {
         lastProviderStopReason = streamResult.providerStopReason;
         lastStopSequence = streamResult.stopSequence ?? undefined;
 
-        // Accumulate usage (including cache metrics), priced at this round's
-        // model. NOT inlined into the optional call — `onUsage?.(addRound())`
-        // skips evaluating its argument entirely when no callback is set.
+        // Not inlined into the optional call: `onUsage?.(addRound())` skips
+        // evaluating its argument when no callback is set.
         const usageSoFar = turnUsage.addRound(streamResult.model, streamResult.usage);
         onUsage?.(usageSoFar);
 
@@ -1216,7 +1202,7 @@ export class Membrane {
         // (one short repeated round is low progress, not proof of none —
         // a stop sequence inside legitimate tool-argument text can cause a
         // couple of short resumptions on the way to completing).
-        const streamedThisRound = accumulated.length - checkFromIndex;
+        const streamedThisRound = accumulated.length - streamedFrom;
         if (
           enteredViaResumption &&
           lastStopReason === 'stop_sequence' &&
@@ -1553,8 +1539,8 @@ export class Membrane {
       );
 
       // Append non-text content blocks (e.g., generated_image) that the XML parser can't handle
-      if (extraContentBlocks.length > 0) {
-        response.content.push(...extraContentBlocks);
+      if (providerImageBlocks.length > 0) {
+        response.content.push(...providerImageBlocks);
       }
 
       // Merge provider thinking signatures into parser-derived thinking blocks
@@ -1727,7 +1713,7 @@ export class Membrane {
 
         // Single-callback adapters (OpenAI Responses) report each finalised
         // block once, after the stream: complete whatever never saw a stop.
-        tracker.flush();
+        tracker.flushAfterProviderReturn();
         rounds++;
         providerCalls += streamResult.providerCalls;
         retryDelaysMs.push(...streamResult.retryDelaysMs);
@@ -1961,41 +1947,8 @@ export class Membrane {
       tools[tools.length - 1] = { ...tools[tools.length - 1], cache_control: cacheControl };
     }
 
-    // ------------------------------------------------------------------
-    // Floating cache marker: incremental prompt caching inside the native
-    // tool loop. Message breakpoints are placed by the context strategy at
-    // compile time — once per turn — but this builder re-runs on every
-    // tool round with that round's messages appended, so the deepest
-    // upstream marker stays glued to the turn-start snapshot and each
-    // rebuild re-pays the entire appended suffix at full input price
-    // (qa-ops incident, 2026-08-20: two subagents re-sent a suffix growing
-    // to ~118k tokens ~30 times each — ~5.3M uncached tokens in 18 min —
-    // with their one marker sitting on message 2 of 61).
-    //
-    // The tool loop only ever appends, so a marker riding the newest
-    // message yields the intended incremental pattern: each round writes
-    // its delta and cache-reads everything before it.
-    //
-    // Authority contract: the float spends only the RESIDUAL breakpoint
-    // budget (Anthropic allows 4 cache_control including tools/system).
-    // Upstream markers are never displaced or stripped — if they fill all
-    // 4 slots the float is withheld (with a warning) and behavior is
-    // exactly pre-float. With 2+ slots free, the message before the
-    // assistant turn that made the round's calls is marked too, which is
-    // usually the previous request's last message (the exception is named
-    // where the targets are chosen): a wide parallel-tool round can append
-    // more blocks than the provider's ~20-block backward search covers,
-    // which would orphan the previous round's cache entry behind an unmarked
-    // boundary.
-    //
-    // Skipped after any repair that rewrites prefix bytes (the kinds in
-    // PREFIX_REWRITING_NORMALIZE_EVENT_KINDS: a synthesized [pending]
-    // result, a textified orphan or duplicate result): those bytes are
-    // rewritten when the real pairing lands, so caching at or past one
-    // poisons the prefix. A repair that only moves blocks (a hoist, a
-    // relocation, results-first) is a fixed function of the history, so the
-    // prefix it leaves is as stable as the history.
-    // ------------------------------------------------------------------
+    // Anthropic allows 4 cache_control markers, tools and system included, and
+    // looks for a cache entry no more than about 20 blocks back from a marker.
     const floatingEnabled =
       request.floatingCacheMarker ?? this.config.defaultFloatingCacheMarker ?? true;
     if (toolLoopRebuild && floatingEnabled && cacheControl && !prefixRewritten) {
@@ -2077,7 +2030,7 @@ export class Membrane {
             ...(item.rawItem ? { rawItem: item.rawItem } : {}),
           });
         } else if (item.type === 'redacted_thinking') {
-          // Pass through verbatim — carries the encrypted `data` payload
+          // A redacted_thinking block's encrypted `data` goes back as it is.
           blocks.push({ ...item } as ContentBlock);
         } else if (item.type === 'image') {
           blocks.push({ ...item } as ContentBlock);
@@ -2128,10 +2081,8 @@ export class Membrane {
   }
 
   /**
-   * Capture native thinking / redacted_thinking blocks from a provider
-   * response so they can be merged into parser-derived content (XML paths,
-   * where the parser only sees text). Includes signature-only thinking
-   * blocks (display:'omitted' returns an empty thinking field).
+   * With display:'omitted' a thinking block's text is empty: it carries only
+   * its signature.
    */
   private captureProviderThinkingBlocks(
     providerContent: unknown,
@@ -2152,36 +2103,9 @@ export class Membrane {
   }
 
   /**
-   * Merge provider thinking signatures into parser-derived thinking blocks
-   * and prepend any leftover provider blocks — signature-only thinking
-   * (display:'omitted') never appears in the text stream, so the parser
-   * produces no block for it. redacted_thinking blocks are always prepended
-   * verbatim.
-   *
-   * Pairing is by CONTENT IDENTITY, never by index. The two lists are
-   * differently shaped whenever the provider emits a block the parser cannot
-   * see (signature-only), the parser emits a block the provider never
-   * produced (the XML path's literal `Claude: <thinking>` prefill turns
-   * VISIBLE text into a thinking block), or one provider block spans several
-   * (auto-continuation: capture runs per round while the parser sees the
-   * CONCATENATED accumulation). Index-zipping crosses the lists in all three
-   * shapes and stamps a signature onto content that never produced it —
-   * which round-trips into the consumer's stored history and fails Anthropic
-   * signature validation on the next turn.
-   *
-   * The three rules, in order:
-   *   1. identity — a provider block pairs with the parsed block whose
-   *      thinking text is the same; empty-thinking (signature-only) blocks
-   *      are never text-match candidates and are prepend-only.
-   *   2. span — a parsed block that reconstructs as the concatenation of a
-   *      RUN of consecutive unpaired provider blocks is REPLACED in place by
-   *      those originals, so the spanning block never wears a fragment's
-   *      signature and no reasoning is sent twice.
-   *   3. leftover — everything still unpaired is prepended, de-duplicated
-   *      against what `content` already carries (and against itself).
-   *
-   * Mutates `content` in place. Shared by the XML stream paths
-   * (streamWithXmlTools and runXmlToolsYielding).
+   * Signature-only thinking (display:'omitted') never appears in the text
+   * stream. Anthropic checks a thinking block's signature against its text on
+   * the next turn, so a signature on text it wasn't made for fails validation.
    */
   private mergeProviderThinkingBlocks(
     content: ContentBlock[],
@@ -2361,30 +2285,19 @@ export class Membrane {
   }
 
   /**
-   * Models with always-on thinking (Claude Fable/Mythos family). Membrane
-   * sends them no sampling params (`temperature`, `top_p`, `top_k`) and no
-   * thinking config, which the family has rejected with a 400. The exception
-   * is the binding controls (`thinking.blockBinding`), sent as
-   * `{ type: 'adaptive', block_binding }`, which Fable 5 and Fable 5.1
-   * accepted on 2026-10-10 (Fable 5.1 also accepted a budgeted config then),
-   * and with `display` beside it when set, which they accepted on 2026-10-12.
-   * They think whatever `thinking.enabled` says, so the binding goes whenever
-   * it's asked for. `display: 'updates'` is the other exception: it is sent
-   * as `{ type: 'adaptive', display: 'updates' }`, because without it these
-   * models return their progress notes between tool calls empty.
+   * The Claude Fable/Mythos family thinks always, and has refused sampling
+   * params (`temperature`, `top_p`, `top_k`) and a thinking config with a 400,
+   * except `{ type: 'adaptive' }` carrying `block_binding`, `display` or both.
+   * Without `display: 'updates'` these models return their progress notes
+   * between tool calls empty.
    */
   private static isAlwaysThinkingModel(model: string | undefined): boolean {
     return /\b(fable|mythos)\b/i.test(model ?? '');
   }
 
   /**
-   * Build the provider thinking parameter from config.
-   *
    * For type 'enabled', the API requires max_tokens > budget_tokens and a
-   * minimum budget of 1024 — a misconfigured budget (e.g., default 10000 with
-   * max_tokens 4096) is clamped to fit. If no valid budget fits (max_tokens
-   * too small), thinking is omitted entirely rather than sending a request
-   * the API will reject.
+   * budget of at least 1024.
    */
   private buildThinkingParam(config: NormalizedRequest['config']):
     | { type: 'adaptive'; display?: ThinkingDisplay; block_binding?: BlockBindingParam }
@@ -2544,17 +2457,8 @@ export class Membrane {
         : { ...request.providerParams, normalizedMessages: messages },
     };
 
-    // Prefill-style builds (XML formatter) use the thinking config for the
-    // literal `<thinking>` text prefix instead of the API feature, so the API
-    // param would buy a second, redundant reasoning channel — drop it when
-    // the built request actually ends in an assistant prefill. Chat-style
-    // builds (no prefill) keep it.
-    //
-    // Whether a provider REFUSES the combination is model-dependent, not API
-    // law: measured live 2026-08-25, claude-haiku-4-5 accepted
-    // `thinking: {type:'enabled'}` on a prefill-terminated conversation
-    // (HTTP 200). Refusing models exist, so the drop stays; it just is not
-    // the reason.
+    // Some models refuse a thinking config on a request that ends in an
+    // assistant prefill.
     if (buildResult.assistantPrefill) {
       stripThinkingForPrefill(providerRequest);
     }
@@ -2741,11 +2645,8 @@ export class Membrane {
       retryDelaysMs: number[];
     }
   > {
-    // Strip `normalizedRequest` before forwarding to the adapter — it's
-    // not part of `ProviderRequestOptions` and TypeScript's structural
-    // compatibility won't catch the excess field (checked only on object
-    // literals, not on variables). Leaving it in would silently leak the
-    // normalized form into every adapter's options.
+    // TypeScript checks excess properties only on object literals, so nothing
+    // else keeps `normalizedRequest` out of the adapter's options.
     const { normalizedRequest, formatterName, requiresAssistantPrefill, refusalRetries, onRetrying, retry, onWireCacheMarkers, progressTimeoutMs, fidelity, ...adapterOptions } = options;
     // Fingerprint around the hook only when both a hook and a reader exist
     // (the yielding loops pass notes only when they emit usage events, which
@@ -2906,15 +2807,15 @@ export class Membrane {
         await this.sleep(delayMs, adapterOptions.signal);
         continue;
       }
-      const rawResult = localStops ? localStops.finish(attemptResult!) : attemptResult!;
+      const afterLocalStops = localStops ? localStops.finish(attemptResult!) : attemptResult!;
       // Restate usage in the one convention before any accumulator, ratio or
       // price sees it — this is the only door streamed usage enters through.
       // The stop token is settled here too, from the adapter's own stop, before
       // a local stop sequence, or the XML loop's, replaces its stopReason.
       const result: ProviderResponse = {
-        ...rawResult,
+        ...afterLocalStops,
         providerStopReason: this.providerReasonFor(attemptResult!),
-        usage: normalizeUsageToCacheExcluded(rawResult.usage, this.adapter.name, this.adapter.usageCacheConvention),
+        usage: normalizeUsageToCacheExcluded(afterLocalStops.usage, this.adapter.name, this.adapter.usageCacheConvention),
       };
       if (result.stopReason !== 'refusal' || retried >= maxAttempts) {
         for (const block of attemptAlterations) fidelity?.alterBlock(block);
@@ -2944,7 +2845,7 @@ export class Membrane {
     prefillResult: BuildResult,
     accumulated: string
   ): any {
-    // Anthropic quirk: assistant content cannot end with trailing whitespace
+    // Anthropic refuses final assistant content that ends in whitespace.
     const trimmedAccumulated = accumulated.trimEnd();
 
     // Everything before the watermark already rides EARLIER messages (a
@@ -2995,23 +2896,7 @@ export class Membrane {
     });
   }
 
-  /**
-   * Build continuation request with split-turn image injection.
-   *
-   * When tool results contain images in prefill mode, we must:
-   * 1. End assistant turn mid-XML (after text content, inside <function_results>)
-   * 2. Insert user turn with only image content
-   * 3. Continue with assistant prefill containing closing XML tags
-   *
-   * This is required because Anthropic API only allows images in user turns.
-   *
-   * Structure:
-   * ```
-   * Assistant: "...response..." + <function_results><result>text content
-   * User: [image blocks]
-   * Assistant (prefill): </result></function_results>
-   * ```
-   */
+  /** The Anthropic API allows images only in user turns. */
   private buildContinuationRequestWithImages(
     originalRequest: NormalizedRequest,
     prefillResult: BuildResult,
@@ -3040,7 +2925,7 @@ export class Membrane {
       }
     }
 
-    // Anthropic quirk: assistant content cannot end with trailing whitespace
+    // Anthropic refuses final assistant content that ends in whitespace.
     const trimmedAfterXml = afterImageXml.trimEnd();
     const splitTurnMessages = [
       { role: 'assistant', content: trailingContent },
@@ -3063,8 +2948,7 @@ export class Membrane {
     // moves to the seam — the point in `accumulated` where afterImageXml is
     // about to be appended — so the next builder replaces only the closing
     // assistant turn.
-    prefillResult.messages = messages;
-    prefillResult.accumulatedBaseOffset = accumulated.length;
+    persistImageSplit(prefillResult, messages, accumulated.length);
 
     return stripThinkingForPrefill({
       ...this.getBaseProviderParams(originalRequest.config),
@@ -3139,7 +3023,7 @@ export class Membrane {
             ...(block.signature ? { signature: block.signature } : {}),
           });
         } else if (block.type === 'redacted_thinking') {
-          // Pass through verbatim — carries the encrypted `data` payload
+          // A redacted_thinking block's encrypted `data` goes back as it is.
           content.push({ ...(block as any) } as ContentBlock);
         } else if (block.type === 'image') {
           content.push({ ...block } as ContentBlock);
@@ -3162,8 +3046,8 @@ export class Membrane {
       rawAssistantText = providerResponse.content;
     }
 
-    // If we stopped on a closing XML tag, append it to the text so parsers can complete
-    // the block. The API stops BEFORE the stop sequence, but we need the closing tag.
+    // The API stops before the stop sequence, leaving a closing tag out of the
+    // text.
     const stoppedOnClosingTag = xmlToolProtocol && providerResponse.stopReason === 'stop_sequence' &&
       providerResponse.stopSequence?.startsWith('</');
     if (stoppedOnClosingTag && providerResponse.stopSequence) {
@@ -3400,23 +3284,8 @@ export class Membrane {
   }
 
   /**
-   * A native round whose provider stop was literally `end_turn` while its
-   * content holds client tool calls (see ToolUseWithEndTurnAnomaly). The
-   * provider contract is a `tool_use` stop for any response carrying a tool
-   * call; production Anthropic responses broke it on 2026-10-19, and every
-   * native loop, gating tool execution on `tool_use`, silently dropped the
-   * calls and ended the turn.
-   *
-   * Returns undefined when the round is not this case. Otherwise the record,
-   * with `treatedAsToolUse` true when every call is complete — its block
-   * stopped and its input parsed to an object (no `unparseableInput`) — so
-   * the caller can run the round as a `tool_use` stop. A length, refusal,
-   * stop-sequence or pause stop never qualifies, nor does a provider token
-   * membrane doesn't map (it reads as end_turn but isn't the provider saying
-   * end_turn), nor a round with no provider token at all (an adapter that
-   * reports none, or an OpenAI-family server sending no `finish_reason`):
-   * those behave as before, and nothing runs. Warns once per occurrence, with
-   * the ids a provider report needs.
+   * Anthropic has sent client tool calls under an `end_turn` stop, where a
+   * response carrying a tool call should stop with `tool_use`.
    */
   private toolUseWithEndTurn(
     responseBlocks: ContentBlock[],
@@ -3532,8 +3401,8 @@ export class Membrane {
       case 'tool_use':
         return 'tool_use';
       case 'pause_turn':
-        // A long-running turn the provider paused and the caller is expected
-        // to resume. Reported as end_turn, it looked finished.
+        // Anthropic's pause_turn: the provider paused a long-running turn, and the
+        // caller resumes it.
         return 'pause_turn';
       case 'refusal':
         // Safety refusal (e.g., Fable 5 reasoning_extraction). Must survive
@@ -3740,13 +3609,8 @@ export class Membrane {
   }
 
   /**
-   * Whether a caught failure is a cancellation, judged by provenance first.
-   * If the caller's own signal has fired, the request was cancelled whatever
-   * the in-flight error is named: `AbortSignal.timeout()` rejects a fetch with
-   * a DOMException named `TimeoutError`, not `AbortError`, and classifying that
-   * by its name would report the caller's own deadline as a provider timeout
-   * on one path and a cancellation on another. Otherwise only a typed abort
-   * counts (see isAbortError).
+   * `AbortSignal.timeout()` rejects a fetch with a DOMException named
+   * `TimeoutError`, not `AbortError`.
    */
   private isCancellation(error: unknown, signal?: AbortSignal): boolean {
     return signal?.aborted === true || this.isAbortError(error);
@@ -3928,7 +3792,7 @@ export class Membrane {
     let rawResponse: unknown;
 
     // The text parser cannot carry images. Retain them across all rounds.
-    const extraContentBlocks: ContentBlock[] = [];
+    const providerImageBlocks: ContentBlock[] = [];
 
     // Native thinking blocks from the provider (with signatures) — merged
     // into the parser-derived content before the final response is emitted.
@@ -4025,7 +3889,7 @@ export class Membrane {
         // Track if we manually detected a stop sequence
         let detectedStopSequence: string | null = null;
         let truncatedAccumulated: string | null = null;
-        const checkFromIndex = parser.getAccumulated().length;
+        const streamedFrom = parser.getAccumulated().length;
         // This round's notes: the build's, plus what the hook and the adapter do.
         const roundFidelity = buildFidelity.copy();
 
@@ -4086,7 +3950,7 @@ export class Membrane {
               }
               // Only visible text enters a plain formatter's parser, and only
               // the text before a stop (see streamWithXmlTools).
-              const { found, head, emissions } = parseUpToStop(parser, chunk, checkFromIndex, prefillResult.stopSequences);
+              const { found, head, emissions } = parseUpToStop(parser, chunk, streamedFrom, prefillResult.stopSequences);
               if (found) {
                 detectedStopSequence = found.stop;
                 truncatedAccumulated = head;
@@ -4117,7 +3981,7 @@ export class Membrane {
           }
         );
 
-        if (typedCallbacks) tracker.flush();
+        if (typedCallbacks) tracker.flushAfterProviderReturn();
         rounds++;
         providerCalls += streamResult.providerCalls;
         retryDelaysMs.push(...streamResult.retryDelaysMs);
@@ -4134,7 +3998,7 @@ export class Membrane {
           streamResult.stopSequence = detectedStopSequence;
         }
 
-        this.captureProviderImageBlocks(streamResult.content, extraContentBlocks);
+        this.captureProviderImageBlocks(streamResult.content, providerImageBlocks);
 
         // Capture native thinking blocks (with signatures) from the provider
         // response — the text parser can't see signatures, so they're merged
@@ -4178,7 +4042,7 @@ export class Membrane {
         // resumption can stall; the turn ends only after several consecutive
         // stalls. Tool rounds are never counted. Mirrors streamWithXmlTools —
         // see the detailed rationale there.
-        const streamedThisRound = parser.getAccumulated().length - checkFromIndex;
+        const streamedThisRound = parser.getAccumulated().length - streamedFrom;
         if (
           enteredViaResumption &&
           lastStopReason === 'stop_sequence' &&
@@ -4537,7 +4401,7 @@ export class Membrane {
       // Merge provider thinking signatures into parser-derived thinking blocks
       this.mergeProviderThinkingBlocks(response.content, providerThinkingBlocks);
 
-      response.content.push(...extraContentBlocks);
+      response.content.push(...providerImageBlocks);
       response.details.timing.rounds = rounds;
       if (retryDelaysMs.length > 0) response.details.timing.retryDelaysMs = retryDelaysMs;
 
@@ -4755,7 +4619,7 @@ export class Membrane {
 
         // Single-callback adapters (OpenAI Responses) report each finalised
         // block once, after the stream: complete whatever never saw a stop.
-        tracker.flush();
+        tracker.flushAfterProviderReturn();
         rounds++;
         providerCalls += streamResult.providerCalls;
         retryDelaysMs.push(...streamResult.retryDelaysMs);
@@ -4878,17 +4742,8 @@ export class Membrane {
             })),
           });
 
-          // Mid-turn injection: messages that arrived while this round's
-          // tools were executing, appended AFTER the tool_result envelope so
-          // the next inference round sees them. Placed here (not co-mingled
-          // with the results) so provider conversions that special-case
-          // tool_result envelopes (e.g. ChatCompletions role:'tool') carry
-          // them as ordinary user messages. Signed-thinking adjacency is
-          // unaffected: the assistant turn above is round-tripped verbatim.
-          //
-          // Positions are the consumer's: a message the cleaning dropped
-          // leaves its position empty, and every position that lost tool
-          // blocks stays altered for as long as the batch is retained.
+          // Chat Completions carries tool results as role:'tool' messages, so injected
+          // messages go after the tool_result envelope, as ordinary user messages.
           if (injected) {
             const batch = injectedBatches++;
             newestBatchSize = injected.size;
@@ -4968,15 +4823,7 @@ export class Membrane {
   }
 }
 
-/**
- * The zero-width carrier for a provider item no normalized ContentBlock
- * represents (an Anthropic server-tool block, an opaque Responses item): the
- * item rides on it as `rawItem`, so a formatter for its wire can send it back,
- * and normalized consumers see no text. An item that already holds its native
- * form as `rawItem` is carried as that form, and so is an Anthropic server-tool
- * block, which is its own native form; any other is new to this module, and
- * warns once per type.
- */
+/** An Anthropic server-tool block is its own native form, sent back as itself. */
 function providerItemCarrier(item: { type?: unknown; rawItem?: unknown }): ContentBlock {
   if (!item.rawItem && !isAnthropicServerBlock(item)) warnUnconvertibleProviderItem(String(item.type));
   return { type: 'text', text: '', rawItem: item.rawItem ?? item };

@@ -1,14 +1,4 @@
-/**
- * Image data that is no image, under an accepted label.
- *
- * A request builder labels an image by its bytes when they show a JPEG, PNG,
- * GIF or WebP image. For data that showed none of them it used to keep the
- * declared label, so data labelled as an accepted type passed every check: a
- * text file renamed notes.png went to the provider as image/png. The API
- * refuses the whole request, and since the block stays in the agent's history,
- * every later request too. Every path now replaces such data with the
- * placeholder an SVG already got, whatever its label says.
- */
+/** A provider refuses a whole request carrying data that is no image under an accepted image label. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { NativeFormatter } from '../../src/formatters/native.js';
@@ -149,9 +139,7 @@ const anthropic = () => new AnthropicAdapter({ apiKey: 'test-key', cacheKeepaliv
 const bedrock = () => new BedrockAdapter({ accessKeyId: 'test-key', secretAccessKey: 'test-secret', region: 'us-west-2' });
 
 describe('images whose bytes match a format', () => {
-  // Native tool requests now label tool-result images before an adapter sees
-  // them. The Anthropic and Bedrock wire must come out byte for byte as it did
-  // when the adapters labelled them, so prompt caches keep their prefixes.
+  // Prompt caches match a request's prefix byte for byte.
   it('reach the Anthropic and Bedrock wire from a native tool request as before', async () => {
     const sent: any[] = [];
     const adapter: ProviderAdapter = {
@@ -241,11 +229,7 @@ describe('the Images adapter', () => {
   });
 });
 
-/**
- * OpenAI, OpenAI-compatible, OpenRouter and Gemini make the decision
- * themselves, so a direct call, or a request a hook replaced, is covered as a
- * builder's is. Gemini takes its own formats: HEIC and HEIF, and no GIF.
- */
+/** Gemini takes its own image formats: HEIC and HEIF, and no GIF. */
 describe('OpenAI-family and Gemini adapters', () => {
   const openAIFrames = ['{"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}', '[DONE]'];
   const geminiFrames = [JSON.stringify({
@@ -592,8 +576,7 @@ describe('formats, labels and shapes', () => {
     }
     // An image sequence's brand is no still image here.
     expect(imageForRequest(brand('msf1'), 'image/heif', GEMINI_IMAGE_TYPES).placeholder).toBeDefined();
-    // Leading whitespace, which base64 decoding skips, doesn't hide a header,
-    // even when there's more of it than the header's 24-character window holds.
+    // base64 decoding skips leading whitespace.
     expect(imageForRequest(`\n${' '.repeat(23)}${PNG}`, 'image/png').mediaType).toBe('image/png');
   });
 
@@ -656,10 +639,7 @@ describe('round reports name a message whose image became the placeholder', () =
     expect([...fidelity.altered]).toEqual([1]);
   });
 
-  // An MCP-shaped image (data and mimeType, no source) becomes membrane's
-  // form where the formatter takes its messages (utils/mcp-media.ts), so a
-  // PNG is carried by either builder. On main the Responses tool output gave
-  // it the note for an image with no source, and altered its message too.
+  // MCP's image form: data and mimeType, no source.
   it.each([
     ['native', () => new NativeFormatter(), [3]],
     ['Responses', () => new OpenAIResponsesFormatter(), [3]],

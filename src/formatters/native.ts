@@ -44,10 +44,6 @@ import { convertMcpMedia } from '../utils/mcp-media.js';
 import { assertCacheMarkersWithinLimit, countWireCacheMarkers } from '../utils/cache-marker-budget.js';
 import { anthropicServerBlockFor, unpairedServerBlocks } from '../utils/anthropic-server-blocks.js';
 
-/** Index of the last content block that can carry cache_control. Anthropic
- *  rejects cache_control on thinking / redacted_thinking blocks, so a cache
- *  breakpoint must attach to the last NON-thinking block. Returns -1 when the
- *  message has only thinking blocks (the breakpoint is then skipped). */
 /**
  * The system prompt as it goes on the wire: `''` and an array left with no
  * blocks become undefined, and empty text blocks leave an array.
@@ -61,6 +57,7 @@ export function withoutEmptySystemText(
   return blocks.length > 0 ? blocks : undefined;
 }
 
+/** Anthropic rejects cache_control on thinking and redacted_thinking blocks. */
 export function lastCacheableBlockIndex(blocks: Array<Record<string, unknown>>): number {
   for (let k = blocks.length - 1; k >= 0; k--) {
     const t = blocks[k]?.type as string | undefined;
@@ -389,22 +386,9 @@ export class NativeFormatter implements PrefillFormatter {
       ? NativeFormatter.placeSystemChanges(mergedMessages, systemChanges, origin)
       : mergedMessages;
 
-    // Build system content. The system block is cached only as a FALLBACK: a
-    // message breakpoint already caches a prefix that begins at the front of
-    // the request, tools and system included, so a separate system marker
-    // would waste one of Anthropic's 4 slots and can push a 4-marker turn to 5,
-    // which the API rejects. The count is of the markers this request already
-    // carries: on the merged messages (this build's own, a contextPrefix's,
-    // and stale ones passed through on stored blocks) and on the caller's
-    // system content, so a caller who marked their own system block gets no
-    // fallback either. The budget check below covers the whole built request;
-    // Membrane defers it (deferCacheBudgetCheck) to after its hooks, which
-    // can still add markers.
-    //
-    // An empty system prompt is no system block. Wrapped for the fallback
-    // marker it became a cache-marked empty text block, which the API doesn't
-    // cache; a caller's empty text blocks are dropped the same way, before the
-    // marker count and before the fallback picks the last block.
+    // A message breakpoint caches a prefix from the front of the request, tools
+    // and system included, so a system marker beside one only spends one of
+    // Anthropic's 4 slots. The API doesn't cache an empty text block.
     const system = withoutEmptySystemText(systemPrompt);
     const markedBreakpoints = countWireCacheMarkers({ messages: builtMessages, system });
     const cacheSystem =
@@ -414,7 +398,7 @@ export class NativeFormatter implements PrefillFormatter {
     let systemContent: unknown;
     if (typeof system === 'string') {
       if (cacheSystem) {
-        // Must use array format for cache_control support
+        // cache_control rides a system block, so the prompt goes as an array of them.
         systemContent = [{ type: 'text', text: system, cache_control: cacheSystem }];
       } else {
         systemContent = system;
@@ -530,35 +514,10 @@ export class NativeFormatter implements PrefillFormatter {
   }
 
   /**
-   * Each message of system changes, as a `role: 'system'` message, at the
-   * first point at or after its place where the API takes one: before an
-   * assistant turn that follows a user turn (a tool-result turn included), or
-   * at the end after a user turn. Never after an assistant turn, so never
-   * after a paused one, which takes no tool change. The turns are read as the
-   * adapter leaves them: its empty-text cleanup (utils/empty-text.ts) drops a
-   * message of only empty or whitespace text, it leaves out a thinking block
-   * with no signature (isUnsignedThinking), and the surviving messages of one
-   * role between two of the other are one turn. The API
-   * accepts consecutive messages of one role, and judges a system message, or
-   * a run of them, by the message right before it, so a change goes right
-   * after a user turn's
-   * last surviving message and right before an assistant turn's first. Its
-   * place is its input index: it
-   * goes before the first surviving message of the first such assistant turn
-   * whose earliest surviving block, across all its messages, came from a
-   * later message, or at the end when the last surviving turn is a user turn.
-   * A block keeps its input index through the turn passes when they move it;
-   * one they rebuild, or a contextPrefix, has none. An assistant turn of such
-   * blocks alone is no point, and one that holds them with later blocks is
-   * dated by those, so a change can go ahead of a contextPrefix that shares
-   * its turn. With no point at or after its
-   * place, as after a final assistant turn, the request is refused before
-   * sending. Adjacent ones keep their order, and the API judges consecutive
-   * system messages together. The message's own breakpoint goes with it to
-   * where it lands. A `hasCacheMarker` boundary never goes on it, since it can
-   * land past later turns: a boundary, on it or on any other message, goes on
-   * the turn message before that message in input order, where it would go
-   * with the request's changes left out.
+   * The API takes a `role: 'system'` message, or a run of them, only after a
+   * user turn, judging it by the message right before it: before an assistant
+   * turn that follows a user turn, or at the end after a user turn, never
+   * after an assistant turn. It accepts consecutive messages of one role.
    */
   private static placeSystemChanges(
     messages: ProviderTurnMessage[],
@@ -654,8 +613,7 @@ export class NativeFormatter implements PrefillFormatter {
         });
       }
       for (const text of change.addSystem ?? []) {
-        // The API refuses empty or whitespace text. An empty one says nothing,
-        // as an empty text block elsewhere; whitespace left out is reported.
+        // The API refuses empty or whitespace text.
         if (hasNonEmptyText(text)) blocks.push({ type: 'text', text });
         else if (text !== '') onAltered();
       }
@@ -691,11 +649,8 @@ export class NativeFormatter implements PrefillFormatter {
         continue;
       }
       if (block.type === 'text') {
-        // Empty text blocks are rejected by the Anthropic API. Any other
-        // zero-width rawItem carrier (an opaque provider-native item from
-        // another wire) has no form here and must not leak. Filter BEFORE
-        // the name prefix below would make it non-empty. A carrier's item is
-        // its content, and it is not sent here.
+        // The Anthropic API rejects an empty text block, so one goes before the name
+        // prefix below would make it non-empty.
         if (block.text === '') {
           if (isRawItemCarrier(block)) altered();
           continue;
@@ -715,9 +670,7 @@ export class NativeFormatter implements PrefillFormatter {
         if (block.source?.type === 'base64') {
           const { mediaType, placeholder } = imageForRequest(block.source.data, block.source.mediaType);
           if (placeholder) {
-            // Not an image the API accepts (an SVG, data that is no image at
-            // all, or no data): degrade to a text placeholder instead of
-            // poisoning the whole request.
+            // Not an image the API accepts (an SVG, data that is no image at all, or no data).
             result.push(placeholder);
             altered();
           } else {
@@ -729,7 +682,7 @@ export class NativeFormatter implements PrefillFormatter {
                 data: block.source.data,
               },
             };
-            // Preserve sourceUrl for providers that use URL-as-text (Gemini 3.x)
+            // Gemini 3.x takes an image's URL as text.
             if (block.sourceUrl) {
               imageBlock.sourceUrl = block.sourceUrl;
             }
@@ -772,11 +725,9 @@ export class NativeFormatter implements PrefillFormatter {
           is_error: block.isError,
         });
       } else if (block.type === 'thinking') {
-        // Round-trip thinking blocks verbatim, including the signature — the
-        // API validates it and (on display:'omitted' models) decrypts it to
-        // reconstruct the original reasoning. Signature-only blocks (empty
-        // thinking field) are valid and must be passed back unchanged. The
-        // Anthropic and Bedrock builders leave out one with no signature.
+        // The API validates a thinking block's signature, and on display:'omitted'
+        // models decrypts it to rebuild the reasoning, so the block goes back as it
+        // is, a signature-only one included.
         result.push({
           type: 'thinking',
           thinking: block.thinking,
@@ -785,7 +736,7 @@ export class NativeFormatter implements PrefillFormatter {
             : {}),
         });
       } else if (block.type === 'redacted_thinking') {
-        // Pass through verbatim (carries encrypted data field)
+        // A redacted_thinking block's encrypted `data` goes back as it is.
         result.push({ ...(block as unknown as Record<string, unknown>) });
       } else if (block.type === 'document') {
         hasUnsupportedMedia = true;

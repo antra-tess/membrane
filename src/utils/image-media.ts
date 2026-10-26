@@ -1,20 +1,8 @@
 /**
- * Image handling shared by every request-build path.
- *
  * A provider refuses a whole request when one of its images is data it
  * doesn't accept, and an image in an agent's history goes out with every
- * later request, so one such block fails every compile until it is removed
- * (LabClaude 2026-07-11: an SVG attachment). Ingest labels can't be trusted
- * to catch it: an SVG arrives as image/svg+xml, but a text file renamed
- * `notes.png` arrives as image/png. So every place that turns image data
- * into a provider image, base64 data or a `data:` URL, asks
- * `imageForRequest` with its destination's accepted formats. The decision
- * recognizes each format by its header: an accepted image is labelled by
- * what its header shows, and anything else becomes a text placeholder the
- * agent can see. A header is not proof the rest decodes. A remote image URL
- * goes out as it is, for the provider to fetch, where the request can carry
- * one; an xml tool loop's results can't, and give the link note instead
- * (linkImageNote).
+ * later request. Ingest labels can't be trusted to catch it: an SVG arrives as
+ * image/svg+xml, but a text file renamed `notes.png` arrives as image/png.
  */
 
 export type RasterImageMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
@@ -26,14 +14,13 @@ export const RASTER_IMAGE_TYPES: ReadonlySet<RasterImageMediaType> =
   new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 
 /** Gemini's image formats as its image-understanding docs list them
- *  (ai.google.dev/gemini-api/docs/image-understanding, read 2026-10-12):
- *  PNG, JPEG, WebP, HEIC and HEIF, and no GIF. */
+ *  (ai.google.dev/gemini-api/docs/image-understanding): PNG, JPEG, WebP, HEIC
+ *  and HEIF, and no GIF. */
 export const GEMINI_IMAGE_TYPES: ReadonlySet<ImageMediaType> =
   new Set(['image/png', 'image/jpeg', 'image/webp', 'image/heic', 'image/heif']);
 
 /** What OpenAI's image edits take from the GPT image models: PNG, WebP and
- *  JPEG, and no GIF (openai-node's images.ts, ImageEditParamsBase.image, as
- *  of 2026-10-06). */
+ *  JPEG, and no GIF (openai-node's images.ts, ImageEditParamsBase.image). */
 export const OPENAI_IMAGE_EDIT_TYPES: ReadonlySet<ImageMediaType> =
   new Set(['image/png', 'image/jpeg', 'image/webp']);
 
@@ -53,11 +40,11 @@ const HEIF_BRANDS: Readonly<Record<string, ImageMediaType>> = {
 
 /** The format whose header the data starts with, if any. Only the first 18
  *  bytes are decoded, which hold every header recognized here. */
+const HEADER_BYTES = 18;
+
 function formatOf(data: unknown): ImageMediaType | undefined {
-  // Malformed blocks can carry non-string fields at runtime; treat them as
-  // data that is no image rather than throwing out of a request build.
-  // Leading whitespace, which the decoder skips, would use up the window.
-  const bytes = Buffer.from((typeof data === 'string' ? data : '').trimStart().slice(0, 24), 'base64');
+  // Node's base64 decoder skips leading whitespace, which would use up the window.
+  const bytes = Buffer.from((typeof data === 'string' ? data : '').trimStart().slice(0, (HEADER_BYTES / 3) * 4), 'base64');
   if (bytes.subarray(0, 8).equals(PNG_SIGNATURE)) return 'image/png';
   if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
   const header = bytes.toString('latin1');
@@ -146,13 +133,9 @@ export type UrlImageForRequest =
   | { placeholder: { type: 'text'; text: string }; url?: undefined; mediaType?: undefined; data?: undefined };
 
 /**
- * The image a `data:` URL holds inline: its bytes as base64 data, the type it
- * was labelled with, and whether its bytes came as base64 (the alternative is
- * percent-encoded). Undefined for any other URL, whose image is at the URL.
- * A `data:` URL without the comma that starts its data holds none: its data
- * is empty. The payload is percent-decoded first, a base64 one too, as the
- * fetch spec's `data:` URL processor decodes it: a URL may escape base64's
- * padding as `%3D`. Valid base64 holds no `%`, so it comes through as it is.
+ * The fetch spec's `data:` URL processor percent-decodes the payload, a base64
+ * one too, so a URL may escape base64's padding as `%3D`; valid base64 holds
+ * no `%`.
  */
 export function dataUrlImage(url: unknown): { data: string; declared: string | undefined; base64: boolean } | undefined {
   if (typeof url !== 'string' || !/^data:/i.test(url)) return undefined;
@@ -228,11 +211,9 @@ export function toolResultContentForRequest(content: unknown, onAltered?: () => 
   });
 }
 
-/** Requests are also capped by SIZE (~32MB serialized) independent of token
- *  count — token math is blind to base64 bulk, so an image-heavy window can
- *  pass the context budget yet draw 413 request_too_large (Mythos 2026-07-12:
- *  47 inline images = 34.3MB). Default cap leaves headroom for system/tools
- *  and JSON overhead; override via MEMBRANE_MAX_REQUEST_BYTES. */
+/** The API caps a request by size (~32MB serialized), apart from its token
+ *  count, and refuses one over it with 413 request_too_large. This caps the
+ *  messages alone, below that limit, so the system prompt and tools fit. */
 export const DEFAULT_MAX_REQUEST_BYTES = 28 * 1024 * 1024;
 
 /** The effective request byte cap. */
@@ -360,7 +341,7 @@ export function linkImageNote(url: unknown): { type: 'text'; text: string } {
  *  text. */
 const MAX_NOTED_LINK_CHARS = 2048;
 
-/** Half of a UTF-16 surrogate pair, which a request's JSON can't carry. */
+/** Half of a UTF-16 surrogate pair, which the API refuses in a request's JSON. */
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
 /** A link for a note: an http or https URL, cut to `MAX_NOTED_LINK_CHARS`

@@ -46,9 +46,21 @@ const MAX_FALLBACK_DESCRIPTION = 4000;
 
 /**
  * Rewrite a root-level `oneOf`/`anyOf`/`allOf` in a tool input schema into a
- * single Anthropic-acceptable object schema. Returns the input unchanged
- * (same reference) when there is nothing to repair, so callers can cheaply
- * detect whether a rewrite happened.
+ * single Anthropic-acceptable object schema: MCP permits a root combinator,
+ * and the Anthropic API refuses one with a 400 ("input_schema does not
+ * support oneOf, allOf, or anyOf at the top level"). Returns the input
+ * unchanged (same reference) when there is nothing to repair, so callers can
+ * cheaply detect whether a rewrite happened.
+ *
+ * When every variant of every combinator present is an object schema,
+ * `properties` merges them all (first wins on a key collision); `required`
+ * is the union of the variants' lists under `allOf`, and under
+ * `oneOf`/`anyOf` only the keys every variant requires; a note naming the
+ * alternative argument groups is appended to the description; and
+ * variant-level `additionalProperties: false` is dropped. Otherwise the
+ * result is a permissive object schema whose description is the schema's own
+ * followed by the serialized union, cut to 4,000 characters. Combinators
+ * nested inside `properties` or array `items` are left untouched.
  */
 export function flattenRootSchemaUnion(schema: unknown): unknown {
   if (!isPlainObject(schema)) return schema;

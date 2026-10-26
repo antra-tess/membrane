@@ -236,7 +236,7 @@ describe('cache markers on duplicate textification', () => {
     expect(input).toEqual(before);
   });
 
-  it.each(['complete', 'stream', 'yielding'])('keeps a duplicate-message breakpoint through %s', async entry => {
+  it.each(['complete', 'stream', 'yielding'])('keeps a duplicate-message breakpoint through %s, leaving the system prompt unmarked', async entry => {
     const { adapter, requests } = recordingAdapter();
     const membrane = new Membrane(adapter, { formatter: new NativeFormatter() });
     const req: NormalizedRequest = {
@@ -266,7 +266,7 @@ describe('cache markers on duplicate textification', () => {
 });
 
 describe('a cache marker on an orphan result', () => {
-  it.each(['complete', 'stream', 'yielding'])('keeps its breakpoint through %s', async entry => {
+  it.each(['complete', 'stream', 'yielding'])('keeps its breakpoint through %s, leaving the system prompt unmarked', async entry => {
     const { adapter, requests } = recordingAdapter();
     const membrane = new Membrane(adapter, { formatter: new NativeFormatter() });
     const req: NormalizedRequest = {

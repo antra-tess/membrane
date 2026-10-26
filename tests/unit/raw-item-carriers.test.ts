@@ -1,20 +1,4 @@
-/**
- * Zero-width rawItem carrier blocks.
- *
- * Opaque provider-native items (e.g. OpenAI Responses compaction records or
- * custom tool records) have no normalized ContentBlock equivalent, so
- * `parseProviderContent` persists them as `{ type: 'text', text: '', rawItem }`
- * carriers. Two invariants:
- *
- *   1. Anthropic-bound conversion paths must FILTER them (and empty text
- *      blocks generally) — the Anthropic API 400s on empty text blocks, which
- *      previously produced a crash loop on provider switch. The filter must
- *      run BEFORE participant-name prefixing, which would otherwise make the
- *      carrier text non-empty and leak "Name: " junk instead.
- *
- *   2. The OpenAI Responses formatter must PRESERVE them — the rawItem is
- *      replayed verbatim as an input item.
- */
+/** The Anthropic API refuses a request that holds an empty text block, with a 400. */
 
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
@@ -58,7 +42,8 @@ function expectNoEmptyOrCarrierText(providerMessages: any[]): void {
   for (const block of texts) {
     expect(block.text).not.toBe('');
     // A carrier resurrected by name prefixing would surface as exactly "Name: "
-    expect(block.text).not.toMatch(/^\S+: $/);
+    const participantPrefixOnly = /^\S+: $/;
+    expect(block.text).not.toMatch(participantPrefixOnly);
   }
   expect(JSON.stringify(providerMessages)).not.toContain('opaque-payload');
   expect(JSON.stringify(providerMessages)).not.toContain('opaque-output');
@@ -100,7 +85,7 @@ describe('zero-width rawItem carrier blocks', () => {
     expect(result).toEqual([{ type: 'text', text: 'real answer' }]);
   });
 
-  it('are replayed verbatim as raw items by the OpenAI Responses formatter', () => {
+  it('are replayed verbatim as raw items by the OpenAI Responses formatter, which keeps the system prompt', () => {
     const result = new OpenAIResponsesFormatter().buildMessages(historyWithCarriers, {
       participantMode: 'multiuser',
       assistantParticipant: 'Claude',

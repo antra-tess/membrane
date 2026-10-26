@@ -48,7 +48,7 @@ function completedResponse(): Response {
 }
 
 describe('OpenAI Responses subscription mode', () => {
-  test('sends a stable session_id per logical stream so the backend prompt cache can hit', async () => {
+  test('sends a stable session_id per logical stream, keyed by the first input item and salted with the base id, so the backend prompt cache can hit', async () => {
     const seen: Array<{ header: string | null; key: unknown }> = [];
     globalThis.fetch = async (_input, init) => {
       seen.push({
@@ -230,7 +230,7 @@ describe('OpenAI Responses subscription mode', () => {
     ]);
   });
 
-  test.each(['complete', 'stream'] as const)('%s sniffs normalized image bytes at the subscription transport boundary', async (lane) => {
+  test.each(['complete', 'stream'] as const)('%s sniffs normalized image bytes at the subscription transport boundary, and replays an input_image item as it is', async (lane) => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==';
     let body: Record<string, any> = {};
@@ -582,7 +582,7 @@ test.each(['retry', 'stream-error'] as const)('does not wait for a cloned respon
     ));
   } });
   const response = new Response(source, { status: scenario === 'retry' ? 401 : 200 });
-  const clone = response.clone(); // logging observer deliberately does not drain
+  const undrainedLoggingClone = response.clone(); // logging observer deliberately does not drain
   let calls = 0;
   globalThis.fetch = async () => ++calls === 1 ? response : completedResponse();
   const adapter = new OpenAIResponsesAPIAdapter({ mode: 'subscription', credentials: () => ({ token: 't' }) });
@@ -596,7 +596,7 @@ test.each(['retry', 'stream-error'] as const)('does not wait for a cloned respon
   } finally {
     clearTimeout(timer);
     controller.close();
-    await clone.text();
+    await undrainedLoggingClone.text();
   }
 });
 

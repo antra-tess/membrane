@@ -35,7 +35,9 @@ import {
  * request-side wire clamp (the cache-marker budget PR) is the layer that
  * makes the ceiling safe by construction rather than by convention.
  */
-const MAX_MODULE_CACHE_POINTS = 3;
+const ANTHROPIC_CACHE_CONTROL_LIMIT = 4;
+const CACHE_CONTROL_SLOTS_LEFT_TO_REQUEST_BUILDERS = 1;
+const MAX_MODULE_CACHE_POINTS = ANTHROPIC_CACHE_CONTROL_LIMIT - CACHE_CONTROL_SLOTS_LEFT_TO_REQUEST_BUILDERS;
 
 // ============================================================================
 // Main Entry Point
@@ -333,7 +335,7 @@ export interface RollDecision {
   reason?: 'threshold' | 'grace_exceeded' | 'hard_limit';
   targetTokens?: number;
   targetMessages?: number;
-  /** Character budget the kept window must fit (set by the maxCharacters limit). */
+  /** Character budget the kept window is truncated toward (the maxCharacters limit). */
   targetCharacters?: number;
   enteredGrace: boolean;
 }

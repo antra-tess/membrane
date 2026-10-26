@@ -162,7 +162,7 @@ describe('complete() overloaded retries', () => {
 });
 
 describe('stream() overloaded retries', () => {
-  it('retries a 529 that arrives before any output', async () => {
+  it('retries a 529 that arrives before any output, and reports the attempts and retry delays', async () => {
     const adapter = new FlakyAdapter(2, overloaded529);
     adapter.queueResponse('recovered');
     const membrane = new Membrane(adapter, FAST_OVERLOADED);
@@ -188,7 +188,8 @@ describe('stream() overloaded retries', () => {
   });
 
   it('does NOT retry once output has been emitted', async () => {
-    const adapter = new FlakyAdapter(1, overloaded529, /* emitBeforeFailure */ true);
+    const emitBeforeFailure = true;
+    const adapter = new FlakyAdapter(1, overloaded529, emitBeforeFailure);
     const membrane = new Membrane(adapter, FAST_OVERLOADED);
     const chunks: string[] = [];
     await expect(

@@ -1,24 +1,14 @@
 /**
  * Providers disagree about whether the prompt-token count INCLUDES the span
- * served from cache. Both conventions were measured live on 2026-08-25:
+ * served from cache. For example:
  *
- *   Anthropic (cache-excluded): a 4,650-token cached system prompt returned
+ *   Anthropic (cache-excluded): a 4,650-token cached system prompt reports
  *     input_tokens 8 / cache_creation 4650 on the first call and
  *     input_tokens 8 / cache_read 4650 on the second — `input_tokens` never
  *     counts the cached span.
- *   OpenAI (cache-inclusive): the same shape on gpt-4o-mini returned
+ *   OpenAI (cache-inclusive): the same shape on gpt-4o-mini reports
  *     prompt_tokens 1732 / cached 0, then prompt_tokens 1732 / cached 1664 —
  *     `prompt_tokens` is CONSTANT across a cache hit, so cached ⊆ prompt.
- *
- * `inputTokens` therefore carried two incomparable meanings, which broke two
- * things: the cache "hit ratio" was unbounded under the Anthropic convention
- * (cacheRead/inputTokens = 400, not a ratio), and cost arithmetic priced the
- * cached span twice under the OpenAI convention (full rate on the whole
- * prompt PLUS the discounted rate on the cached subset).
- *
- * Membrane now normalizes every adapter onto ONE convention — cache-excluded,
- * where inputTokens/cacheReadTokens/cacheCreationTokens are disjoint and each
- * is priced at its own rate.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
@@ -185,7 +175,7 @@ describe('cache-inclusive adapters (OpenAI convention)', () => {
     const response = await membrane.complete(ZZ_REQUEST);
 
     // Fresh input is prompt - cached = 68, not the full 1732.
-    expect(response.details.usage.estimatedCost?.input).toBeCloseTo(68 * 1000 / 1e6, 12);
+    expect(response.details.usage.estimatedCost?.input).toBeCloseTo((1_732 - 1_664) * 1000 / 1e6, 12);
     expect(response.details.usage.estimatedCost?.cacheRead).toBeCloseTo(1664 * 100 / 1e6, 12);
   });
 
@@ -340,9 +330,7 @@ describe("OpenRouter's per-response convention, with cache writes", () => {
       }));
   }
 
-  // Anthropic's fields are disjoint from prompt_tokens and OpenAI's is inside
-  // it, so an Anthropic-shaped field, read or write, marks the response
-  // cache-excluded and keeps its writes out of the subtraction.
+  // Anthropic's cache fields are disjoint from prompt_tokens, and OpenAI's cached count is inside it.
   const SHAPES: Array<[string, Record<string, unknown>, { input: number; written: number; read: number }]> = [
     ["Anthropic's write field and OpenAI's read field at zero",
       { prompt_tokens: 100, completion_tokens: 2, cache_creation_input_tokens: 5_000, prompt_tokens_details: { cached_tokens: 0 } },

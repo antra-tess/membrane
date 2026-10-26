@@ -48,7 +48,7 @@ interface GeminiPart {
    * images" are flagged too, and are kept out of the answer's images.
    */
   thought?: boolean;
-  /** Opaque reasoning state; may ride any part. Not round-tripped yet. */
+  /** Opaque reasoning state; may ride any part. */
   thoughtSignature?: string;
   inlineData?: { mimeType: string; data: string };
   functionCall?: { name: string; args: Record<string, unknown> };
@@ -81,7 +81,7 @@ interface GeminiFunctionDeclaration {
    * The tool's `inputSchema`, as JSON Schema. Gemini's other field,
    * `parameters`, takes only its OpenAPI-subset `Schema`, where a `type` is a
    * single value and `$schema`, `$defs`, `$ref` and `const` are unknown
-   * fields, so a schema using any of them fails the whole request (#185).
+   * fields, so a schema using any of them fails the whole request.
    */
   parametersJsonSchema?: Record<string, unknown>;
 }
@@ -100,16 +100,13 @@ interface GeminiResponse {
     /**
      * Reasoning ("thinking") tokens. DISJOINT from candidatesTokenCount and
      * billed at the output rate, so generated output is candidates + thoughts.
-     * Live receipt 2026-08-25, gemini-3.5-flash-lite, thinkingBudget 512:
-     * prompt 35, candidates 2, thoughts 228, total 265 — 35+2+228 === 265.
      */
     thoughtsTokenCount?: number;
     /**
      * Tokens of the prompts Gemini's built-in tools add, such as code
      * execution's intermediate tokens or URL context's retrieved pages.
      * DISJOINT from promptTokenCount: Google defines totalTokenCount as
-     * "prompt + tool-use prompt + thoughts + response candidates"
-     * (UsageMetadata reference, read 2026-10-14).
+     * "prompt + tool-use prompt + thoughts + response candidates".
      */
     toolUsePromptTokenCount?: number;
   };
@@ -133,11 +130,9 @@ interface GeminiStreamState {
 }
 
 /**
- * Whether a response's first candidate carries data: content or a finish
- * reason. Gemini's API speaks proto3's JSON mapping, where a null field is
- * unset, so a candidate whose content and finishReason are null or absent is
- * none, and a prompt block beside it still reads as a refusal. complete() and
- * stream() both ask here.
+ * Gemini's API speaks proto3's JSON mapping, where a null field is unset, so
+ * a candidate whose content and finishReason are null or absent carries no
+ * data.
  */
 function hasCandidateData(candidate: NonNullable<GeminiResponse['candidates']>[number] | undefined): boolean {
   return candidate?.content != null || candidate?.finishReason != null;
@@ -146,38 +141,22 @@ function hasCandidateData(candidate: NonNullable<GeminiResponse['candidates']>[n
 /**
  * Gemini's usageMetadata follows proto3 JSON, which omits zero-valued counts:
  * when the object is present, a missing prompt, candidates or cache-read
- * count is a reported 0. Only a response with no usageMetadata at all leaves
- * the counts unreported. A turn without thinking keeps `thinkingTokens`
- * absent, as it always has.
+ * count is a reported 0.
  */
 function geminiUnreportedUsage(usageMetadata: GeminiResponse['usageMetadata']): { unreportedUsage?: Array<'inputTokens' | 'outputTokens'> } {
   return usageMetadata ? {} : { unreportedUsage: ['inputTokens', 'outputTokens'] };
 }
 
 /**
- * Map Gemini's `usageMetadata` onto membrane's usage shape.
- *
- * `thoughtsTokenCount` is disjoint from `candidatesTokenCount` and billed at
- * the output rate, so generated output is the SUM of the two; reading only
- * candidates reported a thinking turn at a fraction of its real size. The
- * reconciliation check makes the next such omission loud rather than silent:
- * Google's own total is the independent witness, set against the tokens
- * membrane counts, which are prompt, tool-use prompt, candidates and
- * thoughts, and for a response read as cache-excluded the cached span
- * besides. A total above them means a usageMetadata field outside those is
- * carrying tokens. A total below them warns too, naming no field.
- *
- * `toolUsePromptTokenCount` is disjoint from `promptTokenCount` and is read
- * into `inputTokens`: Google bills code execution's intermediate tokens, URL
- * context's retrieved content and file search's retrieved documents as input.
+ * Google bills `thoughtsTokenCount`, disjoint from `candidatesTokenCount`, at
+ * the output rate, and `toolUsePromptTokenCount`, disjoint from
+ * `promptTokenCount`, as input (code execution's intermediate tokens, URL
+ * context's retrieved content, file search's retrieved documents).
  * Grounding, with Google Search or Google Maps, is billed per query or per
- * grounded prompt instead, which membrane doesn't price, and for text models
- * Google doesn't say whether grounding's retrieved context is counted here or
- * charged as input. If it is counted here and not charged, a grounded
- * response's input is overstated. A grounded candidate carries
- * `groundingMetadata`, but a response that used grounding and another tool
- * reports one count, which can't be split. The adapter's `raw` keeps
- * `usageMetadata` as Google sent it.
+ * grounded prompt instead, and for text models Google doesn't say whether
+ * grounding's retrieved context is counted in the tool-use prompt; a
+ * response that used grounding and another tool reports one count, which
+ * can't be split.
  */
 function geminiUsageToProviderUsage(
   usageMetadata: GeminiResponse['usageMetadata']
@@ -276,6 +255,8 @@ export interface GeminiAdapterConfig {
 // Gemini Adapter
 // ============================================================================
 
+const GEMINI_MAX_STOP_SEQUENCES = 5;
+
 export class GeminiAdapter implements ProviderAdapter {
   readonly name = 'gemini';
 
@@ -285,39 +266,15 @@ export class GeminiAdapter implements ProviderAdapter {
    * as `cacheReadTokens`) reports, so membrane subtracts it to reach the
    * fresh input.
    *
-   * The basis is Google's definition and published usage. The UsageMetadata
-   * reference (https://ai.google.dev/api/generate-content, read 2026-10-10)
-   * says `promptTokenCount` is "Number of tokens in the prompt. When
-   * cachedContent is set, this is still the total effective prompt size
-   * meaning this includes the number of tokens in the cached content", and
-   * that `totalTokenCount` is "prompt + tool-use prompt + thoughts + response
-   * candidates" (read again 2026-10-15), with no cached term of its own. The
-   * "When cachedContent is set" sentence is about explicit caching
-   * (`cachedContent`), which membrane never sets itself: a hit through
-   * membrane is implicit unless a caller passes `cachedContent` through
-   * `providerParams`. Published figures (each read 2026-10-15):
-   *   - explicit: Google's caching cookbook (google-gemini/cookbook,
-   *     quickstarts/Caching.ipynb) prints a response with promptTokenCount
-   *     322,707, of which 322,698 cached, 282 candidates, 4,049 thoughts and
-   *     a totalTokenCount of 327,038, which is prompt + thoughts + candidates,
-   *     the cached span inside the prompt;
-   *   - implicit: googleapis/python-genai#2064 (gemini-3-flash-preview, a
-   *     chat growing about 1,000 tokens a turn) shows promptTokenCount rising
-   *     steadily (7,996, 8,986, ... 17,972) while cachedContentTokenCount
-   *     goes from 6,134 to 0 and later from 0 to 16,391, so the prompt count
-   *     is the whole prompt whether the cache hit or not;
-   *   - implicit: Simon Willison's note of 2025-05-09 on Gemini 2.5 Flash
-   *     shows a cached count on an implicit hit, 200,658 beside a
-   *     204,082-token prompt (promptTokensDetails). With no promptTokenCount
-   *     or total shown, these figures fit either reading.
-   * Membrane's own probe hasn't measured a hit: on 2026-08-25, three
-   * identical 10,893-token calls to gemini-3.5-flash-lite never reported the
-   * field (implicit caching did not trigger), and explicit `cachedContents`
-   * is refused on the free tier (429,
-   * TotalCachedContentStorageTokensPerModelFreeTier limit=0). A response
-   * whose cached count exceeds its prompt count can't be read the inclusive
-   * way, so it is read as cache-excluded, with a warning (see
-   * geminiUsageToProviderUsage).
+   * Google's UsageMetadata reference says `promptTokenCount` is "Number of
+   * tokens in the prompt. When cachedContent is set, this is still the total
+   * effective prompt size meaning this includes the number of tokens in the
+   * cached content", and that `totalTokenCount` is "prompt + tool-use prompt +
+   * thoughts + response candidates", with no cached term of its own. For
+   * implicit caching, googleapis/python-genai#2064 shows the prompt count is
+   * the whole prompt whether the cache hit or not. A response whose cached
+   * count exceeds its prompt count can't be read the inclusive way, so it is
+   * read as cache-excluded, with a warning.
    */
   readonly usageCacheConvention = 'cache-inclusive' as const;
   private apiKey: string;
@@ -362,8 +319,7 @@ export class GeminiAdapter implements ProviderAdapter {
       const data = await response.json() as GeminiResponse;
 
       if (data.error) {
-        // An error object inside an HTTP 200: classify off its own code/status
-        // instead of a rendered string.
+        // Gemini can send an error object inside an HTTP 200.
         throw errorFromProviderStatus({
           provider: this.name,
           status: typeof data.error.code === 'number' ? data.error.code : undefined,
@@ -450,9 +406,8 @@ export class GeminiAdapter implements ProviderAdapter {
           );
         }
       } finally {
-        // A read loop that ends early, on a callback's error or any other,
-        // leaves the body unread: cancel it, so the provider stops sending
-        // and the connection is let go. After a full read it does nothing.
+        // An unread body holds the connection: cancel it, so the provider stops
+        // sending. After a full read it does nothing.
         void reader.cancel().catch(() => {});
       }
 
@@ -613,7 +568,7 @@ export class GeminiAdapter implements ProviderAdapter {
 
     if (request.stopSequences && request.stopSequences.length > 0) {
       // Gemini API limits stop sequences to 5
-      geminiRequest.generationConfig.stopSequences = request.stopSequences.slice(0, 5);
+      geminiRequest.generationConfig.stopSequences = request.stopSequences.slice(0, GEMINI_MAX_STOP_SEQUENCES);
     }
 
     // Auto-detect image generation models by name
@@ -643,12 +598,11 @@ export class GeminiAdapter implements ProviderAdapter {
   private convertMessages(messages: any[], model?: string): GeminiContent[] {
     const contents: GeminiContent[] = [];
 
-    // Gemini 3.x requires thought_signature on image parts from model outputs.
-    // Images that round-trip through Discord lose their thought_signature metadata,
-    // causing 400 INVALID_ARGUMENT when sent back as inlineData. For gemini-3.x
-    // model-role images, we fall back to embedding the source URL as text — Gemini
-    // auto-fetches URLs from text content, enabling iterative editing without
-    // thought_signature. User images pass through as normal inlineData.
+    // Gemini 3.x requires thought_signature on model-role image parts, and an
+    // image that round-trips through another store (such as Discord) loses it
+    // (400 INVALID_ARGUMENT). Gemini fetches a URL given as text, so a gemini-3
+    // model-role image with a sourceUrl goes as its URL; one without still goes
+    // as inlineData.
     const useUrlForModelImages = model?.startsWith('gemini-3');
 
     for (const msg of messages) {
@@ -742,10 +696,7 @@ export class GeminiAdapter implements ProviderAdapter {
     return this.mergeConsecutiveRoles(contents);
   }
 
-  /**
-   * Gemini requires strictly alternating user/model messages.
-   * Merge consecutive messages with the same role into one.
-   */
+  /** Gemini requires strictly alternating user/model messages. */
   private mergeConsecutiveRoles(contents: GeminiContent[]): GeminiContent[] {
     if (contents.length === 0) return contents;
 
@@ -764,7 +715,6 @@ export class GeminiAdapter implements ProviderAdapter {
     }
 
     // Gemini also requires the first message to be "user"
-    // TODO: Accept prefillUserMessage from request when Gemini bots need C2 migration
     if (merged.length > 0 && merged[0]!.role !== 'user') {
       merged.unshift({ role: 'user', parts: [{ text: '[Start]' }] });
     }
@@ -843,9 +793,7 @@ export class GeminiAdapter implements ProviderAdapter {
   ): ContentBlock[] {
     const content: ContentBlock[] = [];
 
-    // Reasoning first, as the other adapters order a thinking block. No
-    // signature: Gemini's thoughtSignature may ride any part, so it doesn't
-    // belong to this block.
+    // Gemini's thoughtSignature may ride any part, so it doesn't belong to this block.
     if (thinking) {
       content.push({ type: 'thinking', thinking });
     }
@@ -968,9 +916,7 @@ export function toGeminiParts(blocks: ContentBlock[]): GeminiPart[] {
  * Convert Gemini parts to normalized content blocks, in part order: a part
  * with text becomes a text block, or a thinking block where it fell if it is
  * a thought, and a function call becomes a tool_use block. Other parts, and
- * parts with empty text, add no block. The adapter's response differs: it
- * joins all thought text into one leading thinking block and all answer text
- * into one text block.
+ * parts with empty text, add no block.
  */
 export function fromGeminiParts(parts: GeminiPart[]): ContentBlock[] {
   const result: ContentBlock[] = [];
@@ -986,7 +932,7 @@ export function fromGeminiParts(parts: GeminiPart[]): ContentBlock[] {
         type: 'tool_use',
         id: `gemini-tc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         name: part.functionCall.name,
-        // As in the adapter's response: null args are unset (proto3 JSON).
+        // null args are unset (proto3 JSON).
         ...toolUseInputFromValue(part.functionCall.args ?? undefined),
       });
     }

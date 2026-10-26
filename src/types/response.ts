@@ -18,7 +18,7 @@ export type StopReason =
                      // expected to resume it (Anthropic pause_turn)
   | 'refusal'        // Content refused by safety
   | 'abort'          // Request was aborted
-  | 'no_progress'    // Stall guard ended the turn (issue #39): consecutive
+  | 'no_progress'    // Stall guard ended the turn: consecutive
                      // automatic resumptions re-sent context without advancing
   | 'round_limit';   // Resumption round cap ended the turn: the turn kept
                      // resuming (with progress) past maxResumptionRounds
@@ -32,13 +32,7 @@ export interface BasicUsage {
   outputTokens: number;
 }
 
-/**
- * What ONE priced unit of work cost — a turn, or the discarded attempts summed
- * together. Held apart from `DetailedUsage` so the discarded-spend record can
- * carry every token field without also inheriting `discardedAttempts`, which
- * would let the type describe discarded spend nested inside discarded spend:
- * a shape nothing produces and nothing could read sensibly.
- */
+/** What ONE priced unit of work cost — a turn, or the discarded attempts summed together. */
 export interface CallUsage extends BasicUsage {
   /** Tokens used for cache creation */
   cacheCreationTokens?: number;
@@ -61,13 +55,11 @@ export interface CallUsage extends BasicUsage {
 
 export interface DetailedUsage extends CallUsage {
   /**
-   * Spend on provider calls whose output was thrown away — today, refusal
-   * retries. Those attempts were completed, billed HTTP calls; the response
-   * describes only the attempt that STANDS, so without this the real cost of
-   * a turn is invisible. Absent when nothing was discarded.
+   * Spend on provider calls whose output was thrown away. Absent when nothing
+   * was discarded.
    *
-   * Reported on `details.usage` only: the top-level `usage` stays the
-   * surviving attempt's, so existing consumers keep their meaning.
+   * Read it on `details.usage`: the top-level `usage`'s counts stay the
+   * surviving attempt's.
    */
   discardedAttempts?: DiscardedAttemptsUsage;
 }
@@ -92,8 +84,7 @@ type DiscardedSpendDoesNotNest = Assert<
 /**
  * One provider round of a turn: the model that served it and what that round
  * alone used and cost. `usage.estimatedCost` here is priced at THIS round's
- * model, which is why the rounds can be summed into a turn total that a
- * multi-model turn's bill actually matches.
+ * model, so the rounds sum to a multi-model turn's bill.
  */
 export interface TurnRoundUsage {
   /** Model the provider named as having served this round; the requested id when it named none. */
@@ -180,8 +171,7 @@ export interface ModelInfo {
    * cannot say what was billed at which rate.
    *
    * Set on the streaming/tool-loop paths, which are the ones that sum. Unset
-   * on `complete()`, which makes exactly one call: `actual` is the whole story
-   * there.
+   * on `complete()`.
    */
   perRound?: TurnRoundUsage[];
 }
@@ -202,9 +192,7 @@ export interface TimingInfo {
   
   /**
    * Provider calls this turn actually cost: retries plus, on the streaming
-   * paths, every continuation round and refusal re-issue. A stitched
-   * multi-call turn used to report 1 here, indistinguishable in durable
-   * logs from a single-shot one.
+   * paths, every continuation round and refusal re-issue.
    */
   attempts: number;
 

@@ -1,32 +1,7 @@
 /**
  * Gemini returns its reasoning as ordinary text parts flagged `thought: true`.
  * Google's own samples read the answer as the text of parts where `thought` is
- * not set (long-decode guide, `if p.text and not p.thought`). The adapter read
- * every part's text as answer text, so a request that asked for thoughts
- * (`thinkingConfig.includeThoughts`) had the model's reasoning glued onto the front of
- * its reply with no separator, streamed through onChunk as visible text, and
- * fed back to it as its own words on the next turn.
- *
- * Seven of the first nine tests fail on the unfixed adapter: the thought text lands
- * in the text block, in onChunk, and in rawAssistantText. Two are guards that
- * pass on both: a response with no thought parts keeps its shape, and a prior
- * turn's thinking block is not sent back as answer text (convertMessages
- * drops thinking blocks today; with thoughts now landing in them, that
- * matters).
- *
- * Four more came from review. The toGeminiParts test fails without its fix.
- * The other three pin behavior the first fix already had: fromGeminiParts
- * keeps interleaved parts in order, and a thought before a function call is
- * a thinking block on complete() and stream(), with the call still parsed.
- *
- * Five more came from the house's review, and one test got stronger. Three
- * fail at 4d11ad1, the head that review read: a thought image is kept out of
- * the answer's images on complete() and stream(), and toGeminiParts sends
- * only text and tool calls, not a redacted_thinking block or an image. Two
- * pin behavior already there: a thought part with empty or no text adds
- * nothing, and complete() on an all-thought response. The Membrane stream
- * test now also checks that the answer reaches rawAssistantText and onChunk
- * whole.
+ * not set (long-decode guide, `if p.text and not p.thought`).
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { GeminiAdapter, fromGeminiParts, toGeminiParts } from '../../src/providers/gemini.js';
@@ -124,8 +99,7 @@ describe('GeminiAdapter thought parts', () => {
     expect(response.content[0]).toEqual({ type: 'thinking', thinking: THOUGHT_1 + THOUGHT_2 });
   });
 
-  // Recent Gemini models can think again after starting an answer. The answer
-  // is the non-thought text in order; the thinking is all thought text in order.
+  // Recent Gemini models can think again after starting an answer.
   it('stream(): separates interleaved thought and answer parts, including within one frame', async () => {
     stubStream([
       [{ text: THOUGHT_1, thought: true }, { text: ANSWER_1 }],

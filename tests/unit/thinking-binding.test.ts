@@ -1,20 +1,14 @@
 /**
- * Thinking-binding controls and their report (context-manager #155).
- *
  * Anthropic binds each signed thinking block to the conversation before it.
  * `thinking.blockBinding` says what the API does with one that fails that
  * check ('drop_block' removes it, 'error' fails the request), and with the
  * `thinking-binding-controls-2026-08-01` beta every response reports, as
  * `input_transformations`, the blocks that failed a binding check: dropped,
- * or shown anyway where the check isn't enforced. Membrane sends the
- * controls, carries the provider's report on ProviderResponse, and on
- * yielding streams places each entry in the consumer's coordinates
- * (RoundReport.thinking).
+ * or shown anyway where the check isn't enforced.
  *
- * Shapes are the API's as a live probe through the house's router showed
- * them (Opus 5.5, 2026-10-10): `{type: 'thinking_dropped', reason:
- * 'prefix_binding_mismatch', path: 'messages.1.content.0'}`, one entry per
- * block, `[]` when nothing failed.
+ * Each entry has the API's shape:
+ * `{type: 'thinking_dropped', reason: 'prefix_binding_mismatch', path:
+ * 'messages.1.content.0'}`, one entry per block, `[]` when nothing failed.
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
@@ -148,7 +142,7 @@ describe('the request asks for the controls', () => {
     expect(adapter.requests[2]!.thinking).toEqual({ type: 'adaptive', display: 'summarized', block_binding: { prefix_mismatch_behavior: 'drop_block' } });
     // Display alone sends these models nothing: a config goes only to carry the controls.
     expect(adapter.requests[3]!.thinking).toBeUndefined();
-    // These models think whatever `enabled` says, so the controls go when asked for.
+    // These models think whatever `enabled` says.
     expect(adapter.requests[4]!.thinking).toEqual({ type: 'adaptive', block_binding: { prefix_mismatch_behavior: 'drop_block' } });
     expect(adapter.requests.map((r) => r.temperature)).toEqual([undefined, undefined, undefined, undefined, undefined]);
   });
@@ -157,7 +151,7 @@ describe('the request asks for the controls', () => {
     const adapter = new BindingAdapter([finalTurn(), finalTurn()]);
     const membrane = new Membrane(adapter);
     await rounds(membrane, request([user('hi')], { thinking: { enabled: false, blockBinding: DROP } }));
-    // A 2000 budget can't fit under maxTokens 1500 beside the API's 1024 floor, so thinking is left out.
+    // The API's minimum thinking budget is 1024 tokens.
     await rounds(membrane, request([user('hi')], { maxTokens: 1500 }));
     expect(adapter.requests.map((r) => r.thinking)).toEqual([undefined, undefined]);
   });
@@ -347,7 +341,7 @@ describe('the adapters carry the provider\'s report', () => {
 });
 
 describe('yielding rounds place each entry in the consumer\'s coordinates', () => {
-  it('names the submitted message and its block, through a merge that moves the block', async () => {
+  it('names the submitted message and its block when two submitted messages travel as one provider message, and leaves a provider\'s drop out of membrane\'s alterations', async () => {
     // Two assistant messages travel as one provider message: S2's block is
     // content 1 of messages.1 on the wire, and block 0 of message 2 here.
     const messages = [user('u1'), reply(text('note')), reply(thinking('S2'), text('a2')), user('u3')];

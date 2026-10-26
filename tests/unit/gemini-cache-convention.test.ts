@@ -1,14 +1,8 @@
 /**
- * Membrane reads Gemini's `promptTokenCount` as counting the cached span that
- * `cachedContentTokenCount` reports, and subtracts it, so every consumer that
- * sums fresh input, cache reads and cache writes as one convention counts a
- * hit once. The basis is Google's UsageMetadata definition ("this is still
- * the total effective prompt size meaning this includes the number of tokens
- * in the cached content"), which it states for explicit cached content, and
- * one published chat fits it for implicit hits too (see
- * GeminiAdapter.usageCacheConvention). A response the inclusive reading
- * can't explain, with more cached tokens than prompt tokens, is read as
- * cache-excluded. The usage below is constructed, not a captured hit.
+ * Google's UsageMetadata definition counts the cached span inside
+ * `promptTokenCount` ("this is still the total effective prompt size meaning
+ * this includes the number of tokens in the cached content"), stated for
+ * explicit cached content.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { GeminiAdapter, resetPromptExcludesCacheWarning } from '../../src/providers/gemini.js';

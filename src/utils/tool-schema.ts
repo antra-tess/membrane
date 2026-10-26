@@ -122,17 +122,9 @@ export function rootUnionOf(schema: Record<string, unknown>): RootUnion | undefi
 }
 
 /**
- * The keys a valid instance MUST carry, given a root `required` and the root
- * combinators around it.
- *
- * Requiredness follows the combinator's own semantics: every `allOf` branch
- * applies to the same instance, so their required lists UNION; `oneOf`/`anyOf`
- * variants are alternatives, so only a key required by EVERY alternative is
- * unconditionally required — an INTERSECTION. Sibling combinators must all
- * hold at once, so their results union together with root `required`.
- *
- * The Anthropic native wire (`flattenRootSchemaUnion`) and the XML reading
- * ({@link readToolSchema}) both derive requiredness here.
+ * In JSON Schema every `allOf` branch applies to the same instance, so their
+ * required lists union; `oneOf`/`anyOf` variants are alternatives, so only a
+ * key every alternative requires is required.
  */
 export function effectiveRequiredKeys(
   rootRequired: unknown,
@@ -157,9 +149,9 @@ export function effectiveRequiredKeys(
 // ============================================================================
 
 /**
- * JSON value kinds. `number` here is a NON-integer number: the type name
- * `number` admits both `integer` and `number`, so `integer` and `number`
- * declarations combine by plain set operations.
+ * JSON Schema's `number` type admits integers too, so `number` here is a
+ * NON-integer number, and `integer` and `number` declarations combine by plain
+ * set operations.
  */
 type JsonKind = 'string' | 'integer' | 'number' | 'boolean' | 'object' | 'array' | 'null';
 
@@ -218,11 +210,8 @@ function kindOfValue(value: unknown): Admitted {
 }
 
 /**
- * What a `type` keyword admits, with OpenAPI's `nullable: true` beside it
- * adding null. Only the boolean `true` counts, and only beside a `type`, the
- * one place OpenAPI 3.0.3 gives it effect. The node's other keywords aren't
- * consulted here; the instructions' reading consults them for null alone
- * ({@link admittedBy}).
+ * OpenAPI 3.0.3 gives `nullable: true` effect only beside a `type`, and only
+ * the boolean `true` counts.
  */
 function admittedByTypeKeyword(type: unknown, nullable: unknown): Admitted {
   const names = typeof type === 'string' ? [type] : Array.isArray(type) ? type : undefined;
@@ -290,25 +279,9 @@ function admittedByRef(ref: unknown, context: ReadContext): Admitted {
 }
 
 /**
- * The kinds one schema node admits.
- *
- * `type`, when present, decides on its own, with OpenAPI's `nullable: true`
- * beside it adding null; the node's other keywords aren't read then. It is
- * what the XML instructions have always rendered as a parameter's type, so
- * reading it alone keeps the type they render as it was (`nullable: true`
- * adds only the null mark); the other kind-bearing keywords are read for a
- * declaration that has no `type`, and all of them apply at once: `enum` and
- * `const` admit the kinds of their values, `anyOf`/`oneOf` the union of their
- * branches, `allOf` the intersection, and `$ref` its target inside the tool's
- * own `definitions`/`$defs`, followed through chains of any length.
- *
- * Read for the instructions (#150), a typed node admits null only where its
- * other keywords admit it too: every keyword of a node applies at once, and
  * OpenAPI 3.0.3 says of `nullable` that "Other Schema Object constraints
  * retain their defined behavior, and therefore may disallow the use of `null`
- * as a value". So `{type: ["string", "null"], enum: ["a", "b"]}` admits no
- * null there, and neither does such a node behind a `$ref`, in a branch or in
- * a root alternative. Other keywords that can't be read leave the type's null.
+ * as a value" (antra-tess/membrane#150).
  */
 function admittedBy(node: unknown, context: ReadContext): Admitted {
   if (node === true) return ANY;

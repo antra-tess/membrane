@@ -32,6 +32,7 @@ const NON_FINITE_STEPS = [
   { firstDelayMs: Number.NaN }, { multiplier: Number.NaN }, { maxDelayMs: Number.NaN },
   { firstDelayMs: Infinity, maxDelayMs: Infinity }, { multiplier: 1e308, maxDelayMs: Infinity },
 ];
+const ATTEMPT_WITHIN_DEFAULT_BOUND = 2;
 const at = (value: number) => () => value;
 
 afterEach(() => {
@@ -179,7 +180,7 @@ describe('delayFor', () => {
   it("throws for a schedule whose numbers give no finite step", () => {
     for (const change of NON_FINITE_STEPS) {
       const broken: RetrySettings = { retryable: { ...settings.retryable!, ...change } };
-      expect(() => delayFor('retryable', 2, broken)).toThrow(RangeError);
+      expect(() => delayFor('retryable', ATTEMPT_WITHIN_DEFAULT_BOUND, broken)).toThrow(RangeError);
     }
   });
 
@@ -210,8 +211,8 @@ describe('retryDecision', () => {
   it("ends the retries on a wait that isn't a finite number, with a stated wait or none", () => {
     for (const change of NON_FINITE_STEPS) {
       const broken: RetrySettings = { retryable: { ...settings.retryable!, ...change } };
-      expect(retryDecision('retryable', 2, undefined, broken)).toEqual({ retry: false });
-      expect(retryDecision('retryable', 2, 500, broken)).toEqual({ retry: false });
+      expect(retryDecision('retryable', ATTEMPT_WITHIN_DEFAULT_BOUND, undefined, broken)).toEqual({ retry: false });
+      expect(retryDecision('retryable', ATTEMPT_WITHIN_DEFAULT_BOUND, 500, broken)).toEqual({ retry: false });
     }
   });
 

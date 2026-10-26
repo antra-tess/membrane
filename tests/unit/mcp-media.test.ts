@@ -1,14 +1,4 @@
-/**
- * Media in MCP's form, `{ type, data, mimeType }` with no `source`
- * (membrane#139). Membrane converts it to its own form wherever it takes
- * content (utils/mcp-media.ts): a request carrying it is the request the same
- * media in membrane's form gives, on every path, with the same round report,
- * and what membrane hands back stays as the caller gave it. A media block
- * with no source object that can't convert is a source each reader can't
- * represent: left out and reported, or noted, rather than failing the request,
- * except where membrane's form fails too: toAnthropicContent gives audio or
- * video the error it gives them in membrane's form.
- */
+/** MCP's media form is `{ type, data, mimeType }`, with no `source`. */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
@@ -54,8 +44,7 @@ const WAV = 'UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
 const PDF = Buffer.from('%PDF-1.4\n%%EOF\n').toString('base64');
 
 const text = (value: string) => ({ type: 'text', text: value });
-/** One piece of media in MCP's form, with the annotations and _meta an MCP
- *  server may send beside it, which no request carries; or in membrane's. */
+/** An MCP server may send annotations and _meta beside a piece of media; no provider request carries them. */
 const mcp = (type: string, data: string, mimeType: string, extra: object = {}) =>
   ({ type, data, mimeType, annotations: { audience: ['user'], priority: 0.5 }, _meta: { server: 'test' }, ...extra });
 const ours = (type: string, data: string, mediaType: string, extra: object = {}) => ({ type, ...extra, source: { type: 'base64', data, mediaType } });
@@ -398,7 +387,7 @@ describe('every path that builds a request carries MCP\'s form as it carries mem
       { type: 'tool_use', id: 'shot', name: 'noop', input: {} },
       handed,
     ], (block: unknown) => reported.push(block));
-    // A function_call_output has no error flag, so the build reports the result.
+    // A function_call_output has no error flag.
     expect(JSON.stringify(sent)).toContain(PNG);
     expect(reported).toEqual([handed]);
     expect(reported[0]).toBe(handed);
@@ -819,7 +808,8 @@ describe('the note for an image that came without its data', () => {
     const link = (url: unknown) => ({ type: 'image', source: { type: 'url', url } }) as any;
     const long = `https://example.com/${'a'.repeat(3000)}`;
     // A pair whose first half is the last the cut would keep, and a URL holding half of one.
-    const astride = `https://example.com/${'a'.repeat(2027)}\u{1F600}${'b'.repeat(10)}`;
+    const NOTED_LINK_CHARS = 2048;
+    const astride = `https://example.com/${'a'.repeat(NOTED_LINK_CHARS - 'https://example.com/'.length - 1)}\u{1F600}${'b'.repeat(10)}`;
     const halved = 'https://example.com/a\uD83Db.png';
     const xml = formatToolResultsForSplitTurn([{ toolUseId: 'u', content: [
       link('https://example.com/a.png'), link('ftp://example.com/a.png'), link(undefined), link(long), link(astride), link(halved),
@@ -832,7 +822,7 @@ describe('the note for an image that came without its data', () => {
       "[system: an image that belongs here was NOT shown to you — it came as a link, which tool results here can't carry. You are not seeing this image.]",
       `[system: an image that belongs here was NOT shown to you — it came as a link (${long.slice(0, 2048)}…), which tool results here can't carry. You are not seeing this image.]`,
       // Cut between code points: the API refuses a request's JSON holding half a pair.
-      `[system: an image that belongs here was NOT shown to you — it came as a link (${astride.slice(0, 2047)}…), which tool results here can't carry. You are not seeing this image.]`,
+      `[system: an image that belongs here was NOT shown to you — it came as a link (${astride.slice(0, NOTED_LINK_CHARS - 1)}…), which tool results here can't carry. You are not seeing this image.]`,
       "[system: an image that belongs here was NOT shown to you — it came as a link, which tool results here can't carry. You are not seeing this image.]",
     ]);
     expect(warn.mock.calls.map((call) => call[0])).toEqual(Array(6).fill("[membrane] image block stripped: a URL source, which the XML tool path can't carry"));

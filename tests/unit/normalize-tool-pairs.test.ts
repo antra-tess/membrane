@@ -606,11 +606,7 @@ describe('normalizeToolPairs', () => {
 
   describe('synthetic result canonical field names', () => {
     it('writes tool_use_id (snake_case) — never toolUseId (camelCase)', () => {
-      // Anthropic API requires snake_case on the wire. The dual-form
-      // read in getToolUseId is defensive against producers, but
-      // synthetics are produced *by* this module and must lock down
-      // to the canonical form so a "drive-by camelCase fix" can't
-      // regress us silently.
+      // The Anthropic API requires snake_case on the wire.
       const input: ProviderMessage[] = [
         user(t('go')),
         assistant(u('A')),
@@ -1061,11 +1057,7 @@ describe('normalizeToolPairs', () => {
     });
   });
 
-  // --------------------------------------------------------------------------
-  // The pairing invariant runs in BOTH directions. Every tool_result must
-  // have its tool_use in the immediately-preceding assistant envelope — the
-  // converse of the rule phases 3 and 5 already enforce forward.
-  // --------------------------------------------------------------------------
+  // Every tool_result must have its tool_use in the immediately preceding assistant message.
 
   describe('converse pairing sweep', () => {
     /** The invariant phases 3/5/validate never checked: result → preceding use. */
@@ -1228,13 +1220,7 @@ describe('normalizeToolPairs', () => {
     });
   });
 
-  // --------------------------------------------------------------------------
-  // Pairing is ONE-TO-ONE, not membership. Every matching site asked
-  // `.has(id)` and never consumed the id, so an envelope holding two results
-  // for one call passed the converse sweep, the interloper pass AND validation
-  // on its way to the provider, which either rejects the request or picks one
-  // of the two results by rules Membrane does not control.
-  // --------------------------------------------------------------------------
+  // A provider either rejects a message holding two results for one call or picks one of them by its own rules.
 
   describe('duplicate results for one call', () => {
     it('pairs the first result and textifies the second with provenance', () => {
@@ -1474,8 +1460,7 @@ describe('normalizeToolPairs', () => {
 
   describe('ids reused across turns pair by position', () => {
     // The API accepts one id in two turns (each result pairs with the call
-    // right before it) and refuses two calls sharing an id in one turn, so
-    // the normalizer pairs by position and refuses only the latter.
+    // right before it) and refuses two calls sharing an id in one turn.
     function resultText(out: { messages: ProviderMessage[] }, index: number): string[] {
       return out.messages[index]!.content.map((b) => {
         const block = b as ProviderBlock & { text?: string; content?: string };
@@ -1648,12 +1633,9 @@ describe('normalizeToolPairs', () => {
 });
 
 /**
- * The cache-placement gate reads this set. Its real guarantee is a compile
- * error — the classification behind it is a `Record` over the whole
- * `NormalizeEvent` union, so a new kind cannot be added without deciding
- * which side it falls on (measured: adding a kind to the union fails tsc with
- * TS2741 "Property ... is missing"). These cases pin the runtime shape the
- * derivation produces from that classification.
+ * A Record over the whole NormalizeEvent union fails tsc (TS2741) when a kind
+ * is added without its entry, so these cases pin only the runtime shape
+ * derived from it.
  */
 describe('PREFIX_REWRITING_NORMALIZE_EVENT_KINDS', () => {
   it('holds exactly the repairs that rewrite prefix bytes', () => {

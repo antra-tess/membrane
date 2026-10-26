@@ -145,9 +145,7 @@ export class YieldingStreamImpl implements YieldingStream {
   ) {
     this.abortController = new AbortController();
 
-    // Link the caller's signal. One that has already fired never dispatches
-    // 'abort' again, so it cancels here: the consumer gets one aborted event
-    // and no provider call is made.
+    // A signal that has already fired never dispatches 'abort' again.
     if (options.signal?.aborted) {
       this.cancel();
     } else if (options.signal) {
@@ -278,22 +276,17 @@ export class YieldingStreamImpl implements YieldingStream {
         }
       },
 
-      // `for await … break`, `return` out of the loop body, and a throw in
-      // the loop body all call return(). Without it the consumer walks away
-      // and the producer keeps streaming, resuming and billing. Cancelling
-      // here is the same act the consumer would perform by hand.
+      // `for await … break`, `return` out of the loop body, and a throw in the loop
+      // body all call return().
       return: async (): Promise<IteratorResult<StreamEvent>> => {
         this.departConsumer();
         return { value: undefined as unknown as StreamEvent, done: true };
       },
 
-      // Reached through `yield*` delegation, or by a caller injecting an
-      // error by hand. Same departure as return() — nobody is reading this
-      // stream again — and then the error continues on its way, exactly as an
-      // async generator with no handler of its own would rethrow it. Reporting
-      // `done: true` here instead swallowed it: a `yield*` delegating to this
-      // stream resumed after the delegation as if nothing had been thrown in,
-      // and a direct `.throw(e)` resolved rather than rejecting.
+      // Reached through `yield*` delegation, or a direct `.throw(e)`. Reporting
+      // `done: true` would swallow the error: a `yield*` would resume after the
+      // delegation, and `.throw(e)` would resolve. So it rethrows, as an async
+      // generator with no handler of its own does.
       throw: async (error?: unknown): Promise<IteratorResult<StreamEvent>> => {
         this.departConsumer();
         throw error;

@@ -588,7 +588,7 @@ describe('plain/native partial and stop responses', () => {
 
 describe('the explicit XML and plain stop scans', () => {
   for (const carrier of ['xml', 'plain']) {
-    it.each(['stream', 'yielding'])(carrier + ' %s ends at the stop that ends first, not the first listed', async path => {
+    it.each(['stream', 'yielding'])(carrier + ' %s ends at the stop that ends first, not the first listed, when both arrive in one chunk', async path => {
       // The whole text arrives in one chunk, so both stops are there to find.
       const adapter = new MockAdapter({ defaultResponse: 'a STOP b END c', completeDelayMs: 0, streamChunkDelayMs: 0, streamChunkSize: 100 });
       const formatter = carrier === 'xml' ? new AnthropicXmlFormatter() : new CompletionsFormatter();

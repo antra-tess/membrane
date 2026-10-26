@@ -1,16 +1,7 @@
 /**
- * Cache-marker budget: Anthropic accepts at most 4 cache_control breakpoints
- * per request and hard-400s the fifth ("A maximum of 4 blocks with
- * cache_control may be provided. Found 5." — measured live 2026-08-25 against
- * claude-haiku-4-5). Membrane attaches markers at nine sites across three
- * builders; before this suite nothing compared the TOTAL to 4.
- *
- * One wire recount is computed at the three moments that matter:
- *   - before the tools/system fallback decision, so caller-marked system
- *     blocks suppress the fallback instead of stacking on top of it
- *   - inside the XML formatter, which had no budget at all
- *   - as a final clamp at the last exit before every adapter call, which is
- *     also the runtime assertion that no marker ever rides a thinking block
+ * Anthropic accepts at most 4 cache_control breakpoints per request and
+ * hard-400s the fifth ("A maximum of 4 blocks with cache_control may be
+ * provided. Found 5.").
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
@@ -134,9 +125,7 @@ describe('countWireCacheMarkers', () => {
   });
 
   it('sees a marker nested inside tool_result.content, not just top-level blocks', () => {
-    // `ToolResultContent.content` is typed `string | ContentBlock[]` and the
-    // native builder passes it through verbatim, so a nested marker is a real
-    // wire marker. Four top-level plus one nested is five on the wire.
+    // A marker nested in tool_result content counts toward the API's four: four top-level plus one nested is five on the wire.
     expect(countWireCacheMarkers(nestedOverBudgetWire())).toBe(5);
   });
 

@@ -1,8 +1,7 @@
 /**
- * Tool-Pair Normalizer
- *
- * Anthropic's API enforces structural rules on tool cycles that any of
- * Membrane's upstreams can accidentally violate:
+ * Anthropic's API enforces structural rules on tool cycles, and returns 400
+ * when one is broken (e.g. `tool_use blocks can only be in assistant
+ * messages`):
  *
  *   - `tool_use` blocks must live in assistant-role messages.
  *   - `tool_result` blocks must live in user-role messages.
@@ -10,53 +9,8 @@
  *     next user-role message.
  *   - `thinking` blocks must live in assistant turns.
  *
- * When these are violated, the API returns 400 (e.g. `tool_use blocks can
- * only be in assistant messages`). This module is the wire-boundary safety
- * net for the paths that reach it, so producer-side bugs cannot leak the
- * same 400 family (compression-bug 5/6/7/8/9, agent-framework #37,
- * 2026-05-22 miner stall).
- *
- * COVERAGE — what actually funnels through `normalizeToolPairs`:
- *
- *   - `NativeFormatter.buildMessages` — COVERED. Membrane's shared
- *     construction uses this pass for complete and native streaming/yielding
- *     requests built by NativeFormatter, including native loop rebuilds and
- *     AnthropicXmlFormatter's native-mode delegation.
- *   - `AnthropicXmlFormatter` in XML mode and `CompletionsFormatter` — NOT
- *     covered, and they do not need to be: both emit flattened text with no
- *     structural tool blocks, so tool-cycle placement rules have nothing
- *     to bind to in their output.
- *   - `OpenAIResponsesFormatter` — NOT covered. It owns provider-native
- *     `function_call` / `function_call_output` items, whose ids, encrypted
- *     reasoning, assistant phases and compaction items must survive shared
- *     construction rather than being forced through this Anthropic-shaped
- *     normalizer. Responses item pairing is outside this module's scope;
- *     that formatter's `ready: true` is not this pass's validation result.
- *
- * Custom formatters own their structural validation. Sharing the formatter
- * build does not imply that every formatter invokes this normalizer.
- *
- * Algorithm overview (phases): refuse malformed input at entry (phase 0 —
- * a `pendingToolCallIds` that isn't a set of strings, a message that isn't
- * a user or assistant message with string or block-array content, a block
- * without a string `type`, a tool_use without a string id), reclassify
- * blocks by required role, reflow into role-correct envelopes, refuse two
- * calls sharing one id in a turn, hoist matching tool_results across the
- * assistant→user boundary, sweep the converse direction so every
- * tool_result sits with its own tool_use, synthesize `[pending]` results
- * for orphans (or signal not-ready for caller-declared pending ids), put
- * all results before non-results while preserving order within each group,
- * drop empty envelopes, prepend a synthetic user envelope (`[continuing]`,
- * or the caller's `leadingUserText`) when the first envelope ended up
- * assistant-role, validate both
- * directions of the pairing rule and its one-to-one arity.
- *
- * PAIRING IS POSITIONAL, as on the wire: a tool_result answers the nearest
- * tool_use with its id before it. Ids are normally unique, but a history
- * can reuse one across turns (a provider that omits or recycles ids), and
- * the API accepts that; every phase below pairs by position, so a reused
- * id needs no refusal. Only two calls with one id in the same turn can't be
- * answered apart, and the API refuses those.
+ * A tool_result answers the nearest tool_use with its id before it, and the
+ * API accepts an id reused across turns.
  */
 
 import type { ProviderTurnMessage as LooseProviderMessage } from './types.js';
@@ -69,12 +23,11 @@ import { MembraneError } from '../types/errors.js';
 
 /**
  * Block shape used internally and exposed for callers that want to
- * build inputs without the full Anthropic SDK types. The required
- * `type` discriminator names the kind of block; any block whose `type`
- * matches a strict-role entry in `requiredRoleOf` is re-roled to its
- * required role during normalization. Unrecognized `tool_*` or
- * `thinking*` types fall through as `inherit` — see the one-shot
- * warning below.
+ * build inputs without the full Anthropic SDK types. `type` names the kind
+ * of block: `tool_use`, `thinking` and `redacted_thinking` blocks are moved
+ * to an assistant envelope and `tool_result` blocks to a user envelope during
+ * normalization; any other type stays with its message's role, and an
+ * unknown `tool_*` or `thinking*` type warns once.
  */
 export type ProviderBlock = Record<string, unknown> & { type: string };
 
@@ -133,17 +86,13 @@ export interface NormalizeOptions {
    * Hears each input block the normalizer rewrote as a new object with
    * different content: a tool_result textified because it was an orphan or
    * a duplicate. For a caller that follows its blocks by object identity
-   * (request fidelity). Phase 1 also copies a tool_result spelled
-   * `toolUseId` to rename the key, without calling this; NativeFormatter,
-   * which passes it, writes `tool_use_id` before the normalizer runs.
+   * (request fidelity). A tool_result spelled `toolUseId` is also copied to
+   * rename the key, without calling this.
    */
   onBlockRewritten?: (original: ProviderBlock, replacement: ProviderBlock) => void;
   /**
    * Text of the synthetic user envelope prepended when the first envelope is
-   * assistant (phase 7). `[continuing]` when absent, empty or only
-   * whitespace. NativeFormatter passes `BuildOptions.prefillUserMessage`, so
-   * a caller's text is used wherever the conversation needs a leading user
-   * turn, whatever made it need one.
+   * assistant. `[continuing]` when absent, empty or only whitespace.
    */
   leadingUserText?: string;
 }
@@ -152,9 +101,7 @@ export interface NormalizeResult {
   /**
    * Normalized messages, structurally compatible with the loose
    * `ProviderMessage` from `./types.js`. Block contents are
-   * `ProviderBlock[]` at runtime; the loose type is preserved at the
-   * public boundary so callers wired against `./types.js` don't need
-   * to cast.
+   * `ProviderBlock[]` at runtime.
    */
   messages: LooseProviderMessage[];
   /**
@@ -192,11 +139,9 @@ export class MembraneNormalizerError extends MembraneError {
  * Normalize a sequence of provider messages so the output is API-valid
  * with respect to Anthropic's tool-cycle structural rules.
  *
- * This function does NOT merge consecutive same-role envelopes — that
- * is the responsibility of `mergeConsecutiveRoles` (exported below). Run
- * the two together at every wire boundary; splitting them keeps the
- * normalize step independently testable and lets callers preserve their
- * own cache-control / breakpoint logic between the two steps if needed.
+ * Consecutive messages of one role become one envelope as their blocks are
+ * reflowed, but the output can still hold adjacent envelopes of one role,
+ * which the API accepts.
  */
 export function normalizeToolPairs(
   input: ReadonlyArray<LooseProviderMessage>,
@@ -257,45 +202,14 @@ export function normalizeToolPairs(
   // ---------------------------------------------------------------------
   envelopes = envelopes.filter((e) => e.content.length > 0);
 
-  // ---------------------------------------------------------------------
-  // Phase 7: ensure first envelope is user-role.
-  //
-  // Anthropic requires `messages[0].role === 'user'`. The leading
-  // envelope can become assistant for two distinct reasons:
-  //
-  //   (a) Re-roling artifact — a strict-role block (thinking, tool_use)
-  //       lived under a user-role input message and phase 1+2 moved it
-  //       to a new leading assistant envelope. `originalFirstRole`
-  //       is `'user'`.
-  //
-  //   (b) Producer bug — a context strategy genuinely selected an
-  //       assistant message as the first message of its compiled view
-  //       (the 2026-05-26 reviewer postmortem: PassthroughStrategy
-  //       `selectFromEnd` cut on an assistant turn). `originalFirstRole`
-  //       is `'assistant'`.
-  //
-  // Both cases get the same repair (prepend a synthetic user envelope:
-  // the caller's `leadingUserText` when given, else `[continuing]`)
-  // because deletion would lose content in case (a) — the
-  // re-roled blocks are real conversation content the producer
-  // expected to ship. The synthetic costs a leading cache miss
-  // (deterministic literal, so idempotent across identical inputs)
-  // but preserves API correctness and producer simplicity. We emit
-  // a warn-level event so telemetry can distinguish the causes and
-  // alert on (b) without coupling control flow to attribution.
-  //
-  // Idempotency: the synthetic content is fixed for a given call. Running
-  // normalize twice on the same input produces identical output the
-  // second time (envelope[0] is user, gate doesn't fire).
-  // ---------------------------------------------------------------------
+  // Anthropic requires `messages[0].role === 'user'`.
   if (envelopes.length > 0 && envelopes[0]!.role === 'assistant') {
     // `input` is guaranteed non-empty here: rebuildEnvelopes only
     // produces envelopes when iterating input messages, so a non-empty
     // envelopes implies a non-empty input.
     const originalFirstRole = input[0]!.role;
     const leadingBlockTypes = envelopes[0]!.content.map((b) => b.type);
-    // Blank text would be a whitespace-only block, which Anthropic rejects
-    // and stripEmptyTextRequest drops, leaving an assistant first again.
+    // Anthropic rejects a text block that is only whitespace.
     const leadingText = options.leadingUserText?.trim() ? options.leadingUserText : '[continuing]';
     envelopes.unshift({ role: 'user', content: [{ type: 'text', text: leadingText }] });
     onEvent({ kind: 'leading_user_synthesized', originalFirstRole, leadingBlockTypes });
@@ -322,16 +236,12 @@ export function normalizeToolPairs(
  * preceded by its own tool_use, and exactly one result per use. All results
  * must precede text, images, and other blocks in their user envelope.
  *
- * This is phase 8 of {@link normalizeToolPairs}, reachable on its own. The
- * validator's contract has to hold independently of the repair phases that
- * normally establish it — otherwise the only evidence it refuses a shape is
- * that no earlier phase produced one, which is a claim about the sweep, not
- * about the validator. Callers holding messages from a path that does NOT
- * funnel through this module (see the COVERAGE note in the file header) can
- * use it to check pairing and known strict-role placement. This is not a
- * complete provider-schema or cache-budget validator. Explicitly pending
- * calls may remain unmatched; success with a pending set does not establish
- * that the request is ready to send.
+ * {@link normalizeToolPairs} ends with this check. A caller holding messages
+ * from a path that doesn't go through it can use it to check pairing and
+ * known strict-role placement. This is not a complete provider-schema or
+ * cache-budget validator. Explicitly pending calls may remain unmatched;
+ * success with a pending set does not establish that the request is ready
+ * to send.
  *
  * The messages are judged as the provider reads them: consecutive messages
  * with one role are one turn, as the API combines them. Nothing else is
@@ -495,16 +405,7 @@ function describeBlock(block: unknown): string {
   return `an object whose type is ${describeShape((block as { type?: unknown }).type)}`;
 }
 
-/**
- * Two calls with one id in the same turn can't be answered apart: a result
- * names its call by id alone, and the API refuses such a request ("tool_use
- * ids must be unique"). A turn is an assistant envelope, which is one wire
- * message. Ids reused across turns are fine (see the header).
- *
- * `origin`, given for a caller's own history, names the messages at fault;
- * without it the turn is one of the normalizer's reflowed envelopes, which a
- * caller can't index, so the id alone identifies it.
- */
+/** The API refuses two calls with one id in the same turn ("tool_use ids must be unique"). */
 function assertCallIdsUniquePerTurn(
   envelopes: ReadonlyArray<Envelope>,
   input: ReadonlyArray<LooseProviderMessage>,
@@ -564,16 +465,7 @@ function requiredRoleOf(block: ProviderBlock): RequiredRole {
   }
 }
 
-/**
- * The reasoning block types Anthropic pins to the assistant role, listed
- * once so {@link requiredRoleOf} and the weld guard in
- * {@link rebuildEnvelopes} cannot drift apart. Membership is exact, not
- * prefix-based: `redacted_thinking` does not start with `thinking`, and a
- * `startsWith` test here silently exempted the one variant whose payload is
- * opaque — a misattributed one cannot even be read back out of the
- * transcript. Any unknown `thinking`-prefixed type is 'inherit' (see the
- * default branch), so it never reaches the guard at all.
- */
+/** The reasoning block types Anthropic pins to the assistant role. */
 const STRICT_REASONING_BLOCK_TYPES: ReadonlySet<string> = new Set([
   'thinking',
   'redacted_thinking',
@@ -602,7 +494,7 @@ function rebuildEnvelopes(
   const out: Envelope[] = [];
   let current: Envelope | null = null;
   // The input message whose tool_use first entered `current`; -1 for none.
-  let currentFirstCallFrom = -1;
+  let currentFirstCallInputIndex = -1;
 
   for (let m = 0; m < input.length; m++) {
     const msg = input[m]!;
@@ -616,7 +508,7 @@ function rebuildEnvelopes(
       if (current === null || current.role !== role) {
         if (current) out.push(current);
         current = { role, content: [] };
-        currentFirstCallFrom = -1;
+        currentFirstCallInputIndex = -1;
       }
       current.content.push({ type: 'text', text: msg.content });
       continue;
@@ -661,16 +553,16 @@ function rebuildEnvelopes(
         isStrictReasoningBlock(block) &&
         current !== null &&
         current.role === 'assistant' &&
-        currentFirstCallFrom >= 0 &&
-        currentFirstCallFrom < m;
+        currentFirstCallInputIndex >= 0 &&
+        currentFirstCallInputIndex < m;
 
       if (current === null || current.role !== targetRole || wouldWeldReasoningPastToolUse) {
         if (current) out.push(current);
         current = { role: targetRole, content: [] };
-        currentFirstCallFrom = -1;
+        currentFirstCallInputIndex = -1;
       }
       current.content.push(block);
-      if (block.type === 'tool_use' && currentFirstCallFrom < 0) currentFirstCallFrom = m;
+      if (block.type === 'tool_use' && currentFirstCallInputIndex < 0) currentFirstCallInputIndex = m;
     }
   }
 
@@ -1269,13 +1161,7 @@ function validate(
 // Helpers
 // ============================================================================
 
-/**
- * Read a tool_result's id: Anthropic's `tool_use_id`, the only field the wire
- * pairs by. Phase 1 has already rewritten a `toolUseId`-only result into this
- * form ({@link withCanonicalResultId}); in a caller's history given to
- * {@link assertToolPairsValid}, a result without `tool_use_id` answers
- * nothing, as on the wire.
- */
+/** Anthropic pairs a result with its call by `tool_use_id` alone. */
 function getToolUseId(block: ProviderBlock): string | undefined {
   const id = (block as { tool_use_id?: unknown }).tool_use_id;
   return typeof id === 'string' ? id : undefined;
@@ -1366,8 +1252,8 @@ function inlineDataPlaceholder(part: Record<string, unknown>): string | undefine
   const label = INLINE_DATA_LABELS.get(part.type);
   if (label === undefined) return undefined;
   const source = part.source as Record<string, unknown> | null | undefined;
-  // Wire form keeps the data in `source` (a text source's data is text, not
-  // bytes); MCP-style and generated images keep it on the part itself.
+  // Anthropic's wire form keeps the data in `source` (a text source's data is
+  // text, not bytes); MCP-style and generated images keep it on the part itself.
   const holder =
     source !== null && typeof source === 'object' && typeof source.data === 'string'
       ? source.type === 'text' ? undefined : source
@@ -1485,19 +1371,8 @@ function noop(): void {
 }
 
 /**
- * Merge consecutive same-role envelopes by concatenating their content
- * arrays. Anthropic's API accepts adjacent same-role envelopes, but counts
- * one token more at each boundary than for the same blocks in one envelope,
- * so the merge gives a turn one rendering however its blocks arrived; and
- * `normalizeToolPairs` can leave adjacent same-role envelopes
- * (e.g. an assistant turn re-roled out of a user message, or two
- * assistant turns stranded by an upstream chunker that dropped the
- * tool_result message between them).
- *
- * This is the second half of the wire-boundary safety net and should run
- * AFTER `normalizeToolPairs` at every callsite that ships messages to
- * Anthropic. Hoisted here so both `NativeFormatter.buildMessages` and
- * `Membrane.buildNativeToolRequest` share one implementation.
+ * Anthropic's API accepts adjacent same-role messages, but counts one token
+ * more at each boundary than for the same blocks in one message.
  */
 export function mergeConsecutiveRoles(
   messages: ReadonlyArray<LooseProviderMessage>,

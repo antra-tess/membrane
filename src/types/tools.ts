@@ -12,8 +12,7 @@
  * `type` is optional and may be an array because JSON Schema spells the same
  * declaration several ways: `{type:'string'}`, `{type:['string','null']}`,
  * `{anyOf:[{type:'string'},{type:'null'}]}` and `{$ref:'#/$defs/X'}` all
- * declare a parameter. readToolSchema in utils/tool-schema.ts reads them all
- * as the JSON types they admit.
+ * declare a parameter.
  */
 export interface ToolParameter {
   type?: string | string[];
@@ -76,7 +75,10 @@ export interface ToolResult {
   toolName?: string;
   /**
    * Result content - can be string or structured content blocks (for images).
-   * For XML mode, images are noted in text. For native mode, passed as content blocks.
+   * In an XML tool loop, the first result of a round with images that can be
+   * sent has them sent as images, in a user turn of their own (see
+   * ToolResultContent.rawXmlImagesAt); other images are noted in text. For
+   * native mode, passed as content blocks.
    */
   content: string | ToolResultContentBlock[];
   isError?: boolean;
@@ -108,8 +110,7 @@ export interface ToolContext {
    * this never repeats earlier rounds and never contains injected results.
    * Consumers persisting per-round assistant text must prefer this field —
    * persisting the cumulative `preamble` per round stores each round's text
-   * N times and re-persists injected results as model text (the Evander
-   * 2026-08-08 scaffold-leak pyramid).
+   * N times and re-persists injected results as model text.
    */
   roundPreamble?: string;
 
@@ -130,15 +131,11 @@ export interface ToolContext {
    * `calls`, which drops thinking blocks and their signatures and reorders
    * what survives.
    *
-   * Provider order is a CONTENT-CORRECTNESS requirement, not something
-   * today's API enforces. Measured live 2026-08-25: a signed thinking block
-   * replayed AFTER its `tool_use` inside the same assistant turn was
-   * accepted by claude-sonnet-4-6 (HTTP 200, signature intact). Preserve the
-   * order anyway — a signature validates against the content that produced
-   * it, a re-ordered turn is a transcript the model never emitted, and
-   * stricter validation has existed in earlier Anthropic generations and in
-   * vendor front-ends (Bedrock and gateway variants). Treat this as "the
-   * only shape that is right everywhere", not as current API law.
+   * Provider order is a content-correctness requirement, not something
+   * today's API enforces: preserve it. A signature validates against the
+   * content that produced it, and stricter validation has existed in earlier
+   * Anthropic generations and in vendor front-ends (Bedrock and gateway
+   * variants).
    */
   roundContent?: import('./content.js').ContentBlock[];
 

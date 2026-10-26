@@ -30,78 +30,9 @@ interface ReleasedTextBlock {
 }
 
 /**
- * A request's stop sequences, applied to one native streaming attempt the way
- * a provider applies them.
- *
  * Whether a provider applies a request's stops at all varies: the Responses
  * API has no stop parameter, Chat Completions drops it for some models and
  * sends at most four, Gemini sends five, and a custom adapter need send none.
- * So Membrane applies them itself, to the visible text of every native
- * attempt, and the accepted output ends at the first stop whatever the
- * provider did. Where the provider already stopped, the stop never streams
- * and nothing changes.
- *
- * When the attempt stops, what the caller receives is what a provider-side
- * stop produces:
- * - No chunk carries any part of the stop or anything after it, however the
- *   provider chunks or subdivides its text. Visible text that could still
- *   begin a stop is held until it either completes a stop or cannot.
- * - At a stop, the text block open at that point completes with the text
- *   before the stop, and nothing after it is reported. A block boundary
- *   exactly at the stop counts as after it: a stop that begins a new text
- *   block leaves the previous block whole and the new one unreported.
- * - The attempt ends with stopReason 'stop_sequence' and the stop as its
- *   stopSequence, its content cut at the stop. A message item shared by
- *   the cut text loses its replayable rawItem on every block that kept it, so
- *   the next request replays the accepted text rather than the whole item.
- * - A tool call finished before the stop stays in the content and the round
- *   still ends with 'stop_sequence', so the native loops don't run it: the
- *   outcome a provider gives when it applies the stop itself.
- *
- * Thinking is never scanned, and a non-text block ends a stretch of visible
- * text: a stop does not span one. The provider's stream still runs to its end,
- * so the attempt's usage and raw response are the provider's own.
- *
- * The returned content decides where the attempt stops, since it is the
- * attempt's result and what the next request replays, and an adapter's chunks
- * need not match it. The returned text need not be the chunks joined
- * (OpenAICompatibleAdapter drops reasoning a backend leaked into the text, and
- * the Responses adapter returns refusals it never streams), and the chunks
- * need not show where the returned blocks begin and end (the Responses adapter
- * reports its blocks only at the end). So the content is cut at the first stop
- * in its own visible text, found stretch by stretch, and a stop found while
- * streaming is settled when the adapter returns: until then, whatever streams
- * after it is withheld. Then:
- * - If the returned content holds no stop, nothing stopped. The content and
- *   its stop reason are the provider's, and what was withheld is delivered in
- *   the order it arrived.
- * - If it holds one, and the streamed visible text is how the returned visible
- *   text begins, positions in the two correspond: held or withheld text is
- *   delivered up to the content's stop. Otherwise they don't correspond, and
- *   nothing more is delivered: the chunks end where they stand (at the stop,
- *   if streaming found one), and the content at its own stop. A stop in text
- *   the adapter returns ahead of what it streamed, without streaming it (a
- *   Responses refusal part before output text), can even fall before chunks
- *   already delivered; those chunks stand.
- *
- * A text block completed at a stop found while streaming stays completed if
- * the content holds no stop. Its own later report is delivered with the rest,
- * and the native loops' NativeBlockTracker records that as the block's final
- * payload without completing it again.
- *
- * Block events (and thinking signatures, which stay in order with them) wait
- * until a chunk follows them. Block events can't be told
- * apart on arrival: a paired adapter's first report is a start payload,
- * and a single-final adapter's is a finished block whose text may never have
- * streamed (see StreamCallbacks). Timing tells them apart: single-final reports
- * come after the last chunk. So an event followed by a chunk is released, in
- * order, before that chunk. Events still waiting when the adapter returns are
- * settled against its returned content: delivered as they arrived if it holds
- * no stop, and otherwise as the cut content's blocks, so text the provider
- * reported only at the end is held to the same stops. The cost, only when
- * stops are configured: a paired block event that no chunk follows, such as a
- * trailing tool call, is reported when the stream ends rather than as it
- * arrives.
  */
 export class LocalStopSequences {
   readonly callbacks: StreamCallbacks;
@@ -337,9 +268,9 @@ function lastIndexWhere<T>(items: readonly T[], predicate: (item: T) => boolean)
 }
 
 /**
- * The stop whose first occurrence in `text` ends first; at equal ends, the one
- * starting first. That's where a provider checking token by token stops,
- * whatever order the request lists its stops in.
+ * A provider checking token by token stops at the stop whose first occurrence
+ * ends first, at equal ends the one starting first, whatever order the request
+ * lists its stops in.
  */
 export function firstStop(text: string, stops: readonly string[]): { stop: string; at: number } | undefined {
   let best: { stop: string; at: number; end: number } | undefined;

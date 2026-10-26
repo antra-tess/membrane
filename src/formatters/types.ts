@@ -29,7 +29,10 @@ export type BlockType = MembraneBlockType;
 // ============================================================================
 
 export interface FormatterConfig {
-  /** How to handle unsupported media (images, etc.). Default: 'error' */
+  /** What to do with a document block (and, in AnthropicXmlFormatter, an audio
+   * block), which the formatter can't send: 'error' throws, 'strip' leaves it
+   * out; CompletionsFormatter always strips. An image in a format the API
+   * doesn't take becomes a text placeholder either way. Default: 'error' */
   unsupportedMedia?: 'error' | 'strip';
 
   /** Warn when stripping content. Default: true */
@@ -37,9 +40,9 @@ export interface FormatterConfig {
 }
 
 export interface BuildOptions {
-  /** The caller owns a later complete-request cache-budget check/clamp (Membrane
-   * checks after hooks). Standalone builds check by default. CM-owned markers
-   * always assert here because they may not be displaced. */
+  /** The caller owns a later complete-request cache-budget check/clamp.
+   * Standalone builds check by default. CM-owned markers are always checked
+   * here. */
   deferCacheBudgetCheck?: boolean;
 
   /** How to handle multiple participants */
@@ -61,12 +64,9 @@ export interface BuildOptions {
   tools?: ToolDefinition[];
 
   /**
-   * The tool mode Membrane RESOLVED for this request (see
-   * `Membrane.resolveToolMode`), which already accounts for `request.toolMode`,
-   * the formatter's own configured mode, and provider/formatter derivation.
-   * A formatter that supports both shapes must build for THIS mode; its
-   * constructor-time mode is only the fallback for direct `buildMessages`
-   * callers that resolve nothing.
+   * The tool mode Membrane resolved for this request. A formatter that supports
+   * both shapes must build for this mode; its constructor-time mode is only the
+   * fallback for direct `buildMessages` callers that pass none.
    */
   toolMode?: 'xml' | 'native';
 
@@ -91,19 +91,18 @@ export interface BuildOptions {
   /** Maximum participants to include in stop sequences */
   maxParticipantsForStop?: number;
 
-  /** Context prefix for simulacrum seeding (injected as first cached assistant message) */
+  /** Context prefix for simulacrum seeding, injected as the first assistant
+   * message and marked for caching when promptCaching is on and membrane places
+   * the markers (`cacheMarkers: 'membrane-system'`). */
   contextPrefix?: string;
 
   /**
    * Whether an assistant turn's Anthropic server-tool blocks (web search and
    * the like, kept on zero-width carriers) go back as the blocks themselves.
-   * Membrane sets this from its adapter's `replaysAnthropicServerBlocks`,
-   * which only AnthropicAdapter declares. Off, they are left out before
-   * cache markers are placed and messages merged, exactly as a carrier was
-   * before they went back at all. Off by default, as membrane's own flag is:
-   * a direct caller building for the Anthropic API, such as a token count,
-   * passes true to build what membrane sends it, and one building for another
-   * wire gets none.
+   * Off, they are left out before cache markers are placed and messages merged.
+   * Off by default: a direct caller building for the Anthropic API, such as a
+   * token count, passes true to build what membrane sends it, and one building
+   * for another wire gets none.
    */
   anthropicServerBlocks?: boolean;
 
@@ -131,26 +130,23 @@ export interface BuildOptions {
    */
   pendingToolCallIds?: ReadonlySet<string>;
 
-  /**
-   * Telemetry callback fired once per normalization action. Lets the
-   * framework count/log normalizations without coupling Membrane to a
-   * specific logger. See `NormalizeEvent` for the event shapes.
-   */
+  /** Telemetry callback for the tool-pair normalizer's events (`NormalizeEvent`). */
   onNormalize?: (event: NormalizeEvent) => void;
 }
 
 /**
- * Events emitted by the tool-pair normalizer. Surfaced through
- * `BuildOptions.onNormalize`. Every normalization action emits one
- * event; treat non-zero counts as a producer-side bug to investigate.
+ * Events emitted by the tool-pair normalizer, through
+ * `BuildOptions.onNormalize`: one per block it moves, synthesizes or
+ * rewrites, except a result's `toolUseId` renamed `tool_use_id`, which
+ * emits none, and `pending_in_flight` for a pending call it leaves
+ * unmatched.
  */
 export type NormalizeEvent =
   | { kind: 'block_re_roled'; blockType: string; from: 'user' | 'assistant'; to: 'user' | 'assistant' }
   /**
    * A tool_result was moved so it sits in the user envelope immediately
-   * following its own tool_use. `fromEnvelope > toEnvelope` is phase 3's
-   * hoist: the result lived downstream of its cycle and was pulled back into
-   * it. `fromEnvelope < toEnvelope` is the converse sweep: the result had
+   * following its own tool_use. `fromEnvelope > toEnvelope`: it lived after
+   * its cycle and was pulled back into it. `fromEnvelope < toEnvelope`: it had
    * been appended ahead of its own cycle and was pushed down into it.
    */
   | { kind: 'tool_result_hoisted'; toolUseId: string; fromEnvelope: number; toEnvelope: number }
@@ -202,10 +198,6 @@ export type NormalizeEvent =
        *                    new assistant envelope). Usually benign.
        *   - `'assistant'`→ producer shipped an assistant-first messages
        *                    list. Real producer bug worth investigating.
-       *
-       * (Empty input never reaches this event: `rebuildEnvelopes([])`
-       * returns `[]`, and the phase-7 gate requires a non-empty envelope
-       * list. So `input[0]` is always defined when this fires.)
        *
        * `leadingBlockTypes` is the block-type list of the now-second
        * envelope (i.e. what came right after the synthesized user turn),
@@ -323,13 +315,11 @@ export interface StreamParser {
 
   /**
    * Check if parser is inside a block (e.g., unclosed XML tag).
-   * Used for false-positive stop sequence detection.
    */
   isInsideBlock(): boolean;
 
   /**
    * Get current nesting depths for each block type.
-   * Used to compare against prefill baseline for false-positive detection.
    */
   getDepths(): { functionCalls: number; functionResults: number; thinking: number };
 
@@ -369,11 +359,8 @@ export interface PrefillFormatter {
   /**
    * Whether this formatter can carry provider-native tool definitions —
    * i.e. whether `buildMessages` can populate `BuildResult.nativeTools`.
-   *
-   * `Membrane.resolveToolMode` reads this to pick the default tool mode:
-   * native wherever the formatter can carry it, XML/prefill only for a
-   * formatter that genuinely cannot (a text-completion surface) or when the
-   * caller opts in explicitly.
+   * Membrane builds native tools by default wherever this holds, and XML only
+   * for a formatter that can't or when the caller asks for it.
    */
   readonly supportsNativeTools: boolean;
 
@@ -393,20 +380,17 @@ export interface PrefillFormatter {
 
   /**
    * True when `buildMessages` sends a message holding `system_change` blocks
-   * (SystemChangeContent) as a mid-conversation `role: 'system'` message. Only
-   * NativeFormatter declares it; AnthropicXmlFormatter doesn't, even in its
-   * native tool mode. Membrane refuses, before sending, a request carrying one
-   * unless both this and the adapter's `sendsSystemChanges` hold.
+   * (SystemChangeContent) as a mid-conversation `role: 'system'` message.
+   * Membrane refuses, before sending, a request carrying one unless both this
+   * and the adapter's `sendsSystemChanges` hold.
    */
   readonly rendersSystemChanges?: boolean;
 
   /**
-   * The tool mode this formatter instance was EXPLICITLY constructed with, if
-   * any. Read by `Membrane.resolveToolMode` as the fallback under an explicit
-   * `request.toolMode`: a formatter that can build either shape carries its
-   * caller's configured choice here so resolution honors it instead of
-   * re-deriving one from the formatter's name. Left undefined by formatters
-   * that build exactly one shape.
+   * The tool mode this formatter instance was explicitly constructed with, if
+   * any. Membrane falls back to it when the request names no `toolMode`, so a
+   * formatter that can build either shape carries its caller's choice here.
+   * Left undefined by formatters that build exactly one shape.
    */
   readonly configuredToolMode?: 'xml' | 'native';
 
@@ -447,14 +431,14 @@ export interface PrefillFormatter {
    *
    * `tools` carries the round's declared schemas. XML-style formatters use them
    * to parse parameter values by declared type (a `string` parameter keeps its
-   * raw, untrimmed text) instead of guessing; formatters whose provider returns
-   * typed arguments ignore it.
+   * text, less one layout newline directly after its opening tag and one
+   * directly before its closing tag) instead of guessing; formatters whose
+   * provider returns typed arguments ignore it.
    */
   parseToolCalls(content: string, tools?: ToolDefinition[]): ToolCall[];
 
   /**
    * Check if content indicates tool use.
-   * Used to determine stop reason.
    */
   hasToolUse(content: string): boolean;
 

@@ -1,16 +1,4 @@
-/**
- * Regression tests for #20: the non-yielding native-tools streaming path
- * (`streamWithNativeTools`, reached through `Membrane.stream()` — note that
- * `complete()` is the non-streaming entry and never emits chunks) hardcoded
- * `meta.type = 'text'` on every chunk and never invoked `onBlock` — the same
- * bug #19 fixed on the yielding path.
- *
- * A caller wiring `stream()`'s onChunk to a UI therefore saw thinking_delta
- * chunks labelled as visible text, and got no block lifecycle at all. These
- * tests pin the fixed behaviour by scripting a provider that emits a thinking
- * block followed by a text block, the way Anthropic's SSE stream does
- * (content_block_start → deltas → content_block_stop, per index).
- */
+/** Anthropic's SSE stream sends each block as content_block_start, then its deltas, then content_block_stop, per index. */
 
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';

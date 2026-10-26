@@ -71,6 +71,7 @@ const bedrockEvents = (text: string) => [
   { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 2 } },
   { type: 'message_stop' },
 ];
+const MESSAGE_DELTA_INDEX = bedrockEvents('').findIndex((event) => event.type === 'message_delta');
 const bedrockResponse = (frames: Uint8Array[], open = false) => {
   const b = body(frames, open);
   return { response: { ok: true, status: 200, body: b.stream } as unknown as Response, cancelled: b.cancelled };
@@ -80,7 +81,7 @@ const bedrock = () => new BedrockAdapter({ accessKeyId: 'zz-key', secretAccessKe
 interface Case { name: string; make: () => ProviderAdapter; request: ProviderRequest; respond: (open?: boolean) => { response: Response; cancelled: () => boolean } }
 
 /** The adapters whose catch used to swallow a callback's error. */
-const swallowed: Case[] = [
+const formerlySwallowing: Case[] = [
   { name: 'openai', make: () => new OpenAIAdapter({ apiKey: 'zz-key' }), request: wire, respond: open => sseResponse([chat('hello'), chat(' world', 'stop'), '[DONE]'], open) },
   { name: 'openai-compatible', make: () => new OpenAICompatibleAdapter({ apiKey: 'zz-key', baseURL: 'https://review.invalid/v1' }), request: wire, respond: open => sseResponse([chat('hello'), chat(' world', 'stop'), '[DONE]'], open) },
   { name: 'openai-completions', make: () => new OpenAICompletionsAdapter({ apiKey: 'zz-key', baseURL: 'https://review.invalid/v1' }), request: wire, respond: open => sseResponse([completion('hello'), completion(' world', 'stop'), '[DONE]'], open) },
@@ -137,7 +138,7 @@ function expectFailed(error: unknown, thrown: Error): void {
 }
 
 describe("a stream callback's error fails the stream", () => {
-  for (const { name, make, request, respond } of [...swallowed, ...surfaced]) {
+  for (const { name, make, request, respond } of [...formerlySwallowing, ...surfaced]) {
     it(`${name}: onChunk's error reaches the caller, after one call`, async () => {
       vi.stubGlobal('fetch', vi.fn(async () => respond().response));
       const thrown = new Error('zz-callback-failure');
@@ -148,7 +149,7 @@ describe("a stream callback's error fails the stream", () => {
     });
   }
 
-  for (const { name, make, request, respond } of [...swallowed, ...surfaced.filter(c => c.name === 'gemini')]) {
+  for (const { name, make, request, respond } of [...formerlySwallowing, ...surfaced.filter(c => c.name === 'gemini')]) {
     it(`${name}: the provider's body is cancelled, not left unread`, async () => {
       const { response, cancelled } = respond(true);
       vi.stubGlobal('fetch', vi.fn(async () => response));
@@ -161,7 +162,7 @@ describe("a stream callback's error fails the stream", () => {
     });
   }
 
-  for (const { name, make, request, respond } of swallowed) {
+  for (const { name, make, request, respond } of formerlySwallowing) {
     it(`${name}: a callback error with code EPIPE is typed network, and retryable`, async () => {
       vi.stubGlobal('fetch', vi.fn(async () => respond().response));
       const epipe = Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
@@ -372,7 +373,7 @@ describe('a frame the handler cannot read is still dropped', () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const events = bedrockEvents('hello').map(chunkFrame);
       // After the first block's stop, before message_delta.
-      vi.stubGlobal('fetch', vi.fn(async () => bedrockResponse([...events.slice(0, 5), ...bad, ...events.slice(5)]).response));
+      vi.stubGlobal('fetch', vi.fn(async () => bedrockResponse([...events.slice(0, MESSAGE_DELTA_INDEX), ...bad, ...events.slice(MESSAGE_DELTA_INDEX)]).response));
       const chunks: string[] = [];
       const blockIndexes: unknown[] = [];
       const response = await bedrock().stream(bedrockWire, {
@@ -397,7 +398,7 @@ describe('a frame the handler cannot read is still dropped', () => {
       chunkFrame({ type: 'content_block_delta', index: 2, delta: { type: 'input_json_delta', partial_json: '{"a":1}' } }),
       chunkFrame({ type: 'content_block_stop', index: 2 }),
     ];
-    vi.stubGlobal('fetch', vi.fn(async () => bedrockResponse([...events.slice(0, 5), ...between, ...events.slice(5)]).response));
+    vi.stubGlobal('fetch', vi.fn(async () => bedrockResponse([...events.slice(0, MESSAGE_DELTA_INDEX), ...between, ...events.slice(MESSAGE_DELTA_INDEX)]).response));
     const error = await settle(bedrock().stream(bedrockWire, { onChunk() {} }));
     expect(error).toBeInstanceOf(MembraneError);
     expect(error).toMatchObject({ type: 'network', retryable: true });
@@ -407,8 +408,7 @@ describe('a frame the handler cannot read is still dropped', () => {
   it('bedrock: a thinking block whose start names no slot, before a tool call, fails the call rather than dropping it', async () => {
     // Anthropic's thinking docs: "when you return tool results, you must pass
     // the thinking blocks from the assistant message back to the API, complete
-    // and unmodified". Returned without this one, the history couldn't; a
-    // failed call can be retried.
+    // and unmodified".
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const events = [
       { type: 'message_start', message: { usage: { input_tokens: 1 } } },
@@ -435,7 +435,7 @@ describe('a frame the handler cannot read is still dropped', () => {
       blockStart(false, { type: 'text', text: '' }),
       chunkFrame({ type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: ' zz-stray' } }),
     ];
-    vi.stubGlobal('fetch', vi.fn(async () => bedrockResponse([...events.slice(0, 5), ...stray, ...events.slice(5)]).response));
+    vi.stubGlobal('fetch', vi.fn(async () => bedrockResponse([...events.slice(0, MESSAGE_DELTA_INDEX), ...stray, ...events.slice(MESSAGE_DELTA_INDEX)]).response));
     const response = await bedrock().stream(bedrockWire, { onChunk() {} }) as any;
     expect(response.content.map((block: { type: string; text?: string }) => block.text)).toEqual(['hello more']);
   });

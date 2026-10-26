@@ -1,17 +1,6 @@
 /**
- * Function tools sent through the Responses adapter state their strictness.
- *
- * Connectome's tools are plain JSON Schema: a property outside `required` may
- * be omitted. Left without a `strict` field, a function tool's validation is
- * the provider's default, and strict validation makes every property one the
- * model must send. A Connectome resident's save_recent_image selectors arrived
- * presented as required; that the provider's default caused it is an
- * inference, since these tests mock the provider and no live request was
- * made. So every function tool convertTools takes reaches the wire with a
- * boolean: omitted or null becomes false, an explicit boolean is kept, and
- * anything else is refused, naming the tool, before a request is sent. That
- * holds in API-key and subscription modes and on all three function spellings
- * convertTools accepts.
+ * Without a `strict` field, a function tool's validation is the provider's
+ * default, and strict validation makes every property one the model must send.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OpenAIResponsesAPIAdapter } from '../../src/providers/openai-responses-api.js';

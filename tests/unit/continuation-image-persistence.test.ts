@@ -1,15 +1,4 @@
-/**
- * Split-turn image continuations (A3 BLOCKER-1) and the continuation
- * builders' `extra` contract (A3 MINOR-5).
- *
- * When a tool result carries an image in XML prefill mode, membrane splits
- * the assistant turn — assistant(text) / user([image]) / assistant(closing
- * XML) — because the API only accepts images in user turns. The split has to
- * be PERSISTED: every later continuation rebuilds its messages from the
- * turn's build result, so a split that lives only in one request vanishes on
- * the next round while the accumulated document still claims a screenshot
- * came back.
- */
+/** The API accepts images only in user turns. */
 
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
