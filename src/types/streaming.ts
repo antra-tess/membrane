@@ -2,6 +2,7 @@ import type { ContentBlock } from './content.js';
 import type { ToolCall, ToolResult, ToolContext } from './tools.js';
 import type { BasicUsage } from './response.js';
 import type { PrefillFormatter } from '../formatters/types.js';
+import type { ProgressBounds } from '../progress-bounds.js';
 
 /**
  * Membrane block types - logical content regions at the context level.
@@ -191,6 +192,40 @@ export interface StreamOptions {
    * it, so for it the deadline bounds the whole call.
    */
   progressTimeoutMs?: number;
+
+  /**
+   * Progress bounds per provider call (default: off, as for `false`). `true`
+   * takes `PROGRESS_BOUNDS` from `@animalabs/membrane/progress-bounds`, and an
+   * object takes them with any of its values in their place; a value that
+   * isn't a finite number above 0 throws before anything is sent. They
+   * apply to a streamed call on an adapter whose stream reports content and
+   * thinking blocks' starts (`AnthropicAdapter`, `BedrockAdapter`), and change
+   * nothing for any other call. Counted from each attempt's send:
+   * - before content, the call ends `beforeContentMs` after the send, or, if
+   *   a thinking block has started, at the later of that and the block's
+   *   allowance from its start: the `max_tokens` the request sends at
+   *   `thinkTokensPerSecond`, rounded up to a whole second;
+   * - once content has begun, it ends `betweenEventsMs` after the last
+   *   provider event, or, when that event was a thinking block's start,
+   *   after the larger of that and the block's allowance.
+   *
+   * Content is a delta of any kind (text, thinking, tool input, a signature)
+   * or a redacted thinking block. When the request asks for summarized
+   * thinking (`display: 'summarized'`), a thinking block's start is only an
+   * event and its summary is content. Keepalives never count. So a thinking
+   * block that starts at the send, with an allowance shorter than
+   * `beforeContentMs` (a `max_tokens` under 5,220 at the defaults), is
+   * bounded by `beforeContentMs`. They run beside `progressTimeoutMs`, and beside
+   * `AnthropicAdapter`'s first-event and idle deadlines: the first to run
+   * out ends the call.
+   *
+   * On expiry the call ends as for `progressTimeoutMs`, as an aborted stream
+   * with reason `'timeout'`, whose `message` names the bound that ran out.
+   * An aborted stream isn't a finished answer, and membrane doesn't send the
+   * call again: a caller with no retry layer of its own should send a call
+   * that ended before any content or thinking block began once more.
+   */
+  progressBounds?: boolean | Partial<ProgressBounds>;
 
   /**
    * Whether membrane retries the call's failed provider calls itself. Default

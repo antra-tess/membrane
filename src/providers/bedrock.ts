@@ -22,7 +22,7 @@ import {
 import { errorFromThrown } from '../types/errors.js';
 import { stripEmptyTextAfterPassthrough } from '../utils/empty-text.js';
 import { isUnsignedThinking } from '../utils/thinking-carriers.js';
-import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, streamIndex, isEventObject, isToolCallBlock, isToolCallArgumentsDelta, contentOfAnthropicEvent } from './utils.js';
+import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, streamIndex, isEventObject, isToolCallBlock, isToolCallArgumentsDelta, progressOfAnthropicEvent } from './utils.js';
 import {
   INTERLEAVED_THINKING_BETA,
   THINKING_BINDING_BETA,
@@ -624,6 +624,7 @@ export class BedrockAdapter implements ProviderAdapter {
     );
 
     const body = JSON.stringify(request);
+    const summarized = request.thinking?.display === 'summarized';
     const headers: Record<string, string> = {
       'content-type': 'application/json',
       accept: 'application/vnd.amazon.eventstream',
@@ -786,7 +787,7 @@ export class BedrockAdapter implements ProviderAdapter {
             if (eventData === undefined) console.warn('[membrane:bedrock] Skipping malformed stream event:', skipped);
 
             if (eventData !== undefined) {
-              if ((eventData as { type?: string }).type !== 'ping') onProgress?.(contentOfAnthropicEvent(eventData));
+              if ((eventData as { type?: string }).type !== 'ping') onProgress?.(progressOfAnthropicEvent(eventData, summarized));
 
               if (eventData.type === 'error') {
                 const streamError = (eventData as any).error;

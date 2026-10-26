@@ -294,8 +294,12 @@ export interface ProviderRequestContext {
  * other block's start is only an event: a text or tool block's content
  * follows as deltas, and a server tool's result block, which arrives whole
  * too, follows its call's input deltas, so content has begun by then.
+ * `'think'`: a `thinking` block's start, unless the body asks for summarized
+ * thinking (`display: 'summarized'`): any other such block can stream
+ * nothing until its signature, as a block of reasoning does under
+ * `display: 'omitted'` or `'updates'`.
  */
-export type ProgressSeen = 'content';
+export type ProgressSeen = 'content' | 'think';
 
 /**
  * What an adapter reports about one attempt as it sends it, through
@@ -305,13 +309,14 @@ export interface SendReport {
   /**
    * The output-token limit the body asks for (its `max_tokens` or
    * equivalent), after any default and passthrough parameter the adapter
-   * applied.
+   * applied. Progress bounds size a thinking block's allowance from it.
    */
   maxTokens?: number;
   /**
-   * Whether this attempt reports content through `onProgress('content')`, so
-   * a stream whose content never began can be told from one whose content
-   * isn't reported.
+   * Whether this attempt reports content and thinking blocks' starts through
+   * `onProgress`, so a stream whose content never began can be told from one
+   * whose content isn't reported. Progress bounds apply only to an attempt
+   * that does.
    */
   reportsContent?: boolean;
 }
@@ -338,8 +343,9 @@ export interface ProviderRequestOptions {
    */
   firstEventTimeoutMs?: number;
   /**
-   * Stream progress, for the progress deadline Membrane core keeps per
-   * provider call (`progressTimeoutMs`). An adapter calls it once per parsed
+   * Stream progress, for the progress deadline and bounds Membrane core keeps
+   * per provider call (`progressTimeoutMs`, `progressBounds`). An adapter
+   * calls it once per parsed
    * provider event: each SDK event, each SSE data frame that parses to a JSON
    * object, each event-stream message that decodes to one. Never for a frame
    * that parses to anything else (`null`, a number, a string, an array),
@@ -347,18 +353,20 @@ export interface ProviderRequestOptions {
    * Bedrock's `ping`), SSE comments or raw body bytes: those prove the
    * connection is up, not that the model is making progress. An adapter that
    * reports content (SendReport.reportsContent) passes `'content'` for an
-   * event that is content (see ProgressSeen), and nothing for any other.
+   * event that is content and `'think'` for a thinking block's start (see
+   * ProgressSeen), and nothing for any other.
    * Decorators must forward it beside the other options: one that drops it
-   * turns the progress deadline into a total one, and one that drops its
-   * argument while forwarding `onSend` reports content that never arrives.
-   * TypeScript doesn't catch the second, since a function of no arguments
-   * fits this type.
+   * turns the progress deadline into a total one, and one that drops it or
+   * its argument while forwarding `onSend` reports content that never
+   * arrives, so progress bounds end any of its calls still running
+   * `beforeContentMs` after the send. TypeScript doesn't catch a dropped
+   * argument, since a function of no arguments fits this type.
    */
   onProgress?: (seen?: ProgressSeen) => void;
   /**
    * What this attempt sends (see SendReport), reported once per attempt
-   * beside `onRequest`, before the request goes out. Decorators forward it
-   * with the other options.
+   * beside `onRequest`, before the request goes out. Progress bounds count
+   * from it. Decorators forward it with the other options.
    */
   onSend?: (send: SendReport) => void;
   /** Report the final API request body immediately before sending it.

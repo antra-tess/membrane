@@ -19,6 +19,11 @@
       "bun": "./src/retry.ts",
       "types": "./dist/retry.d.ts",
       "import": "./dist/retry.js"
+    },
+    "./progress-bounds": {
+      "bun": "./src/progress-bounds.ts",
+      "types": "./dist/progress-bounds.d.ts",
+      "import": "./dist/progress-bounds.js"
     }
   },
   "scripts": {

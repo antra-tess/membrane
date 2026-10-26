@@ -138,7 +138,7 @@ describe('Anthropic stream idle watchdog with live transport', () => {
     const progress = createProgressDeadline(undefined, 2 * LIVE_MS);
     try {
       await expect(newAdapter().stream(request, { onChunk: () => {} }, {
-        ...timing, signal: progress.signal, onProgress: progress.renew,
+        ...timing, signal: progress.signal, onProgress: progress.onProgress,
       })).rejects.toMatchObject({
         type: 'timeout', retryable: true, message: expect.stringMatching(/first-event timeout/),
       });

@@ -32,7 +32,7 @@ import {
 import { markSystemChangeRefused, runCallerCode, statusForProviderCode, deadlineExpired, isDeadlineExpiry, errorFromThrown } from '../types/errors.js';
 import { flattenRootSchemaUnion } from './anthropic-tool-schema.js';
 import { isPlainObject } from '../utils/tool-schema.js';
-import { assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, isDeadlineAbort, deadlineTimeoutError, isToolCallBlock, isToolCallArgumentsDelta, contentOfAnthropicEvent } from './utils.js';
+import { assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, isDeadlineAbort, deadlineTimeoutError, isToolCallBlock, isToolCallArgumentsDelta, progressOfAnthropicEvent } from './utils.js';
 import { fetchWithCredentials, validateCredential, type CredentialContext, type CredentialResolver } from './credentials.js';
 import { CacheKeepalive, type CacheKeepaliveConfig } from '../cache-keepalive.js';
 
@@ -481,6 +481,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     assertMessagePrefillSupported(fullRequest.model, fullRequest.messages, options, this.name, fullRequest);
     options?.onRequest?.(fullRequest);
     options?.onSend?.({ maxTokens: fullRequest.max_tokens, reportsContent: true });
+    const summarized = (fullRequest.thinking as { display?: unknown } | null | undefined)?.display === 'summarized';
 
     const headers = this.betaHeaders(request, anthropicRequest);
     const live = this.liveHeaders(headers, 'stream');
@@ -655,7 +656,7 @@ export class AnthropicAdapter implements ProviderAdapter {
           this.cacheKeepalive?.record(fullRequest as unknown as Record<string, unknown>, headers, 'stream', sentAt);
         }
         // Every SDK event is progress; the SDK drops pings before this loop.
-        options?.onProgress?.(contentOfAnthropicEvent(event));
+        options?.onProgress?.(progressOfAnthropicEvent(event, summarized));
         if (event.type === 'message_start') {
           model = event.message.model;
           messageId = typeof event.message.id === 'string' && event.message.id ? event.message.id : undefined;
@@ -872,8 +873,9 @@ export class AnthropicAdapter implements ProviderAdapter {
           rawRequest: fullRequest,
         }));
       }
-      // A deadline on the caller's signal (Membrane's progressTimeoutMs) is a
-      // timeout with its own message, whatever the SDK wrapped the abort in.
+      // A deadline on the caller's signal (Membrane's progressTimeoutMs or
+      // progressBounds) is a timeout with its own message, whatever the SDK
+      // wrapped the abort in.
       if (isDeadlineAbort(options?.signal?.reason)) throw deadlineTimeoutError(options!.signal!.reason, fullRequest);
       throw this.handleError(session?.failure() ?? error, fullRequest);
     }

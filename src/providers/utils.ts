@@ -1,5 +1,7 @@
 import { TimeoutAbortError, errorFromProviderStatus, networkError } from '../types/errors.js';
 import { imageForRequest, urlImageForRequest } from '../utils/image-media.js';
+import { trackProgress, type ProgressBounds, type ProgressTracker } from '../progress-bounds.js';
+import type { ProgressSeen, SendReport } from '../types/provider.js';
 
 interface StreamErrorFrameFields {
   code?: unknown;
@@ -404,45 +406,88 @@ export function createCombinedSignal(
   };
 }
 
-/** A `redacted_thinking` block arrives whole once its think is done. */
-export function contentOfAnthropicEvent(
+/**
+ * A `redacted_thinking` block arrives whole once its think is done. Unless
+ * the body asks for summarized thinking, a thinking block can stream nothing
+ * until its signature, as a block of reasoning does under `display:
+ * 'omitted'` or `'updates'`.
+ */
+export function progressOfAnthropicEvent(
   event: { type?: unknown; content_block?: { type?: unknown } | null },
-): 'content' | undefined {
+  summarized: boolean,
+): ProgressSeen | undefined {
   if (event.type === 'content_block_delta') return 'content';
-  return event.type === 'content_block_start' && event.content_block?.type === 'redacted_thinking'
-    ? 'content'
-    : undefined;
+  if (event.type !== 'content_block_start') return undefined;
+  const block = event.content_block?.type;
+  if (block === 'redacted_thinking') return 'content';
+  return block === 'thinking' && !summarized ? 'think' : undefined;
 }
 
 export function createProgressDeadline(
   signal: AbortSignal | undefined,
   timeoutMs: number | undefined,
-): { signal?: AbortSignal; renew?: () => void; cleanup: () => void } {
-  if (!timeoutMs || timeoutMs <= 0) return { signal, cleanup: () => {} };
+  bounds?: ProgressBounds,
+): {
+  signal?: AbortSignal;
+  onProgress?: (seen?: ProgressSeen) => void;
+  onSend?: (send: SendReport) => void;
+  cleanup: () => void;
+} {
+  const flatMs = timeoutMs && timeoutMs > 0 ? timeoutMs : undefined;
+  if (flatMs === undefined && bounds === undefined) return { signal, cleanup: () => {} };
 
   const controller = new AbortController();
   const beganAt = Date.now();
   let lastAt = beganAt;
   let last = performance.now();
   let events = 0;
+  let tracker: ProgressTracker | undefined;
+  let over = false;
   let cancelTimer: (() => void) | undefined;
+  let armedAt = Infinity;
+
+  const due = (): { at: number; why: string } => {
+    let next = flatMs === undefined
+      ? { at: Infinity, why: '' }
+      : { at: last + flatMs, why: `No provider progress within ${flatMs}ms` };
+    const bound = tracker?.due();
+    if (bound && bound.at < next.at) next = { at: bound.at, why: bound.bound };
+    return next;
+  };
+  const arm = (at: number): void => {
+    cancelTimer?.();
+    cancelTimer = undefined;
+    armedAt = at;
+    if (at !== Infinity) cancelTimer = setLongTimeout(check, Math.max(0, at - performance.now()));
+  };
   const check = (): void => {
-    const quiet = performance.now() - last;
-    if (quiet >= timeoutMs) {
-      cancelTimer = undefined;
+    cancelTimer = undefined;
+    armedAt = Infinity;
+    const next = due();
+    if (performance.now() >= next.at) {
+      over = true;
       controller.abort(deadlineAbortReason(
-        `No provider progress within ${timeoutMs}ms: the call began at ${new Date(beganAt).toISOString()}, ` +
+        `${next.why}: the call began at ${new Date(beganAt).toISOString()}, ` +
         `provider events: ${events}${events > 0 ? `, the last at ${new Date(lastAt).toISOString()}` : ''}`,
       ));
     } else {
-      cancelTimer = setLongTimeout(check, timeoutMs - quiet);
+      arm(next.at);
     }
   };
-  cancelTimer = setLongTimeout(check, timeoutMs);
-
-  const onAbort = (): void => {
+  const moved = (): void => {
+    const next = due();
+    if (next.at < armedAt) arm(next.at);
+  };
+  const stop = (): void => {
+    over = true;
     cancelTimer?.();
     cancelTimer = undefined;
+    armedAt = Infinity;
+  };
+  arm(due().at);
+
+  const onAbort = (): void => {
+    stop();
     controller.abort(signal!.reason);
   };
   if (signal) {
@@ -452,10 +497,27 @@ export function createProgressDeadline(
 
   return {
     signal: controller.signal,
-    renew: () => { last = performance.now(); lastAt = Date.now(); events++; },
+    onProgress: (seen) => {
+      if (over) return;
+      last = performance.now();
+      lastAt = Date.now();
+      events++;
+      if (tracker) {
+        tracker.seen(seen, last);
+        moved();
+      }
+    },
+    ...(bounds
+      ? {
+          onSend: (send: SendReport) => {
+            if (over || send?.reportsContent !== true) return;
+            tracker = trackProgress(bounds, performance.now(), send.maxTokens);
+            moved();
+          },
+        }
+      : {}),
     cleanup: () => {
-      cancelTimer?.();
-      cancelTimer = undefined;
+      stop();
       signal?.removeEventListener('abort', onAbort);
     },
   };
