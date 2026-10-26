@@ -200,7 +200,10 @@ export interface StreamOptions {
    * isn't a finite number above 0 throws before anything is sent. They
    * apply to a streamed call on an adapter whose stream reports content and
    * thinking blocks' starts (`AnthropicAdapter`, `BedrockAdapter`), and change
-   * nothing for any other call. Counted from each attempt's send:
+   * nothing for any other call. They count from each attempt's send as the
+   * adapter reports it (`onSend`), before any credential resolver runs, so a
+   * resolver's time, and its one resend after an HTTP 401, count against
+   * `beforeContentMs`. From that send:
    * - before content, the call ends `beforeContentMs` after the send, or, if
    *   a thinking block has started, at the later of that and the block's
    *   allowance from its start: the `max_tokens` the request sends at

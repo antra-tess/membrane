@@ -4,6 +4,9 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
+import { BedrockAdapter } from '../../src/providers/bedrock.js';
+import { NativeFormatter } from '../../src/formatters/native.js';
+import { chunkFrame } from '../helpers/bedrock-event-stream.js';
 import { MockAdapter } from '../../src/providers/mock.js';
 import { createProgressDeadline, deadlineTimeoutError, isDeadlineAbort } from '../../src/providers/utils.js';
 import { PROGRESS_BOUNDS, resolveProgressBounds, type ProgressBounds } from '../../src/progress-bounds.js';
@@ -564,6 +567,46 @@ describe('AnthropicAdapter under progress bounds', () => {
     expect((result as { message?: string }).message).toMatch(
       /^No content within 2s of a thinking block's start \(max_tokens 100 at 50 tokens a second\): /,
     );
+    expect(calls).toHaveLength(1);
+  });
+});
+
+describe('BedrockAdapter under progress bounds', () => {
+  it('end a stream that sends only pings after message_start, as a timeout naming the bound, and send it once', async () => {
+    const calls: RequestInit[] = [];
+    vi.stubGlobal('fetch', async (_input: unknown, init: RequestInit) => {
+      calls.push(init);
+      let done = false;
+      let controller!: ReadableStreamDefaultController<Uint8Array>;
+      const body = new ReadableStream<Uint8Array>({
+        start(c) { controller = c; },
+        cancel() { done = true; },
+      });
+      init.signal?.addEventListener('abort', () => {
+        if (done) return;
+        done = true;
+        controller.error(init.signal!.reason as Error);
+      }, { once: true });
+      void (async () => {
+        controller.enqueue(chunkFrame({ type: 'message_start', message: { usage: { input_tokens: 3 } } }));
+        for (let elapsed = 0; elapsed < 3000 && !done; elapsed += 25) {
+          controller.enqueue(chunkFrame({ type: 'ping' }));
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        if (!done) { done = true; controller.close(); }
+      })();
+      return new Response(body, { status: 200 });
+    });
+    const membrane = new Membrane(
+      new BedrockAdapter({ accessKeyId: 'zz-key', secretAccessKey: 'zz-secret', region: 'us-east-1' }),
+      { formatter: new NativeFormatter() },
+    );
+    const result = await membrane.stream(
+      { ...NATIVE_REQUEST, tools: undefined },
+      { progressBounds: { beforeContentMs: 300, betweenEventsMs: 300, thinkTokensPerSecond: 50 } },
+    );
+    expect(result).toMatchObject({ aborted: true, reason: 'timeout' });
+    expect((result as { message?: string }).message).toMatch(/^No content within 0\.3s of the send: /);
     expect(calls).toHaveLength(1);
   });
 });

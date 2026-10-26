@@ -291,9 +291,10 @@ export interface ProviderRequestContext {
  * through `ProviderRequestOptions.onProgress`. `'content'`: a content delta of
  * any kind (text, thinking, tool input, a signature), or a `redacted_thinking`
  * block's start, since that block arrives whole once its think is done. Any
- * other block's start is only an event: a text or tool block's content
- * follows as deltas, and a server tool's result block, which arrives whole
- * too, follows its call's input deltas, so content has begun by then.
+ * other block's start, apart from a thinking block's (below), is only an
+ * event: a text or tool block's content follows as deltas, and a server
+ * tool's result block, which arrives whole too, follows its call's input
+ * deltas, so content has begun by then.
  * `'think'`: a `thinking` block's start, unless the body asks for summarized
  * thinking (`display: 'summarized'`): any other such block can stream
  * nothing until its signature, as a block of reasoning does under
@@ -303,7 +304,10 @@ export type ProgressSeen = 'content' | 'think';
 
 /**
  * What an adapter reports about one attempt as it sends it, through
- * `ProviderRequestOptions.onSend`.
+ * `ProviderRequestOptions.onSend`. It comes before any credential resolver
+ * runs, and once for the attempt, so progress bounds count a resolver's time,
+ * and the one resend after an HTTP 401 it makes within the attempt, against
+ * `beforeContentMs`.
  */
 export interface SendReport {
   /**
