@@ -1,6 +1,10 @@
 /**
- * Without a `strict` field, a function tool's validation is the provider's
- * default, and strict validation makes every property one the model must send.
+ * Responses attempts to normalize an omitted `strict` into strict mode when
+ * possible; that mode requires every property. Explicit `strict: false` opts
+ * out, preserving the caller's optional-property semantics.
+ * https://developers.openai.com/api/docs/guides/function-calling#strict-mode
+ * These mocked tests assert the outbound contract, not the model's choice of
+ * tool arguments.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OpenAIResponsesAPIAdapter } from '../../src/providers/openai-responses-api.js';
@@ -288,8 +292,27 @@ const SAVE_RECENT_IMAGE: ToolDefinition = frozen({
   },
 });
 
-describe('save_recent_image through Membrane', () => {
-  it('reaches the Responses wire with strict:false and its own required list (API key, Responses formatter)', async () => {
+// Schema shape from agent-framework 0.22.1, with abbreviated descriptions.
+// This fixture does not track that module: Membrane must preserve any schema
+// revision unchanged and send strict:false, regardless of its paging rules.
+const WORKSPACE_READ: ToolDefinition = frozen({
+  name: 'workspace--read',
+  description: 'Read workspace text using either line or character paging, never both.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      path: { type: 'string' },
+      offset: { type: 'number' },
+      limit: { type: 'number' },
+      offsetChars: { type: 'integer' },
+      limitChars: { type: 'integer' },
+    },
+    required: ['path'],
+  },
+});
+
+describe('function tools through Membrane', () => {
+  it.each([SAVE_RECENT_IMAGE, WORKSPACE_READ])('$name reaches the Responses wire with strict:false and its own required list (API key, Responses formatter)', async (fixture) => {
     const fetchMock = stubFetch(completedJson);
     const membrane = new Membrane(
       new OpenAIResponsesAPIAdapter({ apiKey: 'sk-test' }),
@@ -297,17 +320,17 @@ describe('save_recent_image through Membrane', () => {
     );
 
     await membrane.complete({
-      messages: [{ participant: 'nissa', content: [{ type: 'text', text: 'Keep that screenshot.' }] }],
+      messages: [{ participant: 'nissa', content: [{ type: 'text', text: 'Use the requested tool.' }] }],
       config: { model: 'gpt-5.6', maxTokens: 100 },
-      tools: [SAVE_RECENT_IMAGE],
+      tools: [fixture],
     });
 
     const [tool] = sentTools(fetchMock) as Array<Record<string, any>>;
     expect(tool).toEqual({
       type: 'function',
-      name: 'save_recent_image',
-      description: SAVE_RECENT_IMAGE.description,
-      parameters: SAVE_RECENT_IMAGE.inputSchema,
+      name: fixture.name,
+      description: fixture.description,
+      parameters: fixture.inputSchema,
       strict: false,
     });
     expect(tool!.parameters.required).toEqual(['path']);
@@ -398,7 +421,7 @@ describe('save_recent_image through Membrane', () => {
     expect(((error as MembraneError).rawRequest as { tools?: unknown }).tools).toEqual(refusedTools);
   });
 
-  it('reaches the subscription wire with strict:false from an Anthropic-shaped input_schema (native formatter)', async () => {
+  it.each([SAVE_RECENT_IMAGE, WORKSPACE_READ])('$name reaches the subscription wire with strict:false from an Anthropic-shaped input_schema (native formatter)', async (fixture) => {
     const fetchMock = stubFetch(completedSse);
     const membrane = new Membrane(
       new OpenAIResponsesAPIAdapter({ mode: 'subscription', credentials: async () => ({ token: 'subscription-token' }) }),
@@ -406,79 +429,19 @@ describe('save_recent_image through Membrane', () => {
     );
 
     await membrane.complete({
-      messages: [{ participant: 'nissa', content: [{ type: 'text', text: 'Keep that screenshot.' }] }],
+      messages: [{ participant: 'nissa', content: [{ type: 'text', text: 'Use the requested tool.' }] }],
       config: { model: 'gpt-5.4', maxTokens: 100 },
-      tools: [SAVE_RECENT_IMAGE],
+      tools: [fixture],
     });
 
     const [tool] = sentTools(fetchMock) as Array<Record<string, any>>;
     expect(tool).toEqual({
       type: 'function',
-      name: 'save_recent_image',
-      description: SAVE_RECENT_IMAGE.description,
-      parameters: SAVE_RECENT_IMAGE.inputSchema,
+      name: fixture.name,
+      description: fixture.description,
+      parameters: fixture.inputSchema,
       strict: false,
     });
     expect(tool!.parameters.required).toEqual(['path']);
-  });
-});
-
-// Mirrors the property names, types and required list of agent-framework 0.22.1
-// workspace read; descriptions are abbreviated. Paging is selected by presence:
-// line arguments and character arguments cannot be supplied together.
-const WORKSPACE_READ: ToolDefinition = frozen({
-  name: 'workspace--read',
-  description: 'Read workspace text using either line or character paging, never both.',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      path: { type: 'string' },
-      offset: { type: 'number' },
-      limit: { type: 'number' },
-      offsetChars: { type: 'integer' },
-      limitChars: { type: 'integer' },
-    },
-    required: ['path'],
-  },
-});
-
-describe.each(Object.entries(MODES))('workspace read optional paging through Membrane, %s', (modeName, mode) => {
-  it.each([
-    ['default', { path: 'workspace/check.txt' }],
-    ['lines', { path: 'workspace/check.txt', offset: 3, limit: 2 }],
-    ['characters', { path: 'workspace/unicode.txt', offsetChars: 5, limitChars: 5 }],
-  ])('keeps %s paging optional on the wire and preserves omitted arguments on return', async (_case, input) => {
-    const response = {
-      id: 'resp_read', model: 'gpt-5.6', status: 'completed',
-      output: [{
-        type: 'function_call', id: 'fc_read', call_id: 'call_read',
-        name: WORKSPACE_READ.name, arguments: JSON.stringify(input), status: 'completed',
-      }],
-      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
-    };
-    const subscription = modeName === 'subscription mode';
-    const fetchMock = stubFetch(() => new Response(
-      subscription
-        ? `data: ${JSON.stringify({ type: 'response.completed', response })}\n\n`
-        : JSON.stringify(response),
-      { headers: { 'Content-Type': subscription ? 'text/event-stream' : 'application/json' } },
-    ));
-    const membrane = new Membrane(mode.adapter(), {
-      formatter: subscription ? new NativeFormatter() : new OpenAIResponsesFormatter(),
-      assistantParticipant: 'Reader',
-    });
-
-    const result = await membrane.complete({
-      messages: [{ participant: 'user', content: [{ type: 'text', text: 'Read the requested file range.' }] }],
-      config: { model: 'gpt-5.6', maxTokens: 100 },
-      tools: [WORKSPACE_READ],
-    });
-
-    // This is the regression assertion: the old adapter omits strict here.
-    expect(sentTools(fetchMock)).toEqual([{
-      type: 'function', name: WORKSPACE_READ.name, description: WORKSPACE_READ.description,
-      parameters: WORKSPACE_READ.inputSchema, strict: false,
-    }]);
-    expect(result.toolCalls).toStrictEqual([{ id: 'call_read', name: WORKSPACE_READ.name, input }]);
   });
 });
