@@ -21,7 +21,6 @@ import {
 } from '../types/index.js';
 import { errorFromThrown } from '../types/errors.js';
 import { stripEmptyTextAfterPassthrough } from '../utils/empty-text.js';
-import { isUnsignedThinking } from '../utils/thinking-carriers.js';
 import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, streamIndex, isEventObject, isToolCallBlock, isToolCallArgumentsDelta, progressOfAnthropicEvent } from './utils.js';
 import {
   INTERLEAVED_THINKING_BETA,
@@ -34,8 +33,7 @@ import {
   sendsDisplayUpdates,
   thinkingEnabled,
 } from './anthropic.js';
-import { imageForRequest, urlImageForRequest } from '../utils/image-media.js';
-import { convertMcpMedia, isSourcelessMedia } from '../utils/mcp-media.js';
+import { anthropicWireMessages, blockBuiltFrom } from '../utils/anthropic-wire-blocks.js';
 
 export interface BedrockAdapterConfig {
   /** AWS access key ID */
@@ -276,13 +274,16 @@ const AWS_EVENTSTREAM_STRING_HEADER_TYPE = 7;
 export class BedrockAdapter implements ProviderAdapter {
   readonly name = 'bedrock';
   /**
-   * Reports what it leaves out: whitespace-only text its cleanup removes, an
-   * image whose data the API doesn't accept, which goes as the placeholder
-   * (at the top level or nested in a tool result), a thinking block with no
-   * signature, media with no source object, and a passthrough `messages` that
-   * replaces the built ones. Otherwise it carries message content as built,
-   * nested tool-result blocks included; only wire fields (sourceUrl, cache
-   * ttl, media_type spelling) change.
+   * Reports what it leaves out or replaces: media with no source object, a
+   * thinking block with no signature, an image whose data the API doesn't
+   * accept, which goes as the placeholder, a block in a tool_result's content
+   * other than text and a base64 or URL image, whitespace-only text, an
+   * error tool_result's image, which goes as a note, an error tool_result
+   * that would go with no content, which carries a note, and a passthrough
+   * `messages` that replaces the built ones. Otherwise it carries message
+   * content as built, each block at the top of a message built from the
+   * API's fields for its type, in the wire's spellings and without a cache
+   * ttl.
    */
   readonly reportsContentAlterations = true;
   readonly cacheReceiptBasis = 'wire-request' as const;
@@ -406,83 +407,7 @@ export class BedrockAdapter implements ProviderAdapter {
   }
 
   private buildRequest(request: ProviderRequest, bedrockModelId?: string, onContentAltered?: (block?: unknown) => void): BedrockMessageRequest {
-    const originals = new WeakMap<object, unknown>();
-    const remember = <T>(copy: T, original: unknown): T => {
-      if (copy !== original && copy !== null && typeof copy === 'object') originals.set(copy as object, original);
-      return copy;
-    };
-    // Bedrock rejects extra inputs on an image block (e.g. Gemini's
-    // sourceUrl), and rejects cache_control.ttl as one: its prompt cache runs at
-    // the fixed default (5m) TTL, and the marker without the ttl works.
-    // It requires snake_case `media_type` on an image source, where membrane
-    // writes `mediaType`: without it a tool-returned image 400s with
-    // "media_type: Field required".
-    const toWireImage = (block: any, onPlaceholder: () => void): any => {
-      const source = block.source;
-      if (source?.type === 'url') {
-        const image = urlImageForRequest(source.url);
-        if (image.placeholder) {
-          onPlaceholder();
-          return block.cache_control ? { ...image.placeholder, cache_control: block.cache_control } : image.placeholder;
-        }
-        return image.data ? { ...block, source: { type: 'base64', media_type: image.mediaType, data: image.data } } : block;
-      }
-      if (!source || source.type !== 'base64') return block;
-      const { mediaType, media_type, ...restSource } = source;
-      const image = imageForRequest(source.data, media_type ?? mediaType);
-      if (image.placeholder) {
-        onPlaceholder();
-        return block.cache_control ? { ...image.placeholder, cache_control: block.cache_control } : image.placeholder;
-      }
-      return {
-        ...block,
-        source: {
-          ...restSource,
-          media_type: image.mediaType,
-        },
-      };
-    };
-    const sanitizedMessages = (request.messages as any[]).map((msg: any) => {
-      if (!Array.isArray(msg.content)) return msg;
-      const converted = convertMcpMedia(msg.content as unknown[]) as any[];
-      return {
-        ...msg,
-        content: msg.content.flatMap((original: any, index: number) => {
-          const block = converted[index];
-          if (isSourcelessMedia(block)) {
-            onContentAltered?.(original);
-            return [];
-          }
-          if (isUnsignedThinking(block)) {
-            // The API refuses a thinking block without a valid signature.
-            onContentAltered?.(original);
-            return [];
-          }
-          return [remember((() => {
-            if (block.type === 'image' && block.sourceUrl !== undefined) {
-              const { sourceUrl, ...rest } = block;
-              return stripCacheTtl(toWireImage(rest, () => onContentAltered?.(original)));
-            }
-            if (block.type === 'image') {
-              return stripCacheTtl(toWireImage(block, () => onContentAltered?.(original)));
-            }
-            if (block.type === 'tool_result' && Array.isArray(block.content)) {
-              let altered = false;
-              const content = block.content.flatMap((inner: any) => {
-                if (isSourcelessMedia(inner)) {
-                  altered = true;
-                  return [];
-                }
-                return [inner?.type === 'image' ? toWireImage(inner, () => { altered = true; }) : inner];
-              });
-              if (altered) onContentAltered?.(original);
-              return stripCacheTtl({ ...block, content });
-            }
-            return stripCacheTtl(block);
-          })(), original)];
-        }),
-      };
-    });
+    const sanitizedMessages = anthropicWireMessages(request.messages, { onContentAltered, finish: stripCacheTtl, imageMediaTypeLast: true });
 
     const params: BedrockMessageRequest = {
       anthropic_version: this.anthropicVersion,
@@ -563,9 +488,7 @@ export class BedrockAdapter implements ProviderAdapter {
       params.anthropic_beta = [...new Set([...existing, THINKING_DISPLAY_UPDATES_BETA])];
     }
 
-    stripEmptyTextAfterPassthrough(params, onContentAltered
-      ? (dropped) => onContentAltered(dropped !== null && typeof dropped === 'object' ? originals.get(dropped) ?? dropped : dropped)
-      : undefined);
+    stripEmptyTextAfterPassthrough(params, onContentAltered ? (dropped) => onContentAltered(blockBuiltFrom(dropped)) : undefined);
     return params;
   }
 

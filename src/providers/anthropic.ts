@@ -7,6 +7,7 @@ import { anthropicServerBlockFor, isAnthropicServerBlock, unpairedServerBlocks, 
 import { imageForRequest, urlImageForRequest, assertWithinByteBudget, shedImagesToFitByteBudget } from '../utils/image-media.js';
 import { convertMcpMedia, isSourcelessMedia } from '../utils/mcp-media.js';
 import { isUnsignedThinking } from '../utils/thinking-carriers.js';
+import { anthropicToolResultContent, anthropicWireMessages, blockBuiltFrom } from '../utils/anthropic-wire-blocks.js';
 import type {
   ProviderAdapter,
   ProviderInputTransformation,
@@ -182,7 +183,7 @@ export function readInputTransformations(
       type,
       ...(typeof reason === 'string' ? { reason } : {}),
       ...(typeof path === 'string' ? { path } : {}),
-      ...(block !== undefined ? { block } : {}),
+      ...(block !== undefined ? { block: blockBuiltFrom(block) } : {}),
     });
   }
   return { inputTransformations };
@@ -318,10 +319,16 @@ function observeBodyActivity(base: SdkFetch, observe?: () => void): SdkFetch {
 export class AnthropicAdapter implements ProviderAdapter {
   readonly name = 'anthropic';
   /**
-   * Carries message content verbatim, and reports what it can't: an image
-   * whose data the API doesn't accept, which goes as the placeholder (at the
-   * top level or nested in a tool result), and the nested tool-result blocks
-   * it has no form for.
+   * Reports what it leaves out or replaces: media with no source object, a
+   * thinking block with no signature, an image whose data the API doesn't
+   * accept, which goes as the placeholder, a block in a tool_result's content
+   * other than text and a base64 or URL image, whitespace-only text, an
+   * error tool_result's image, which goes as a note, an error tool_result
+   * that would go with no content, which carries a note, a `tool_addition`
+   * whose schema's root union is flattened, and a passthrough `messages` that
+   * replaces the built ones. Otherwise it carries message content as built,
+   * each block at the top of a message built from the API's fields for its
+   * type, in the wire's spellings.
    */
   readonly reportsContentAlterations = true;
   readonly cacheReceiptBasis = 'wire-request' as const;
@@ -909,75 +916,7 @@ export class AnthropicAdapter implements ProviderAdapter {
   }
 
   private buildRequest(request: ProviderRequest, onContentAltered?: (block?: unknown) => void): Anthropic.MessageCreateParams {
-    // Anthropic rejects extra inputs on an image block (e.g. Gemini's
-    // sourceUrl), and expects snake_case `media_type` where membrane writes
-    // `mediaType`: a nested tool_result image with `{source: {mediaType: ...}}`
-    // fails the API's validation.
-    const sanitizedMessages = (request.messages as any[]).map((msg: any) => {
-      if (!Array.isArray(msg.content)) return msg;
-      const converted = convertMcpMedia(msg.content as unknown[]);
-      return {
-        ...msg,
-        content: msg.content.map((original: any, index: number) => {
-          const block = converted[index] as any;
-          if (isSourcelessMedia(block)) {
-            onContentAltered?.(original);
-            return undefined;
-          }
-          if (isUnsignedThinking(block)) {
-            // The API refuses a thinking block without a valid signature, as another provider's reasoning has.
-            onContentAltered?.(original);
-            return undefined;
-          }
-          if (block.type === 'image') {
-            const { sourceUrl, ...rest } = block;
-            if (block.source?.type === 'url') {
-              const image = urlImageForRequest(block.source.url);
-              if (image.placeholder) {
-                onContentAltered?.(original);
-                return rest.cache_control ? { ...image.placeholder, cache_control: rest.cache_control } : image.placeholder;
-              }
-              if (image.data) return { ...rest, source: { type: 'base64', media_type: image.mediaType, data: image.data } };
-              return rest;
-            }
-            if (block.source?.type !== 'base64') return rest;
-            // A wire-shaped source keeps its key order, so an already-correct image
-            // serializes to the same bytes as before (the prompt cache reads bytes).
-            const { mediaType, ...source } = block.source;
-            const image = imageForRequest(source.data, source.media_type ?? mediaType);
-            if (image.placeholder) {
-              onContentAltered?.(original);
-              return rest.cache_control ? { ...image.placeholder, cache_control: rest.cache_control } : image.placeholder;
-            }
-            return {
-              ...rest,
-              source: {
-                ...source,
-                media_type: image.mediaType,
-              },
-            };
-          }
-          if (block.type === 'tool_result' && Array.isArray(block.content)) {
-            let substituted = false;
-            const content = toAnthropicToolResultContent(block.content as ContentBlock[], () => { substituted = true; });
-            // Anthropic's tool_result content takes only text and image blocks.
-            const carried = (block.content as Array<{ type?: string; text?: unknown }>)
-              .filter((b) => !(b?.type === 'text' && (typeof b.text !== 'string' || b.text === ''))).length;
-            if (content.length !== carried || substituted) onContentAltered?.(original);
-            return { ...block, content };
-          }
-          if (block.type === 'tool_addition' && block.tool?.type === 'tool_definition' && block.tool.definition) {
-            const definition = block.tool.definition;
-            const flattened = flattenRootSchemaUnion(definition.input_schema);
-            if (flattened !== definition.input_schema) {
-              onContentAltered?.(original);
-              return { ...block, tool: { ...block.tool, definition: { ...definition, input_schema: flattened } } };
-            }
-          }
-          return block;
-        }).filter((block: unknown) => block !== undefined),
-      };
-    });
+    const sanitizedMessages = anthropicWireMessages(request.messages, { onContentAltered, finish: withFlatToolAddition, nestedInApiOrder: true }) as Array<{ content?: unknown }>;
 
     assertWithinByteBudget(sanitizedMessages, undefined, 'anthropic-provider');
 
@@ -1054,7 +993,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       Object.assign(params, rest);
     }
 
-    stripEmptyTextAfterPassthrough(params, onContentAltered);
+    stripEmptyTextAfterPassthrough(params, onContentAltered ? (dropped) => onContentAltered(blockBuiltFrom(dropped)) : undefined);
     return params;
   }
 
@@ -1183,23 +1122,14 @@ export class AnthropicAdapter implements ProviderAdapter {
   }
 }
 
-function toAnthropicToolResultContent(
-  blocks: ContentBlock[],
-  onPlaceholder?: () => void,
-): Array<Anthropic.TextBlockParam | Anthropic.ImageBlockParam> {
-  const out: Array<Anthropic.TextBlockParam | Anthropic.ImageBlockParam> = [];
-  for (const block of stripEmptyTextBlocks(blocks)) {
-    if (block.type === 'text') {
-      out.push({ type: 'text', text: block.text });
-    } else if (block.type === 'image') {
-      const image = block.source?.type === 'base64'
-        ? anthropicImage(block.source.data, block.source.mediaType ?? (block.source as { media_type?: string }).media_type)
-        : block.source?.type === 'url' ? anthropicUrlImage(block.source.url) : undefined;
-      if (image?.type === 'text') onPlaceholder?.();
-      if (image) out.push(image);
-    }
-  }
-  return out;
+function withFlatToolAddition<T extends Record<string, unknown>>(block: T, report: () => void): T {
+  const addition = block as { type?: unknown; tool?: { type?: unknown; definition?: { input_schema?: unknown } } };
+  const definition = addition.type === 'tool_addition' && addition.tool?.type === 'tool_definition' ? addition.tool.definition : undefined;
+  if (!definition) return block;
+  const flattened = flattenRootSchemaUnion(definition.input_schema);
+  if (flattened === definition.input_schema) return block;
+  report();
+  return { ...block, tool: { ...addition.tool, definition: { ...definition, input_schema: flattened } } };
 }
 
 /** The API refuses an image whose declared type doesn't match its bytes (a
@@ -1234,6 +1164,9 @@ function anthropicUrlImage(url: string): Anthropic.ImageBlockParam | Anthropic.T
  * document that doesn't convert, with no source after that, is left out, and
  * so is an image with no source object that isn't MCP's form, with neither
  * `data` nor `mimeType`. A thinking block with no signature is left out too.
+ * A `tool_result`'s content carries text and images only, an error result's
+ * text only, with an image there going as a note, and an error result with
+ * nothing to send carries a note.
  * Nothing reports what it leaves out: it has no alteration callback. It sees
  * one turn, so a turn whose only blocks it or pairing leaves out comes back
  * empty, for the caller to drop, unless it's the final turn and dropping it
@@ -1305,9 +1238,7 @@ export function toAnthropicContent(
         result.push({
           type: 'tool_result',
           tool_use_id: block.toolUseId,
-          content: typeof block.content === 'string'
-            ? block.content
-            : toAnthropicToolResultContent(block.content),
+          content: anthropicToolResultContent(block.content, { is_error: block.isError }) as Anthropic.ToolResultBlockParam['content'],
           is_error: block.isError,
         });
         break;

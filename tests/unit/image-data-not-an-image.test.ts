@@ -369,7 +369,7 @@ describe('data: URLs', () => {
     expect(result.content).toEqual([{ type: 'text', text: expect.stringContaining(SAID) }]);
   });
 
-  it('the Bedrock adapter keeps a tool-result image\'s cache breakpoint on its placeholder', () => {
+  it('the Bedrock adapter sends a tool-result image\'s placeholder without its cache breakpoint, as Anthropic\'s does', () => {
     const built = (bedrock() as any).buildRequest({
       model: 'claude-sonnet-4-5',
       messages: [{ role: 'user', content: [
@@ -380,8 +380,8 @@ describe('data: URLs', () => {
       ] }],
     });
     expect(built.messages[0].content[0].content).toEqual([
-      { type: 'text', text: expect.stringContaining(SAID), cache_control: { type: 'ephemeral' } },
-      { type: 'text', text: expect.stringContaining(SAID), cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: expect.stringContaining(SAID) },
+      { type: 'text', text: expect.stringContaining(SAID) },
     ]);
   });
 

@@ -1,9 +1,9 @@
 /**
  * Anthropic accepts at most 4 cache_control breakpoints per request and
  * rejects the fifth with a non-retryable 400 ("A maximum of 4 blocks with
- * cache_control may be provided. Found 5."). A marker can also ride a block
- * nested in another block's content (`tool_result.content`), which reaches
- * the wire as it is.
+ * cache_control may be provided. Found 5."). The walk also counts a marker
+ * on a block nested in another block's content (`tool_result.content`),
+ * though no adapter's build sends one there.
  */
 
 /** Anthropic's hard limit on cache_control breakpoints per request. */
