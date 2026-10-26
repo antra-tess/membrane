@@ -97,6 +97,7 @@ export interface CacheKeepaliveConfig {
    * (no read, or a write) at which the lineage is dropped. Default 2.
    */
   maxIneffective?: number;
+  /** Each keepalive event as it happens. An error it throws is ignored. */
   onEvent?: (event: KeepaliveEvent) => void;
   /** Report background calls to the same ledger as foreground inference.
    * Invoked once on success (including ineffective responses) or failure.

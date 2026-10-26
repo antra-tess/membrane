@@ -20,7 +20,9 @@ const HEADINGS = {
   fixed: "Fixed",
 };
 
-// process.exit() would race a stderr write to a pipe, which is asynchronous on macOS, and the caller would get the failure status without its reason.
+// A refusal throws this, and the entry point reports it and sets exitCode:
+// process.exit() would race a stderr write to a pipe, which is asynchronous
+// on macOS, and the caller would get the failure status without its reason.
 class ReleaseError extends Error {}
 const fail = (msg) => {
   throw new ReleaseError(msg);

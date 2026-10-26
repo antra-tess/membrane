@@ -66,8 +66,10 @@ const NO_TEMPERATURE_MODELS = [
   'claude-mythos-preview',
 ];
 
+const LATER_VERSION_SUFFIX = /^(\d|-\d{1,2}(?!\d))/;
+
 function noTemperatureSupport(model: string): boolean {
-  return NO_TEMPERATURE_MODELS.some((id) => model.startsWith(id) && !/^(\d|-\d{1,2}(?!\d))/.test(model.slice(id.length)));
+  return NO_TEMPERATURE_MODELS.some((id) => model.startsWith(id) && !LATER_VERSION_SUFFIX.test(model.slice(id.length)));
 }
 
 /** Beta flag for thinking blocks between tool calls on pre-4.6 Claude 4.
