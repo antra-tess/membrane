@@ -4,14 +4,16 @@ import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import type { ProviderRequest } from '../../src/types/index.js';
 
 // membrane#97: ProviderRequestOptions.timeoutMs is documented as the request
-// timeout and the Chat Completions adapters honour it through
+// timeout and the other provider adapters honour it through
 // createCombinedSignal; the Anthropic adapter never reads it. A stream whose
-// body keeps sending deltas re-arms the idle watchdog forever, so timeoutMs
-// is the only whole-call bound a caller has — and here it is inert.
+// body keeps sending deltas re-arms the idle watchdog forever, so besides the
+// caller's own signal, timeoutMs is the only whole-call bound a caller has —
+// and here it is inert.
 //
-// RED on main: the call ignores timeoutMs and settles only at the caller's
-// own abort. GREEN once the adapter bounds the whole call by timeoutMs with
-// the TimeoutAbortError classification the other adapters' timeoutMs gives
+// RED on main: the call ignores timeoutMs and runs on until the caller's own
+// abort, or the test's timeout where there is none. GREEN once the adapter
+// bounds the whole call by timeoutMs with the TimeoutAbortError
+// classification the other adapters' timeoutMs gives
 // (type 'timeout', retryable false — a spent whole-call budget, unlike the
 // idle watchdog's retryable stall).
 
@@ -117,21 +119,29 @@ describe('Anthropic adapter timeoutMs (membrane#97)', () => {
     ).rejects.toMatchObject({ type: 'timeout', retryable: false, name: 'TimeoutAbortError' });
   });
 
+  // The SDK client takes the global fetch when it is built, so each adapter
+  // is built after its stub.
   it('keeps a caller abort an abort when timeoutMs is set too, on stream() and complete()', async () => {
-    const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
     const aborted = { type: 'abort', retryable: false, name: 'MembraneError' };
-    vi.stubGlobal('fetch', async (_input: unknown, init: RequestInit) => foreverStreamingResponse(init));
+    const streamingFetch = vi.fn(async (_input: unknown, init: RequestInit) => foreverStreamingResponse(init));
+    vi.stubGlobal('fetch', streamingFetch);
+    const streamer = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
     const streaming = new AbortController();
     setTimeout(() => streaming.abort(), DELTA_MS * 2);
     await expect(
-      adapter.stream(request, { onChunk: () => {} }, { timeoutMs: 600_000, signal: streaming.signal }),
+      streamer.stream(request, { onChunk: () => {} }, { timeoutMs: 600_000, signal: streaming.signal }),
     ).rejects.toMatchObject(aborted);
-    vi.stubGlobal('fetch', async (_input: unknown, init: RequestInit) => hangingResponse(init));
+    expect(streamingFetch).toHaveBeenCalledTimes(1);
+
+    const hangingFetch = vi.fn(async (_input: unknown, init: RequestInit) => hangingResponse(init));
+    vi.stubGlobal('fetch', hangingFetch);
+    const completer = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
     const completing = new AbortController();
     setTimeout(() => completing.abort(), DELTA_MS);
     await expect(
-      adapter.complete(request, { timeoutMs: 600_000, signal: completing.signal }),
+      completer.complete(request, { timeoutMs: 600_000, signal: completing.signal }),
     ).rejects.toMatchObject(aborted);
+    expect(hangingFetch).toHaveBeenCalledTimes(1);
   });
 
   it('bounds a stream that never stops sending deltas by timeoutMs, not by the caller', async () => {
@@ -157,13 +167,15 @@ describe('Anthropic adapter timeoutMs (membrane#97)', () => {
   // alive ten minutes after its last stream) and a dead listener on the
   // caller's signal. The listener on the caller's signal is the observable
   // half, so it is the pin.
-  it('releases the deadline and the caller-signal listener once a stream completes', async () => {
+  it('releases the caller-signal listener once a stream completes, with or without timeoutMs', async () => {
     vi.stubGlobal('fetch', async () => completingResponse());
     const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
-    const caller = new AbortController();
-    const result = await adapter.stream(request, { onChunk: () => {} }, { timeoutMs: 600_000, signal: caller.signal });
-    expect(result.stopReason).toBe('end_turn');
-    expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
+    for (const timeoutMs of [600_000, undefined]) {
+      const caller = new AbortController();
+      const result = await adapter.stream(request, { onChunk: () => {} }, { signal: caller.signal, ...(timeoutMs ? { timeoutMs } : {}) });
+      expect(result.stopReason).toBe('end_turn');
+      expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
+    }
   });
 
   it('releases the deadline and the caller-signal listener once complete() returns', async () => {
@@ -174,6 +186,25 @@ describe('Anthropic adapter timeoutMs (membrane#97)', () => {
     const caller = new AbortController();
     const result = await adapter.complete(request, { timeoutMs: 600_000, signal: caller.signal });
     expect(result.stopReason).toBe('end_turn');
+    expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
+  });
+
+  it('releases the caller-signal listener when a stream or complete() fails', async () => {
+    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({
+      type: 'error', error: { type: 'invalid_request_error', message: 'zz bad request' },
+    }), { status: 400, headers: { 'content-type': 'application/json', 'request-id': 'req_fixture' } }));
+    const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
+    for (const timeoutMs of [600_000, undefined]) {
+      const caller = new AbortController();
+      await expect(
+        adapter.stream(request, { onChunk: () => {} }, { signal: caller.signal, ...(timeoutMs ? { timeoutMs } : {}) }),
+      ).rejects.toMatchObject({ httpStatus: 400 });
+      expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
+    }
+    const caller = new AbortController();
+    await expect(
+      adapter.complete(request, { timeoutMs: 600_000, signal: caller.signal }),
+    ).rejects.toMatchObject({ httpStatus: 400 });
     expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
   });
 });
