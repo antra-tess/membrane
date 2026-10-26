@@ -12,6 +12,43 @@ Releases up to and including 0.5.75 predate this file; for their contents see
 
 ## Unreleased
 
+## 0.7.2 — 2026-10-26
+
+### Added
+
+- **`ProviderRequestOptions.onSend`** (`SendReport`: `maxTokens`, `reportsContent`) and an argument to **`onProgress`** (`ProgressSeen`: `'content'`). `AnthropicAdapter` and `BedrockAdapter` report the `max_tokens` their body carries, and on `stream()` which events are content. A decorator forwards `onSend` with the other options, and `onProgress` with its argument. Membrane itself passes no `onSend` and reads no `onProgress` argument, so these reach only code that calls an adapter directly.
+- **`BedrockAdapter`'s stream** carries a refusal's `stop_details` on its final message, its raw response, when a `message_delta` carried them, which AWS's page doesn't show, so they may never come. An exception or error event inside a Bedrock stream now keeps the provider's error on the error's raw error, as `error`, as an Anthropic SDK error keeps its body.
+
+- **`ProviderResponse.refusalCategory`**, optional: the provider's category for a refusal, such as `'cyber'`. An adapter sets it when the provider stopped with `refusal` and named a category, and membrane announces it on a refusal re-issue's `RetryingEvent.category`. `AnthropicAdapter` sets it from `stop_details.category`. A custom adapter sets it to have its category announced, and a decorator that builds a new provider response, rather than passing on the one it got, carries it.
+
+### Changed
+
+- The Anthropic adapter's list of models whose `temperature`, `top_p` and `top_k` it strips now
+  names each model by its id. An entry matches that id, or that id followed by anything that
+  doesn't continue its version (a digit, or a hyphen and one or two digits, does), such as a dated
+  snapshot. Before, an entry such as `claude-sonnet-5` matched every id that began with it. Every
+  model the old entries covered is still listed: Fable 5.1 and Sonnet 5.5 on measurements (on
+  2026-10-23, with no thinking config, each refused `temperature` 0.2 and `top_k` 40 with a 400,
+  and Fable 5.1 a `top_p` of 0.9, which Sonnet 5.5 refused on 2026-10-19), and Mythos 5.1 because
+  the Fable and Mythos family always thinks, and with thinking on the API takes no custom
+  `temperature` or `top_k`. A model released later that an old entry would have covered, such as
+  `claude-opus-5-6`, gets a caller's sampling parameters passed through rather than stripped until
+  a release lists it, and if it refuses them, the API's 400 says so.
+
+### Fixed
+
+- **Cache keepalive: a lineage's touch counts from the request's send, where the cache's clock starts (follow-up to #164).** Since #164 the keepalive records a request once the provider has begun answering it, at `message_start` or once a non-streamed answer arrives, and it stamped the lineage's touch then. So a call that waited minutes for its first event, or a `complete()` whose answer took minutes (in the opt-in `complete` lane), had its first refresh fall due that much later against a TTL that started at the send, toward the edge where a refresh writes instead of reading. The adapter now passes each attempt's send time to `CacheKeepalive.record()`, whose new optional `sentAt` sets the touch, and the 24-hour window unless the lineage already has a later real call (left out, both count from now). A refresh stamps its touch at its own send rather than its return. `getStatus()`'s `idleMs` and `realIdleMs`, and a `refreshed` event's `idleMs`, now include that wait. `record()`'s doc and the keepalive's header now say the provider has *processed* the prefix, not cached it: a prefix under the model's minimum cacheable length is processed and not cached, and the refresh's self-check drops its lineage.
+
+- The Anthropic adapter strips `temperature`, `top_k` and `top_p` for Claude Opus 5 and Opus 5.5
+  (`claude-opus-5` and `claude-opus-5-5`, with their dated snapshots), as it does for the other
+  models that refuse them. With no thinking config, both refused `temperature` 0.2, `top_k` 40 and
+  `top_p` 0.9 with a 400 ("… is deprecated for this model"), so a caller's sampling setting
+  failed the whole request. As for the other listed models, every `top_p` is stripped, with a
+  thinking config or without one: 0.99 too, which both accept with no thinking config, and a
+  `top_p` of 0.95 or more under thinking, which the adapter used to pass.
+
+- **A refusal re-issue's `RetryingEvent.category` now carries the refused attempt's category through `AnthropicAdapter`.** Membrane read the category from `raw.response.stop_details` on the adapter's response, a shape no built-in adapter's raw response has: `AnthropicAdapter`'s raw carries `stop_details` at its top level. So the event never had a category for a real Anthropic refusal. The adapter now reports it in the new `ProviderResponse.refusalCategory` (under Added): Anthropic's `stop_details.category`, such as `'cyber'`, set on `stream()` and `complete()` when the provider stopped with `refusal` and the category is a non-empty string. Membrane reads that field for the event, and no longer reads the adapter's raw response for it. A custom adapter whose raw response carried the category at `response.stop_details`, the one shape that was read, sets `refusalCategory` to keep it on the event. `BedrockAdapter` now sets the field too, from the `stop_details` AWS documents on a non-streamed body, and on its stream when a refusal's `message_delta` carries them, which AWS's page doesn't show, so there they may never come. Its refusal re-issues carry their category whenever it's read. The other built-in adapters set none, so their retrying events still have no category.
+
 ## 0.7.1 — 2026-10-22
 
 ### Added
