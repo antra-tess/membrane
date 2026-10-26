@@ -302,7 +302,7 @@ export class BedrockAdapter implements ProviderAdapter {
   private region: string;
   private defaultMaxTokens: number;
   private anthropicVersion: string;
-  private baseURL?: string;
+  private baseURL: string;
 
   constructor(config: BedrockAdapterConfig = {}) {
     this.accessKeyId = config.accessKeyId ?? process.env.AWS_ACCESS_KEY_ID ?? '';
@@ -311,7 +311,7 @@ export class BedrockAdapter implements ProviderAdapter {
     this.region = config.region ?? process.env.AWS_REGION ?? 'us-west-2';
     this.defaultMaxTokens = config.defaultMaxTokens ?? 4096;
     this.anthropicVersion = config.anthropicVersion ?? 'bedrock-2023-05-31';
-    this.baseURL = config.baseURL?.replace(/\/$/, '');
+    this.baseURL = config.baseURL?.replace(/\/$/, '') ?? `https://bedrock-runtime.${this.region}.amazonaws.com`;
 
     if (!this.accessKeyId || !this.secretAccessKey) {
       throw new Error('AWS credentials required: accessKeyId and secretAccessKey');
@@ -499,7 +499,7 @@ export class BedrockAdapter implements ProviderAdapter {
     rawRequest: unknown
   ): Promise<BedrockMessageResponse> {
     const url = new URL(
-      `${this.baseURL ?? `https://bedrock-runtime.${this.region}.amazonaws.com`}/model/${encodeURIComponent(modelId)}/invoke`
+      `${this.baseURL}/model/${encodeURIComponent(modelId)}/invoke`
     );
 
     const body = JSON.stringify(request);
@@ -543,7 +543,7 @@ export class BedrockAdapter implements ProviderAdapter {
     onProgress?: ProviderRequestOptions['onProgress'],
   ): Promise<ProviderResponse> {
     const url = new URL(
-      `${this.baseURL ?? `https://bedrock-runtime.${this.region}.amazonaws.com`}/model/${encodeURIComponent(modelId)}/invoke-with-response-stream`
+      `${this.baseURL}/model/${encodeURIComponent(modelId)}/invoke-with-response-stream`
     );
 
     const body = JSON.stringify(request);
@@ -964,7 +964,7 @@ export class BedrockAdapter implements ProviderAdapter {
       });
     }
 
-    return errorFromThrown(error, rawRequest);
+    return errorFromThrown(error, rawRequest, this.baseURL);
   }
 }
 

@@ -1,4 +1,5 @@
 import { authError } from '../types/index.js';
+import { failedElsewhere } from '../types/errors.js';
 
 /** Credential acquisition stays with the application; transports resolve per attempt. */
 export interface ResolvedCredential {
@@ -27,7 +28,7 @@ export async function fetchWithCredentials(
   for (const forceRefresh of [false, true]) {
     signal?.throwIfAborted();
     const credential = typeof credentials === 'function'
-      ? await resolveWithSignal(credentials, forceRefresh, signal)
+      ? await resolveWithSignal(credentials, forceRefresh, signal).catch((error: unknown) => { throw failedElsewhere(error); })
       : credentials;
     signal?.throwIfAborted();
     validateCredential(credential);

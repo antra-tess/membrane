@@ -1055,7 +1055,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       return deadlineExpired(timeoutError(error.message, error, rawRequest));
     }
     if (error instanceof Anthropic.APIConnectionError) {
-      return networkError(error.message, error, rawRequest);
+      return networkError(error.message, error, rawRequest, this.client.baseURL);
     }
 
     if (error instanceof Anthropic.APIError) {
@@ -1104,7 +1104,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       }
     }
 
-    return errorFromThrown(error, rawRequest);
+    return errorFromThrown(error, rawRequest, this.client.baseURL);
   }
 
   private parseRetryAfter(error: { headers?: Headers }): number | undefined {
