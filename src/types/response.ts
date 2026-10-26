@@ -1,13 +1,5 @@
-/**
- * Response types for membrane
- */
-
 import type { ContentBlock } from './content.js';
 import type { ToolCall, ToolResult } from './tools.js';
-
-// ============================================================================
-// Stop Reason
-// ============================================================================
 
 export type StopReason =
   | 'end_turn'       // Natural completion
@@ -22,10 +14,6 @@ export type StopReason =
                      // automatic resumptions re-sent context without advancing
   | 'round_limit';   // Resumption round cap ended the turn: the turn kept
                      // resuming (with progress) past maxResumptionRounds
-
-// ============================================================================
-// Usage Information
-// ============================================================================
 
 export interface BasicUsage {
   inputTokens: number;
@@ -71,12 +59,6 @@ export interface DiscardedAttemptsUsage extends CallUsage {
 
 type Assert<TCondition extends true> = TCondition;
 
-/**
- * Erased at build; checked by `tsc --noEmit`, which covers src/ and not the
- * test suite — so this is where a type-level guarantee can actually fail the
- * build. Re-widening the discarded record to `DetailedUsage` reintroduces
- * discarded-spend-inside-discarded-spend and turns this line red.
- */
 type DiscardedSpendDoesNotNest = Assert<
   'discardedAttempts' extends keyof DiscardedAttemptsUsage ? false : true
 >;
@@ -109,10 +91,6 @@ export interface CostBreakdown {
    */
   pricingAsOf?: string;
 }
-
-// ============================================================================
-// Stop Information
-// ============================================================================
 
 export interface StopInfo {
   reason: StopReason;
@@ -147,10 +125,6 @@ export interface StopInfo {
   unclosedToolBlock?: boolean;
 }
 
-// ============================================================================
-// Model Information
-// ============================================================================
-
 export interface ModelInfo {
   /** Model ID that was requested */
   requested: string;
@@ -175,10 +149,6 @@ export interface ModelInfo {
    */
   perRound?: TurnRoundUsage[];
 }
-
-// ============================================================================
-// Timing Information
-// ============================================================================
 
 export interface TimingInfo {
   /** Total request duration */
@@ -207,10 +177,6 @@ export interface TimingInfo {
   retryDelaysMs?: number[];
 }
 
-// ============================================================================
-// Cache Information
-// ============================================================================
-
 export interface CacheInfo {
   /** Cache markers in the last logical request, using the adapter's
    * cacheReceiptBasis. The default counts post-hook semantic markers;
@@ -228,10 +194,6 @@ export interface CacheInfo {
   hitRatio: number;
 }
 
-// ============================================================================
-// Response Details
-// ============================================================================
-
 export interface ResponseDetails {
   stop: StopInfo;
   usage: DetailedUsage;
@@ -246,10 +208,6 @@ export interface ResponseDetails {
    */
   anomalies?: ResponseAnomaly[];
 }
-
-// ============================================================================
-// Provider anomalies
-// ============================================================================
 
 /**
  * A round the provider ended with a literal `stop_reason: end_turn` while its
@@ -299,10 +257,6 @@ export interface ToolUseWithEndTurnAnomaly {
 
 export type ResponseAnomaly = ToolUseWithEndTurnAnomaly;
 
-// ============================================================================
-// Raw Access
-// ============================================================================
-
 export interface RawAccess {
   /** Exact request body sent to provider */
   request: unknown;
@@ -313,10 +267,6 @@ export interface RawAccess {
   /** Response headers */
   headers?: Record<string, string>;
 }
-
-// ============================================================================
-// Normalized Response
-// ============================================================================
 
 export interface NormalizedResponse {
   /** Response content blocks (parsed/structured) */
@@ -352,10 +302,6 @@ export interface NormalizedResponse {
   /** Raw request/response for debugging */
   raw: RawAccess;
 }
-
-// ============================================================================
-// Aborted Response
-// ============================================================================
 
 export interface AbortedResponse {
   aborted: true;

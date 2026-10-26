@@ -21,7 +21,6 @@ afterEach(() => vi.unstubAllGlobals());
 
 const chatRequest = { model: 'zz-model-1', maxTokens: 64, messages: [{ role: 'user', content: 'zz prompt' }] };
 
-/** The failure must be retryable: the request was never answered in full. */
 async function expectRetryableTerminalFailure(streaming: Promise<unknown>): Promise<void> {
   const error = await streaming.then(
     (value) => { throw new Error(`expected a terminal-event failure, resolved with ${JSON.stringify(value)}`); },
@@ -128,7 +127,7 @@ describe('GeminiAdapter terminal-event observation', () => {
 
 function fakeAnthropicStream(events: unknown[]) {
   return {
-    controller: { abort() { /* noop */ } },
+    controller: { abort() { } },
     [Symbol.asyncIterator]() {
       let i = 0;
       return {

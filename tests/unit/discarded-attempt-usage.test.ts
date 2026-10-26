@@ -14,7 +14,6 @@ import type { NormalizedRequest, StreamEvent } from '../../src/types/index.js';
 const REFUSED_USAGE = { inputTokens: 700, outputTokens: 70 };
 const SURVIVING_USAGE = { inputTokens: 700, outputTokens: 30 };
 
-/** Refuses the first `refusals` attempts with a real (billed) usage record. */
 class BilledRefusingAdapter implements ProviderAdapter {
   readonly name = 'zz-billed-refusing';
   calls = 0;
@@ -66,7 +65,6 @@ describe('complete() refusal retries report discarded spend', () => {
     const response = await new Membrane(adapter).complete(createRequest(), { refusalRetries: 1 });
 
     expect(adapter.calls).toBe(2);
-    // The response describes the attempt that stands.
     expect(response.usage).toMatchObject(SURVIVING_USAGE);
     expect(response.details.usage.discardedAttempts).toMatchObject({
       attempts: 1,

@@ -6,10 +6,6 @@ import type { ProviderRequest } from '../../src/types/index.js';
 
 const wire: ProviderRequest = { model: 'zz-review-model', messages: [{ role: 'user', content: 'go' }], maxTokens: 16 };
 
-// ---------------------------------------------------------------------------
-// Vercel AI Gateway aggregates on the Anthropic adapter: main's precedence.
-// ---------------------------------------------------------------------------
-
 describe('Anthropic gateway aggregates keep main precedence', () => {
   const adapter = () => new AnthropicAdapter({ apiKey: 'zz-key', cacheKeepalive: { enabled: false } });
   const classify = (error: unknown) => (adapter() as any).handleError(error, wire);
@@ -30,7 +26,6 @@ describe('Anthropic gateway aggregates keep main precedence', () => {
     expect(got).toMatchObject({
       type: 'server', retryable: true, httpStatus: status, providerErrorCode: code, retryAfterMs: 7000, rawRequest: wire,
     });
-    // MembraneError stores a serialized copy; the SDK error's text and body survive.
     expect(got.rawError).toMatchObject({ message: error.message, error: error.error });
   });
   it('retries a status-less aggregate whose code implies a non-authoritative status', () => {
@@ -64,10 +59,6 @@ describe('Anthropic gateway aggregates keep main precedence', () => {
     expect(classify(apiError(status, code, 'plain provider failure'))).toMatchObject({ type, retryable: false, httpStatus: status, providerErrorCode: code });
   });
 });
-
-// ---------------------------------------------------------------------------
-// A wait read from prose belongs to the guarded reader alone.
-// ---------------------------------------------------------------------------
 
 describe('the Anthropic adapter reads no loose prose wait', () => {
   const adapter = () => new AnthropicAdapter({ apiKey: 'zz-key', cacheKeepalive: { enabled: false } });

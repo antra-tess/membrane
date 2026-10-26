@@ -1,22 +1,9 @@
-/**
- * Incremental XML parser for streaming
- *
- * Tracks nesting depth of XML blocks as tokens arrive, enabling:
- * - False-positive stop sequence detection
- * - Structured block events for UI
- * - Enriched chunk metadata for TTS/display filtering
- */
-
 import type {
   BlockEvent,
   ChunkMeta,
   MembraneBlock,
   MembraneBlockType,
 } from '../types/streaming.js';
-
-// ============================================================================
-// Result Types
-// ============================================================================
 
 /**
  * A single emission from processChunk - either content or a block event.
@@ -34,10 +21,6 @@ export interface ProcessChunkResult {
   /** @deprecated Use emissions instead - blockEvents may be out of order with content */
   blockEvents: BlockEvent[];
 }
-
-// ============================================================================
-// Parser State
-// ============================================================================
 
 interface ParserState {
   functionCallsDepth: number;
@@ -85,13 +68,10 @@ function createInitialState(): ParserState {
   };
 }
 
-// For finding all membrane tags in one pass
 const ALL_TAGS = /<\/?(?:antml:)?(?:function_calls|function_results|thinking)>/g;
 
-// For matching complete membrane tags  
 const COMPLETE_MEMBRANE_TAG = /^<\/?(?:antml:)?(?:function_calls|function_results|thinking|invoke|parameter)(?:\s[^>]*)?>$/;
 
-// Known membrane tag prefixes
 const MEMBRANE_TAG_PREFIXES = [
   '<thinking', '<\/thinking>',
   '<function_calls', '<\/function_calls>',
@@ -101,10 +81,6 @@ const MEMBRANE_TAG_PREFIXES = [
   '<function_calls', '<\/antml:function_calls>',
   '<invoke', '<\/antml:invoke>',
 ];
-
-// ============================================================================
-// Incremental XML Parser
-// ============================================================================
 
 export class IncrementalXmlParser {
   private state: ParserState;
@@ -118,11 +94,6 @@ export class IncrementalXmlParser {
     return this.scan();
   }
 
-  /**
-   * Reset streaming state for a new API response iteration.
-   * Keeps accumulated text and depths, but resets block tracking
-   * so processChunk will resync currentBlockType with current depths.
-   */
   resetForNewIteration(): void {
     this.state.currentBlockStarted = false;
     this.state.currentBlockContent = '';
@@ -172,16 +143,10 @@ export class IncrementalXmlParser {
     };
   }
 
-  /**
-   * Get the current block index (for external block event emission).
-   */
   getBlockIndex(): number {
     return this.state.blockIndex;
   }
 
-  /**
-   * Increment the block index (call after emitting external block events).
-   */
   incrementBlockIndex(): void {
     this.state.blockIndex++;
   }
@@ -194,38 +159,25 @@ export class IncrementalXmlParser {
     return this.flush().blockEvents;
   }
 
-  // ============================================================================
-  // Enriched Streaming API
-  // ============================================================================
-
   processChunk(chunk: string): ProcessChunkResult {
     const emissions: StreamEmission[] = [];
     const content: Array<{ text: string; meta: ChunkMeta }> = [];
     const blockEvents: BlockEvent[] = [];
 
-    // Helper to emit content (adds to both emissions and legacy content array)
     const emitContent = (text: string, meta: ChunkMeta) => {
       emissions.push({ kind: 'content', text, meta });
       content.push({ text, meta });
     };
 
-    // Helper to emit block event (adds to both emissions and legacy blockEvents array)
     const emitBlockEvent = (event: BlockEvent) => {
       emissions.push({ kind: 'blockEvent', event });
       blockEvents.push(event);
     };
 
-    // Sync currentBlockType with depths before processing
-    // This handles the case where push() was used for prefill initialization
-    // and now we're streaming with processChunk()
     if (!this.state.currentBlockStarted) {
       this.state.currentBlockType = this.getCurrentBlockType();
     }
 
-    // Note: We intentionally do NOT call scanForDepth() here anymore.
-    // The character-by-character handling via handleMembraneTag() tracks depths.
-    // Calling scanForDepth() would pre-update depths before content is emitted,
-    // causing the last tokens before a closing tag to have wrong type.
     this.state.accumulated += chunk;
 
     let pos = 0;
@@ -270,7 +222,6 @@ export class IncrementalXmlParser {
       }
     }
 
-    // Update lastScanPos so scanForDepth won't re-process tags we handled
     this.state.lastScanPos = this.state.accumulated.length;
 
     return { emissions, content, blockEvents };
@@ -310,10 +261,6 @@ export class IncrementalXmlParser {
     return 'text';
   }
 
-  // ============================================================================
-  // Private Methods
-  // ============================================================================
-
   private isCompleteMembraneTag(buffer: string): boolean {
     if (!buffer.endsWith('>')) return false;
     return COMPLETE_MEMBRANE_TAG.test(buffer);
@@ -334,10 +281,6 @@ export class IncrementalXmlParser {
   private handleMembraneTag(tag: string): BlockEvent[] {
     const events: BlockEvent[] = [];
     const isClosing = tag.startsWith('</');
-
-    // A closing tag completes the block in progress, if there is one. After
-    // a flush, or after resetForNewIteration, there is none, and nothing went
-    // out for the tag to complete. Depths stop at 0, as in scanForDepth.
 
     if (tag.includes('thinking')) {
       if (!isClosing) {
@@ -426,8 +369,6 @@ export class IncrementalXmlParser {
   }
 
   private getCurrentMeta(): ChunkMeta {
-    // Use currentBlockType (updated only after tag is fully handled)
-    // not getCurrentBlockType() (which checks depths that may be pre-updated by scanForDepth)
     const type = this.state.currentBlockType;
     return {
       type,
@@ -495,10 +436,6 @@ export class IncrementalXmlParser {
     return afterLt.length;
   }
 }
-
-// ============================================================================
-// Utility Functions
-// ============================================================================
 
 export function hasUnclosedXmlBlock(text: string): boolean {
   const parser = new IncrementalXmlParser();

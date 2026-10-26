@@ -8,7 +8,6 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-/** One response's events: a silent think's start, its signature, a redacted think, then text. */
 const EVENTS = [
   { type: 'message_start', message: { id: 'msg_zz', type: 'message', role: 'assistant', model: 'claude-zz', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 1 } } },
   { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } },
@@ -21,7 +20,6 @@ const EVENTS = [
   { type: 'content_block_stop', index: 2 },
   { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 5 } },
 ];
-/** What each event above is reported as. */
 const SEEN = [undefined, undefined, 'content', undefined, 'content', undefined, undefined, 'content', undefined, undefined];
 
 const REQUEST: ProviderRequest = {
@@ -43,11 +41,6 @@ function observed() {
   return { options, sends, seen, body: () => body };
 }
 
-/**
- * A real AnthropicAdapter over a stubbed SDK client. `sends`, when given, is
- * read as the SDK is called, into `reportsAtSend`, so a test can tell the
- * send report came first.
- */
 function anthropicStreaming(events: unknown[], sends?: SendReport[], reportsAtSend: number[] = []) {
   const adapter = new AnthropicAdapter({ apiKey: 'zz-key', cacheKeepalive: { enabled: false } });
   (adapter as any).client = {
@@ -104,7 +97,6 @@ describe('BedrockAdapter', () => {
     expect(atSend).toEqual([1]);
     expect(o.body()!.max_tokens).toBe(333);
     expect(o.sends).toEqual([{ maxTokens: 333, reportsContent: true }]);
-    // Reading stops at message_delta, so message_stop is never an event.
     expect(o.seen).toEqual(SEEN);
   });
 
@@ -148,7 +140,6 @@ describe('BedrockAdapter', () => {
     const withDetails = await bedrock().stream(REQUEST, { onChunk: () => {} });
     expect(withDetails.stopReason).toBe('refusal');
     expect(withDetails.refusalCategory).toBe('cyber');
-    // The final message, the raw response, carries them as the delta did.
     expect((withDetails.raw as { stop_details?: unknown }).stop_details).toEqual({ type: 'refusal', category: 'cyber' });
 
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, body: streamBody(refusalDelta({})) })));

@@ -1,12 +1,3 @@
-/**
- * Parser-safety regressions for the XML tool parser.
- *
- * Each case here fails on the unfixed parser — they are the red fixtures for
- * the 2026-08-25 review findings F3 (spliced truncated block), F8 (one-spelling
- * invoke regex + silent zero-invoke block), F9 (contained spans), F11 (document
- * order across invoke forms) and F13 (executed-block lookahead).
- */
-
 import { describe, it, expect } from 'vitest';
 import { parseAccumulatedIntoBlocks, parseToolCalls } from '../../src/utils/tool-parser.js';
 
@@ -162,10 +153,6 @@ describe('F9 · a contained call is filtered before legacy results are paired', 
   const liveCall = toolBlock(`<invoke name="zz_live_tool"/>`);
   const legacyResult = resultsBlock(`<result>\n<stdout>zz-result</stdout>\n</result>`);
 
-  // The quoted call sits earlier in the document than the live one, so a
-  // callSites entry built before containment filtering is the FIRST unclaimed
-  // site the legacy pairing walks — it claims the phantom and leaves the real
-  // call answerless.
   const shadowedTurn =
     `<thinking>zz musing: I could call ${shadowedCall} but I will not.\n</thinking>\n` +
     `zz_bot: calling the real one\n${liveCall}\n${legacyResult}`;
@@ -191,8 +178,6 @@ describe('F9 · a contained call is filtered before legacy results are paired', 
   });
 
   it('pairs by containment order when the quoted call has the live call\'s name', () => {
-    // The quoted call wears the SAME name as the live one, so the tool_name
-    // disambiguator cannot rescue the pairing — only containment order can.
     const quotedTwin = toolBlock(`<invoke name="zz_live_tool"/>`);
     const namedResult = resultsBlock(
       `<result>\n<tool_name>zz_live_tool</tool_name>\n<stdout>zz-result</stdout>\n</result>`
@@ -321,11 +306,6 @@ describe('F13 · executed-block detection', () => {
 });
 
 describe('greptile#52-2 · a call span that crosses out of its container', () => {
-  // The quoted opener sits INSIDE the thinking block and its closer sits after
-  // `</thinking>`, so the call span starts inside a retained container and ends
-  // past it. Retention that tested only `end` kept both spans: the quoted call
-  // dispatched, and the source text from the quoted opener to `</thinking>`
-  // was emitted twice — once as thinking content, once as a tool_use.
   const crossingTurn =
     `<thinking>zz musing: I could write ${FUNCTION_CALLS_OPEN}\n` +
     `<invoke name="zz_quoted_tool"><parameter name="fld1">v1</parameter></invoke>\n` +
@@ -367,9 +347,6 @@ describe('greptile#52-2 · a call span that crosses out of its container', () =>
   });
 
   it('reports no structural defect for an unpaired closer', () => {
-    // Measured, not assumed: hasUnclosedToolBlock compares opener COUNT to
-    // closer count, so a closer with no opener left outside every span is
-    // invisible to every structural diagnostic and simply reads as text.
     const parsed = parseAccumulatedIntoBlocks(crossingTurn);
 
     expect(parsed.unclosedToolBlock).toBe(false);
@@ -403,10 +380,6 @@ describe('greptile#52-2 · a call span that crosses out of its container', () =>
 });
 
 describe('greptile#52-1 · an unclosed invoke head absorbs the next call', () => {
-  // The block-splice disease one level down: INVOKE_REGEX's full-form
-  // alternative is lazy, so an invoke left open pairs with the NEXT invoke's
-  // closing tag. The head then dispatches carrying the inner call's parameters
-  // as its own, and the inner call never parses at all.
   const absorbingBlock = toolBlock(
     `<invoke name="zz_head_tool"><parameter name="fld1">1</parameter>\n` +
       `<invoke name="zz_inner_tool"><parameter name="fld2">2</parameter></invoke>`

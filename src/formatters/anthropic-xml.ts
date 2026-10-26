@@ -1,13 +1,3 @@
-/**
- * Anthropic XML Formatter
- *
- * Prefill-based formatting for Anthropic models using XML tool syntax.
- * This is the "classic" membrane format with:
- * - Participant: content format
- * - <function_calls>/<function_results> for tools
- * - <thinking> blocks for extended thinking
- */
-
 import { NativeFormatter } from './native.js';
 import type {
   NormalizedMessage,
@@ -41,10 +31,6 @@ import { lastCacheableBlockIndex } from './native.js';
 import { imageForRequest, isAcceptedImage } from '../utils/image-media.js';
 import { convertMcpMedia } from '../utils/mcp-media.js';
 import { holdsContent, isRawItemCarrier } from '../utils/fidelity.js';
-
-// ============================================================================
-// Configuration
-// ============================================================================
 
 export interface AnthropicXmlFormatterConfig extends FormatterConfig {
   /**
@@ -82,18 +68,6 @@ export interface AnthropicXmlFormatterConfig extends FormatterConfig {
   maxParticipantsForStop?: number;
 }
 
-// ============================================================================
-// Helpers
-// ============================================================================
-
-/**
- * Convert a stored tool_result content block into a ToolResult for XML
- * re-rendering (legacy path — blocks without rawXml). Only text and image
- * sub-blocks survive, an image as it was stored, so its note reads it as the
- * live notes read one (toolResultImage): a base64 or url source, or MCP-style
- * `data` and `mimeType`, which is how a split stores the image a tool returned
- * that way. Other sources, and other block types, have no XML representation.
- */
 function toToolResult(block: ToolResultContent): ToolResult {
   let content: string | ToolResultContentBlock[];
   if (typeof block.content === 'string') {
@@ -104,7 +78,6 @@ function toToolResult(block: ToolResultContent): ToolResult {
       if (sub.type === 'text') {
         content.push({ type: 'text', text: sub.text });
       } else if (sub.type === 'image' && (!sub.source || sub.source.type === 'base64' || sub.source.type === 'url')) {
-        // Typed as a source image; an MCP-style one comes untyped, as the tool returned it.
         content.push(sub as ToolResultContentBlock);
       }
     }
@@ -117,45 +90,12 @@ function toToolResult(block: ToolResultContent): ToolResult {
   };
 }
 
-/** A results block's text split where the turn sent a result's images, with those images. */
 interface SentSplit {
   before: string;
   images: unknown[];
   after: string;
 }
 
-/**
- * The split a turn sent a results block with: the result marked with
- * `rawXmlImagesAt` holds the images it sent, and the raw text splits there,
- * where the live split's second part began with a result's closing text.
- * The stored offset has to fall where a result or error closes, as this
- * version renders the close, and the images are decided again, as the live
- * split (formatToolResultsForSplitTurn) decides them: each image block read
- * as the split reads one (toolResultImage), sent when its data's header shows
- * a format the request carries (isAcceptedImage, imageForRequest's test) and
- * labelled by what the header shows, whatever label it came with. An image at
- * a URL a provider would fetch holds no data, so neither sends it; a `data:`
- * URL holds its image inline, and both read its bytes. Null when no result in
- * the group is marked, the mark doesn't fall where a result or error closes,
- * or no image it holds can be sent; the block then goes out as its raw text
- * whole, and when the marked result holds an image, its round report says
- * the message was altered. A split leaves out the images this rule refuses,
- * with no note and no warning: under the same rule the turn refused them too,
- * and wrote its note for each into the raw text (imageForRequest's
- * placeholder, or the link note). A consumer that removes an image drops the
- * raw text with it (ToolResultContent's rawXmlImagesAt), so only a rule that
- * changed between versions can leave out an image the turn sent, or send one
- * it left out:
- * - data in none of the formats the request carries, which an earlier
- *   version sent by its label and the API refuses, so the request that
- *   carried it failed;
- * - data a url source also carries, which an earlier version's split sent as
- *   an image and this one doesn't read;
- * - a `data:` URL's image, which an earlier version's split refused, and
- *   which this one sends beside the note that turn wrote.
- * Where the split still sends another image, that goes unreported, since
- * `content` doesn't say which of its images the turn sent.
- */
 function sentSplit(group: readonly ToolResultContent[]): SentSplit | null {
   const rawXml = group[0]!.rawXml!;
   const marked = group.find((b) => typeof b.rawXmlImagesAt === 'number');
@@ -168,8 +108,6 @@ function sentSplit(group: readonly ToolResultContent[]): SentSplit | null {
   for (const sub of Array.isArray(marked!.content) ? marked!.content : []) {
     if (sub.type !== 'image') continue;
     const { data, declared } = toolResultImage(sub);
-    // The test without imageForRequest's warning: the turn warned of a
-    // refused image when it wrote its placeholder.
     if (!isAcceptedImage(data)) continue;
     const { mediaType } = imageForRequest(data, declared);
     images.push({ type: 'image', source: { type: 'base64', media_type: mediaType, data } });
@@ -177,21 +115,10 @@ function sentSplit(group: readonly ToolResultContent[]): SentSplit | null {
   return images.length > 0 ? { before: rawXml.slice(0, at), images, after } : null;
 }
 
-/** Whether a result holds an image block among its content. */
 function holdsImage(block: ToolResultContent): boolean {
   return Array.isArray(block.content) && block.content.some((sub) => sub.type === 'image');
 }
 
-/**
- * How many results, or calls, one block's raw text holds, as the parser reads
- * it today: a run of blocks with the same raw text is one block's only up to
- * that many, and the rest are another round's, with the same text, stored
- * beside it. That holds while the parser reads the text as the turn's parse
- * did (see parseAccumulatedIntoBlocks). Infinity when the parser reads none,
- * as for a damaged raw text, so the count doesn't divide the run: calls go out
- * once, as they always did, and results once for each marked result in the
- * run, or once if none is marked (renderToolResultRun).
- */
 function rawXmlGroupCapacity(rawXml: string, kind: 'results' | 'calls', memo: Map<string, number>): number {
   let count = memo.get(rawXml);
   if (count === undefined) {
@@ -201,10 +128,6 @@ function rawXmlGroupCapacity(rawXml: string, kind: 'results' | 'calls', memo: Ma
   }
   return count > 0 ? count : Infinity;
 }
-
-// ============================================================================
-// Anthropic XML Formatter
-// ============================================================================
 
 function escapeLayoutNewlines(value: string): string {
   return `${value.startsWith('\n') ? '\n' : ''}${value}${value.endsWith('\n') ? '\n' : ''}`;
@@ -236,17 +159,8 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     };
   }
 
-  // ==========================================================================
-  // REQUEST BUILDING
-  // ==========================================================================
-
   buildMessages(messages: NormalizedMessage[], options: BuildOptions): BuildResult {
-    // Media in MCP's form becomes membrane's first, for a caller that builds
-    // messages directly. Membrane's own builds have converted it already and
-    // get the same array back (utils/mcp-media.ts).
     messages = convertMcpMedia(messages);
-    // Native mode is a native conversation, not an XML transcript with a tools
-    // array attached. Keep explicit XML's prefill/continuation protocol separate.
     if ((options.toolMode ?? this.config.toolMode) === 'native') {
       return new NativeFormatter({
         unsupportedMedia: this.config.unsupportedMedia,
@@ -266,11 +180,8 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
       hasCacheMarker,
     } = options;
 
-    // Membrane resolves the mode per request and passes it here; the
-    // constructor-time mode is the fallback for direct callers only.
     const toolMode = options.toolMode ?? this.config.toolMode;
 
-    // Build cache_control object (with optional TTL for extended caching)
     const cacheControl: Record<string, unknown> = { type: 'ephemeral' };
     if (cacheTtl) {
       cacheControl.ttl = cacheTtl;
@@ -279,15 +190,11 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     const providerMessages: ProviderMessage[] = [];
     const joiner = this.config.messageDelimiter ? '' : '\n';
 
-    // Track conversation state
     let currentConversation: string[] = [];
     let lastNonEmptyParticipant: string | null = null;
-    // True right after an unlabeled tool-results glue — the next assistant
-    // message continues the same turn, so it must not get a fresh label.
     let lastWasToolResults = false;
 
 
-    // Calculate tool injection point
     const totalMessages = messages.length;
     const toolInjectionIndex = Math.max(0, totalMessages - this.config.toolInjectionPosition);
     let toolsInjected = false;
@@ -298,14 +205,6 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
       tools.length > 0;
     const toolsText = hasToolsForConversation ? this.formatToolsForInjection(tools!) : '';
 
-    // Build system content. A caller-supplied system ARRAY keeps its block
-    // structure and its per-block cache_control: `systemPrompt` accepts
-    // caller-marked blocks from a caller of the formatter itself (a Membrane
-    // request's `system` is a string, so a `cm-owned` Membrane caller marks
-    // its system prompt in a `beforeRequest` hook instead, as
-    // docs/formatters.md describes), and flattening them into one text block
-    // discarded every marker the caller placed (three in, one out) — the
-    // caller's stable prefixes then re-paid full input price forever.
     const callerSystemBlocks = Array.isArray(systemPrompt)
       ? systemPrompt
           .filter((b): b is ContentBlock & { type: 'text' } => b.type === 'text')
@@ -322,25 +221,17 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
       ? systemPrompt
       : (systemBlocks?.map((b) => b.text as string).join('\n') ?? '');
 
-    // Inject tools into system if configured
     if (toolMode === 'xml' && this.config.toolInjectionMode === 'system' && tools?.length) {
       const toolsXml = this.formatToolDefinitionsXml(tools);
       systemText = this.injectToolsIntoSystem(systemText, toolsXml);
       if (systemBlocks) {
-        // Append to the LAST block only — appending to the join would
-        // collapse the array and take every earlier block's marker with it.
         const tail = systemBlocks[systemBlocks.length - 1]!;
         tail.text = this.injectToolsIntoSystem(tail.text as string, toolsXml);
       }
     }
 
-    // Build system content with optional cache control
     let systemContent: unknown;
     if (systemBlocks) {
-      // The caller's own markers are authoritative: adding one beside them
-      // spends a slot the caller already allocated. Under `cm-owned` the
-      // caller owns every slot, so the formatter adds none, as for a system
-      // string and in the native formatter.
       const callerMarkedAny = systemBlocks.some((b) => b.cache_control);
       if (promptCaching && cacheMarkers === 'membrane-system' && !callerMarkedAny) {
         const bpIdx = lastCacheableBlockIndex(systemBlocks);
@@ -355,7 +246,6 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
       systemContent = [systemBlock];
     }
 
-    // Add context prefix as first cached assistant message (for simulacrum seeding)
     if (contextPrefix) {
       const prefixBlock: Record<string, unknown> = { type: 'text', text: contextPrefix };
       if (promptCaching && cacheMarkers === 'membrane-system') {
@@ -367,7 +257,6 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
       });
     }
 
-    // Process messages
     for (let i = 0; i < messages.length; i++) {
       const message = messages[i];
       if (!message) continue;
@@ -375,13 +264,11 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
       const isLastMessage = i === messages.length - 1;
       const isAssistant = message.participant === assistantParticipant;
 
-      // Extract content (recording alterations against this message's index)
       const onAltered = options.fidelity ? () => options.fidelity!.alter(i) : undefined;
       const { text, images, hasUnsupportedMedia, segments, splitImages } = this.extractContent(message.content, message.participant, onAltered);
       const hasImages = images.length > 0;
       const isEmpty = !text.trim() && !hasImages;
 
-      // Handle unsupported media
       if (hasUnsupportedMedia) {
         if (this.config.unsupportedMedia === 'error') {
           throw new Error(`AnthropicXmlFormatter does not support media in message from ${message.participant}. Configure unsupportedMedia: 'strip' to ignore.`);
@@ -390,10 +277,8 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         }
       }
 
-      // Check for tool results
       const hasToolResult = message.content.some(c => c.type === 'tool_result');
 
-      // If message has images, flush and add as user turn
       if (hasImages && !isEmpty) {
         if (currentConversation.length > 0) {
           providerMessages.push({
@@ -403,8 +288,6 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
           currentConversation = [];
         }
 
-        // One user turn: the text, with a split results block's images where
-        // the turn split it, then the message's own images.
         const userContent: unknown[] = [];
         let prefix = `${message.participant}: `;
         for (let k = 0; k < segments.length; k++) {
@@ -422,9 +305,6 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         continue;
       }
 
-      // A results block the turn split to send images replays the same way:
-      // the assistant text through the result, a user turn with its images,
-      // then the rest. Without a split, this is the message's text whole.
       const pushText = (prefix: string): void => {
         for (let k = 0; k < segments.length; k++) {
           const last = k === segments.length - 1;
@@ -437,22 +317,15 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         }
       };
 
-      // Every branch below that leaves a message's content out of the
-      // transcript alters it, unless it held nothing: whitespace-only text is
-      // content, and only an exactly empty '' block with no raw form (not a
-      // zero-width carrier) carries nothing.
       const omitted = () => {
         if (holdsContent(message.content)) onAltered?.();
       };
 
-      // Skip empty messages except last.
       if (isEmpty && !isLastMessage) {
         omitted();
         continue;
       }
 
-      // Check hasCacheMarker callback - flush content BEFORE this message with cache_control
-      // (backward compatibility: callback marks WHERE cache boundary should be)
       if (hasCacheMarker && hasCacheMarker(message, i)) {
         if (currentConversation.length > 0 && promptCaching) {
           const content = currentConversation.join(joiner);
@@ -472,14 +345,12 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         }
       }
 
-      // Inject tools before this message if at injection point
       const shouldInjectHere = toolInjectionIndex > 0 ? i >= toolInjectionIndex : i === 0;
       if (hasToolsForConversation && !toolsInjected && shouldInjectHere) {
         currentConversation.push(toolsText);
         toolsInjected = true;
       }
 
-      // Check bot continuation
       const isBotMessage = message.participant === assistantParticipant;
       const isContinuation = isBotMessage && lastNonEmptyParticipant === assistantParticipant && !hasToolResult;
 
@@ -487,29 +358,15 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         hasToolResult && message.content.every((c) => c.type === 'tool_result');
 
       if (isContinuation && isLastMessage) {
-        // Bot continuation - don't add prefix. Its content is not carried:
-        // the transcript ends on the turn prefix alone.
         omitted();
         continue;
       } else if (isLastMessage && isEmpty) {
-        // Completion target - prefix added below; whitespace it held is not carried
         omitted();
       } else if (text) {
         if (isPureToolResults) {
-          // Tool results are not speech: replay them exactly as they were
-          // injected live — inside the assistant flow, unlabeled (legacy
-          // convention). A participant prefix here re-attributes the
-          // harness's injection as someone's utterance, and the model then
-          // reads the same result in two attributions across compiles
-          // (D2 of the Evander 2026-08-08 scaffold-leak analysis).
           pushText('');
           lastWasToolResults = true;
         } else if (isBotMessage && lastWasToolResults) {
-          // The round after injected results continues the same assistant
-          // turn — no fresh label mid-turn, matching what the model lived.
-          // (If a turn ended exactly on a results injection, the next
-          // assistant turn glues here unlabeled — a minor cost the message
-          // model can't distinguish; a turn id would be needed.)
           pushText('');
           lastWasToolResults = false;
           lastNonEmptyParticipant = message.participant;
@@ -522,8 +379,6 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         }
       }
 
-      // Check cacheBreakpoint - flush INCLUDING this message with cache_control
-      // (explicit user control: this message is the last thing to be cached)
       if (message.cacheBreakpoint && promptCaching && currentConversation.length > 0) {
         const content = currentConversation.join(joiner);
         const contentBlock: Record<string, unknown> = { type: 'text', text: content };
@@ -536,7 +391,6 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
       }
     }
 
-    // Determine turn prefix
     let turnPrefix: string;
     if (thinking?.enabled) {
       turnPrefix = `${assistantParticipant}: <thinking>`;
@@ -544,7 +398,6 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
       turnPrefix = `${assistantParticipant}:`;
     }
 
-    // Flush remaining conversation
     if (hasToolsForConversation && !toolsInjected) {
       currentConversation.push(toolsText);
     }
@@ -565,14 +418,11 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     // (Bedrock and older Claude models enforce it strictly).
     if (providerMessages.length > 0 && providerMessages[0]!.role !== 'user') {
       if (prefillUserMessage) {
-        // Explicit custom prefill user message from config
         providerMessages.unshift({
           role: 'user',
           content: prefillUserMessage,
         });
       } else if (!systemText) {
-        // No system prompt and no custom prefill: default to CLI simulation mode
-        // for context purity in prefill format (chapter2 parity)
         const cliSystemBlock: Record<string, unknown> = {
           type: 'text',
           text: 'The assistant is in CLI simulation mode, and responds to the user\'s CLI commands only with the output of the command.',
@@ -586,7 +436,6 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
           content: '<cmd>cat untitled.txt</cmd>',
         });
       } else {
-        // System prompt is set but no custom prefill — use generic marker
         providerMessages.unshift({
           role: 'user',
           content: '[Start]',
@@ -594,26 +443,12 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
       }
     }
 
-    // Build stop sequences
     const stopSequences = this.buildStopSequences(messages, assistantParticipant, options);
 
-    // Native tools if configured
     const nativeTools = toolMode === 'native' && tools?.length
       ? this.convertToNativeTools(tools)
       : undefined;
 
-    // Budget. Under membrane-system five sites above can attach cache_control
-    // (system, contextPrefix, hasCacheMarker flush, cacheBreakpoint flush,
-    // CLI-simulation system) and multiple cacheBreakpoints are documented
-    // input, so a prefill turn with three marked messages reaches five
-    // markers — one over Anthropic's hard limit, which rejects the request
-    // outright. Clamping here, once, on the finished artifacts is the only
-    // count that can see all five sites; the reported tally is that same
-    // recount, so it can never drift from the wire. Under cm-owned the
-    // formatter adds no marker of its own, so every marker here is one the
-    // caller asked for (its breakpoints, its hasCacheMarker boundaries, the
-    // markers on its own system blocks), and the build asserts they fit
-    // rather than dropping any.
     const cacheSurfaces = { messages: providerMessages, system: systemContent, tools: nativeTools };
     const budget = cacheMarkers === 'cm-owned'
       ? { total: assertCacheMarkersWithinLimit(cacheSurfaces, 'anthropic-xml') }
@@ -639,15 +474,6 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     return xml;
   }
 
-  // ==========================================================================
-  // RESPONSE PARSING
-  // ==========================================================================
-  //
-  // These decode the XML tool protocol whatever mode this formatter builds
-  // in: called directly, they read `<function_calls>` in any text they're
-  // given. Membrane calls them only when a request's resolved protocol is XML;
-  // a native-mode response takes its tool calls from the provider's blocks.
-
   createStreamParser(): StreamParser {
     return new IncrementalXmlParser();
   }
@@ -666,10 +492,6 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     return blocks;
   }
 
-  // ==========================================================================
-  // PRIVATE HELPERS
-  // ==========================================================================
-
   private extractContent(
     content: ContentBlock[],
     participant: string,
@@ -678,19 +500,12 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     let parts: string[] = [];
     const images: unknown[] = [];
     let hasUnsupportedMedia = false;
-    // A results block the turn split to send images ends a segment: the text
-    // through the result goes before its images, the rest after. Joined
-    // without a separator, the segments are the text unsplit.
     const segments: string[] = [];
     const splitImages: unknown[][] = [];
 
     for (let i = 0; i < content.length; i++) {
       const block = content[i]!;
       if (block.type === 'text') {
-        // A zero-width carrier (a provider item with no normalized form, such
-        // as an Anthropic server-tool block) has no text: an empty part would
-        // only add a line to the document. Its item is its content, and the
-        // transcript can't carry it.
         if (isRawItemCarrier(block)) {
           onAltered?.();
           continue;
@@ -713,14 +528,9 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
             });
           }
         } else {
-          // A source that isn't base64 has no branch here, and nor does no
-          // source object at all (media in MCP's form that didn't convert,
-          // utils/mcp-media.ts).
           onAltered?.();
         }
       } else if (block.type === 'tool_use') {
-        // Collect the run of consecutive tool_use blocks so calls parsed
-        // from one <function_calls> block (shared rawXml) render once.
         const run: ToolUseContent[] = [];
         while (i < content.length && content[i]!.type === 'tool_use') {
           run.push(content[i] as ToolUseContent);
@@ -749,8 +559,6 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         hasUnsupportedMedia = true;
         onAltered?.();
       } else {
-        // Thinking carriers and any other block type have no rendering in the
-        // prefill transcript: left out.
         onAltered?.();
       }
     }
@@ -781,9 +589,6 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     for (const block of run) {
       if (block.rawXml) {
         flushLegacy();
-        // One block's calls share its text, which goes out once, for as
-        // many calls as the text holds; more calls with the same text are
-        // another round's.
         if (block.rawXml !== lastRaw || inBlock >= rawXmlGroupCapacity(block.rawXml, 'calls', counts)) {
           out.push(block.rawXml);
           inBlock = 0;
@@ -799,14 +604,6 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     return out;
   }
 
-  /**
-   * See {@link renderToolUseRun}: the same contract for tool results, with
-   * one addition. A results block the turn split to send a result's images
-   * (that result carries `rawXmlImagesAt`) comes back as that split, so the
-   * transcript shows the images where the turn showed them. A block without
-   * rawXml renders its text, with nested media as a note ([Image: …]) and no
-   * rendering for other nested blocks, which alters its message.
-   */
   private renderToolResultRun(run: ToolResultContent[], onAltered?: () => void): Array<string | SentSplit> {
     const out: Array<string | SentSplit> = [];
     let legacy: ToolResultContent[] = [];
@@ -828,12 +625,6 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         continue;
       }
       flushLegacy();
-      // Every result parsed from one <function_results> block carries its
-      // text, which goes out once, for as many results as the parser reads
-      // from it (rawXmlCount). More results with the same text are another
-      // round's, stored beside it, and start a group of their own, and so does
-      // a second marked result: a mark is its own round's. The count is read
-      // only when the next block shares the text.
       const cap = run[i + 1]?.rawXml === block.rawXml ? rawXmlGroupCapacity(block.rawXml, 'results', counts) : 1;
       let end = i + 1;
       let marked = typeof block.rawXmlImagesAt === 'number';
@@ -846,12 +637,6 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
       const group = run.slice(i, end);
       i = end;
       const split = sentSplit(group);
-      // A replay sends what the turn sent: the raw text, and a marked
-      // result's images where the turn split. A marked result that holds an
-      // image goes out as the raw text alone when its mark no longer falls
-      // where a result closes or this replay can't send its images, and then
-      // the message is altered, and its round report says so. An unmarked
-      // result's images were never sent, so its raw text carries it.
       if (!split && group.some((b) => typeof b.rawXmlImagesAt === 'number' && holdsImage(b))) onAltered?.();
       out.push(split ?? block.rawXml);
     }
@@ -859,15 +644,6 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     return out;
   }
 
-  /**
-   * Reconstruct canonical <function_calls> XML for legacy tool_use blocks
-   * stored without rawXml. Lossy (whitespace, parameter order, antml:
-   * prefix are gone) but consistent with the parser and the instructions.
-   *
-   * A string value that begins or ends with a newline gets one more there:
-   * the parser reads one newline on each side of a string parameter as
-   * layout, so this is how that value is written to read back as itself.
-   */
   private formatLegacyToolUseXml(blocks: ToolUseContent[]): string {
     const lines = ['<function_calls>'];
     for (const block of blocks) {
@@ -894,7 +670,6 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
   private formatToolsForInjection(tools: ToolDefinition[]): string {
     const toolsXml = this.formatToolDefinitionsXml(tools);
 
-    // Assemble tags to avoid triggering stop sequences
     const FUNC_CALLS_OPEN = '<' + 'function_calls>';
     const FUNC_CALLS_CLOSE = '</' + 'function_calls>';
     const INVOKE_OPEN = '<' + 'invoke name="';
@@ -938,10 +713,8 @@ When you want to use a tool, output:
   ): string[] {
     const sequences: string[] = [];
 
-    // Use option's maxParticipantsForStop, falling back to config
     const maxParticipants = options.maxParticipantsForStop ?? this.config.maxParticipantsForStop;
 
-    // Collect unique participants (excluding assistant)
     const participants = new Set<string>();
     for (let i = messages.length - 1; i >= 0 && participants.size < maxParticipants; i--) {
       const message = messages[i];
@@ -950,15 +723,12 @@ When you want to use a tool, output:
       }
     }
 
-    // Participant-based stops
     for (const participant of participants) {
       sequences.push(`\n${participant}:`);
     }
 
-    // Tool-related stop
     sequences.push('</function_calls>');
 
-    // Add any additional stop sequences from options
     if (options.additionalStopSequences?.length) {
       sequences.push(...options.additionalStopSequences);
     }

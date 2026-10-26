@@ -40,10 +40,8 @@ function build(
   });
 }
 
-/** A caller's system prompt as an array of blocks, none of them marked. */
 const unmarkedSystemArray = () => [{ type: 'text' as const, text: 'system one' }, { type: 'text' as const, text: 'system two' }];
 
-/** The system blocks a build sends: each one's text, and whether it carries a marker. */
 function sentSystem(system: unknown): Array<{ text: unknown; marked: boolean }> {
   return Array.isArray(system)
     ? system.map((block) => {
@@ -103,7 +101,6 @@ describe('cm-owned cache marker contract', () => {
   }
 
   it('anthropic-xml: the CLI-simulation system block carries a marker only under membrane-system', () => {
-    // No system prompt and a context prefix: the build stands in its CLI-simulation system block.
     const owned = build(new AnthropicXmlFormatter(), [], '');
     expect(sentSystem(owned.systemContent)).toEqual([{ text: expect.stringContaining('CLI simulation mode'), marked: false }]);
     expect(countCacheControls(owned)).toBe(0);
@@ -122,12 +119,9 @@ describe('cm-owned cache marker contract', () => {
       promptCaching: true,
       cacheMarkers: 'cm-owned',
       assistantParticipant: 'Claude',
-      // Without it Membrane resolves native tool mode, and the XML formatter
-      // hands the build to the native formatter.
       toolMode: 'xml',
     });
     const sent = adapter.getLastRequest() as unknown as { system?: unknown; messages?: unknown[] };
-    // The XML transcript was built: it ends in the assistant's prefill.
     expect(sent.messages?.at(-1)).toEqual({ role: 'assistant', content: 'Claude:' });
     expect(countCacheControls({ system: sent.system, messages: sent.messages })).toBe(4);
     expect(sentSystem(sent.system)).toEqual([
@@ -149,10 +143,6 @@ describe('cm-owned cache marker contract', () => {
     expect(() => build(formatter, messages)).toThrow(/imported block-level/);
   });
 
-  // docs/formatters.md gives a beforeRequest hook as the way a Membrane caller
-  // marks its system prompt under cm-owned, since NormalizedRequest.system is
-  // a string. The hook's marker is sent beside the caller's breakpoints, on
-  // complete() and on stream(), which applies the hook at its own site.
   for (const [name, makeFormatter, toolMode, method] of [
     ['native', () => new NativeFormatter(), undefined, 'complete'],
     ['anthropic-xml', () => new AnthropicXmlFormatter(), 'xml', 'complete'],
@@ -188,8 +178,6 @@ describe('cm-owned cache marker contract', () => {
       if (method === 'stream') await membrane.stream(normalized, { onChunk: () => {} });
       else await membrane.complete(normalized);
       const sent = adapter.getLastRequest() as unknown as { system?: unknown; messages?: unknown[] };
-      // The XML transcript was built: without toolMode 'xml' the XML formatter
-      // hands the build to the native formatter, and this case would test that.
       if (toolMode === 'xml') expect(sent.messages?.at(-1)).toEqual({ role: 'assistant', content: 'Claude:' });
       expect(sentSystem(sent.system)).toEqual([{ text: 'system one', marked: true }]);
       expect(countCacheControls({ system: sent.system, messages: sent.messages })).toBe(4);

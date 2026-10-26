@@ -1,9 +1,3 @@
-/**
- * Test extended thinking and redacted traces
- * 
- * Run with: npx tsx test-thinking.ts
- */
-
 import Anthropic from '@anthropic-ai/sdk';
 
 const client = new Anthropic({
@@ -50,7 +44,6 @@ async function testBasicThinking() {
 async function testThinkingMultiTurn() {
   console.log('\n=== Test 2: Multi-turn with Thinking Preservation ===\n');
   
-  // First turn
   const response1 = await client.messages.create({
     model: 'claude-sonnet-4-20250514',
     max_tokens: 8000,
@@ -68,7 +61,6 @@ async function testThinkingMultiTurn() {
     console.log('  -', block.type, block.type === 'text' ? `: "${block.text.slice(0, 50)}..."` : '');
   }
   
-  // Second turn - echo back the content blocks
   const response2 = await client.messages.create({
     model: 'claude-sonnet-4-20250514',
     max_tokens: 8000,
@@ -78,7 +70,7 @@ async function testThinkingMultiTurn() {
     },
     messages: [
       { role: 'user', content: 'I\'m thinking of a number between 1 and 100. It\'s 42. Remember it.' },
-      { role: 'assistant', content: response1.content },  // Echo back with thinking
+      { role: 'assistant', content: response1.content },
       { role: 'user', content: 'What number was I thinking of?' }
     ],
   });
@@ -115,7 +107,6 @@ async function testThinkingWithTools() {
     },
   ];
   
-  // First request - should trigger tool use
   const response1 = await client.messages.create({
     model: 'claude-sonnet-4-20250514',
     max_tokens: 8000,
@@ -148,11 +139,9 @@ async function testThinkingWithTools() {
     return;
   }
   
-  // Execute tool
   const toolResult = eval((toolUseBlock.input as any).expression);
   console.log('\nTool result:', toolResult);
   
-  // Second request - provide tool result, preserve thinking
   const response2 = await client.messages.create({
     model: 'claude-sonnet-4-20250514',
     max_tokens: 8000,
@@ -217,7 +206,6 @@ async function testRedactedThinking() {
     }
   }
   
-  // Check if any thinking was redacted
   const hasRedacted = response.content.some(b => b.type === 'redacted_thinking');
   console.log('\nHas redacted thinking:', hasRedacted);
 }

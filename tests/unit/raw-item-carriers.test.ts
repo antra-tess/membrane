@@ -11,21 +11,19 @@ import type { NormalizedMessage, NormalizedRequest } from '../../src/types/index
 const compactionItem = { type: 'compaction', id: 'cmp_1', encrypted_content: 'opaque-payload' };
 const customToolItem = { type: 'custom_tool_call_output', id: 'ct_1', output: 'opaque-output' };
 
-/** History as persisted after a Responses turn: assistant and user messages
- *  each contain a zero-width carrier next to real text. */
 const historyWithCarriers: NormalizedMessage[] = [
   { participant: 'User', content: [{ type: 'text', text: 'hello' }] },
   {
     participant: 'Claude',
     content: [
-      { type: 'text', text: '', rawItem: compactionItem }, // zero-width carrier
+      { type: 'text', text: '', rawItem: compactionItem },
       { type: 'text', text: 'real answer' },
     ],
   },
   {
     participant: 'User',
     content: [
-      { type: 'text', text: '', rawItem: customToolItem }, // zero-width carrier
+      { type: 'text', text: '', rawItem: customToolItem },
       { type: 'text', text: 'next turn' },
     ],
   },
@@ -41,7 +39,6 @@ function expectNoEmptyOrCarrierText(providerMessages: any[]): void {
   expect(texts.length).toBeGreaterThan(0);
   for (const block of texts) {
     expect(block.text).not.toBe('');
-    // A carrier resurrected by name prefixing would surface as exactly "Name: "
     const participantPrefixOnly = /^\S+: $/;
     expect(block.text).not.toMatch(participantPrefixOnly);
   }
@@ -99,7 +96,6 @@ describe('zero-width rawItem carrier blocks', () => {
       customToolItem,
       { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'next turn' }] },
     ]);
-    // Not an imported history — the system prompt (→ `instructions`) survives.
     expect(result.systemContent).toBe('sys');
   });
 });

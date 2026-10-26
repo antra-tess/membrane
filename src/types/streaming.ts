@@ -1,15 +1,7 @@
-/**
- * Streaming types for membrane
- */
-
 import type { ContentBlock } from './content.js';
 import type { ToolCall, ToolResult, ToolContext } from './tools.js';
 import type { BasicUsage } from './response.js';
 import type { PrefillFormatter } from '../formatters/types.js';
-
-// ============================================================================
-// Membrane Block Types (logical content regions, not API types)
-// ============================================================================
 
 /**
  * Membrane block types - logical content regions at the context level.
@@ -29,10 +21,6 @@ export interface MembraneBlock {
   input?: Record<string, unknown>;  // For tool_call (parsed parameters)
   isError?: boolean;          // For tool_result
 }
-
-// ============================================================================
-// Chunk Metadata
-// ============================================================================
 
 /**
  * Chunk type - alias for MembraneBlockType for clarity in chunk contexts
@@ -65,10 +53,6 @@ export interface ChunkMeta {
   /** Tool name (for tool_call chunks, once known) */
   toolName?: string;
 }
-
-// ============================================================================
-// Block Events
-// ============================================================================
 
 /**
  * Block start event - signals a new block is starting.
@@ -105,10 +89,6 @@ export type BlockDelta =
   | { type: 'thinking'; thinking: string }
   | { type: 'tool_input'; partialJson: string };
 
-// ============================================================================
-// Stream State
-// ============================================================================
-
 export interface StreamState {
   /** Accumulated text output */
   accumulated: string;
@@ -128,10 +108,6 @@ export interface StreamState {
   /** Abort function */
   abort: () => void;
 }
-
-// ============================================================================
-// Stream Callbacks
-// ============================================================================
 
 /**
  * Callback for text chunks - called immediately as tokens arrive.
@@ -181,10 +157,6 @@ export type OnRequestCallback = (rawRequest: unknown) => void;
  * Called for each API request during multi-turn tool execution.
  */
 export type OnResponseCallback = (rawResponse: unknown) => void;
-
-// ============================================================================
-// Stream Options
-// ============================================================================
 
 export interface StreamOptions {
   /** Abort signal for cancellation */
@@ -238,8 +210,6 @@ export interface StreamOptions {
   /** Request ID for correlation */
   requestId?: string;
   
-  // ---- Callbacks ----
-  
   /** Called immediately for each text chunk */
   onChunk?: OnChunkCallback;
   
@@ -269,8 +239,6 @@ export interface StreamOptions {
   /** Called with raw provider response after each API call (for logging) */
   onResponse?: OnResponseCallback;
 
-  // ---- Tool Loop Config ----
-
   /** Maximum tool execution depth (default: 10) */
   maxToolDepth?: number;
 
@@ -285,8 +253,6 @@ export interface StreamOptions {
   /** Timeout for each tool execution */
   toolTimeoutMs?: number;
 
-  // ---- Formatter Config ----
-
   /**
    * Override the instance's formatter for this request. On an adapter that
    * needs native Responses input (`OpenAIResponsesAPIAdapter` outside
@@ -295,10 +261,6 @@ export interface StreamOptions {
    */
   formatter?: PrefillFormatter;
 }
-
-// ============================================================================
-// Non-Streaming Options
-// ============================================================================
 
 export interface CompleteOptions {
   /** Abort signal for cancellation */

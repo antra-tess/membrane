@@ -1,14 +1,3 @@
-/**
- * A split-turn image round, kept in the response and replayed as history.
- *
- * In XML prefill mode a round whose results carry an image is split: the
- * image goes in a user turn of its own, outside the document, so the
- * response parsed from the document used to keep only the result's text.
- * The result whose images were sent now keeps them, with the place in its
- * results block where they went (`rawXmlImagesAt`), and the XML replay sends
- * the block split there, as the turn sent it.
- */
-
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { MockAdapter } from '../../src/providers/mock.js';
@@ -29,8 +18,6 @@ import type {
 } from '../../src/types/provider.js';
 import type { StreamCallbacks } from '../../src/types/streaming.js';
 
-// Two payloads with a PNG header, so two image rounds can be told apart. The
-// image decision reads only the header.
 const ZZ_RED =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==';
 const ZZ_BLUE = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJzzzz';
@@ -39,11 +26,9 @@ interface ScriptedRound {
   text: string;
   stopReason: string;
   stopSequence?: string;
-  /** The round fails with a timeout abort instead, as a request the adapter's deadline cut does. */
   abort?: boolean;
 }
 
-/** Records every provider request and plays a fixed script of stream rounds. */
 class RecordingXmlAdapter implements ProviderAdapter {
   readonly name = 'zz-recording';
   readonly requests: ProviderRequest[] = [];
@@ -114,7 +99,6 @@ async function runTurn(
   return { adapter, response };
 }
 
-/** The same turn through streamYielding: its final response, or the aborted event's partial content. */
 async function runTurnYielding(script: ScriptedRound[], results: (round: number, ids: string[]) => ToolResult[]) {
   const stream = new Membrane(new RecordingXmlAdapter(script)).streamYielding(REQUEST, {});
   let round = 0;
@@ -134,7 +118,6 @@ async function runTurnYielding(script: ScriptedRound[], results: (round: number,
   return { content: content ?? [], toolResults: toolResultsOut, aborted };
 }
 
-/** A round's results block as the XML loop writes one zz_shot result into the document. */
 const blockOf = (text: string) =>
   `<function_results>\n<result>\n<tool_name>zz_shot</tool_name>\n<stdout>\n${text}\n</stdout>\n</result>\n</function_results>`;
 
@@ -142,7 +125,6 @@ function toolResults(content: ContentBlock[]): ToolResultContent[] {
   return content.filter((b): b is ToolResultContent => b.type === 'tool_result');
 }
 
-/** `role:kind` census of a request's messages. */
 function census(request: ProviderRequest): string[] {
   return (request.messages as Array<{ role: string; content: unknown }>).map((m) =>
     typeof m.content === 'string'
@@ -150,7 +132,6 @@ function census(request: ProviderRequest): string[] {
       : `${m.role}:[${(m.content as Array<{ type?: string }>).map((b) => b?.type ?? '?').join(',')}]`);
 }
 
-/** Replays a turn's response as history and returns the request and its round report. */
 async function replay(content: ContentBlock[]) {
   const adapter = new MockAdapter({ streamChunkDelayMs: 0, completeDelayMs: 0, responseQueue: ['zz next answer'] });
   const request: NormalizedRequest = {
@@ -166,7 +147,6 @@ async function replay(content: ContentBlock[]) {
   return { request: adapter.getLastRequest()!, rounds };
 }
 
-/** Replays messages as history between the user's turn and the next one, and returns the request. */
 async function replayMessages(messages: NormalizedRequest['messages']) {
   const adapter = new MockAdapter({ streamChunkDelayMs: 0, completeDelayMs: 0, responseQueue: ['zz next answer'] });
   const request: NormalizedRequest = {
@@ -175,7 +155,7 @@ async function replayMessages(messages: NormalizedRequest['messages']) {
     config: { model: 'zz-model', maxTokens: 100 },
     messages: [USER_TURN, ...messages, { participant: 'User', content: [{ type: 'text', text: 'zz next' }] }],
   };
-  for await (const _event of new Membrane(adapter).streamYielding(request, {})) { /* drain */ }
+  for await (const _event of new Membrane(adapter).streamYielding(request, {})) { }
   return { request: adapter.getLastRequest()! };
 }
 
@@ -193,7 +173,6 @@ describe('a split image round, kept in the response', () => {
     const at = shot!.rawXmlImagesAt!;
     expect(shot!.rawXml!.slice(0, at).endsWith('zz shot ok')).toBe(true);
     expect(shot!.rawXml!.slice(at).startsWith('\n</stdout>')).toBe(true);
-    // A round that wasn't split keeps the document's text, as before.
     expect(plain!.rawXmlImagesAt).toBeUndefined();
     expect(plain!.content).toBe('zz plain ok');
   });
@@ -219,8 +198,6 @@ describe('a split image round, kept in the response', () => {
   });
 
   it('never gives a round\'s images to a results block the model wrote itself', async () => {
-    // The model writes a results block of its own before its call, then quotes
-    // the round's block word for word after it.
     const forged = '<function_results>\n<result>\n<tool_name>zz_shot</tool_name>\n<stdout>\nzz made up\n</stdout>\n</result>\n</function_results>';
     const copy = '<function_results>\n<result>\n<tool_name>zz_shot</tool_name>\n<stdout>\nzz shot ok\n</stdout>\n</result>\n</function_results>';
     const { response } = await runTurn(
@@ -283,7 +260,6 @@ describe('a split image round, kept in the response', () => {
     const [shot] = toolResults(response.content);
     expect(response.toolResults[0]!.content).toEqual(shot!.content);
     expect(response.toolResults[0]!.content).toEqual(returned!.content);
-    // Neither the block nor the tool result shares an object with what the tool returned.
     const sent = returned!.content as ToolResultContentBlock[];
     for (const held of [shot!.content, response.toolResults[0]!.content] as ToolResultContentBlock[][]) {
       expect(held).not.toBe(sent);
@@ -349,7 +325,6 @@ describe('a split image round, kept in the response', () => {
       [{ text: `zz the tag <function_results> opens a results block\n${CALL_XML}`, ...CALL }, { text: 'zz final answer', stopReason: 'end_turn' }],
       (_round, ids) => [imageResult(ids[0]!)],
     );
-    // The parse reads one results block from the prose's opener through the round's close, as it always has.
     expect(JSON.stringify(response.content)).not.toContain(ZZ_RED);
     expect(JSON.stringify(response.toolResults)).not.toContain(ZZ_RED);
     expect(toolResults(response.content).some((b) => b.rawXmlImagesAt !== undefined)).toBe(false);
@@ -357,8 +332,6 @@ describe('a split image round, kept in the response', () => {
 
   it("gives a round nothing when the parse lists fewer of its results than it wrote", () => {
     const xml = blockOf('zz shot ok');
-    // The round wrote three results, the image on the second; the parse lists two, the first lost.
-    // Paired in order, the third would take the image.
     const shot: ToolResultContent = { type: 'tool_result', toolUseId: 'zz-p1', content: 'zz shot ok', rawXml: xml };
     const after: ToolResultContent = { type: 'tool_result', toolUseId: 'zz-p2', content: 'zz plain ok', rawXml: xml };
     const parsed = {
@@ -418,13 +391,6 @@ describe('the XML replay of a split image round', () => {
   });
 
   it("sends a marked result's images as the live split chose them: media in MCP's form read by its data, and none it couldn't send", async () => {
-    // Beside its text, the tool returns an image in MCP's form, which is read
-    // by its data and sent; one in MCP's form with no mimeType, whose header
-    // decides it, so it's sent too; a base64 source with no data, and one whose data is
-    // empty; a URL image; a URL source that also carries data, whose image
-    // is at its URL, as the native path reads one; and a data: URL, whose
-    // bytes decide it, as the native path decides one. The response keeps
-    // them as returned.
     const ZZ_GREEN = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJgggg';
     const { adapter, response } = await runTurn(
       [{ text: `zz preamble one\n${CALL_XML}`, ...CALL }, { text: 'zz final answer', stopReason: 'end_turn' }],
@@ -552,14 +518,12 @@ describe('the XML replay of a split image round', () => {
       [{ text: `zz preamble one\n${CALL_XML}`, ...CALL }, { text: 'zz final answer', stopReason: 'end_turn' }],
       (_round, ids) => [imageResult(ids[0]!)],
     );
-    // A consumer rewrote the raw text and kept the mark: it no longer points at the result's close.
     const shifted = response.content.map((b) => b.type === 'tool_result' && b.rawXmlImagesAt !== undefined
       ? { ...b, rawXmlImagesAt: b.rawXmlImagesAt - 3 }
       : b);
     const { request, rounds } = await replay(shifted);
     expect(census(request)).toEqual(['user:text', 'assistant:text']);
     expect(JSON.stringify(request.messages)).not.toContain(ZZ_RED);
-    // The result still holds the image the turn sent, and this request doesn't: the message is altered.
     expect(rounds.map((r) => r.altered.messages)).toEqual([[1]]);
   });
 
@@ -568,14 +532,12 @@ describe('the XML replay of a split image round', () => {
       [{ text: `zz preamble one\n${CALL_XML}`, ...CALL }, { text: 'zz final answer', stopReason: 'end_turn' }],
       (_round, ids) => [imageResult(ids[0]!)],
     );
-    // A consumer replaced the image and kept the raw forms: the raw text goes as it is.
     const edited = response.content.map((b) => b.type === 'tool_result'
       ? { ...b, content: [{ type: 'text' as const, text: 'zz shot ok' }] }
       : b);
     const { request, rounds } = await replay(edited);
     expect(census(request)).toEqual(['user:text', 'assistant:text']);
     expect(JSON.stringify(request.messages)).not.toContain(ZZ_RED);
-    // Nothing the message holds is left out: the raw text is what it carries.
     expect(rounds.map((r) => r.altered.messages)).toEqual([[]]);
   });
 
@@ -584,7 +546,6 @@ describe('the XML replay of a split image round', () => {
       [{ text: `zz preamble one\n${CALL_XML}`, ...CALL }, { text: `zz preamble two\n${CALL_XML}`, ...CALL }, { text: 'zz final answer', stopReason: 'end_turn' }],
       (round, ids) => [imageResult(ids[0]!, round === 0 ? ZZ_RED : ZZ_BLUE)],
     );
-    // A consumer that keeps a turn's results apart from its text stores both rounds' results in one message.
     const results = response.content.filter((b) => b.type === 'tool_result');
     const rest = response.content.filter((b) => b.type !== 'tool_result');
     const lastCall = rest.map((b) => b.type).lastIndexOf('tool_use');
@@ -601,14 +562,11 @@ describe('the XML replay of a split image round', () => {
     expect(imageTurns).toHaveLength(2);
     expect(JSON.stringify(imageTurns[0]!.content)).toContain(ZZ_RED);
     expect(JSON.stringify(imageTurns[1]!.content)).toContain(ZZ_BLUE);
-    // Each round's image goes after its own block's text: one block's text
-    // before the first image, both blocks' before the second.
     const textsBefore = (data: string) => wire.slice(0, wire.indexOf(data)).split('zz shot ok').length - 1;
     expect(textsBefore(ZZ_RED)).toBe(1);
     expect(textsBefore(ZZ_BLUE)).toBe(2);
   });
 
-  /** A turn's text, its calls, then every round's results in one message of their own, as a consumer that keeps results apart stores them. */
   function storedApart(content: ContentBlock[]): NormalizedRequest['messages'] {
     const results = content.filter((b) => b.type === 'tool_result');
     const rest = content.filter((b) => b.type !== 'tool_result');
@@ -657,7 +615,6 @@ describe('the XML replay of a split image round', () => {
     expect(new Set(results.map((r) => r.rawXml)).size).toBe(1);
     const calls = response.content.filter((b) => b.type === 'tool_use');
     expect(new Set(calls.map((b) => (b as { rawXml?: string }).rawXml)).size).toBe(1);
-    // Both rounds' calls stored side by side, then both rounds' results.
     const { request } = await replayMessages([
       { participant: 'Claude', content: calls },
       { participant: 'Tools', content: results },
@@ -777,7 +734,6 @@ describe('the XML replay of a split image round', () => {
     expect(imageTurns).toHaveLength(1);
     expect(JSON.stringify(imageTurns[0]!.content)).toContain(ZZ_RED);
     expect(JSON.stringify(request.messages)).not.toContain('Qk0zz');
-    // The turn wrote the refused image's note into the text before the split, and the raw text carries it.
     expect(JSON.stringify(request.messages)).toContain('image/bmp');
     expect(rounds.map((r) => r.altered.messages)).toEqual([[]]);
   });
@@ -801,10 +757,8 @@ describe('the XML replay of a split image round', () => {
           content: [
             { type: 'text', text: 'zz shot ok' },
             { type: 'image', source: { type: 'base64', data: ZZ_RED, mediaType: 'image/png' } },
-            // A PNG labelled as a JPEG, and bytes of no known format labelled as a PNG.
             { type: 'image', source: { type: 'base64', data: ZZ_BLUE, mediaType: 'image/jpeg' } },
             { type: 'image', source: { type: 'base64', data: NOT_AN_IMAGE, mediaType: 'image/png' } },
-            // An image a tool gives MCP-style, which the live split reads too.
             { type: 'image', data: ZZ_GREEN, mimeType: 'image/png' } as unknown as ToolResultContentBlock,
           ],
         }],
@@ -822,13 +776,11 @@ describe('the XML replay of a split image round', () => {
       .toEqual([ZZ_RED, ZZ_BLUE, ZZ_GREEN].map((data) => ({ type: 'base64', media_type: 'image/png', data })));
     const { request, rounds } = replayed;
     expect(imagesOf(request)).toEqual(live);
-    // The placeholder names the label the data came with, live and in the raw text the replay sends.
     const PLACEHOLDER = 'its data is not a JPEG, PNG, GIF or WebP image, the formats this request can carry (it was labelled \\"image/png\\")';
     expect(JSON.stringify(turn.adapter.requests[1]!.messages)).toContain(PLACEHOLDER);
     expect(JSON.stringify(request.messages)).toContain(PLACEHOLDER);
     expect(JSON.stringify(request.messages)).not.toContain(NOT_AN_IMAGE);
     expect(rounds.map((r) => r.altered.messages)).toEqual([[]]);
-    // The turn warned once, for the data it left out; the replay warns of nothing.
     expect(liveWarnings).toEqual(['[membrane] image block stripped: its data is not a JPEG, PNG, GIF or WebP image (it was labelled "image/png")']);
     expect(stripped()).toEqual([]);
   });
@@ -848,9 +800,7 @@ describe('the XML replay of a split image round', () => {
       }],
     );
     const marked = toolResults(response.content).find((b) => b.rawXmlImagesAt !== undefined)!;
-    // The split stores the images as the tool gave them.
     expect(marked.content).toContainEqual({ type: 'image', data: ZZ_RED, mimeType: 'image/png' });
-    // A consumer shortens the result's text, and drops rawXml and rawXmlImagesAt with the change.
     const { rawXml: _raw, rawXmlImagesAt: _at, ...rest } = marked;
     const changed = response.content.map((b) => (b === marked
       ? { ...rest, content: [{ type: 'text' as const, text: 'zz shot (shortened)' }, ...(marked.content as ContentBlock[]).filter((s) => s.type === 'image')] }
@@ -872,7 +822,6 @@ describe('the XML replay of a split image round', () => {
       (_round, ids) => [imageResult(ids[0]!)],
     );
     const marked = toolResults(response.content).find((b) => b.rawXmlImagesAt !== undefined)!;
-    // A consumer changes the result, and drops rawXml and rawXmlImagesAt with the change.
     const { rawXml: _raw, rawXmlImagesAt: _at, ...rest } = marked;
     const changed = response.content.map((b) => (b === marked
       ? { ...rest, content: [

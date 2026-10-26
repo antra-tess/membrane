@@ -1,14 +1,3 @@
-/**
- * stream({ streaming: false }) and onToolCalls (A3 MAJOR-6).
- *
- * The non-streaming fallback routes to complete(), which has no tool loop:
- * onToolCalls was accepted, dropped and never called. The turn ended after
- * one provider call with raw <function_calls> XML in the returned text — a
- * working agent silently converted into one that narrates tool calls it
- * never makes. There is no tool loop on that path, so the option is refused
- * where it is passed rather than honoured halfway.
- */
-
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { MembraneError } from '../../src/types/errors.js';
@@ -75,7 +64,6 @@ describe('stream({ streaming: false }) with onToolCalls', () => {
     ).rejects.toThrow(MembraneError);
 
     expect(handlerRuns).toBe(0);
-    // Refused before the provider call, not after billing one.
     expect(adapter.completeCalls).toBe(0);
   });
 

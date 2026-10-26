@@ -1,16 +1,8 @@
-/**
- * Formatter Unit Tests
- */
-
 import { describe, it, expect } from 'vitest';
 import { AnthropicXmlFormatter } from '../../src/formatters/anthropic-xml.js';
 import { NativeFormatter } from '../../src/formatters/native.js';
 import { CompletionsFormatter } from '../../src/formatters/completions.js';
 import type { NormalizedMessage, ToolDefinition, ToolResult } from '../../src/types/index.js';
-
-// ============================================================================
-// Test Helpers
-// ============================================================================
 
 function textMessage(participant: string, text: string): NormalizedMessage {
   return {
@@ -31,10 +23,6 @@ const calculatorTool: ToolDefinition = {
   },
 };
 
-// ============================================================================
-// AnthropicXmlFormatter Tests
-// ============================================================================
-
 describe('AnthropicXmlFormatter', () => {
   describe('buildMessages', () => {
     it('builds messages with participant prefixes', () => {
@@ -52,7 +40,6 @@ describe('AnthropicXmlFormatter', () => {
       });
 
       expect(result.messages.length).toBeGreaterThan(0);
-      // Last message should be assistant with prefill
       const lastMsg = result.messages[result.messages.length - 1];
       expect(lastMsg?.role).toBe('assistant');
       expect(typeof lastMsg?.content).toBe('string');
@@ -107,7 +94,6 @@ describe('AnthropicXmlFormatter', () => {
         tools: [calculatorTool],
       });
 
-      // Tool definitions should be in the conversation
       const content = result.messages.map(m =>
         typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
       ).join('');
@@ -131,7 +117,6 @@ describe('AnthropicXmlFormatter', () => {
       const lastMsg = result.messages[result.messages.length - 1];
       const prefill = typeof lastMsg?.content === 'string' ? lastMsg.content : '';
 
-      // Tools should come BEFORE "Claude:" turn prefix
       const toolsPos = prefill.indexOf('<available_tools>');
       const turnPrefixPos = prefill.lastIndexOf('Claude:');
 
@@ -139,7 +124,6 @@ describe('AnthropicXmlFormatter', () => {
       expect(turnPrefixPos).toBeGreaterThan(-1);
       expect(toolsPos).toBeLessThan(turnPrefixPos);
 
-      // Should NOT look like Claude is outputting tools
       expect(prefill).not.toMatch(/Claude:\s*\n*<available_tools>/);
     });
 
@@ -160,13 +144,11 @@ describe('AnthropicXmlFormatter', () => {
         tools: [calculatorTool],
       });
 
-      // Tools should be in system, not in conversation
       const systemText = Array.isArray(result.systemContent)
         ? (result.systemContent as any[]).map(b => b.text).join('')
         : '';
       expect(systemText).toContain('<available_tools>');
 
-      // Conversation should NOT have tools
       const conversationContent = result.messages.map(m =>
         typeof m.content === 'string' ? m.content : ''
       ).join('');
@@ -198,13 +180,11 @@ describe('AnthropicXmlFormatter', () => {
       const lastMsg = result.messages[result.messages.length - 1];
       const prefill = typeof lastMsg?.content === 'string' ? lastMsg.content : '';
 
-      // Tools should appear before final messages (injection position = 3 from end)
       const toolsPos = prefill.indexOf('<available_tools>');
       const message4Pos = prefill.indexOf('Message 4');
       const message6Pos = prefill.indexOf('Message 6');
 
       expect(toolsPos).toBeGreaterThan(-1);
-      // Tools should be somewhere before the last few messages
       expect(toolsPos).toBeLessThan(message6Pos);
     });
 
@@ -225,7 +205,6 @@ describe('AnthropicXmlFormatter', () => {
       const lastMsg = result.messages[result.messages.length - 1];
       const prefill = typeof lastMsg?.content === 'string' ? lastMsg.content : '';
 
-      // Tools should come before "Claude: <thinking>"
       const toolsEnd = prefill.indexOf('</function_calls>');
       const thinkingStart = prefill.indexOf('Claude: <thinking>');
 
@@ -289,16 +268,13 @@ describe('AnthropicXmlFormatter', () => {
       expect(result.messages[0]?.role).toBe('user');
       expect(result.messages[0]?.content).toBe('[Start]');
 
-      // Second message should be the context prefix as assistant
       expect(result.messages[1]?.role).toBe('assistant');
 
-      // Should be an array with cache_control
       const prefixContent = result.messages[1]?.content as any[];
       expect(Array.isArray(prefixContent)).toBe(true);
       expect(prefixContent[0]?.text).toBe('You are a helpful assistant named Bob.');
       expect(prefixContent[0]?.cache_control).toEqual({ type: 'ephemeral' });
 
-      // Cache markers should be counted: system + prefix = 2
       expect(result.cacheMarkersApplied).toBe(2);
     });
 
@@ -316,7 +292,6 @@ describe('AnthropicXmlFormatter', () => {
         promptCaching: true,
       });
 
-      // System content should have cache_control
       const systemContent = result.systemContent as any[];
       expect(Array.isArray(systemContent)).toBe(true);
       expect(systemContent[0]?.cache_control).toEqual({ type: 'ephemeral' });
@@ -338,13 +313,11 @@ describe('AnthropicXmlFormatter', () => {
         participantMode: 'multiuser',
         assistantParticipant: 'Claude',
         promptCaching: true,
-        hasCacheMarker: (msg, index) => index === 2, // Mark message at index 2
+        hasCacheMarker: (msg, index) => index === 2,
       });
 
-      // Should have applied cache markers: system + conversation flush
       expect(result.cacheMarkersApplied).toBeGreaterThanOrEqual(1);
 
-      // Find the message with cache_control in conversation
       const messagesWithCacheControl = result.messages.filter(m => {
         if (Array.isArray(m.content)) {
           return (m.content as any[]).some(block => block.cache_control);
@@ -352,7 +325,6 @@ describe('AnthropicXmlFormatter', () => {
         return false;
       });
 
-      // Should have at least one message with cache_control (the flush before cache marker)
       expect(messagesWithCacheControl.length).toBeGreaterThanOrEqual(1);
     });
 
@@ -370,7 +342,6 @@ describe('AnthropicXmlFormatter', () => {
         promptCaching: false,
       });
 
-      // System content should NOT have cache_control
       const systemContent = result.systemContent as any[];
       expect(systemContent[0]?.cache_control).toBeUndefined();
       expect(result.cacheMarkersApplied).toBe(0);
@@ -393,10 +364,8 @@ describe('AnthropicXmlFormatter', () => {
         promptCaching: true,
       });
 
-      // Should have cache marker applied for the cacheBreakpoint message
       expect(result.cacheMarkersApplied).toBeGreaterThanOrEqual(1);
 
-      // Find messages with cache_control
       const messagesWithCacheControl = result.messages.filter(m => {
         if (Array.isArray(m.content)) {
           return (m.content as any[]).some(block => block.cache_control);
@@ -406,7 +375,6 @@ describe('AnthropicXmlFormatter', () => {
 
       expect(messagesWithCacheControl.length).toBeGreaterThanOrEqual(1);
 
-      // The cached content should include Message 2 (the cacheBreakpoint message)
       const cachedContent = messagesWithCacheControl[0]?.content as any[];
       expect(cachedContent[0]?.text).toContain('Message 2');
     });
@@ -428,8 +396,6 @@ describe('AnthropicXmlFormatter', () => {
         promptCaching: true,
       });
 
-      // Should have at least 2 cache markers in conversation (plus possibly system)
-      // Find messages with cache_control in conversation
       const messagesWithCacheControl = result.messages.filter(m => {
         if (Array.isArray(m.content)) {
           return (m.content as any[]).some(block => block.cache_control);
@@ -455,10 +421,8 @@ describe('AnthropicXmlFormatter', () => {
         promptCaching: false,
       });
 
-      // No cache markers should be applied
       expect(result.cacheMarkersApplied).toBe(0);
 
-      // No messages should have cache_control
       const messagesWithCacheControl = result.messages.filter(m => {
         if (Array.isArray(m.content)) {
           return (m.content as any[]).some(block => block.cache_control);
@@ -587,10 +551,6 @@ describe('AnthropicXmlFormatter', () => {
   });
 });
 
-// ============================================================================
-// NativeFormatter Tests
-// ============================================================================
-
 describe('NativeFormatter', () => {
   describe('thinking block round-trip', () => {
     it('emits thinking blocks with signatures in assistant turns', () => {
@@ -694,7 +654,6 @@ describe('NativeFormatter', () => {
         assistantParticipant: 'Claude',
       });
 
-      // User messages should have name prefix
       const firstContent = result.messages[0]?.content as any[];
       expect(firstContent[0]?.text).toContain('Alice:');
     });
@@ -712,7 +671,6 @@ describe('NativeFormatter', () => {
         assistantParticipant: 'Claude',
       });
 
-      // Alice and Bob should be merged into one user message
       expect(result.messages.length).toBe(2);
       expect(result.messages[0]?.role).toBe('user');
       expect(result.messages[1]?.role).toBe('assistant');
@@ -824,10 +782,6 @@ describe('NativeFormatter', () => {
   });
 });
 
-// ============================================================================
-// CompletionsFormatter Tests
-// ============================================================================
-
 describe('CompletionsFormatter', () => {
   describe('buildMessages', () => {
     it('serializes conversation to prompt format', () => {
@@ -843,11 +797,9 @@ describe('CompletionsFormatter', () => {
         assistantParticipant: 'Assistant',
       });
 
-      // Should have single message with prompt
       expect(result.messages.length).toBe(1);
       expect(result.assistantPrefill).toBeDefined();
 
-      // Prompt should contain participant format
       const prompt = result.assistantPrefill!;
       expect(prompt).toContain('Alice: Hello');
       expect(prompt).toContain('Bob: Hi there');
@@ -868,7 +820,6 @@ describe('CompletionsFormatter', () => {
 
       const prompt = result.assistantPrefill!;
       expect(prompt).toContain('User: Hello<|eot|>');
-      // Final turn prefix should NOT have EOT
       expect(prompt).toMatch(/Assistant:$/);
     });
 
@@ -900,12 +851,10 @@ describe('CompletionsFormatter', () => {
         assistantParticipant: 'Claude',
       });
 
-      // Should have stop sequences for non-assistant participants
       expect(result.stopSequences).toContain('\n\nAlice:');
       expect(result.stopSequences).toContain('\nAlice:');
       expect(result.stopSequences).toContain('\n\nBob:');
       expect(result.stopSequences).toContain('\nBob:');
-      // Should NOT have stop for assistant
       expect(result.stopSequences).not.toContain('\nClaude:');
     });
 
@@ -938,7 +887,6 @@ describe('CompletionsFormatter', () => {
       });
 
       const prompt = result.assistantPrefill!;
-      // System prompt should be at the beginning
       expect(prompt.startsWith('You are a helpful assistant.')).toBe(true);
     });
 
@@ -1054,16 +1002,6 @@ describe('CompletionsFormatter', () => {
   });
 });
 
-// ============================================================================
-// NativeFormatter — tool block routing (wire-boundary normalizer integration)
-// ============================================================================
-//
-// These tests cover the integration between the NativeFormatter and the
-// tool-pair normalizer (see `normalize-tool-pairs.ts`). The normalizer's
-// own behavior is unit-tested in `normalize-tool-pairs.test.ts`; these
-// tests verify the formatter calls it correctly and that role-misplaced
-// blocks reach the API on the correct side.
-
 describe('NativeFormatter > tool blocks', () => {
   it('positive: well-formed [u: tool_use] → [u: tool_result] passes through unchanged', () => {
     const formatter = new NativeFormatter();
@@ -1113,16 +1051,12 @@ describe('NativeFormatter > tool blocks', () => {
       humanParticipant: 'Human',
     });
 
-    // Find the assistant envelope; it must contain the tool_use, and
-    // its content must NOT include any tool_result.
     const assistantEnv = result.messages.find((m) => m.role === 'assistant');
     expect(assistantEnv).toBeDefined();
     const assistantBlocks = assistantEnv!.content as { type: string }[];
     expect(assistantBlocks.some((b) => b.type === 'tool_use')).toBe(true);
     expect(assistantBlocks.some((b) => b.type === 'tool_result')).toBe(false);
 
-    // The tool_result must appear in a user envelope (and the envelope
-    // immediately following the assistant one).
     const assistantIdx = result.messages.findIndex((m) => m.role === 'assistant');
     const after = result.messages[assistantIdx + 1];
     expect(after).toBeDefined();

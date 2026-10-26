@@ -1,9 +1,3 @@
-/**
- * Prefill Formatter Types
- *
- * Interfaces for pluggable prefill formatting and parsing.
- */
-
 import type {
   NormalizedMessage,
   ContentBlock,
@@ -18,15 +12,10 @@ import type {
 } from '../types/streaming.js';
 import type { StreamEmission, ProcessChunkResult } from '../utils/stream-parser.js';
 
-// Re-export types used by formatters
 export type { BlockEvent, ChunkMeta, MembraneBlockType, StreamEmission };
 
 /** Block type alias for formatter contexts */
 export type BlockType = MembraneBlockType;
-
-// ============================================================================
-// Configuration
-// ============================================================================
 
 export interface FormatterConfig {
   /** What to do with a document block (and, in AnthropicXmlFormatter, an audio
@@ -209,10 +198,6 @@ export type NormalizeEvent =
       leadingBlockTypes: string[];
     };
 
-// ============================================================================
-// Build Result
-// ============================================================================
-
 export interface BuildResult {
   /** Messages in provider format */
   messages: ProviderMessage[];
@@ -263,10 +248,6 @@ export interface ProviderMessage {
 
 /** A user or assistant turn: what the tool-pair normalizer and the role merge take and give. */
 export type ProviderTurnMessage = ProviderMessage & { role: 'user' | 'assistant' };
-
-// ============================================================================
-// Stream Parser
-// ============================================================================
 
 /** Parse result from processing a chunk */
 export type ParseResult = ProcessChunkResult;
@@ -331,10 +312,6 @@ export interface StreamParser {
   resetForNewIteration(): void;
 }
 
-// ============================================================================
-// Prefill Formatter Interface
-// ============================================================================
-
 /** Source context when parsing visible text between native thinking blocks. */
 export interface ContentParseContext {
   /** Complete visible response text, excluding provider thinking blocks. */
@@ -394,10 +371,6 @@ export interface PrefillFormatter {
    */
   readonly configuredToolMode?: 'xml' | 'native';
 
-  // ==========================================================================
-  // REQUEST BUILDING
-  // ==========================================================================
-
   /**
    * Transform normalized messages into provider-ready format.
    */
@@ -414,10 +387,6 @@ export interface PrefillFormatter {
     results: ToolResult[],
     options?: { thinking?: boolean }
   ): string;
-
-  // ==========================================================================
-  // RESPONSE PARSING
-  // ==========================================================================
 
   /**
    * Create a stream parser for this format.

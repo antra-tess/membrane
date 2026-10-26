@@ -1,9 +1,3 @@
-/**
- * Unit tests for calculateCost and getDefaultPricing.
- * Converted from the legacy tsx script test/cost.test.ts (pre-vitest layout),
- * which sat outside the vitest include globs and never ran in CI.
- */
-
 import { describe, it, expect } from 'vitest';
 import { calculateCost, type CostableUsage } from '../../src/utils/cost.js';
 import { getDefaultPricing } from '../../src/registry/default-pricing.js';

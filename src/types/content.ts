@@ -1,22 +1,10 @@
-/**
- * Content block types for normalized messages
- */
-
 import type { ToolDefinition } from './tools.js';
-
-// ============================================================================
-// Cache Control (Anthropic prompt caching)
-// ============================================================================
 
 export interface CacheControl {
   type: 'ephemeral';
   /** TTL for cache - '5m' (default) or '1h' for extended caching */
   ttl?: '5m' | '1h';
 }
-
-// ============================================================================
-// Media Source
-// ============================================================================
 
 export interface Base64Source {
   type: 'base64';
@@ -30,10 +18,6 @@ export interface UrlSource {
 }
 
 export type MediaSource = Base64Source | UrlSource;
-
-// ============================================================================
-// Text Content
-// ============================================================================
 
 export interface TextContent {
   type: 'text';
@@ -66,10 +50,6 @@ export interface TextContent {
    */
   rawItem?: unknown;
 }
-
-// ============================================================================
-// Media Input Content
-// ============================================================================
 
 export interface ImageContent {
   type: 'image';
@@ -107,10 +87,6 @@ export interface VideoContent {
   rawItem?: unknown;
 }
 
-// ============================================================================
-// Media Output Content (Generated)
-// ============================================================================
-
 export interface GeneratedImageContent {
   type: 'generated_image';
   data: string;
@@ -119,10 +95,6 @@ export interface GeneratedImageContent {
   /** See {@link TextContent.rawItem}. */
   rawItem?: unknown;
 }
-
-// ============================================================================
-// Tool Content
-// ============================================================================
 
 export interface ToolUseContent {
   type: 'tool_use';
@@ -226,10 +198,6 @@ export interface ToolResultContent {
   rawItem?: unknown;
 }
 
-// ============================================================================
-// Thinking Content
-// ============================================================================
-
 export interface ThinkingContent {
   type: 'thinking';
   thinking: string;
@@ -249,10 +217,6 @@ export interface RedactedThinkingContent {
   /** See {@link TextContent.rawItem}. */
   rawItem?: unknown;
 }
-
-// ============================================================================
-// System Changes
-// ============================================================================
 
 /**
  * A change, from this point in the conversation on, to the tools the model is
@@ -298,32 +262,18 @@ export interface SystemChangeContent {
   addSystem?: string[];
 }
 
-// ============================================================================
-// Union Type
-// ============================================================================
-
 export type ContentBlock =
-  // Text
   | TextContent
-  // Media Input
   | ImageContent
   | DocumentContent
   | AudioContent
   | VideoContent
-  // Media Output
   | GeneratedImageContent
-  // Tools
   | ToolUseContent
   | ToolResultContent
-  // Thinking
   | ThinkingContent
   | RedactedThinkingContent
-  // System changes
   | SystemChangeContent;
-
-// ============================================================================
-// Type Guards
-// ============================================================================
 
 export function isTextContent(block: ContentBlock): block is TextContent {
   return block.type === 'text';

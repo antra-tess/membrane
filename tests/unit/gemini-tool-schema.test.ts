@@ -12,7 +12,6 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
-/** Answers every request with a plain completion and keeps each request body. */
 function recordBodies(): Array<Record<string, any>> {
   const bodies: Array<Record<string, any>> = [];
   globalThis.fetch = (async (_url: unknown, init?: { body?: unknown }) => {
@@ -28,7 +27,6 @@ function recordBodies(): Array<Record<string, any>> {
   return bodies;
 }
 
-/** A nullable field as JSON Schema writes it. */
 const NULLABLE = {
   type: 'object',
   properties: {
@@ -38,7 +36,6 @@ const NULLABLE = {
   required: ['path'],
 };
 
-/** What MCP servers' schema generators write: a draft URI, definitions and references, constants, and null as a branch. */
 const GENERATED = {
   $schema: 'http://json-schema.org/draft-07/schema#',
   type: 'object',
@@ -67,8 +64,6 @@ describe('GeminiAdapter tool schemas', () => {
   for (const [label, schema] of [['a type array', NULLABLE], ['a generated schema', GENERATED]] as const) {
     it(`sends ${label} unchanged as parametersJsonSchema, and no parameters`, async () => {
       const bodies = recordBodies();
-      // Taken before the call, so an adapter that edited the caller's schema
-      // in place would differ from it.
       const schemaBeforeTheCall = structuredClone(schema);
       await new GeminiAdapter({ apiKey: 'zz-key-not-used' }).complete(
         request([{ name: 'zz_tool', description: 'zz-description', inputSchema: schema }]),
@@ -94,7 +89,7 @@ describe('GeminiAdapter tool schemas', () => {
     const expected = structuredClone(NULLABLE);
     await new GeminiAdapter({ apiKey: 'zz-key-not-used' }).stream(
       request([{ name: 'zz_tool', description: 'zz-description', inputSchema: NULLABLE }]),
-      { onChunk: () => { /* noop */ } },
+      { onChunk: () => { } },
     );
 
     const [declaration] = bodies[0]!.tools[0].functionDeclarations;

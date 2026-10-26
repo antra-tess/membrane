@@ -1,20 +1,7 @@
-/**
- * Smoke tests with real Anthropic API
- * Run with: npx tsx tests/manual/smoke.ts
- *
- * These tests verify the core streaming and tool execution flow.
- * Model outputs are non-deterministic, so we test structural behavior
- * rather than specific content.
- */
-
 import { Membrane } from '../../src/membrane.js';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import type { NormalizedRequest, ToolCall, ToolResult } from '../../src/types/index.js';
 import { isAbortedResponse } from '../../src/types/index.js';
-
-// ============================================================================
-// Configuration
-// ============================================================================
 
 const API_KEY = process.env.ANTHROPIC_API_KEY;
 if (!API_KEY) {
@@ -22,10 +9,6 @@ if (!API_KEY) {
   process.exit(1);
 }
 const MODEL = 'claude-haiku-4-5-20251001';
-
-// ============================================================================
-// Test Helpers
-// ============================================================================
 
 let passed = 0;
 let failed = 0;
@@ -52,21 +35,12 @@ async function runTest(name: string, fn: () => Promise<void>) {
   }
 }
 
-// Add delay between tests to avoid rate limiting
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// ============================================================================
-// Setup
-// ============================================================================
-
 const adapter = new AnthropicAdapter({ apiKey: API_KEY });
 const membrane = new Membrane(adapter);
-
-// ============================================================================
-// Test 1: Basic Streaming Works
-// ============================================================================
 
 await runTest('Test 1: Basic Streaming', async () => {
   const request: NormalizedRequest = {
@@ -88,7 +62,6 @@ await runTest('Test 1: Basic Streaming', async () => {
   assert(!isAbortedResponse(response), 'Response should not be aborted');
 
   if (!isAbortedResponse(response)) {
-    // Verify streaming worked
     const hasContent = response.rawAssistantText.length > 0;
     assert(hasContent, `Should have content (got ${response.rawAssistantText.length} chars)`);
 
@@ -97,16 +70,11 @@ await runTest('Test 1: Basic Streaming', async () => {
       assert(chunks.join('') === response.rawAssistantText, 'Chunks should match raw text');
     }
 
-    // Usage should be populated
     assert(response.usage.outputTokens > 0, `Should have output tokens (got ${response.usage.outputTokens})`);
   }
 });
 
 await delay(1000);
-
-// ============================================================================
-// Test 2: Tool Execution Flow
-// ============================================================================
 
 await runTest('Test 2: Tool Execution Flow', async () => {
   const request: NormalizedRequest = {
@@ -154,18 +122,15 @@ await runTest('Test 2: Tool Execution Flow', async () => {
   assert(!isAbortedResponse(response), 'Response should not be aborted');
 
   if (!isAbortedResponse(response)) {
-    // Check if tool was called via callback
     if (toolCallCount > 0) {
       assert(true, `Tool callback was invoked ${toolCallCount} time(s)`);
       assert(receivedToolCalls.length > 0, 'Should have received tool calls');
       assert(response.toolResults.length > 0, 'Should have tool results in response');
 
-      // Tool results should be in the raw text (as XML)
       const hasResults = response.rawAssistantText.includes('<function_results>') ||
                          response.rawAssistantText.includes('result');
       assert(hasResults, 'Raw text should contain tool results');
     } else {
-      // Model might not have called tool - check if it's in the parsed response
       if (response.toolCalls.length > 0) {
         console.log('  NOTE: Tool calls parsed but callback not invoked (stop sequence issue?)');
         assert(false, 'Tool callback should have been invoked');
@@ -178,10 +143,6 @@ await runTest('Test 2: Tool Execution Flow', async () => {
 });
 
 await delay(1000);
-
-// ============================================================================
-// Test 3: Multi-turn Tool Execution
-// ============================================================================
 
 await runTest('Test 3: Multi-turn Tool Execution', async () => {
   const request: NormalizedRequest = {
@@ -236,7 +197,6 @@ await runTest('Test 3: Multi-turn Tool Execution', async () => {
   if (!isAbortedResponse(response)) {
     console.log(`  Tool callback invoked ${toolCallCount} time(s), IDs: ${idsChecked.join(', ')}`);
 
-    // We expect at least one tool call
     if (toolCallCount >= 1) {
       assert(true, 'Tool was called at least once');
       assert(response.toolResults.length >= 1, 'Should have at least one tool result');
@@ -248,12 +208,7 @@ await runTest('Test 3: Multi-turn Tool Execution', async () => {
 
 await delay(1000);
 
-// ============================================================================
-// Test 4: False Positive Resistance
-// ============================================================================
-
 await runTest('Test 4: Stop Sequence in Tool Result', async () => {
-  // Test that content in tool results doesn't cause premature stops
   const request: NormalizedRequest = {
     messages: [
       {
@@ -288,7 +243,6 @@ await runTest('Test 4: Stop Sequence in Tool Result', async () => {
       toolCalled = true;
       console.log(`\n  [Tool called: ${calls[0]?.name}]`);
 
-      // Return content with potential stop sequences embedded
       return calls.map(call => ({
         toolUseId: call.id,
         content: `Chat log:
@@ -307,12 +261,10 @@ User: Thanks
     if (toolCalled) {
       assert(true, 'Tool was called');
 
-      // The model should continue after receiving tool results
       const hasToolResults = response.rawAssistantText.includes('<function_results>') ||
                             response.rawAssistantText.includes('Chat log');
       assert(hasToolResults, 'Should include tool results in output');
 
-      // Response should complete normally
       assert(response.stopReason === 'end_turn', `Should end normally (got ${response.stopReason})`);
     } else {
       console.log('  NOTE: Model did not call tool');
@@ -320,10 +272,6 @@ User: Thanks
     }
   }
 });
-
-// ============================================================================
-// Summary
-// ============================================================================
 
 console.log('\n========================================');
 console.log(`Results: ${passed} passed, ${failed} failed`);

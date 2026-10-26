@@ -3,7 +3,7 @@ import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 
 function fakeStream(events: unknown[]) {
   return {
-    controller: { abort() { /* noop */ } },
+    controller: { abort() { } },
     [Symbol.asyncIterator]() {
       let index = 0;
       return {

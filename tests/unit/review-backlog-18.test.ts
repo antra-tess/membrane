@@ -94,7 +94,6 @@ describe('participant prefixes (#18)', () => {
 
   it.each(['complete', 'stream', 'yielding'] as const)('uses the active formatter name format on %s: the per-call formatter on complete and stream, the instance formatter on yielding', async (entry) => {
     const adapter = recordingAdapter();
-    // Yielding uses the instance formatter; complete/stream also support an override.
     const membrane = new Membrane(adapter, { formatter: new NativeFormatter({ nameFormat: entry === 'yielding' ? '@{name}: ' : 'WRONG {name}: ' }) });
     const req = request();
     const options = { formatter: new NativeFormatter({ nameFormat: '@{name}: ' }) };

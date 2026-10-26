@@ -1,23 +1,7 @@
-/**
- * API Integration Tests
- * Run with: npx tsx tests/manual/api-integration.ts
- *
- * These tests hit the real Anthropic API to verify end-to-end behavior.
- * They specifically test scenarios that unit tests with mocks cannot catch:
- * - Thinking block parsing when opening tag is in prefill
- * - Tool execution across multiple turns
- * - Tools in long conversation contexts
- * - Tool results rendered in previous turns
- */
-
 import { Membrane } from '../../src/membrane.js';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import type { NormalizedRequest, NormalizedMessage, ToolCall, ToolResult, ContentBlock } from '../../src/types/index.js';
 import { isAbortedResponse } from '../../src/types/index.js';
-
-// ============================================================================
-// Configuration
-// ============================================================================
 
 const API_KEY = process.env.ANTHROPIC_API_KEY;
 if (!API_KEY) {
@@ -25,12 +9,7 @@ if (!API_KEY) {
   process.exit(1);
 }
 
-// Use haiku for speed and cost, but these tests should work with any model
 const MODEL = 'claude-haiku-4-5-20251001';
-
-// ============================================================================
-// Test Helpers
-// ============================================================================
 
 let passed = 0;
 let failed = 0;
@@ -68,14 +47,9 @@ function createMessage(participant: string, text: string): NormalizedMessage {
   };
 }
 
-// ============================================================================
-// Setup
-// ============================================================================
-
 const adapter = new AnthropicAdapter({ apiKey: API_KEY });
 const membrane = new Membrane(adapter);
 
-// Standard calculator tool for testing
 const calculatorTool = {
   name: 'calculate',
   description: 'Performs a calculation. Use this for any math operations.',
@@ -87,10 +61,6 @@ const calculatorTool = {
     required: ['expression'],
   },
 };
-
-// ============================================================================
-// Test 1: Thinking Block Parsing
-// ============================================================================
 
 await runTest('Test 1: Thinking block parsing with prefill', async () => {
   const request: NormalizedRequest = {
@@ -112,7 +82,6 @@ await runTest('Test 1: Thinking block parsing with prefill', async () => {
   assert(!isAbortedResponse(response), 'Response should not be aborted');
 
   if (!isAbortedResponse(response)) {
-    // Key assertion: response.content should have parsed thinking block
     const thinkingBlocks = response.content.filter(b => b.type === 'thinking');
     const textBlocks = response.content.filter(b => b.type === 'text');
 
@@ -125,23 +94,17 @@ await runTest('Test 1: Thinking block parsing with prefill', async () => {
 
     assert(textBlocks.length > 0, `Should have text block(s) in content (got ${textBlocks.length})`);
 
-    // rawAssistantText should contain the closing tag (proves API continued from prefill)
     assert(
       response.rawAssistantText.includes('</thinking>'),
       'rawAssistantText should contain </thinking> closing tag'
     );
 
-    // The response should mention 255 (15 * 17)
     const fullText = response.rawAssistantText;
     assert(fullText.includes('255'), 'Response should contain the answer 255');
   }
 });
 
 await delay(1500);
-
-// ============================================================================
-// Test 2: Basic Tool Execution
-// ============================================================================
 
 await runTest('Test 2: Basic tool execution', async () => {
   const request: NormalizedRequest = {
@@ -173,23 +136,17 @@ await runTest('Test 2: Basic tool execution', async () => {
     assert(response.toolCalls.length > 0, `Should have toolCalls in response (got ${response.toolCalls.length})`);
     assert(response.toolResults.length > 0, `Should have toolResults in response (got ${response.toolResults.length})`);
 
-    // Content should have tool_use and tool_result blocks
     const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
     const toolResultBlocks = response.content.filter(b => b.type === 'tool_result');
 
     assert(toolUseBlocks.length > 0, `Should have tool_use block(s) in content (got ${toolUseBlocks.length})`);
     assert(toolResultBlocks.length > 0, `Should have tool_result block(s) in content (got ${toolResultBlocks.length})`);
 
-    // Response should mention the result
     assert(response.rawAssistantText.includes('579'), 'Response should contain the result 579');
   }
 });
 
 await delay(1500);
-
-// ============================================================================
-// Test 3: Multi-turn Tool Execution
-// ============================================================================
 
 await runTest('Test 3: Multi-turn tool execution', async () => {
   const request: NormalizedRequest = {
@@ -210,7 +167,6 @@ await runTest('Test 3: Multi-turn tool execution', async () => {
       }
       return calls.map(call => {
         const expr = call.input.expression as string;
-        // Simple eval for test (safe because we control the input)
         let result: number;
         if (expr.includes('*')) result = 50;
         else if (expr.includes('/')) result = 25;
@@ -224,12 +180,10 @@ await runTest('Test 3: Multi-turn tool execution', async () => {
   assert(!isAbortedResponse(response), 'Response should not be aborted');
 
   if (!isAbortedResponse(response)) {
-    // Should have multiple tool calls
     assert(toolCalls.length >= 2, `Should have at least 2 tool calls (got ${toolCalls.length})`);
     assert(response.toolCalls.length >= 2, `response.toolCalls should have at least 2 (got ${response.toolCalls.length})`);
     assert(response.toolResults.length >= 2, `response.toolResults should have at least 2 (got ${response.toolResults.length})`);
 
-    // Response should mention both results
     assert(response.rawAssistantText.includes('50'), 'Response should contain 50');
     assert(response.rawAssistantText.includes('25'), 'Response should contain 25');
   }
@@ -237,17 +191,11 @@ await runTest('Test 3: Multi-turn tool execution', async () => {
 
 await delay(1500);
 
-// ============================================================================
-// Test 4: Tools with Conversation History
-// ============================================================================
-
 await runTest('Test 4: Tools with prior conversation history', async () => {
-  // Simulate a conversation where tools were used in previous turns
   const request: NormalizedRequest = {
     messages: [
       createMessage('User', 'What is 5 + 5?'),
       createMessage('Claude', 'Let me calculate that for you.'),
-      // Previous tool use would be in the conversation
       createMessage('User', 'Great! Now what is 20 + 30?'),
     ],
     tools: [calculatorTool],
@@ -271,12 +219,10 @@ await runTest('Test 4: Tools with prior conversation history', async () => {
   assert(!isAbortedResponse(response), 'Response should not be aborted');
 
   if (!isAbortedResponse(response)) {
-    // The model should be able to use tools even with conversation history
     if (toolCalled) {
       assert(true, 'Tool was called successfully with conversation history');
       assert(response.rawAssistantText.includes('50'), 'Response should contain result 50');
     } else {
-      // Model might answer without tool - check if it's reasonable
       const hasAnswer = response.rawAssistantText.includes('50');
       assert(hasAnswer, 'Should have answer (with or without tool)');
     }
@@ -285,12 +231,7 @@ await runTest('Test 4: Tools with prior conversation history', async () => {
 
 await delay(1500);
 
-// ============================================================================
-// Test 5: Long Conversation Context with Tools
-// ============================================================================
-
 await runTest('Test 5: Long conversation context with tools', async () => {
-  // Build a long conversation history
   const messages: NormalizedMessage[] = [];
 
   for (let i = 0; i < 20; i++) {
@@ -298,7 +239,6 @@ await runTest('Test 5: Long conversation context with tools', async () => {
     messages.push(createMessage('Claude', `I acknowledge message ${i}.`));
   }
 
-  // Final message asking for tool use
   messages.push(createMessage('User', 'Now use the calculate tool to compute 7 * 8.'));
 
   const request: NormalizedRequest = {
@@ -324,7 +264,6 @@ await runTest('Test 5: Long conversation context with tools', async () => {
   assert(!isAbortedResponse(response), 'Response should not be aborted');
 
   if (!isAbortedResponse(response)) {
-    // Check that prefill didn't leak into response content
     const contentText = response.content
       .filter(b => b.type === 'text')
       .map(b => (b as any).text)
@@ -341,10 +280,6 @@ await runTest('Test 5: Long conversation context with tools', async () => {
 });
 
 await delay(1500);
-
-// ============================================================================
-// Test 6: Tool Results with Stop Sequences
-// ============================================================================
 
 await runTest('Test 6: Tool results containing stop sequences', async () => {
   const request: NormalizedRequest = {
@@ -368,7 +303,6 @@ await runTest('Test 6: Tool results containing stop sequences', async () => {
     onToolCalls: async (calls) => {
       toolCalled = true;
       console.log(`\n  [Returning tool result with embedded stop sequences]`);
-      // Return content that contains potential stop sequences
       return calls.map(call => ({
         toolUseId: call.id,
         content: `Chat log:
@@ -387,13 +321,11 @@ Claude: You're welcome!`,
     if (toolCalled) {
       assert(true, 'Tool was called');
 
-      // The response should complete normally despite stop sequences in tool result
       assert(
         response.stopReason === 'end_turn',
         `Should end normally (got ${response.stopReason})`
       );
 
-      // Tool result should be in the raw text
       assert(
         response.rawAssistantText.includes('Chat log'),
         'Raw text should include tool result content'
@@ -403,10 +335,6 @@ Claude: You're welcome!`,
 });
 
 await delay(1500);
-
-// ============================================================================
-// Test 7: Thinking + Tools Combined
-// ============================================================================
 
 await runTest('Test 7: Thinking and tools combined', async () => {
   const request: NormalizedRequest = {
@@ -438,11 +366,9 @@ await runTest('Test 7: Thinking and tools combined', async () => {
   assert(!isAbortedResponse(response), 'Response should not be aborted');
 
   if (!isAbortedResponse(response)) {
-    // Should have thinking block
     const thinkingBlocks = response.content.filter(b => b.type === 'thinking');
     assert(thinkingBlocks.length > 0, `Should have thinking block(s) (got ${thinkingBlocks.length})`);
 
-    // Should have answer (9999 or 9,999)
     assert(
       response.rawAssistantText.includes('9999') || response.rawAssistantText.includes('9,999'),
       'Response should contain the answer 9999'
@@ -455,10 +381,6 @@ await runTest('Test 7: Thinking and tools combined', async () => {
 });
 
 await delay(1500);
-
-// ============================================================================
-// Test 8: Content Block Integrity
-// ============================================================================
 
 await runTest('Test 8: Content block integrity (no duplicates)', async () => {
   const request: NormalizedRequest = {
@@ -478,22 +400,15 @@ await runTest('Test 8: Content block integrity (no duplicates)', async () => {
   if (!isAbortedResponse(response)) {
     const textBlocks = response.content.filter(b => b.type === 'text');
 
-    // Should have exactly one text block
     assert(textBlocks.length === 1, `Should have exactly 1 text block (got ${textBlocks.length})`);
 
-    // Text content should not be duplicated
     const textContent = textBlocks.map(b => (b as any).text).join('');
     const helloCount = (textContent.match(/Hello/g) || []).length;
     assert(helloCount <= 1, `Text should not be duplicated (found "Hello" ${helloCount} times)`);
   }
 });
 
-// ============================================================================
-// Test 9: Cache Breakpoints
-// ============================================================================
-
 await runTest('Test 9: Cache breakpoints in request', async () => {
-  // Build messages with explicit cache breakpoints
   const messages: NormalizedMessage[] = [
     createMessage('User', 'This is the first message with important context.'),
     { ...createMessage('Claude', 'I understand the context.'), cacheBreakpoint: true },
@@ -518,14 +433,12 @@ await runTest('Test 9: Cache breakpoints in request', async () => {
   assert(rawRequest !== null, 'Should capture raw request');
 
   if (rawRequest) {
-    // Check that system has cache_control
     const system = rawRequest.system;
     if (Array.isArray(system)) {
       const systemHasCache = system.some((block: any) => block.cache_control);
       assert(systemHasCache, 'System prompt should have cache_control');
     }
 
-    // Check that messages have cache_control at breakpoints
     const messagesWithCache = rawRequest.messages?.filter((m: any) => {
       if (Array.isArray(m.content)) {
         return m.content.some((block: any) => block.cache_control);
@@ -535,13 +448,11 @@ await runTest('Test 9: Cache breakpoints in request', async () => {
 
     console.log(`  Messages with cache_control: ${messagesWithCache.length}`);
 
-    // Should have multiple cache breakpoints (at least 2 from cacheBreakpoint messages)
     assert(
       messagesWithCache.length >= 2,
       `Should have at least 2 messages with cache_control (got ${messagesWithCache.length})`
     );
 
-    // Log the raw request structure for inspection
     console.log('  Raw request messages:');
     for (let i = 0; i < (rawRequest.messages?.length || 0); i++) {
       const msg = rawRequest.messages[i];
@@ -553,7 +464,6 @@ await runTest('Test 9: Cache breakpoints in request', async () => {
   assert(!isAbortedResponse(response), 'Response should not be aborted');
 
   if (!isAbortedResponse(response)) {
-    // Check usage includes cache info
     console.log(`  Usage: ${JSON.stringify(response.usage)}`);
     console.log(`  Cache details: ${JSON.stringify(response.details?.cache)}`);
   }
@@ -561,18 +471,13 @@ await runTest('Test 9: Cache breakpoints in request', async () => {
 
 await delay(1500);
 
-// ============================================================================
-// Test 10: Cache Breakpoints - Second Call (should hit cache)
-// ============================================================================
-
 await runTest('Test 10: Cache breakpoints - second call should hit cache', async () => {
-  // Same messages as Test 9 to test cache hit
   const messages: NormalizedMessage[] = [
     createMessage('User', 'This is the first message with important context.'),
     { ...createMessage('Claude', 'I understand the context.'), cacheBreakpoint: true },
     createMessage('User', 'This is the second message.'),
     { ...createMessage('Claude', 'Got it.'), cacheBreakpoint: true },
-    createMessage('User', 'Now answer: what is 3+3?'), // Different question
+    createMessage('User', 'Now answer: what is 3+3?'),
   ];
 
   const request: NormalizedRequest = {
@@ -586,17 +491,13 @@ await runTest('Test 10: Cache breakpoints - second call should hit cache', async
   assert(!isAbortedResponse(response), 'Response should not be aborted');
 
   if (!isAbortedResponse(response)) {
-    // Log cache usage - second call should show cache reads
     console.log(`  Usage: ${JSON.stringify(response.usage)}`);
     console.log(`  Cache details: ${JSON.stringify(response.details?.cache)}`);
     console.log(`  Detailed usage: ${JSON.stringify(response.details?.usage)}`);
 
-    // Check if we got cache reads (cacheReadTokens > 0)
     const cacheReadTokens = response.details?.usage?.cacheReadTokens ?? 0;
     console.log(`  Cache read tokens: ${cacheReadTokens}`);
 
-    // Note: Cache hit depends on Anthropic's caching behavior
-    // First call creates cache, second call should read from it
     if (cacheReadTokens > 0) {
       assert(true, `Cache hit! Read ${cacheReadTokens} tokens from cache`);
     } else {
@@ -605,10 +506,6 @@ await runTest('Test 10: Cache breakpoints - second call should hit cache', async
     }
   }
 });
-
-// ============================================================================
-// Test: Temperature enforcement for thinking in complete()
-// ============================================================================
 
 await delay(1500);
 
@@ -623,7 +520,7 @@ await runTest('Temperature enforcement: complete() with thinking enabled', async
     config: {
       model: MODEL,
       maxTokens: 2000,
-      temperature: 0.5, // This should be overridden to 1
+      temperature: 0.5,
       thinking: { enabled: true, budgetTokens: 1000 },
     },
   };
@@ -632,11 +529,9 @@ await runTest('Temperature enforcement: complete() with thinking enabled', async
     onRequest: (req) => { capturedRequest = req; },
   });
 
-  // The request should have succeeded (API would reject temperature != 1 with thinking)
   assert(response.content.length > 0, 'Got response content with thinking enabled');
   assert(capturedRequest?.temperature === 1, `Temperature forced to 1 (was ${capturedRequest?.temperature})`);
 
-  // Check that thinking and text content were present
   const hasThinking = response.content.some((b: ContentBlock) => b.type === 'thinking');
   const hasText = response.content.some((b: ContentBlock) => b.type === 'text');
   console.log(`  Content blocks: ${response.content.map((b: ContentBlock) => b.type).join(', ')}`);
@@ -644,14 +539,9 @@ await runTest('Temperature enforcement: complete() with thinking enabled', async
   assert(hasText, 'Response includes text content');
 });
 
-// ============================================================================
-// Test: Stop sequence capture in native mode streaming
-// ============================================================================
-
 await delay(1500);
 
 await runTest('Stop sequence in native mode streaming, with a tool registered to take the native-tools stream path', async () => {
-  // Use native tool mode with a tool present to activate streamWithNativeTools path
   const request: NormalizedRequest = {
     messages: [
       createMessage('User', 'Count from 1 to 10, one number per line. Do NOT use any tools.'),
@@ -675,30 +565,21 @@ await runTest('Stop sequence in native mode streaming, with a tool registered to
     console.log(`  Triggered sequence: ${JSON.stringify(response.details?.stop?.triggeredSequence)}`);
     console.log(`  Chunks: ${chunks.substring(0, 100)}...`);
 
-    // Should have stopped at the stop sequence
     if (response.stopReason === 'stop_sequence') {
       assert(true, 'Stop reason correctly detected as stop_sequence');
-      // Note: triggeredSequence depends on the adapter/SDK correctly propagating
-      // stop_sequence from streaming events. Anthropic SDK may return null here.
       if (response.details?.stop?.triggeredSequence) {
         assert(true, `triggeredSequence captured: "${response.details.stop.triggeredSequence}"`);
       } else {
         console.log('  Note: triggeredSequence is undefined (SDK may not propagate in streaming)');
-        // Verify the field exists in the response structure (our fix)
         assert('triggeredSequence' in (response.details?.stop ?? {}), 'triggeredSequence field exists in response structure');
       }
     } else {
-      // Model may have finished before hitting stop sequence
       assert(true, `Response completed with stop reason: ${response.stopReason}`);
     }
   } else {
     assert(false, 'Response was unexpectedly aborted');
   }
 });
-
-// ============================================================================
-// Summary
-// ============================================================================
 
 console.log('\n========================================');
 console.log(`Results: ${passed} passed, ${failed} failed`);

@@ -12,7 +12,6 @@ import {
 } from '../../src/providers/utils.js';
 import type { ContentBlock, NormalizedMessage, ProviderAdapter } from '../../src/types/index.js';
 
-// PNG signature followed by ~300KB of base64 payload: a realistic screenshot size.
 const PNG_HEADER = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ';
 const BIG_PNG = PNG_HEADER + 'A'.repeat(300_000);
 const PAYLOAD_PROBE = 'A'.repeat(1_000);
@@ -111,7 +110,6 @@ describe.each(adapters)('%s adapter: Membrane.complete with tool-result image hi
     const body = await sentBody([{ type: 'text', text: 'Screenshot taken' }, imageBlock()]);
     expect(body).not.toContain(PAYLOAD_PROBE);
     expect(body).toContain('Screenshot taken');
-    // The placeholder sits inside a JSON string that is itself JSON-encoded.
     expect(body).toContain('tool results reach this model as text only');
     expect(body.length).toBeLessThan(5_000);
   });

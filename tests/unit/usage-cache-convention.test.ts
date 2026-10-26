@@ -26,7 +26,6 @@ import type {
   NormalizedResponse,
 } from '../../src/types/index.js';
 
-// Every rate differs, so a cost assertion can tell which rate priced a count.
 const ZZ_PRICING = {
   inputPerMillion: 1000,
   outputPerMillion: 1000,
@@ -35,7 +34,6 @@ const ZZ_PRICING = {
   currency: 'USD',
 };
 
-/** A registry stub so the cost assertions do not depend on the default table. */
 const zzRegistry = {
   getPricing: () => ZZ_PRICING,
   getCapabilities: () => undefined,
@@ -93,7 +91,6 @@ async function yielded(membrane: Membrane, request: NormalizedRequest): Promise<
 
 type Door = [string, (membrane: Membrane, request: NormalizedRequest) => Promise<NormalizedResponse>];
 
-/** Each way a turn leaves membrane, by the tool loop each one runs. */
 const DOORS: Door[] = [
   ['complete()', (membrane, request) => membrane.complete(request)],
   ['stream() in native tool mode',
@@ -104,8 +101,6 @@ const DOORS: Door[] = [
   ['streamYielding() in XML tool mode', (membrane, request) => yielded(membrane, { ...request, toolMode: 'xml' })],
 ];
 
-// The undeclared-convention warning latches per adapter NAME, process-wide,
-// and these cases all use the same one.
 beforeEach(() => { resetUndeclaredConventionWarnings(); });
 afterEach(() => { vi.restoreAllMocks(); });
 
@@ -117,7 +112,6 @@ describe('cache-excluded adapters (Anthropic convention)', () => {
     );
     const response = await membrane.complete(ZZ_REQUEST);
 
-    // 48000 / (48000 + 120) — was 48000/120 = 400 before normalization.
     expect(response.details.cache.hitRatio).toBeCloseTo(48_000 / 48_120, 10);
     expect(response.details.cache.hitRatio).toBeLessThanOrEqual(1);
   });
@@ -131,15 +125,11 @@ describe('cache-excluded adapters (Anthropic convention)', () => {
 
     expect(response.usage.inputTokens).toBe(120);
     expect(response.usage.cacheReadTokens).toBe(48_000);
-    // 120 fresh at 1000/M + 48000 cached at 100/M.
     expect(response.details.usage.estimatedCost?.input).toBeCloseTo(120 * 1000 / 1e6, 12);
     expect(response.details.usage.estimatedCost?.cacheRead).toBeCloseTo(48_000 * 100 / 1e6, 12);
   });
 
   it.each(DOORS)('counts cache writes as part of the prompt in the hit ratio, through %s', async (_door, call) => {
-    // 100 fresh + 5,000 written + 5,000 read is a 10,100-token prompt, half
-    // of it served from cache. Leaving the writes out of the prompt made it
-    // 5,100 tokens and the ratio 98%.
     const membrane = new Membrane(
       adapterReporting(
         { inputTokens: 100, outputTokens: 40, cacheCreationTokens: 5_000, cacheReadTokens: 5_000 },
@@ -174,15 +164,11 @@ describe('cache-inclusive adapters (OpenAI convention)', () => {
     );
     const response = await membrane.complete(ZZ_REQUEST);
 
-    // Fresh input is prompt - cached = 68, not the full 1732.
     expect(response.details.usage.estimatedCost?.input).toBeCloseTo((1_732 - 1_664) * 1000 / 1e6, 12);
     expect(response.details.usage.estimatedCost?.cacheRead).toBeCloseTo(1664 * 100 / 1e6, 12);
   });
 
   it.each(DOORS)('subtracts cache writes too, since an inclusive input count holds every cached token, through %s', async (_door, call) => {
-    // No built-in inclusive adapter reports writes. One that did would count
-    // them inside its input, as it counts its reads: a 10,000-token prompt
-    // with 1,000 written and 2,000 read has 7,000 fresh.
     const membrane = new Membrane(
       adapterReporting(
         { inputTokens: 10_000, outputTokens: 2, cacheCreationTokens: 1_000, cacheReadTokens: 2_000 },
@@ -195,7 +181,6 @@ describe('cache-inclusive adapters (OpenAI convention)', () => {
     expect(response.usage.inputTokens).toBe(7_000);
     expect(response.usage.cacheCreationTokens).toBe(1_000);
     expect(response.usage.cacheReadTokens).toBe(2_000);
-    // Each part priced once at its own rate.
     expect(response.details.usage.estimatedCost?.input).toBeCloseTo(7_000 * 1000 / 1e6, 12);
     expect(response.details.usage.estimatedCost?.cacheWrite).toBeCloseTo(1_000 * 1250 / 1e6, 12);
     expect(response.details.usage.estimatedCost?.cacheRead).toBeCloseTo(2_000 * 100 / 1e6, 12);
@@ -213,8 +198,6 @@ describe('cache-inclusive adapters (OpenAI convention)', () => {
   });
 
   it('clamps the fresh input at zero when the cached counts exceed the input count', async () => {
-    // A count that can't be right: an adapter declaring itself inclusive
-    // while reporting its cached span outside the input count.
     const membrane = new Membrane(
       adapterReporting(
         { inputTokens: 1_000, outputTokens: 2, cacheCreationTokens: 600, cacheReadTokens: 600 },
@@ -256,7 +239,7 @@ describe('per-response convention override', () => {
 
 describe('undeclared conventions', () => {
   it('passes the counts through and warns once when a cache read is present', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { });
     const membrane = new Membrane(
       adapterReporting({ inputTokens: 1732, outputTokens: 2, cacheReadTokens: 1664 }, 'unknown'),
       { registry: zzRegistry },
@@ -271,11 +254,7 @@ describe('undeclared conventions', () => {
   });
 
   it('treats an adapter that declares NOTHING the same as one declaring "unknown"', async () => {
-    // `usageCacheConvention` is optional on the interface so external custom
-    // adapters keep compiling. Silence is not a licence to guess: an
-    // undeclared adapter gets `unknown`'s exact behaviour — counts through
-    // untouched, one warning when a cache read makes the ambiguity bite.
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { });
     const membrane = new Membrane(
       adapterReporting({ inputTokens: 1732, outputTokens: 2, cacheReadTokens: 1664 }),
       { registry: zzRegistry },
@@ -289,9 +268,7 @@ describe('undeclared conventions', () => {
   });
 
   it('warns once when an undeclared adapter reports cache writes alone', async () => {
-    // Writes enter the total prompt and the hit ratio, so whether the input
-    // count already holds them matters as much as it does for reads.
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { });
     const membrane = new Membrane(
       adapterReporting({ inputTokens: 11_000, outputTokens: 2, cacheCreationTokens: 1_000 }, 'unknown'),
       { registry: zzRegistry },
@@ -306,7 +283,7 @@ describe('undeclared conventions', () => {
   });
 
   it('stays silent when no cache read or write is reported', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { });
     const membrane = new Membrane(
       adapterReporting({ inputTokens: 1732, outputTokens: 2 }, 'unknown'),
       { registry: zzRegistry },
@@ -320,7 +297,6 @@ describe('undeclared conventions', () => {
 describe("OpenRouter's per-response convention, with cache writes", () => {
   afterEach(() => { vi.unstubAllGlobals(); });
 
-  /** One OpenRouter reply carrying `usage`, as complete() or a stream receives it. */
   function openRouterReply(streamed: boolean, usage: Record<string, unknown>): Response {
     return streamed
       ? sseResponse([JSON.stringify({ choices: [{ delta: { content: 'zz-reply' }, finish_reason: 'stop' }], usage })])
@@ -351,7 +327,7 @@ describe("OpenRouter's per-response convention, with cache writes", () => {
 
   for (const [door, call] of DOORS.filter(([label]) => !label.includes('XML'))) {
     it.each(SHAPES)(`restates a response reporting %s, through ${door}`, async (_shape, usage, expected) => {
-      const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => { });
       vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => openRouterReply(door !== 'complete()', usage)));
       const membrane = new Membrane(new OpenRouterAdapter({ apiKey: 'zz-key' }), {
         registry: zzRegistry,
@@ -364,7 +340,6 @@ describe("OpenRouter's per-response convention, with cache writes", () => {
       expect(response.usage.cacheReadTokens ?? 0).toBe(expected.read);
       const prompt = expected.input + expected.written + expected.read;
       expect(response.details.cache.hitRatio).toBeCloseTo(expected.read / prompt, 10);
-      // Each shape resolves to a declared convention, so none warns about it.
       expect(warn.mock.calls.filter((args) => String(args[0]).includes('usageCacheConvention'))).toHaveLength(0);
     });
   }

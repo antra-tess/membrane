@@ -43,7 +43,6 @@ describe.each(['Anthropic', 'Bedrock'])('%s empty text at the wire boundary', ki
       { role: 'assistant', content: [thinking] },
     ]);
     expect(request).toEqual(before);
-    // Applying the wire pass again preserves the same payload.
     expect(makeAdapter(kind).buildRequest({ ...base, messages: built.messages }).messages).toEqual(built.messages);
   });
 

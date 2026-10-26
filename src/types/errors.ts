@@ -1,12 +1,4 @@
-/**
- * Error types for membrane
- */
-
 import { classifyFailure } from '../retry.js';
-
-// ============================================================================
-// Error Serialization Helper
-// ============================================================================
 
 /** Serialize an error for storage in rawError field. */
 export function serializeError(error: unknown): unknown {
@@ -20,12 +12,10 @@ export function serializeError(error: unknown): unknown {
       message: error.message,
     };
 
-    // Include stack trace in non-production
     if (process.env.NODE_ENV !== 'production' && error.stack) {
       serialized.stack = error.stack;
     }
 
-    // Copy any additional enumerable properties (like status, code, etc.)
     for (const key of Object.keys(error)) {
       serialized[key] = (error as unknown as Record<string, unknown>)[key];
     }
@@ -33,13 +23,8 @@ export function serializeError(error: unknown): unknown {
     return serialized;
   }
 
-  // For non-Error objects, return as-is (they should serialize fine)
   return error;
 }
-
-// ============================================================================
-// Error Types
-// ============================================================================
 
 export type MembraneErrorType =
   | 'rate_limit'
@@ -53,10 +38,6 @@ export type MembraneErrorType =
   | 'safety'
   | 'unsupported'
   | 'unknown';
-
-// ============================================================================
-// Error Info (for hooks and logging)
-// ============================================================================
 
 export interface ErrorInfo {
   /** Normalized error type */
@@ -86,10 +67,6 @@ export interface ErrorInfo {
   /** See {@link MembraneError.systemChangeRefused}. */
   systemChangeRefused?: boolean;
 }
-
-// ============================================================================
-// Membrane Error Class
-// ============================================================================
 
 export class MembraneError extends Error {
   readonly type: MembraneErrorType;
@@ -123,7 +100,6 @@ export class MembraneError extends Error {
     this.retryAfterMs = info.retryAfterMs;
     this.httpStatus = info.httpStatus;
     this.providerErrorCode = info.providerErrorCode;
-    // Serialize error objects so they don't become {} when JSON.stringify'd
     this.rawError = serializeError(info.rawError);
     this.rawRequest = info.rawRequest;
     if (info.systemChangeRefused) this.systemChangeRefused = true;
@@ -170,10 +146,6 @@ export class MembraneNotReadyError extends MembraneError {
     this.formatterName = formatterName;
   }
 }
-
-// ============================================================================
-// Error Factory Functions
-// ============================================================================
 
 export function rateLimitError(message: string, retryAfterMs?: number, raw?: unknown, rawRequest?: unknown): MembraneError {
   return new MembraneError({
@@ -308,7 +280,6 @@ export function unsupportedError(message: string, rawRequest?: unknown): Membran
   });
 }
 
-/** Membrane's own refusal, before sending, of a request for the system change it carries. */
 export function systemChangeRefusedError(message: string, rawRequest?: unknown): MembraneError {
   return new MembraneError({
     type: 'unsupported',
@@ -320,20 +291,12 @@ export function systemChangeRefusedError(message: string, rawRequest?: unknown):
   });
 }
 
-/**
- * Mark an error an adapter already classified as the API refusing the
- * request's system change, keeping its identity, as withRawRequest does.
- */
 export function markSystemChangeRefused(error: MembraneError): MembraneError {
   try {
     Object.defineProperty(error, 'systemChangeRefused', { value: true, enumerable: true, configurable: true });
-  } catch { /* A frozen error still propagates unchanged. */ }
+  } catch { }
   return error;
 }
-
-// ============================================================================
-// HTTP Boundary Classification
-// ============================================================================
 
 /** The part of a `Response` this module needs. */
 export interface HttpErrorResponseLike {
@@ -413,8 +376,6 @@ const NON_RETRYABLE_RATE_LIMIT_CODES = new Set([
 const CONTEXT_LENGTH_PATTERN =
   /context[ _-]?(?:length|limit|window)|maximum context|too many tokens|token limit|(?:prompt|input)(?: is)? too long|exceeds? the maximum number of (?:input )?tokens|input token count/i;
 
-// "rate limit" only where no letter precedes it, so "moderate limit" and
-// "generate limit" aren't rate limits, while "user_rate_limit" still is.
 const RATE_LIMIT_PATTERN = /\b429\b|(?<![a-z])rate[ _-]?limit|too many requests/i;
 
 const SERVER_STATUS_PATTERN = /\b(500|502|503|504|529)\b/;
@@ -508,7 +469,6 @@ function retryAfterFromBody(root: Record<string, unknown>, errorNode: Record<str
   }
   const millis = errorNode.retry_after_ms ?? root.retry_after_ms;
   if (typeof millis === 'number' && Number.isFinite(millis)) return Math.round(millis);
-  // A digit string, as the SSE frame reader also accepts for this field.
   if (typeof millis === 'string' && /^\d+$/.test(millis.trim())) return Number(millis.trim());
   return parseRetryDelayValue(errorNode.retry_after ?? root.retry_after ?? errorNode.retryAfter ?? root.retryAfter);
 }
@@ -534,8 +494,6 @@ export function extractProviderErrorFields(body: unknown): ProviderErrorFields {
 
   if (typeof body !== 'object') return { message: String(body) };
 
-  // A body wrapped in an array, as `[{"error": {...}}]`: its first entry is
-  // the error.
   if (Array.isArray(body)) {
     const first = body.find((entry) => entry !== null && typeof entry === 'object');
     return first === undefined ? {} : extractProviderErrorFields(first);
@@ -655,14 +613,8 @@ function classifyByStatus(
   return { type: 'unknown', retryable: false };
 }
 
-/**
- * The HTTP status a provider's own error code implies, when the shared table
- * knows the code. Adapters with a provider-specific precedence rule use it to
- * read the same status errorFromProviderStatus would classify by.
- */
 export function statusForProviderCode(code: string | undefined): number | undefined {
   const key = code?.toLowerCase();
-  // Own keys only: a provider code such as "constructor" is not a table entry.
   return key !== undefined && Object.prototype.hasOwnProperty.call(PROVIDER_ERROR_CODE_STATUS, key)
     ? PROVIDER_ERROR_CODE_STATUS[key]
     : undefined;
@@ -676,7 +628,6 @@ export function statusForProviderCode(code: string | undefined): number | undefi
 export function errorFromProviderStatus(params: {
   provider: string;
   status?: number | undefined;
-  /** Provider-specific structured-token inference, after explicit status or a known code. */
   fallbackStatus?: number | undefined;
   body?: unknown;
   message?: string;
@@ -701,17 +652,10 @@ export function errorFromProviderStatus(params: {
   const ownText = fields.message ?? (params.body === undefined ? params.message : undefined);
   const evidence = [ownText, fields.upstreamMessage].filter((text): text is string => !!text).join('\n');
 
-  // Without a status the transport patterns read the whole message, but the
-  // echo-sensitive ones (an account refusal, a context overflow) read the
-  // same evidence as with one, so the same body types the same way.
   const classification =
     status !== undefined
       ? { ...classifyByStatus(status, code, evidence, fields.reason, fields.terminalQuota), httpStatus: status }
       : classifyMessage(fields.upstreamMessage ? `${message}\n${fields.upstreamMessage}` : message, evidence);
-  // A wait read from prose is believed only for an error that asks to be
-  // retried: a stated wait is a hold for anyone who honours it, and a 400
-  // whose text happens to say "retry after", or a 429 no retry can outlast,
-  // asks for none. A body's own RetryInfo or header is reported either way.
   const retryAfterMs = params.retryAfterMs ?? fields.retryAfterMs
     ?? (classification.retryable && (classification.type === 'rate_limit' || classification.type === 'server')
       ? retryAfterFromProse(detail) : undefined);
@@ -728,11 +672,6 @@ export function errorFromProviderStatus(params: {
   });
 }
 
-/**
- * The fetch boundary: the one place where status, headers and body are all
- * still live. Everything downstream reads the classification off the error
- * instead of re-deriving one by substring over a rendered string.
- */
 export function errorFromHttpResponse(
   provider: string,
   response: HttpErrorResponseLike,
@@ -755,7 +694,6 @@ function amznErrorType(value: string | null | undefined): string | undefined {
   return name ? name : undefined;
 }
 
-/** A retry hint stated only in the message, when neither header nor body carries one. */
 function retryAfterFromProse(message: string): number | undefined {
   const seconds = message.match(RETRY_AFTER_PROSE)?.[1];
   return seconds ? Math.round(parseFloat(seconds) * 1000) : undefined;
@@ -767,12 +705,9 @@ function retryAfterFromProse(message: string): number | undefined {
  */
 export function withRawRequest(error: MembraneError, rawRequest: unknown): MembraneError {
   if (rawRequest === undefined || error.rawRequest !== undefined) return error;
-  // Preserve object identity, subclass fields and private-field brands. Credential
-  // resolvers and deadline handling use the original classified error as evidence.
-  // An immutable caller-owned error remains authoritative even without this hint.
   try {
     Object.defineProperty(error, 'rawRequest', { value: rawRequest, enumerable: true, configurable: true });
-  } catch { /* A frozen error still propagates unchanged. */ }
+  } catch { }
   return error;
 }
 
@@ -780,49 +715,18 @@ export function withRawRequest(error: MembraneError, rawRequest: unknown): Membr
 // of membrane reads the same mark.
 const DEADLINE_EXPIRY = Symbol.for('membrane.deadlineExpiry');
 
-/**
- * Mark an error as a deadline running out on a call that was under way:
- * AnthropicAdapter's idle and first-event watchdogs, every timeout its SDK
- * client reports, and a runtime's own fetch deadlines (errorFromThrown). It
- * stays the retryable timeout a caller sees, but membrane doesn't send the
- * call again: the deadline was the call's budget, and another full one is the
- * caller's to give. (An adapter's `timeoutMs` deadline is a TimeoutAbortError,
- * which isn't retryable at all.) Keeps the error's identity.
- */
 export function deadlineExpired<E extends MembraneError>(error: E): E {
   try {
     Object.defineProperty(error, DEADLINE_EXPIRY, { value: true });
-  } catch { /* A frozen error is retried like any other timeout. */ }
+  } catch { }
   return error;
 }
 
-/** Whether an error was marked with deadlineExpired. */
 export function isDeadlineExpiry(error: unknown): boolean {
   return typeof error === 'object' && error !== null
     && (error as Record<symbol, unknown>)[DEADLINE_EXPIRY] === true;
 }
 
-/**
- * What the caller's own code threw while membrane ran it beside a call: a
- * hook, a request or stream callback, a receipt consumer, a header stamp,
- * the configured logger or a model registry's pricing. Resending the provider
- * request can't mend that code, and would pay for another call or run it
- * again, so the error is never retryable: membrane's own retries stop on it,
- * and so does a caller's policy that reads `retryable`. (What builds, sends
- * or reads the call, such as an adapter, the transport, a credential
- * resolver, a formatter or a parser, keeps its own classification.)
- *
- * A MembraneError that already says it isn't retryable leaves as itself.
- * Anything else, a retryable MembraneError included, is wrapped, with the
- * original as `cause`, so this never marks an error the caller still holds.
- * (complete() and stream() may still attach their request to one that
- * leaves as itself, as they do to any MembraneError that has none.) The
- * wrapper keeps the type membrane reads from the error, but nothing a
- * provider's response would state (an HTTP status, a provider code, a wait),
- * since no response to this call stands behind it, and no request or raw
- * error taken from a MembraneError the caller threw, which would be another
- * call's.
- */
 export function callerCodeError(error: unknown): MembraneError {
   if (error instanceof MembraneError && !error.retryable) return error;
   const info = classifyError(error);
@@ -839,13 +743,6 @@ export function callerCodeError(error: unknown): MembraneError {
   return wrapped;
 }
 
-/**
- * Run the caller's code: what it throws leaves as a callerCodeError. Wrap
- * each call membrane makes into the caller's code, since the rule covers
- * those calls. A getter membrane reads outside them, such as on the caller's
- * hooks or on a value its code returned, is a read, not a call, and its
- * error is classified as before.
- */
 export function runCallerCode<R>(run: () => R): R {
   try {
     return run();
@@ -854,7 +751,6 @@ export function runCallerCode<R>(run: () => R): R {
   }
 }
 
-/** Run caller code that membrane awaits, such as a hook or a tool executor. */
 export async function awaitCallerCode<R>(run: () => R | Promise<R>): Promise<R> {
   try {
     return await run();
@@ -889,10 +785,6 @@ function renderBody(body: unknown): string {
   }
 }
 
-// ============================================================================
-// Error Classification
-// ============================================================================
-
 /**
  * Provider capacity exhaustion: Anthropic's 529 overloaded_error, whichever
  * path it arrived by, among errors already judged retryable: a non-retryable
@@ -905,23 +797,6 @@ export function isOverloadedError(info: ErrorInfo): boolean {
   return classifyFailure(info) === 'overloaded';
 }
 
-/**
- * Last-resort classification for throwables that never carried an HTTP
- * response: SDK errors, socket failures, internal bugs. HTTP failures are
- * classified at the boundary (`errorFromHttpResponse`) where the status is
- * still in hand, so this table no longer has to guess at one.
- *
- * The patterns are deliberately narrow. Bare `rate` promoted anything
- * containing "generated"/"moderate"/"accurate" to a retryable 429, and bare
- * `maximum` turned an internal TypeError ("...reading 'maximum'") into a
- * provider context_length. Status digits are word-boundary anchored, and the
- * server-status arm is tested BEFORE context-length so a transient 5xx whose
- * body mentions "context" stays retryable.
- *
- * `ownText` is the provider's own message, for the patterns a request's echo
- * could otherwise trip (an account refusal, a context overflow), as with a
- * status; it is the message itself when the caller has nothing more precise.
- */
 function classifyMessage(rawMessage: string, ownText: string = rawMessage): {
   type: MembraneErrorType;
   retryable: boolean;
@@ -989,7 +864,6 @@ function socketCodes(error: unknown): string[] {
     .map((code) => code.toLowerCase());
 }
 
-/** An error and its causes, outermost first, at most four deep. */
 function causeChain(error: unknown): object[] {
   const chain: object[] = [];
   let current = error;
@@ -1000,21 +874,11 @@ function causeChain(error: unknown): object[] {
   return chain;
 }
 
-/**
- * The MembraneError for a failure an adapter caught that isn't one yet, such
- * as what `fetch` throws: typed by classifyError, with the request attached.
- * A runtime's deadline on a request it already sent (undici's headers and
- * body timeouts, Bun's fetch timeout) is marked deadlineExpired, as an
- * adapter's own watchdog is, so membrane leaves it to the caller.
- */
 export function errorFromThrown(error: unknown, rawRequest?: unknown): MembraneError {
-  // Already typed: keep it, and its marks, as it is.
   if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
   const info = classifyError(error);
   info.rawRequest = rawRequest;
   const typed = new MembraneError(info);
-  // A mark the error already carries, as a second loaded copy of membrane
-  // sets one on its own MembraneError, stays on the new one.
   return isSentRequestDeadline(error) || isDeadlineExpiry(error) ? deadlineExpired(typed) : typed;
 }
 
@@ -1023,12 +887,9 @@ export function classifyError(error: unknown): ErrorInfo {
     return error.toErrorInfo();
   }
 
-  // Serialize the error once for use in all return paths
   const serializedError = serializeError(error);
 
   if (error instanceof Error) {
-    // Abort is decided by type, never by prose: a tool or provider message
-    // that merely contains "abort" is not a user cancellation.
     if (error.name === 'AbortError') {
       return {
         type: 'abort',
@@ -1055,7 +916,6 @@ export function classifyError(error: unknown): ErrorInfo {
     }
   }
 
-  // Unknown
   return {
     type: 'unknown',
     message: error instanceof Error ? error.message : String(error),

@@ -1,16 +1,7 @@
-/**
- * Normalized message types
- */
-
 import type { ContentBlock, CacheControl } from './content.js';
 import { isRawItemCarrier } from '../utils/fidelity.js';
 
-// Re-export CacheControl for consumers
 export type { CacheControl } from './content.js';
-
-// ============================================================================
-// Message Metadata
-// ============================================================================
 
 export interface MessageMetadata {
   /** Original timestamp */
@@ -28,10 +19,6 @@ export interface MessageMetadata {
   /** Additional metadata (pass-through) */
   [key: string]: unknown;
 }
-
-// ============================================================================
-// Normalized Message
-// ============================================================================
 
 /**
  * A message from a single participant.
@@ -54,10 +41,6 @@ export interface NormalizedMessage {
    */
   cacheBreakpoint?: boolean;
 }
-
-// ============================================================================
-// Helpers
-// ============================================================================
 
 /**
  * Create a simple text message

@@ -1,9 +1,3 @@
-/**
- * A cancelled streamYielding() turn reports what it had. The aborted event
- * that cancel() emits, for the consumer's cancel and for the caller's
- * AbortSignal alike, carries partialContent, rawAssistantText, toolCalls and
- * toolResults, as a provider or deadline abort's does (#142).
- */
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { YieldingStreamImpl } from '../../src/yielding-stream.js';
@@ -17,11 +11,6 @@ type Mode = 'native' | 'xml';
 
 const XML_CALL = 'zz checking\n<function_calls><invoke name="zz_noop"><parameter name="x">1</parameter></invoke></function_calls>';
 
-/**
- * Round one makes one tool call. Round two streams some text and then waits
- * until its signal aborts, failing as an adapter does: a deadline abort as a
- * timeout, anything else as an abort.
- */
 class TwoRoundAdapter implements ProviderAdapter {
   readonly name = 'zz-two-rounds';
   calls = 0;
@@ -74,7 +63,6 @@ const BASE: NormalizedRequest = {
 };
 const requestFor = (mode: Mode): NormalizedRequest => ({ ...BASE, toolMode: mode });
 
-/** Answers the tool round, then runs `stop` once round two is under way; returns every event. */
 async function drive(stream: YieldingStream, adapter: TwoRoundAdapter, stop: () => void): Promise<StreamEvent[]> {
   void adapter.secondRound.then(stop);
   const events: StreamEvent[] = [];
@@ -87,7 +75,6 @@ async function drive(stream: YieldingStream, adapter: TwoRoundAdapter, stop: () 
   return events;
 }
 
-/** The fields an aborted event carries beside its type and reason. */
 function partOf(events: StreamEvent[]): Record<string, unknown> {
   const aborted = events.filter((event) => event.type === 'aborted');
   expect(aborted).toHaveLength(1);
@@ -95,7 +82,6 @@ function partOf(events: StreamEvent[]): Record<string, unknown> {
   return rest;
 }
 
-/** The same, with the ids the XML parser mints for each run (`tool_<ms>_<n>`) made alike. */
 function comparable(part: Record<string, unknown>): unknown {
   return JSON.parse(JSON.stringify(part).replace(/tool_\d+_\d+/g, 'tool_id'));
 }
@@ -112,14 +98,11 @@ describe('a cancelled streamYielding() turn reports what it had', () => {
       const part = partOf(events);
       expect(part.toolCalls).toEqual([expect.objectContaining({ name: 'zz_noop', input: { x: 1 } })]);
       expect(part.toolResults).toEqual([expect.objectContaining({ content: 'zz ok' })]);
-      // Both rounds' text: the recorded round's and the open round's so far.
       expect(String(part.rawAssistantText)).toContain('zz checking');
       expect(String(part.rawAssistantText)).toContain('zz second ');
       const blocks = part.partialContent as Array<{ type: string }>;
       expect(blocks.map((block) => block.type)).toEqual(['text', 'tool_use', 'tool_result', 'text']);
       expect(JSON.stringify(blocks[0])).toContain('zz checking');
-      // The XML path parses its blocks from the text, and that parse gives
-      // this one as "zz second", without the trailing space.
       expect(JSON.stringify(blocks[3])).toContain('zz second');
     });
 
@@ -145,7 +128,6 @@ describe('a cancelled streamYielding() turn reports what it had', () => {
       const cancelledStream = new Membrane(cancelled).streamYielding(requestFor(mode), {});
       const byCancel = partOf(await drive(cancelledStream, cancelled, () => cancelledStream.cancel()));
 
-      // The deadline lets round one run, then expires while round two waits.
       const expired = new TwoRoundAdapter(mode);
       const expiredStream = new Membrane(expired).streamYielding(requestFor(mode), { progressTimeoutMs: 200 });
       const events = await drive(expiredStream, expired, () => {});
@@ -226,7 +208,7 @@ describe('a cancelled streamYielding() turn reports what it had', () => {
     const stream = new YieldingStreamImpl({}, async (running) => {
       running.setAbortSnapshot(() => ({ rawAssistantText: 'zz' }));
     });
-    for await (const _event of stream) { /* the loop ends at once */ }
+    for await (const _event of stream) { }
     expect((stream as unknown as { abortSnapshot?: unknown }).abortSnapshot).toBeUndefined();
   });
 });

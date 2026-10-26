@@ -1,13 +1,5 @@
-/**
- * Request types for membrane
- */
-
 import type { NormalizedMessage } from './message.js';
 import type { ToolDefinition } from './tools.js';
-
-// ============================================================================
-// Generation Config
-// ============================================================================
 
 export interface GenerationConfig {
   /** Model identifier */
@@ -135,10 +127,6 @@ export interface GenerationConfig {
   };
 }
 
-// ============================================================================
-// Stop Sequence Config
-// ============================================================================
-
 export type StopSequenceStrategy = 
   | 'none'              // Trust API stop sequences only
   | 'post-facto'        // Disable API sequences, check in code
@@ -158,10 +146,6 @@ export interface StopSequenceConfig {
   postFactoOnly?: string[];
 }
 
-// ============================================================================
-// Request Options
-// ============================================================================
-
 export interface RequestOptions {
   /** Abort signal for cancellation */
   signal?: AbortSignal;
@@ -176,18 +160,10 @@ export interface RequestOptions {
   tags?: Record<string, string>;
 }
 
-// ============================================================================
-// Tool Mode
-// ============================================================================
-
 export type ToolMode = 
   | 'xml'     // XML injection in prefill mode
   | 'native'  // Native API tool support (Anthropic tool_use, OpenAI tool_calls)
   | 'auto';   // Automatically choose based on provider/mode
-
-// ============================================================================
-// Normalized Request
-// ============================================================================
 
 export interface NormalizedRequest {
   /** Cache-layout receipt: the default basis is the post-format/post-hook,

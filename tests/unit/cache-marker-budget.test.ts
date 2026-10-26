@@ -50,7 +50,6 @@ function build(request: NormalizedRequest, messages: NormalizedMessage[], rebuil
   return (membrane as any).buildNativeToolRequest(request, messages, rebuild);
 }
 
-/** Capture what the adapter is actually handed by streamOnce. */
 function captureAdapter() {
   const captured: any[] = [];
   const adapter = {
@@ -69,19 +68,9 @@ function captureAdapter() {
   return { adapter, captured };
 }
 
-/**
- * Count `cache_control` on the wire WITHOUT asking the module under test —
- * the module's own blindness is the bug, so a test that counted with it could
- * not fail on the unfixed tip.
- */
 const wireMarkerCensus = (wire: unknown): number =>
   JSON.stringify(wire).split('"cache_control"').length - 1;
 
-/**
- * Five real wire markers in document order: tools, system, two message text
- * blocks, and a fifth riding a block inside `tool_result.content`. The
- * top-level walk sees only four of them.
- */
 const nestedOverBudgetWire = () => ({
   model: 'claude-haiku-4-5-20251001',
   tools: [{ name: 'zz_shell', cache_control: marked }],
@@ -130,9 +119,6 @@ describe('countWireCacheMarkers', () => {
   });
 
   it('stops descending at the nested-content depth cap', () => {
-    // The cap is what makes the walk total on caller-built structures
-    // (including cyclic ones); a marker below it is out of the belt's reach
-    // and this test is the honest record of where that line sits.
     let deepest: Record<string, unknown> = { type: 'text', text: 'zz too deep', cache_control: marked };
     for (let level = 0; level < MAX_NESTED_CONTENT_DEPTH + 1; level++) {
       deepest = { type: 'tool_result', tool_use_id: `zz-t${level}`, content: [deepest] };
@@ -162,7 +148,6 @@ describe('clampCacheMarkers', () => {
 
     expect(result.dropped).toBe(2);
     expect(countWireCacheMarkers(wire)).toBe(MAX_CACHE_BREAKPOINTS);
-    // The shallowest two (tools, then system) lost theirs; every message kept one.
     expect(wire.tools[0]!.cache_control).toBeUndefined();
     expect((wire.system[0] as any).cache_control).toBeUndefined();
     expect(wire.messages.every((m) => (m.content[0] as any).cache_control)).toBe(true);
@@ -201,7 +186,6 @@ describe('tools/system fallback gate (caller-marked system blocks are real wire 
     ] as any;
     const providerRequest = build(makeRequest({ system: callerMarkedSystem }), [user('zz go')]);
 
-    // 3 caller markers, nothing added: the fallback would have made it 5.
     expect(countWireCacheMarkers(providerRequest)).toBe(3);
     expect(providerRequest.tools.some((t: any) => t.cache_control)).toBe(false);
     expect((providerRequest.system as any[]).filter((b) => b.cache_control)).toHaveLength(3);
@@ -232,8 +216,6 @@ describe('final clamp at the last exit before the adapter', () => {
     const membrane = new Membrane(adapter as any, {
       hooks: {
         beforeRequest: (_normalized: unknown, providerRequest: any) => {
-          // A hook that stamps its own prefix markers is invisible to every
-          // builder-side budget — only the last-exit clamp can see it.
           providerRequest.system = [1, 2, 3, 4, 5, 6].map((n) => ({
             type: 'text',
             text: `zz hook system ${n}`,
@@ -278,8 +260,6 @@ describe('nested markers are clamped exactly like top-level ones', () => {
     const wire = nestedOverBudgetWire();
     const result = clampCacheMarkers(wire, 'zz-test-site');
 
-    // Document order governs wherever the marker sits: the tools marker is
-    // shallowest and loses; the nested one is deepest and survives.
     expect(result).toEqual({ total: MAX_CACHE_BREAKPOINTS, dropped: 1, strippedFromThinking: 0 });
     expect(wireMarkerCensus(wire)).toBe(MAX_CACHE_BREAKPOINTS);
     expect((wire.tools[0] as any).cache_control).toBeUndefined();
@@ -298,7 +278,6 @@ describe('nested markers are clamped exactly like top-level ones', () => {
       onWireCacheMarkers: (n: number) => tallies.push(n),
     });
 
-    // Unfixed, five markers ride to the wire while the tally reports four.
     expect(wireMarkerCensus(captured[0])).toBe(MAX_CACHE_BREAKPOINTS);
     expect(tallies).toEqual([MAX_CACHE_BREAKPOINTS]);
     expect(warn).toHaveBeenCalled();
@@ -326,9 +305,6 @@ describe('nested markers are clamped exactly like top-level ones', () => {
 describe('the clamp never reaches back into the caller request', () => {
   it('owns caller system blocks down to the nested grain the clamp now reaches', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
-    // A caller system block whose own `content` array carries the marker: the
-    // clamp can now see that marker, so ownership has to cover it too, or an
-    // over-budget turn deletes the caller's breakpoint permanently.
     const callerSystem = [
       {
         type: 'text',
@@ -354,8 +330,6 @@ describe('the clamp never reaches back into the caller request', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const { adapter, captured } = captureAdapter();
     const membrane = new Membrane(adapter as any);
-    // A caller that reuses one marked system array across turns: an
-    // in-place strip here would silently delete its breakpoints forever.
     const callerSystem = [1, 2, 3, 4, 5].map((n) => ({
       type: 'text',
       text: `zz caller system ${n}`,
@@ -379,9 +353,6 @@ describe('float stand-down covers every prefix-rewriting normalizer repair', () 
   });
 
   it('stands down when an orphan tool_result was textified', () => {
-    // The orphan's bytes are REWRITTEN by the normalizer ("[orphan
-    // tool_result for …]"), so a marker placed at or past it caches a prefix
-    // that changes the moment the real pairing arrives.
     const orphan: NormalizedMessage = {
       participant: 'zzOperator',
       content: [{ type: 'tool_result' as const, toolUseId: 'zz-never-called', content: 'zz stray' }],

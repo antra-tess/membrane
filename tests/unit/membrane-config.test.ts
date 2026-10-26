@@ -1,18 +1,9 @@
-/**
- * Tests for tool schema handling, participant role mapping,
- * and tool mode resolution in Membrane.
- */
-
 import { describe, it, expect } from 'vitest';
 import { AnthropicXmlFormatter } from '../../src/formatters/anthropic-xml.js';
 import { NativeFormatter } from '../../src/formatters/native.js';
 import { Membrane } from '../../src/membrane.js';
 import { MockAdapter } from '../../src/providers/mock.js';
 import type { NormalizedMessage, NormalizedRequest, ToolDefinition } from '../../src/types/index.js';
-
-// ============================================================================
-// Helpers
-// ============================================================================
 
 function textMessage(participant: string, text: string): NormalizedMessage {
   return { participant, content: [{ type: 'text', text }] };
@@ -27,7 +18,6 @@ const noArgTool: ToolDefinition = {
   },
 };
 
-/** A tool with an explicit empty properties object. */
 const emptyPropertiesTool: ToolDefinition = {
   name: 'ping',
   description: 'Ping the server',
@@ -37,7 +27,6 @@ const emptyPropertiesTool: ToolDefinition = {
   },
 };
 
-/** A normal tool with properties for comparison. */
 const normalTool: ToolDefinition = {
   name: 'calculate',
   description: 'Performs a calculation',
@@ -49,10 +38,6 @@ const normalTool: ToolDefinition = {
     required: ['expression'],
   },
 };
-
-// ============================================================================
-// 1. XML formatter: no-arg tools don't crash
-// ============================================================================
 
 describe('AnthropicXmlFormatter: no-properties tools', () => {
   it('formats a tool with no properties key without crashing', () => {
@@ -116,17 +101,6 @@ describe('AnthropicXmlFormatter: no-properties tools', () => {
   });
 });
 
-// ============================================================================
-// 2. assistantParticipant role mapping
-//
-// The request-level assistantParticipant is used in buildNativeToolRequest,
-// which is only called from the streaming native-tool path. The complete()
-// path goes through transformRequest → formatter.buildMessages, which reads
-// config-level assistantParticipant only. So we test:
-//   - config-level via complete() (formatter path)
-//   - request-level via stream() (buildNativeToolRequest path)
-// ============================================================================
-
 describe('Membrane: assistantParticipant role mapping', () => {
   it('maps non-Claude participant to assistant role via request field (stream path)', async () => {
     const adapter = new MockAdapter();
@@ -145,13 +119,11 @@ describe('Membrane: assistantParticipant role mapping', () => {
       assistantParticipant: 'commander',
     };
 
-    // stream() uses resolveToolMode → streamWithNativeTools → buildNativeToolRequest
     await membrane.stream(request);
 
     const lastRequest = adapter.getLastRequest()!;
     expect(lastRequest).toBeDefined();
 
-    // The second message (participant 'commander') should have role 'assistant'
     const roles = lastRequest.messages.map((m: any) => m.role);
     expect(roles).toEqual(['user', 'assistant', 'user']);
   });
@@ -226,10 +198,6 @@ describe('Membrane: assistantParticipant role mapping', () => {
   });
 });
 
-// ============================================================================
-// 3. resolveToolMode with NativeFormatter
-// ============================================================================
-
 describe('Membrane: resolveToolMode', () => {
   it('uses native tool mode when NativeFormatter is configured', async () => {
     const adapter = new MockAdapter();
@@ -246,14 +214,11 @@ describe('Membrane: resolveToolMode', () => {
     await membrane.complete(request);
 
     const lastRequest = adapter.getLastRequest()!;
-    // Native tool mode passes tools in the provider request
     expect(lastRequest.tools).toBeDefined();
     expect(lastRequest.tools.length).toBe(1);
     expect(lastRequest.tools[0].name).toBe('calculate');
   });
 
-  // Explicit XML is still available; automatic mode now selects native on
-  // complete(), stream(), and yielding requests through one resolution.
   it('complete() with explicit XML and the default formatter injects XML tools', async () => {
     const adapter = new MockAdapter();
     const membrane = new Membrane(adapter);
@@ -271,9 +236,7 @@ describe('Membrane: resolveToolMode', () => {
     await membrane.complete(request);
 
     const lastRequest = adapter.getLastRequest()!;
-    // XML tool mode injects tools into message content, not provider request
     expect(lastRequest.tools).toBeUndefined();
-    // Tool definitions appear in the message content as XML
     const content = lastRequest.messages
       .map((m: any) => (typeof m.content === 'string' ? m.content : ''))
       .join('');
@@ -282,7 +245,7 @@ describe('Membrane: resolveToolMode', () => {
 
   it('explicit native toolMode with XML formatter sends tools natively', async () => {
     const adapter = new MockAdapter();
-    const membrane = new Membrane(adapter); // default AnthropicXmlFormatter
+    const membrane = new Membrane(adapter);
 
     const request: NormalizedRequest = {
       messages: [textMessage('User', 'Hello')],
@@ -291,8 +254,6 @@ describe('Membrane: resolveToolMode', () => {
       config: { model: 'test-model', maxTokens: 100 },
     };
 
-    // stream() with explicit 'native' should use streamWithNativeTools
-    // even though the default formatter is AnthropicXmlFormatter
     await membrane.stream(request);
 
     const lastRequest = adapter.getLastRequest()!;

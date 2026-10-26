@@ -74,8 +74,6 @@ describe('OpenAI Responses subscription mode', () => {
 
     expect(seen[0].header).toMatch(/^[0-9a-f-]{36}:[0-9a-f]{12}$/);
     expect(seen[0].key).toBe(seen[0].header);
-    // Grouping is by serialized head: appended turns and a different tool list keep
-    // the id, a different first item gets its own.
     expect(seen[4].header).toBe(seen[0].header);
     expect(seen[1].header).toBe(seen[0].header);
     expect(seen[2].header).not.toBe(seen[0].header);
@@ -85,7 +83,6 @@ describe('OpenAI Responses subscription mode', () => {
     const pinned = new OpenAIResponsesAPIAdapter({ mode: 'subscription', credentials, sessionId: 'pinned' });
     await pinned.complete(request());
     expect(seen[5].header).toMatch(/^pinned:[0-9a-f]{12}$/);
-    // The digest is salted with the base id, so it is not a bare content fingerprint.
     expect(seen[5].header!.slice(-12)).not.toBe(seen[0].header!.slice(-12));
   });
 
@@ -254,7 +251,6 @@ describe('OpenAI Responses subscription mode', () => {
           ].map(label => ({ type: 'image', source: { type: 'base64', data: png, ...label } })),
           { type: 'image', source: { type: 'base64', mediaType: 'image/gif', data: 'unknown' } },
           { type: 'image', source: { type: 'url', url: 'https://example.test/image.png' } },
-          // Already-native items are replayed verbatim, not reinterpreted.
           { type: 'input_image', image_url: nativeUrl },
         ],
       }],
@@ -264,7 +260,6 @@ describe('OpenAI Responses subscription mode', () => {
     else await adapter.stream(req, { onChunk: () => {} });
     expect(body.input[0].content).toEqual([
       ...Array.from({ length: 3 }, () => ({ type: 'input_image', image_url: 'data:image/png;base64,' + png })),
-      // Data that is no image goes as the placeholder, whatever its label.
       { type: 'input_text', text: expect.stringContaining('its data is not a JPEG, PNG, GIF or WebP image, the formats this request can carry (it was labelled "image/gif")') },
       { type: 'input_image', image_url: 'https://example.test/image.png' },
       { type: 'input_image', image_url: nativeUrl },
@@ -365,7 +360,6 @@ describe('OpenAI Responses subscription mode', () => {
   });
 });
 
-// These exercise the shared transport directly, without a host or Codex CLI.
 describe('subscription transport contracts', () => {
   test('requires explicit subscription credentials, even with an API key', () => {
     expect(() => new OpenAIResponsesAPIAdapter({ mode: 'subscription', apiKey: 'sk-api' }))
@@ -582,7 +576,7 @@ test.each(['retry', 'stream-error'] as const)('does not wait for a cloned respon
     ));
   } });
   const response = new Response(source, { status: scenario === 'retry' ? 401 : 200 });
-  const undrainedLoggingClone = response.clone(); // logging observer deliberately does not drain
+  const undrainedLoggingClone = response.clone();
   let calls = 0;
   globalThis.fetch = async () => ++calls === 1 ? response : completedResponse();
   const adapter = new OpenAIResponsesAPIAdapter({ mode: 'subscription', credentials: () => ({ token: 't' }) });

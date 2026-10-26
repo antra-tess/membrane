@@ -1,8 +1,3 @@
-/**
- * Test image handling with streaming
- * Run with: ANTHROPIC_API_KEY=... npx tsx test-images.ts
- */
-
 import { Membrane } from './src/index.js';
 import { AnthropicAdapter } from './src/providers/anthropic.js';
 import type { ChunkMeta, BlockEvent } from './src/types/streaming.js';
@@ -19,7 +14,6 @@ if (!API_KEY) {
 const adapter = new AnthropicAdapter({ apiKey: API_KEY });
 const membrane = new Membrane(adapter, {});
 
-// Small 1x1 PNG for testing (color doesn't matter, just testing image handling)
 const TINY_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==';
 
 async function testImageInChat() {
@@ -72,7 +66,6 @@ async function testImageInChat() {
   console.log('Visible text:', visibleText);
   console.log('Content blocks:', result.content.length);
 
-  // Success = got chunks and a response (image was processed)
   const success = chunks.length > 0 && visibleText.trim().length > 0;
   console.log('Image handled:', success ? 'YES' : 'NO');
   return success;
@@ -106,7 +99,7 @@ async function testImageInPrefill() {
         ],
       },
     ],
-    toolMode: 'xml',  // Prefill mode
+    toolMode: 'xml',
   };
 
   const chunks: Array<{ text: string; meta: ChunkMeta }> = [];
@@ -132,7 +125,6 @@ async function testImageInPrefill() {
   console.log('Block events:', blocks.length);
   console.log('Visible text:', visibleText);
 
-  // Success = got chunks and a response (image was processed)
   const success = chunks.length > 0 && visibleText.trim().length > 0;
   console.log('Image handled:', success ? 'YES' : 'NO');
   return success;
@@ -186,7 +178,6 @@ async function testMultipleImages() {
   console.log('\n\n--- Results ---');
   console.log('Response:', visibleText);
 
-  // Success = got a response mentioning "two" or "2"
   const success = visibleText.toLowerCase().includes('two') || visibleText.includes('2');
   console.log('Multiple images recognized:', success ? 'YES' : 'NO');
   return success;

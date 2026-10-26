@@ -44,8 +44,6 @@ describe('AnthropicXmlFormatter: breakpoint budget', () => {
       .toBe(MAX_CACHE_BREAKPOINTS);
     expect(result.cacheMarkersApplied).toBe(MAX_CACHE_BREAKPOINTS);
     expect(warn).toHaveBeenCalled();
-    // Shallowest dropped first: the system block loses its marker, the
-    // deepest conversation flushes keep theirs.
     expect((result.systemContent as any[])[0].cache_control).toBeUndefined();
   });
 
@@ -138,7 +136,6 @@ describe('AnthropicXmlFormatter: caller-marked system array', () => {
     expect(blocks[0].text).toBe('zz stable preamble');
     expect(blocks[1].text).toContain('available_tools');
     expect(blocks.filter((b) => b.cache_control)).toHaveLength(2);
-    // Conversation-mode injection leaves the system blocks alone.
     expect((conversationModeResult.systemContent as any[])[1].text).toBe('zz tail');
   });
 });

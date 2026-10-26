@@ -12,14 +12,6 @@ export const MAX_CACHE_BREAKPOINTS = 4;
 /** The API's own content nesting is one level deep; this cap is above it. */
 export const MAX_NESTED_CONTENT_DEPTH = 4;
 
-/**
- * Walk one candidate block and everything nested under it, in document order
- * (a block before its own content), applying `visitBlock` to each object.
- *
- * This is the single traversal law: marker discovery and the ownership copy
- * that protects caller-owned blocks from it both descend exactly here, so
- * the clamp can never reach a grain that ownership did not copy.
- */
 function walkBlockTree(
   candidate: unknown,
   depth: number,
@@ -33,11 +25,6 @@ function walkBlockTree(
   for (const child of nested) walkBlockTree(child, depth + 1, visitBlock);
 }
 
-/**
- * The one rule for what counts as nested content: an array-valued `content`
- * on a block, while still above the depth cap. Discovery and the ownership
- * copy both ask here, so neither can descend where the other does not.
- */
 function nestedContentBlocks(block: Record<string, unknown>, depth: number): unknown[] | undefined {
   if (depth >= MAX_NESTED_CONTENT_DEPTH) return undefined;
   return Array.isArray(block.content) ? block.content : undefined;
@@ -76,35 +63,12 @@ export function collectMarkedBlocks(surfaces: WireCacheSurfaces): Array<Record<s
   return marked;
 }
 
-/**
- * Omit empty system arrays and take ownership of nonempty system surfaces
- * before they can reach the clamp. All request builders use the same rule.
- *
- * A caller's own system array can carry caller-marked blocks, whether it
- * comes as a formatter's `systemPrompt` or as `request.system` passed untyped
- * (the field is typed as a string), and a builder that adds no marker of its
- * own can pass its blocks through by reference (`NativeFormatter` does). The
- * clamp strips markers IN PLACE at the wire boundary — correct for blocks
- * membrane built, catastrophic for the caller's own array, which a long-lived
- * caller reuses turn after turn: one over-budget request would silently delete
- * the caller's breakpoints for the life of that object. Copying the array and its
- * blocks at build time keeps the clamp's mutations inside the request.
- *
- * The copy descends exactly as far as marker discovery does: a shallow
- * `{...block}` leaves any nested `content` array shared with the caller, and
- * the clamp now strips markers at that grain, so ownership has to reach it
- * too or the leak just moves one level down.
- */
 export function ownSystemBlocks(system: unknown): unknown {
   if (!Array.isArray(system)) return system;
   if (system.length === 0) return undefined;
   return system.map((block) => copyBlockTree(block, 0));
 }
 
-/**
- * Shallow-copy a block and, recursively, its nested content blocks, to the
- * same depth marker discovery walks. Non-objects pass through untouched.
- */
 function copyBlockTree(candidate: unknown, depth: number): unknown {
   if (!candidate || typeof candidate !== 'object') return candidate;
   const copy = { ...(candidate as Record<string, unknown>) };
@@ -113,19 +77,10 @@ function copyBlockTree(candidate: unknown, depth: number): unknown {
   return copy;
 }
 
-/** How many cache_control markers this request would actually put on the wire. */
 export function countWireCacheMarkers(surfaces: WireCacheSurfaces): number {
   return collectMarkedBlocks(surfaces).length;
 }
 
-/**
- * Validate a caller-owned marker layout without changing it.
- *
- * In `cm-owned` mode the caller has deliberately allocated the complete
- * breakpoint set. Silently stripping or reordering those markers would make
- * the cache receipt describe a request that was never sent, so invalid
- * layouts fail before submission instead of using the legacy repair clamp.
- */
 export function assertCacheMarkersWithinLimit(
   surfaces: WireCacheSurfaces,
   site: string

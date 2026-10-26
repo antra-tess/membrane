@@ -1,10 +1,3 @@
-/**
- * Chat mode transforms
- * 
- * Converts normalized messages to role-based alternating format
- * for providers that don't support prefill mode.
- */
-
 import type {
   NormalizedMessage,
   NormalizedRequest,
@@ -12,10 +5,6 @@ import type {
 } from '../types/index.js';
 import { isTextContent, isToolUseContent, isToolResultContent } from '../types/index.js';
 import { convertMcpMedia } from '../utils/mcp-media.js';
-
-// ============================================================================
-// Chat Transform Result
-// ============================================================================
 
 export interface ChatMessage {
   role: 'user' | 'assistant';
@@ -39,10 +28,6 @@ export interface ChatTransformResult {
   stopSequences: string[];
 }
 
-// ============================================================================
-// Transform Options
-// ============================================================================
-
 export interface ChatTransformOptions {
   /** Name of the assistant participant (default: 'Claude') */
   assistantName?: string;
@@ -53,10 +38,6 @@ export interface ChatTransformOptions {
   /** How to handle multiple consecutive same-role messages */
   mergeStrategy?: 'concatenate' | 'separate';
 }
-
-// ============================================================================
-// Main Transform Function
-// ============================================================================
 
 /**
  * Transform normalized request to chat format. Media in MCP's form comes out
@@ -83,7 +64,6 @@ export function transformToChat(
     if (mergeStrategy === 'concatenate' && messages.length > 0) {
       const lastMessage = messages[messages.length - 1];
       if (lastMessage && lastMessage.role === role) {
-        // Merge with previous message
         lastMessage.content.push(...content);
         continue;
       }
@@ -95,7 +75,6 @@ export function transformToChat(
   // Most providers require alternating roles.
   const normalizedMessages = ensureAlternatingRoles(messages);
   
-  // Build stop sequences
   const stopSequences = buildChatStopSequences(request);
   
   return {
@@ -104,10 +83,6 @@ export function transformToChat(
     stopSequences,
   };
 }
-
-// ============================================================================
-// Helper Functions
-// ============================================================================
 
 function determineRole(
   participant: string,
@@ -120,7 +95,6 @@ function determineRole(
   if (userSet.has(participant)) {
     return 'user';
   }
-  // Default: non-assistant is user
   return 'user';
 }
 
@@ -156,7 +130,6 @@ function transformContent(blocks: ContentBlock[]): ChatContent[] {
         content,
       });
     }
-    // Other block types are skipped or could be handled here
   }
   
   return result;
@@ -170,7 +143,6 @@ function ensureAlternatingRoles(messages: ChatMessage[]): ChatMessage[] {
   
   for (const message of messages) {
     if (lastRole === message.role) {
-      // Insert empty message of opposite role
       const fillerRole = message.role === 'user' ? 'assistant' : 'user';
       result.push({
         role: fillerRole,
@@ -182,7 +154,6 @@ function ensureAlternatingRoles(messages: ChatMessage[]): ChatMessage[] {
     lastRole = message.role;
   }
   
-  // Ensure starts with user
   const first = result[0];
   if (result.length > 0 && first && first.role === 'assistant') {
     result.unshift({
@@ -197,12 +168,10 @@ function ensureAlternatingRoles(messages: ChatMessage[]): ChatMessage[] {
 function buildChatStopSequences(request: NormalizedRequest): string[] {
   const sequences: string[] = [];
   
-  // Add tool-related stop if tools are defined
   if (request.tools && request.tools.length > 0) {
     sequences.push('</function_calls>');
   }
   
-  // Add any explicit stop sequences from request
   if (request.stopSequences) {
     if (Array.isArray(request.stopSequences)) {
       sequences.push(...request.stopSequences);

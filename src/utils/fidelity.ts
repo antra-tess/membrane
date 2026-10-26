@@ -58,12 +58,6 @@ export class FidelityNotes {
    */
   mutatedInPlace = false;
 
-  /**
-   * Request blocks the builder emitted (and nested tool-result blocks): the
-   * owning message of each registration. Builders emit a distinct object per
-   * occurrence (nested tool-result blocks are copied, not passed through), so
-   * one owner is the norm; an object that ends up with several is ambiguous.
-   */
   constructor(private readonly owners = new WeakMap<object, number[]>()) {}
 
   alter(index: number): void {
@@ -120,11 +114,6 @@ export class FidelityNotes {
   }
 }
 
-/**
- * Register a built message's blocks (and the blocks nested in its tool
- * results, which builders pass through by reference) as coming from message
- * `index`, so an adapter's report about one of them is attributed.
- */
 export function ownBlocks(fidelity: FidelityNotes | undefined, blocks: readonly unknown[], index: number): void {
   if (!fidelity) return;
   for (const block of blocks) {
@@ -136,15 +125,6 @@ export function ownBlocks(fidelity: FidelityNotes | undefined, blocks: readonly 
   }
 }
 
-/**
- * The tool-pair normalizer's block-identity callback, for a build recording
- * `fidelity` (spread into `normalizeToolPairs`' options). It hears a
- * tool_result the normalizer rewrites as text, an orphan or a duplicate.
- * That alters exactly the message the occurrence came from, and the
- * replacement keeps its owner, so a later adapter report about it is
- * attributed. (Phase 1's rename of a `toolUseId` key also copies a block,
- * but NativeFormatter writes `tool_use_id` before the normalizer runs.)
- */
 export function followNormalizedBlocks(
   fidelity: FidelityNotes | undefined,
 ): Pick<NormalizeOptions, 'onBlockRewritten'> {
@@ -157,47 +137,21 @@ export function followNormalizedBlocks(
   };
 }
 
-/**
- * A zero-width carrier: exactly empty text holding a provider-native item
- * (an object `rawItem`, the test the Responses formatter replays it by). The
- * item is all of its content, so a path that doesn't send the item and
- * leaves the block out alters its message.
- */
 export function isRawItemCarrier(block: ContentBlock): boolean {
   if (block.type !== 'text' || block.text !== '') return false;
   const raw = (block as { rawItem?: unknown }).rawItem;
   return raw !== null && typeof raw === 'object';
 }
 
-/**
- * Whether leaving these blocks out loses anything: true unless every block
- * is an exactly empty text block that holds no raw form. Only such a ''
- * carries nothing; whitespace-only text is content, and so is a zero-width
- * carrier's item.
- */
 export function holdsContent(blocks: readonly ContentBlock[]): boolean {
   return blocks.some((block) => !(block.type === 'text' && block.text === '') || isRawItemCarrier(block));
 }
 
-/** Where a message in a yielding loop's working array came from. */
 export type MessageOrigin =
-  /** `NormalizedRequest.messages[index]`, as the consumer submitted it. */
   | { kind: 'input'; index: number }
-  /** Message `index` of injected batch `batch`. */
   | { kind: 'injected'; batch: number; index: number }
-  /**
-   * Built by membrane itself: an assistant round (`round` is the stream's
-   * round it holds), or a tool_result envelope.
-   */
   | { kind: 'own'; round?: number };
 
-/**
- * A structural fingerprint of a provider request, for telling whether a
- * `beforeRequest` hook changed it (by replacement or in place). A request
- * JSON can't serialize can't be compared, so its fingerprint never matches
- * (a fresh random one each time): membrane can't tell whether the hook
- * changed it, and the round, like those after it, reads unknown.
- */
 export function requestFingerprint(request: unknown): string {
   try {
     return JSON.stringify(request) ?? '';

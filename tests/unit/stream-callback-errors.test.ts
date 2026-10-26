@@ -1,18 +1,3 @@
-/**
- * A caller's stream callback that throws fails the stream (antra-tess/membrane#117).
- *
- * The Chat Completions family adapters parse a data line in a `try` of its
- * own and ignore only JSON that doesn't parse. The handling after the parse,
- * which calls the caller's `onChunk` (and, on OpenRouter, `onContentBlock`),
- * sat in a second `try` whose catch ignored everything. Bedrock's per-event
- * catch rethrew only its own stream errors and skipped everything else. So a
- * callback that threw left the stream to finish as if nothing had happened.
- *
- * Now a callback's error fails the stream through the adapter's error
- * boundary, typed by `classifyError` like any other error, and the provider's
- * body is cancelled rather than left unread. Frames and events the adapters
- * can't read are still dropped, as before.
- */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import { BedrockAdapter } from '../../src/providers/bedrock.js';
@@ -32,10 +17,6 @@ afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 const wire: ProviderRequest = { model: 'zz-review-model', messages: [{ role: 'user', content: 'go' }], maxTokens: 16 };
 const bedrockWire = { ...wire, model: 'anthropic.claude-3-5-sonnet-20241022-v2:0' } as ProviderRequest;
 
-/**
- * A body that hands out one piece per read and records a cancel. With `open`,
- * it never closes on its own, as a provider still generating doesn't.
- */
 function body(pieces: Uint8Array[], open = false): { stream: ReadableStream<Uint8Array>; cancelled: () => boolean } {
   let cancelled = false;
   const queue = [...pieces];
@@ -80,7 +61,6 @@ const bedrock = () => new BedrockAdapter({ accessKeyId: 'zz-key', secretAccessKe
 
 interface Case { name: string; make: () => ProviderAdapter; request: ProviderRequest; respond: (open?: boolean) => { response: Response; cancelled: () => boolean } }
 
-/** The adapters whose catch used to swallow a callback's error. */
 const formerlySwallowing: Case[] = [
   { name: 'openai', make: () => new OpenAIAdapter({ apiKey: 'zz-key' }), request: wire, respond: open => sseResponse([chat('hello'), chat(' world', 'stop'), '[DONE]'], open) },
   { name: 'openai-compatible', make: () => new OpenAICompatibleAdapter({ apiKey: 'zz-key', baseURL: 'https://review.invalid/v1' }), request: wire, respond: open => sseResponse([chat('hello'), chat(' world', 'stop'), '[DONE]'], open) },
@@ -89,7 +69,6 @@ const formerlySwallowing: Case[] = [
   { name: 'bedrock', make: bedrock, request: bedrockWire, respond: open => bedrockResponse(bedrockEvents('hello').map(chunkFrame), open) },
 ];
 
-/** Adapters that already surfaced it, kept here so every streaming adapter answers the same way. */
 const surfaced: Case[] = [
   {
     name: 'anthropic',
@@ -131,7 +110,6 @@ const surfaced: Case[] = [
 
 const settle = (promise: Promise<unknown>) => promise.then(() => undefined, (e: unknown) => e);
 
-/** The callback's error reached the caller through the adapter's error boundary. */
 function expectFailed(error: unknown, thrown: Error): void {
   expect(error).toBeInstanceOf(MembraneError);
   expect(error).toMatchObject({ type: 'unknown', retryable: false, message: thrown.message });
@@ -233,7 +211,6 @@ describe('an end-of-turn stop', () => {
   it("openai-completions: returns without waiting on the body's cancel", async () => {
     let cancelled = false;
     const pieces = sseLines([completion('hello<|eot|>zz-tail')]);
-    // A provider still sending, whose cancel never settles.
     const stream = new ReadableStream<Uint8Array>({
       pull(controller) {
         const next = pieces.shift();
@@ -243,7 +220,6 @@ describe('an end-of-turn stop', () => {
       cancel() { cancelled = true; return new Promise(() => {}); },
     }, { highWaterMark: 0 });
     vi.stubGlobal('fetch', vi.fn(async () => new Response(stream, { headers: { 'content-type': 'text/event-stream' } })));
-    // A stream that waited on the cancel would never return, and the test's timeout would fail it.
     const response = await new OpenAICompletionsAdapter({ apiKey: 'zz-key', baseURL: 'https://review.invalid/v1' }).stream(wire, { onChunk() {} }) as any;
     expect(response.stopReason).toBe('end_turn');
     expect(cancelled).toBe(true);
@@ -339,7 +315,6 @@ describe('a frame the handler cannot read is still dropped', () => {
     });
   }
 
-  /** A chunk event whose payload is the given text, framed as chunkFrame frames one. */
   const rawChunk = (payloadText: string): Uint8Array => {
     const headers = stringHeader(':event-type', 'chunk');
     const payload = new TextEncoder().encode(payloadText);
@@ -372,7 +347,6 @@ describe('a frame the handler cannot read is still dropped', () => {
     it(`bedrock: ${label} is skipped, with a warning`, async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const events = bedrockEvents('hello').map(chunkFrame);
-      // After the first block's stop, before message_delta.
       vi.stubGlobal('fetch', vi.fn(async () => bedrockResponse([...events.slice(0, MESSAGE_DELTA_INDEX), ...bad, ...events.slice(MESSAGE_DELTA_INDEX)]).response));
       const chunks: string[] = [];
       const blockIndexes: unknown[] = [];
@@ -383,7 +357,6 @@ describe('a frame the handler cannot read is still dropped', () => {
       expect(chunks.join('')).toBe('hello more');
       expect(response.stopReason).toBe('end_turn');
       expect(warn).toHaveBeenCalledWith('[membrane:bedrock] Skipping malformed stream event:', expect.anything());
-      // Only the real block is reported: its start and its stop, at index 0.
       expect(blockIndexes).toEqual([0, 0]);
     });
   }
@@ -532,7 +505,6 @@ describe('through Membrane', () => {
   });
 
   it('a callback that fails on text held for a stop sequence, delivered as the stream ends, fails the call', async () => {
-    // "hello Z" could begin "ZZSTOP", so "Z" is held until the stream ends.
     vi.stubGlobal('fetch', vi.fn(async () => sseResponse([chat('hello Z', 'stop'), '[DONE]']).response));
     const seen: string[] = [];
     const error = await settle(membrane().stream({ ...request, stopSequences: ['ZZSTOP'] }, {
@@ -543,8 +515,6 @@ describe('through Membrane', () => {
   });
 
   it("held text isn't handed on after the caller's onBlock fails on a block a chunk releases", async () => {
-    // "abS" could begin "STOP", so "S" is held, and "ab" waits behind the
-    // block's start, whose delivery inside the chunk's own delivery fails.
     const events = [
       { type: 'message_start', message: { usage: { input_tokens: 1 } } },
       { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
@@ -568,7 +538,6 @@ describe('through Membrane', () => {
   });
 
   it('text held for a stop sequence isn\'t handed to a callback that has failed', async () => {
-    // "hello Z" could begin the stop "ZZSTOP", so "Z" is held while "hello " is delivered.
     vi.stubGlobal('fetch', vi.fn(async () => sseResponse([chat('hello Z'), chat('Zq', 'stop'), '[DONE]']).response));
     const seen: string[] = [];
     const error = await settle(membrane().stream({ ...request, stopSequences: ['ZZSTOP'] }, {

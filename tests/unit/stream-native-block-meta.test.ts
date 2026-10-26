@@ -14,7 +14,6 @@ import type {
   BlockEvent,
 } from '../../src/types/index.js';
 
-/** One provider block as the SSE stream presents it: start, deltas, stop. */
 interface ScriptedBlock {
   index: number;
   start: Record<string, unknown>;
@@ -37,7 +36,6 @@ class ScriptedAdapter implements ProviderAdapter {
   }
 }
 
-/** Native tool mode needs at least one tool declared. */
 function nativeRequest(): NormalizedRequest {
   return {
     messages: [{ participant: 'User', content: [{ type: 'text', text: 'hi' }] }],
@@ -108,13 +106,6 @@ describe('stream() native path: chunk metadata follows the provider block type (
   });
 });
 
-/**
- * The OpenAI Responses adapter fires `onContentBlock` ONCE per block, already
- * finalised, after the whole stream has been consumed (openai-responses-api.ts:
- * `parsed.content.forEach((block, index) => callbacks.onContentBlock?.(index, block))`).
- * There is no second callback to signal completion, so completion is
- * synthesised when the provider stream returns (#63 review, P1).
- */
 class SingleCallbackAdapter implements ProviderAdapter {
   readonly name = 'single-callback';
   constructor(private chunks: string[], private content: ProviderResponse['content']) {}

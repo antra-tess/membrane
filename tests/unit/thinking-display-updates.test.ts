@@ -27,7 +27,6 @@ afterEach(() => {
 
 const BETA = 'thinking-display-updates-2026-08-18';
 
-/** Records each request and answers with a plain end_turn. */
 class RecordingAdapter implements ProviderAdapter {
   readonly name = 'recording';
   requests: ProviderRequest[] = [];
@@ -78,12 +77,10 @@ describe('membrane builds the config', () => {
       .toEqual({ type: 'adaptive', display: 'updates' });
     expect((await sent({ model: 'claude-mythos-5-1', thinking: { enabled: true, display: 'updates' } })).thinking)
       .toEqual({ type: 'adaptive', display: 'updates' });
-    // Unchanged: 'summarized' or 'omitted' alone still sends these models nothing.
     expect((await sent({ model: 'claude-fable-5-1', thinking: { enabled: true, display: 'summarized' } })).thinking)
       .toBeUndefined();
     expect((await sent({ model: 'claude-fable-5-1', thinking: { enabled: true, display: 'omitted' } })).thinking)
       .toBeUndefined();
-    // Beside the binding controls, both go.
     expect((await sent({
       model: 'claude-fable-5-1',
       thinking: { enabled: true, display: 'updates', blockBinding: { prefixMismatchBehavior: 'drop_block' } },
@@ -110,7 +107,6 @@ describe('the adapters add the beta', () => {
     } } };
     const base = { messages: [{ role: 'user', content: 'hi' }], maxTokens: 4000, model: 'claude-opus-5-5' } as const;
     await adapter.complete({ ...base, thinking: { type: 'adaptive', display: 'updates' } } as any);
-    // A thinking config passed through `extra` is what goes out, so it counts.
     await adapter.complete({ ...base, extra: { thinking: { type: 'adaptive', display: 'updates' } } } as any);
     await adapter.complete({ ...base, thinking: { type: 'adaptive', display: 'updates', block_binding: { prefix_mismatch_behavior: 'drop_block' } } } as any);
     await adapter.complete({ ...base, thinking: { type: 'adaptive', display: 'summarized' } } as any);
@@ -192,7 +188,6 @@ const endTurn = [
   { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 1 } },
 ];
 
-/** An async iterable of SSE events with the surface the Anthropic adapter touches. */
 function fakeStream(events: unknown[]) {
   return {
     controller: { abort() {} },

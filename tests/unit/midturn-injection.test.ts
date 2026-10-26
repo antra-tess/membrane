@@ -1,16 +1,3 @@
-/**
- * Mid-turn message injection via provideToolResults(results, { injectedMessages }).
- *
- * A consumer (agent framework) can pass messages that arrived while a tool
- * round was executing; the next inference round's request must include them
- * as user-side content AFTER the round's tool_result envelope, without
- * disturbing tool_use → tool_result adjacency or the assistant turn.
- *
- * Also pins the ChatCompletions interloper fix: text sharing an envelope
- * with tool_results becomes a following user message instead of being
- * silently dropped (providers/openai.ts convertMessages).
- */
-
 import { describe, it, expect, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { MockAdapter } from '../../src/providers/mock.js';
@@ -34,10 +21,6 @@ const noopTool: ToolDefinition = {
   description: 'A no-op tool used to force tool rounds.',
   inputSchema: { type: 'object', properties: {} },
 };
-
-// ---------------------------------------------------------------------------
-// Scripted native-mode adapter: captures every provider request it receives
-// ---------------------------------------------------------------------------
 
 interface ScriptedTurn {
   content: ProviderResponse['content'];
@@ -107,7 +90,6 @@ const finalTurn: ScriptedTurn = {
   stopReason: 'end_turn',
 };
 
-/** Drive the stream, answering each tool round via the supplied callback. */
 async function drive(
   membrane: Membrane,
   request: NormalizedRequest,
@@ -126,7 +108,6 @@ function okResults(event: any): ToolResult[] {
   return event.calls.map((c: any) => ({ toolUseId: c.id, content: 'ok', isError: false }));
 }
 
-/** All text found in user-role envelopes of a captured request, in order. */
 function userTexts(req: any): string[] {
   const texts: string[] = [];
   for (const msg of req.messages ?? []) {
@@ -154,11 +135,8 @@ describe('native yielding: mid-turn injected messages', () => {
     expect(events.some((e) => e.type === 'complete')).toBe(true);
     expect(adapter.requests.length).toBe(2);
 
-    // Round 1 must NOT contain the injected message
     expect(userTexts(adapter.requests[0]).join('\n')).not.toContain('look left!');
 
-    // Round 2: injected message present, with participant name prefix,
-    // positioned AFTER the tool_result block
     const round2 = adapter.requests[1] as any;
     const flat: Array<{ kind: string; text?: string }> = [];
     for (const msg of round2.messages) {
@@ -202,7 +180,6 @@ describe('native yielding: mid-turn injected messages', () => {
 
     expect(adapter.requests.length).toBe(3);
     const round3Text = userTexts(adapter.requests[2]).join('\n');
-    // Round-1 injections persist into every later round's conversation
     expect(round3Text).toContain('first interjection');
     expect(round3Text).toContain('Skye: second interjection');
   });
@@ -216,7 +193,6 @@ describe('native yielding: mid-turn injected messages', () => {
     });
 
     const round2 = adapter.requests[1] as any;
-    // Only original user message text — no phantom user text appended
     const texts = userTexts(round2);
     expect(texts.filter((t) => !t.includes('drive the robot'))).toEqual([]);
   });
@@ -240,12 +216,9 @@ describe('native yielding: mid-turn injected messages', () => {
         });
       });
 
-      // Stream completed normally — a throw here would wedge the caller's turn
       expect(events.some((e) => e.type === 'complete')).toBe(true);
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('stripped 1 tool block'));
 
-      // The text survived; the tool_result did not (exactly one tool_result
-      // in round 2 — the real one for tu_1)
       const round2 = adapter.requests[1] as any;
       expect(userTexts(round2).join('\n')).toContain('legit interjection');
       const toolResultCount = round2.messages
@@ -290,8 +263,6 @@ describe('XML yielding: injectedMessages are ignored with a warning', () => {
         messages: [{ participant: 'User', content: [{ type: 'text', text: 'go' }] }],
         config: { model: 'test-model', maxTokens: 1000 },
         tools: [noopTool],
-        // This case is about the XML yielding path; native is the default
-        // tool mode now, so the XML path is an explicit opt-in.
         toolMode: 'xml',
       };
 
@@ -310,9 +281,6 @@ describe('XML yielding: injectedMessages are ignored with a warning', () => {
 });
 
 describe('ChatCompletions-shaped convertMessages: tool_result envelope interlopers', () => {
-  // mergeConsecutiveRoles folds the separately-pushed injected user message
-  // into the tool_result envelope, so EVERY ChatCompletions-shaped converter
-  // must split it back out instead of dropping it.
   const interloperEnvelope = {
     role: 'user',
     content: [

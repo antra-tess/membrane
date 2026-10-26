@@ -1,7 +1,3 @@
-/**
- * Utility exports
- */
-
 export {
   parseToolCalls,
   formatToolResults,

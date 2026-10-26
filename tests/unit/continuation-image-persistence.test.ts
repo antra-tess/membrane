@@ -11,7 +11,6 @@ import type {
 } from '../../src/types/provider.js';
 import type { StreamCallbacks } from '../../src/types/streaming.js';
 
-// 1x1 red pixel PNG — the only base64 in this file, so a grep for it lands here.
 const ZZ_PIXEL =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==';
 
@@ -21,7 +20,6 @@ interface ScriptedRound {
   stopSequence?: string;
 }
 
-/** Records every provider request and plays a fixed script of stream rounds. */
 class RecordingXmlAdapter implements ProviderAdapter {
   readonly name = 'zz-recording';
   readonly requests: ProviderRequest[] = [];
@@ -67,7 +65,6 @@ const REQUEST: NormalizedRequest = {
 const CALL_XML =
   '<function_calls>\n<invoke name="zz_shot">\n<parameter name="fld1">ite1</parameter>\n</invoke>';
 
-/** Two tool rounds then a natural finish; round 1's result carries an image. */
 const SCRIPT: ScriptedRound[] = [
   { text: `zz preamble one\n${CALL_XML}`, stopReason: 'stop_sequence', stopSequence: '</function_calls>' },
   { text: `zz preamble two\n${CALL_XML}`, stopReason: 'stop_sequence', stopSequence: '</function_calls>' },
@@ -86,7 +83,6 @@ function textResult(toolUseId: string): ToolResult {
   return { toolUseId, toolName: 'zz_shot', content: 'zz plain ok' };
 }
 
-/** `role:kind` census of one request's messages — the A3 red fixture's shape. */
 function roleCensus(request: ProviderRequest): string[] {
   return (request.messages as Array<{ role: string; content: unknown }>).map((m) => {
     if (typeof m.content === 'string') return `${m.role}:text`;
@@ -121,7 +117,6 @@ describe('split-turn image continuation persistence', () => {
 
     expect(adapter.streamCalls).toBe(3);
 
-    // Request 1 (the immediate image continuation) carries the split turn.
     expect(roleCensus(adapter.requests[1]!)).toEqual([
       'user:text',
       'assistant:text',
@@ -130,9 +125,6 @@ describe('split-turn image continuation persistence', () => {
     ]);
     expect(serialize(adapter.requests[1]!)).toContain(ZZ_PIXEL);
 
-    // Request 2 is a plain continuation built AFTER the image round. The
-    // model is still being shown a <function_results> block asserting a
-    // screenshot came back, so the image turn must still be on the wire.
     expect(serialize(adapter.requests[2]!)).toContain(ZZ_PIXEL);
     expect(roleCensus(adapter.requests[2]!)).toEqual([
       'user:text',
@@ -149,8 +141,6 @@ describe('split-turn image continuation persistence', () => {
     const preImage = messages[1]!.content as string;
     const postImage = messages[3]!.content as string;
 
-    // The pre-image assistant turn ends at the image seam; the post-image
-    // turn carries the closers and everything the model wrote after them.
     expect(preImage).toContain('zz preamble one');
     expect(postImage).not.toContain('zz preamble one');
     expect(postImage).toContain('zz preamble two');
@@ -209,9 +199,6 @@ describe('continuation builders carry the transformRequest extra contract', () =
       expect(extra!.normalizedMessages, `request ${index} dropped normalizedMessages`).toBeDefined();
     }
 
-    // The image builder (request 1) previously supplied neither, dropping a
-    // completions-style adapter onto serializeToPrompt over provider-shaped
-    // messages.
     expect((adapter.requests[1]!.extra as Record<string, unknown>).prompt).toEqual(
       expect.stringContaining('zz preamble one'),
     );

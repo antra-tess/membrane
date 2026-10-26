@@ -41,7 +41,6 @@ interface Probe { torn: boolean }
 
 const probes: Probe[] = [];
 
-/** A live SSE body the test scripts byte by byte; records transport teardown. */
 function liveResponse(init: RequestInit | undefined, script: (io: Io) => Promise<void>): Response {
   const encoder = new TextEncoder();
   const probe: Probe = { torn: false };
@@ -54,7 +53,7 @@ function liveResponse(init: RequestInit | undefined, script: (io: Io) => Promise
     if (done) return;
     done = true;
     release();
-    try { if (error) controller.error(error); else controller.close(); } catch { /* already settled */ }
+    try { if (error) controller.error(error); else controller.close(); } catch { }
   };
   const body = new ReadableStream<Uint8Array>({
     start(c) { controller = c; },
@@ -65,7 +64,7 @@ function liveResponse(init: RequestInit | undefined, script: (io: Io) => Promise
     stop(Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' }));
   }, { once: true });
   void script({
-    emit: text => { if (!done) { try { controller.enqueue(encoder.encode(text)); } catch { /* closed */ } } },
+    emit: text => { if (!done) { try { controller.enqueue(encoder.encode(text)); } catch { } } },
     sleep: ms => new Promise<void>(resolve => setTimeout(resolve, ms)),
     close: () => stop(),
     isDone: () => done,
@@ -74,7 +73,6 @@ function liveResponse(init: RequestInit | undefined, script: (io: Io) => Promise
   return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream', 'request-id': 'req_fixture' } });
 }
 
-/** Keepalives only, at PING_MS intervals, for about `ms`. */
 async function keepalives(io: Io, ms: number): Promise<void> {
   for (let elapsed = 0; elapsed < ms && !io.isDone(); elapsed += PING_MS) {
     io.emit(ping());
@@ -296,8 +294,6 @@ describe('Anthropic stream setup and alternate SDK response bodies', () => {
 
   it('passes an async-iterable SSE body through the real SDK without retry or byte loss', async () => {
     const encoder = new TextEncoder();
-    // message_delta is the adapter's terminal event; it intentionally closes
-    // the transport before any later message_stop frame.
     const answerThroughMessageDelta = answer().slice(0, -1);
     const bytes = encoder.encode(messageStart() + ping() + answerThroughMessageDelta.join(''));
     let consumed = 0;

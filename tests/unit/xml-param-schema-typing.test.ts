@@ -1,19 +1,3 @@
-/**
- * Schema-typed XML parameter parsing (A1 finding F4).
- *
- * Parameter values were guessed — trimmed, then JSON.parse'd with the trimmed
- * text as fallback — with the declared inputSchema never consulted. A
- * string-typed argument lost its leading/trailing whitespace (fatal for
- * exact-match edit tools) and silently changed type whenever its text happened
- * to be valid JSON.
- *
- * The fix consults the declaration at the parse site: a parameter declared
- * `string` keeps its text untrimmed, less one layout newline on each side —
- * the framing tool results are written in; JSON-shaped declarations
- * JSON-parse with a loud diagnostic on disagreement; undeclared parameters
- * keep the legacy guess exactly.
- */
-
 import { describe, it, expect, vi } from 'vitest';
 import { parseToolCalls, parseAccumulatedIntoBlocks } from '../../src/utils/tool-parser.js';
 import type { ToolDefinition } from '../../src/types/index.js';
@@ -56,12 +40,6 @@ describe('schema-typed parameter parsing', () => {
   });
 
   describe('one newline on each side of a string value is layout', () => {
-    // Tool results are written `<stdout>\n…\n</stdout>` and read back with one
-    // newline stripped on each side; the model reads results framed that way
-    // all day. Taking a string parameter's bytes raw handed a model that
-    // frames its values the same way an extra leading and trailing newline —
-    // a blank first line in every file it writes, an exact-match edit that
-    // starts one line early. Main trimmed all of it; raw kept all of it.
     it('drops the framing newlines of a value written on its own lines', () => {
       const input = inputOf(
         callWith({ fld1: '\n#!/bin/sh\n  echo zz-indented\n' }),
@@ -154,10 +132,8 @@ describe('schema-typed parameter parsing', () => {
       );
       expect(input).toEqual({ fld2: digits, fld3: digits, fld4: digits, fld5: digits });
       const message = warn.mock.calls.map(c => c.join(' ')).join('\n');
-      // A mismatch for the three declarations that are not numeric...
       expect(warn).toHaveBeenCalledTimes(3);
       for (const name of ['fld2', 'fld4', 'fld5']) expect(message).toContain(`"${name}"`);
-      // ...and none for the number declaration, whose value this is.
       expect(message).not.toContain('"fld3"');
       expect(message).not.toContain(digits);
     } finally {
@@ -181,10 +157,6 @@ describe('schema-typed parameter parsing', () => {
   });
 
   it('types a re-anchored invoke against the tool it actually dispatches', () => {
-    // collectInvokes re-anchors an invoke head that swallowed the next one:
-    // only the INNERMOST head owns the closing tag and gets dispatched. The
-    // schema consulted must therefore be the innermost head's, not the
-    // outer head's — the two disagree about fld1 on purpose here.
     const zzOuterTool: ToolDefinition = {
       name: 'zz_outer_tool',
       description: 'obviously-fake tool the swallowed head names',
@@ -201,8 +173,6 @@ describe('schema-typed parameter parsing', () => {
       const parsed = parseToolCalls(xml, { tools: [zzOuterTool, zzEditTool] });
       expect(parsed!.calls.map(c => c.name)).toEqual(['zz_edit_tool']);
       expect(parsed!.calls[0]!.input.fld1).toBe('  {"ite1": 1}  ');
-      // The outer tool's `object` declaration never applied, so its
-      // JSON-kind diagnostic never fired.
       expect(warn).not.toHaveBeenCalled();
     } finally {
       warn.mockRestore();

@@ -8,7 +8,6 @@ import {
 } from './cache-keepalive.js';
 import { countWireCacheMarkers } from './utils/cache-marker-budget.js';
 
-/** A wire request shaped like what buildRequest() produces for a real turn. */
 function wire(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     model: 'claude-fable-5',
@@ -247,8 +246,6 @@ describe('CacheKeepalive', () => {
   it('does nothing while real traffic keeps the entry warm (the busy-agent case)', async () => {
     const send = vi.fn().mockResolvedValue(hit);
     const { ka } = setup(send);
-    // A turn every 10 minutes for 2 hours: real requests refresh the TTL for
-    // free, so the keepalive must never fire.
     for (let i = 0; i < 12; i++) {
       ka.record(wire(), undefined, 'stream');
       await vi.advanceTimersByTimeAsync(10 * 60_000);
@@ -310,9 +307,7 @@ describe('CacheKeepalive', () => {
     const expected: Record<string, unknown> = { ...original, messages: [marked], max_tokens: 0 };
     delete expected.stream;
     expect(JSON.stringify(payload)).toBe(JSON.stringify(expected));
-    // The receipt carries the payload sent, cut as it was.
     expect(JSON.stringify(receipts[0]!.request)).toBe(JSON.stringify(expected));
-    // A second refresh sends the same.
     await vi.advanceTimersByTimeAsync(50 * 60_000);
     expect(JSON.stringify(send.mock.calls[1]![0])).toBe(JSON.stringify(expected));
     ka.stop();
@@ -324,7 +319,6 @@ describe('CacheKeepalive', () => {
     ka.record(wire(), undefined, 'stream');
 
     await vi.advanceTimersByTimeAsync(3 * 60 * 60_000 + 60_000);
-    // Pokes must not extend their own mandate: ~3 refreshes, then expiry.
     expect(events.some((e) => e.type === 'expired')).toBe(true);
     const before = send.mock.calls.length;
     await vi.advanceTimersByTimeAsync(6 * 60 * 60_000);
@@ -333,7 +327,6 @@ describe('CacheKeepalive', () => {
   });
 
   it('detects a poke that WROTE instead of read, and gives up on that lineage', async () => {
-    // The silent-20x failure: a successful call that created a fresh 2x entry.
     const send = vi.fn().mockResolvedValue({
       usage: { cache_read_input_tokens: 0, cache_creation_input_tokens: 494_000 },
     });
@@ -363,8 +356,6 @@ describe('CacheKeepalive', () => {
   });
 
   it('hard-disables after consecutive errors instead of becoming a retry storm', async () => {
-    // fable-cm, 2026-08-21: 1033 `400 invalid_request_error` in 3h from a
-    // background lane. A keepalive must never be able to do that.
     const send = vi.fn().mockRejectedValue(new Error('400 invalid_request_error'));
     const { ka, events } = setup(send, { maxConsecutiveErrors: 3 });
     ka.record(wire(), undefined, 'stream');
@@ -400,7 +391,6 @@ describe('CacheKeepalive', () => {
     const { ka, events } = setup(send);
     ka.record(wire(), undefined, 'stream');
     expect(ka.getStatus().length).toBe(1);
-    // Same lineage (model/system/tools identical), now with forced tool choice.
     ka.record(wire({ tool_choice: { type: 'any' } }), undefined, 'stream');
     expect(ka.getStatus().length).toBe(0);
     expect(events.some((e) => e.type === 'skipped')).toBe(true);

@@ -34,7 +34,7 @@ describe('NativeFormatter audio pass-through', () => {
   });
 
   it('does not throw for audio under the default unsupportedMedia: error config', () => {
-    const formatter = new NativeFormatter(); // default: unsupportedMedia 'error'
+    const formatter = new NativeFormatter();
     const messages: NormalizedMessage[] = [
       {
         participant: 'Human',
@@ -48,7 +48,7 @@ describe('NativeFormatter audio pass-through', () => {
   });
 
   it('still errors on document blocks (regression guard)', () => {
-    const formatter = new NativeFormatter(); // default: unsupportedMedia 'error'
+    const formatter = new NativeFormatter();
     const messages: NormalizedMessage[] = [
       {
         participant: 'Human',
@@ -82,7 +82,6 @@ describe('NativeFormatter audio pass-through', () => {
     expect(content.some((b) => b.type === 'audio')).toBe(true);
     expect(content.some((b) => b.type === 'document')).toBe(false);
     expect(content.some((b) => b.type === 'text' && b.text === 'hello')).toBe(true);
-    // The strip warning fires for the document, not the audio
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('Stripped unsupported media'));
     warn.mockRestore();
   });

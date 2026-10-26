@@ -1,12 +1,4 @@
 /**
- * Tool definition and execution types
- */
-
-// ============================================================================
-// Tool Definition
-// ============================================================================
-
-/**
  * One JSON Schema node inside a tool's inputSchema.
  *
  * `type` is optional and may be an array because JSON Schema spells the same
@@ -43,10 +35,6 @@ export interface ToolDefinition {
     $defs?: Record<string, ToolParameter>;
   };
 }
-
-// ============================================================================
-// Tool Execution
-// ============================================================================
 
 export interface ToolCall {
   id: string;
@@ -90,10 +78,6 @@ export interface ToolResult {
 export type ToolResultContentBlock =
   | { type: 'text'; text: string }
   | { type: 'image'; source: { type: 'base64'; data: string; mediaType: string } };
-
-// ============================================================================
-// Tool Context (passed to execution callback)
-// ============================================================================
 
 export interface ToolContext {
   /** The raw text that contained the tool calls */
@@ -148,10 +132,6 @@ export interface ToolContext {
    */
   supportsInjectedMessages?: boolean;
 }
-
-// ============================================================================
-// Tool Parsing
-// ============================================================================
 
 export interface ParsedToolCalls {
   /** Parsed tool calls */

@@ -1,16 +1,3 @@
-/**
- * Coverage for `streamYielding`'s `maxToolDepth` option:
- *   - by default the yielding paths are uncapped (the agent framework
- *     budgets its own work);
- *   - an explicit non-negative cap is honored;
- *   - `-1` is accepted as an "unlimited" sentinel;
- *   - the stream still terminates naturally when the model emits no tool.
- *
- * Background: the original data-miner postmortem traced a stalled agent
- * to the prior default of 10 tool rounds. This test pins the new default
- * and keeps the cap mechanic itself tested for callers that still want it.
- */
-
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { MockAdapter } from '../../src/providers/mock.js';
@@ -34,17 +21,10 @@ function makeRequest(): NormalizedRequest {
     ],
     config: { model: 'test-model', maxTokens: 1000 },
     tools: [noopTool],
-    // These tests exercise the XML tool loop specifically; native is the
-    // default tool mode now, so the XML path is an explicit opt-in.
     toolMode: 'xml',
   };
 }
 
-/**
- * Scripted response: a preamble text + one XML tool call.
- * The XML form is what AnthropicXmlFormatter (default for MockAdapter)
- * extracts as a tool round.
- */
 function scriptedToolCall(roundIndex: number): string {
   return (
     `preamble ${roundIndex}\n` +
@@ -54,13 +34,6 @@ function scriptedToolCall(roundIndex: number): string {
   );
 }
 
-/**
- * Drive the stream end-to-end, auto-answering every tool round with a
- * dummy success result. Returns counts, the terminal event, and the final
- * response (when the stream completed) so callers can assert the turn
- * actually FINISHED — a weaker "saw a complete event" check once let a
- * mislabeled early termination pass (issue #39 review).
- */
 async function driveStream(
   membrane: Membrane,
   request: NormalizedRequest,
@@ -106,8 +79,6 @@ describe('streamYielding maxToolDepth', () => {
       completeDelayMs: 0,
       responseQueue: [
         ...Array.from({ length: SCRIPTED }, (_, i) => scriptedToolCall(i + 1)),
-        // Final plain-text response so the stream terminates naturally
-        // once the scripted tool rounds are exhausted.
         'done.',
       ],
     });
@@ -117,9 +88,6 @@ describe('streamYielding maxToolDepth', () => {
 
     expect(toolRounds).toBe(SCRIPTED);
     expect(terminalEvent).toBe('complete');
-    // The queued final response must actually stream and the stop must be
-    // natural — the resumption guards may not chop a progressing tool chain
-    // (issue #39 review: an early break here once hid behind this test).
     expect(finalResponse?.stopReason).toBe('end_turn');
     expect(finalResponse?.rawAssistantText).toContain('done.');
   });
@@ -147,10 +115,6 @@ describe('streamYielding maxToolDepth', () => {
   });
 
   it('does NOT treat other negative values as unlimited (-1 is the only sentinel)', async () => {
-    // Pre-fix, `< 0` accepted -2, -99, etc. as unlimited. That silently
-    // masked computation errors (e.g. `userCap - N` going negative). Now
-    // anything other than -1 is taken at face value as the cap, which
-    // makes the failure loud — zero tool rounds, stream terminates.
     const adapter = new MockAdapter({
       streamChunkDelayMs: 0,
       completeDelayMs: 0,
@@ -172,7 +136,6 @@ describe('streamYielding maxToolDepth', () => {
     const adapter = new MockAdapter({
       streamChunkDelayMs: 0,
       completeDelayMs: 0,
-      // Queue 15 scripted tool-calling responses — more than the cap.
       responseQueue: Array.from({ length: 15 }, (_, i) => scriptedToolCall(i + 1)),
     });
     const membrane = new Membrane(adapter);
@@ -183,7 +146,6 @@ describe('streamYielding maxToolDepth', () => {
       { maxToolDepth: 10 },
     );
 
-    // 11 tool rounds happen (toolDepth iterates 0..10 inclusive)
     expect(toolRounds).toBe(11);
     expect(terminalEvent).toBe('complete');
   });
@@ -202,7 +164,6 @@ describe('streamYielding maxToolDepth', () => {
       { maxToolDepth: 20 },
     );
 
-    // With maxToolDepth=20, the loop allows depths 0..20 → 21 tool rounds.
     expect(toolRounds).toBe(21);
     expect(terminalEvent).toBe('complete');
   });
@@ -214,7 +175,6 @@ describe('streamYielding maxToolDepth', () => {
       responseQueue: [
         scriptedToolCall(1),
         scriptedToolCall(2),
-        // Plain text response — no tool call. Stream should terminate.
         'I am done.',
       ],
     });

@@ -14,11 +14,6 @@ function sse(frames: unknown[]) {
   return new Response(frames.map(frame => 'data: ' + (typeof frame === 'string' ? frame : JSON.stringify(frame)) + '\n\n').join(''), { headers: { 'content-type': 'text/event-stream' } });
 }
 
-// ---------------------------------------------------------------------------
-// The overload schedule is chosen by a known status; prose decides only when
-// no status exists.
-// ---------------------------------------------------------------------------
-
 describe('overload policy reads a known status before prose', () => {
   const prose = 'upstream returned 529 overloaded_error';
   it.each([
@@ -34,8 +29,6 @@ describe('overload policy reads a known status before prose', () => {
     expect(isOverloadedError({ type: 'server', retryable: false, httpStatus: 529, message: 'capacity' })).toBe(false);
   });
 
-  // Base schedule waits 1ms; the overload schedule waits 50..100ms. Recording
-  // the waits shows which schedule an actual public retry chose.
   const OVERLOAD_STEP_MS = 100;
   const OVERLOAD_JITTER_FLOOR_MS = OVERLOAD_STEP_MS / 2;
   function membrane(status: number) {

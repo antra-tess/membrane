@@ -27,10 +27,8 @@ export function chunkFrame(event: unknown): Uint8Array {
   const view = new DataView(frame.buffer);
   view.setUint32(0, totalLength, false);
   view.setUint32(4, headers.length, false);
-  // prelude CRC (8..12) left zero — adapter does not validate
   frame.set(headers, 12);
   frame.set(payload, 12 + headers.length);
-  // message CRC (last 4) left zero
   return frame;
 }
 

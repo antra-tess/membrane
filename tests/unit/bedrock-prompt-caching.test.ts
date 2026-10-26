@@ -21,10 +21,6 @@ function buildRequest(request: unknown): Record<string, any> {
   }).buildRequest(request as ProviderRequest);
 }
 
-// ── AWS event-stream frame crafting (same shape as
-//    bedrock-stream-stop-sequence.test.ts; the adapter reads lengths and
-//    headers but does not validate CRCs) ──
-
 const STRING_HEADER_VALUE_TYPE = 7;
 
 function stringHeader(name: string, value: string): Uint8Array {

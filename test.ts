@@ -1,13 +1,6 @@
-/**
- * Standalone test for membrane
- * 
- * Run with: npx tsx test.ts
- */
-
 import { Membrane, AnthropicAdapter, textMessage } from './src/index.js';
 import type { NormalizedRequest, ToolCall, ToolResult, ToolContext } from './src/index.js';
 
-// Simple tool for testing
 const echoTool = {
   name: 'echo',
   description: 'Echoes back the input message',
@@ -38,7 +31,6 @@ const calculatorTool = {
   },
 };
 
-// Tool executor
 async function executeToolUnsafelyForDemo(call: ToolCall): Promise<ToolResult> {
   console.log(`\n  [Tool] Executing: ${call.name}`, call.input);
   
@@ -51,7 +43,6 @@ async function executeToolUnsafelyForDemo(call: ToolCall): Promise<ToolResult> {
   
   if (call.name === 'calculate') {
     try {
-      // Simple eval for demo (don't do this in production!)
       const result = eval(call.input.expression as string);
       return {
         toolUseId: call.id,
@@ -203,7 +194,6 @@ async function testMultiTurn() {
   }
 }
 
-// Run tests
 async function main() {
   console.log('Membrane Standalone Tests');
   console.log('=========================');

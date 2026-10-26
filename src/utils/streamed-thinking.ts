@@ -18,9 +18,6 @@ export class StreamedThinking {
     const block = value as ContentBlock | undefined;
     if (!block) return;
     this.textLengths.set(index, block.type === 'text' && typeof block.text === 'string' ? block.text.length : 0);
-    // Finalized-only callbacks may follow the text deltas. Their ordered block
-    // indices still place thinking before/among those text blocks, not after
-    // all text merely because its snapshot arrived late.
     let logicalOffset = this.roundOffset;
     let preceding = 0;
     for (const [i, length] of this.textLengths) {
@@ -33,8 +30,6 @@ export class StreamedThinking {
       : { ...block };
     const span = this.current.get(index);
     if (span) {
-      // The finalized provider snapshot supplies the signature/opaque data.
-      // Copy it: Bedrock mutates its own start-block object as deltas arrive.
       span.block = snapshot;
     } else {
       const next = { offset, block: snapshot };
@@ -43,7 +38,6 @@ export class StreamedThinking {
     }
   }
 
-  /** A signature received before the block's finished snapshot, which supersedes it. */
   onSignature(index: number, signature: string): void {
     const span = this.current.get(index);
     if (span?.block.type === 'thinking') span.block = { ...span.block, signature };
@@ -65,7 +59,6 @@ export class StreamedThinking {
       result.push({ ...span.block });
       cursor = end;
     }
-    // Preserve the parser's empty-response operation even when only thinking arrived.
     if (cursor < text.length || text.length === 0) result.push(...parseText(text.slice(cursor), { visibleText: text, offset: cursor }));
     return result;
   }

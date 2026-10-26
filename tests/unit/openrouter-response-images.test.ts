@@ -81,7 +81,7 @@ describe('OpenRouter complete transport', () => {
     expect(result.content).toEqual([text('Here'), image, remoteImage]);
     expect(result.usage).toMatchObject({ inputTokens: 7, outputTokens: 3 });
     expect(result.model).toBe('served/image-model');
-    expect(fetchMock).toHaveBeenCalledTimes(1); // URL images are references, never fetched.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -60,7 +60,6 @@ describe('empty-text cleanup scope and ordering', () => {
       if (event.type === 'complete') response = event.response;
     }
     expect(receipts).toEqual([computeCacheWireReceipt(adapterInput)]);
-    // Default semantic receipt/count behavior does not require wire logging.
     expect(response.details.cache.markersInRequest).toBe(1);
   });
 
@@ -131,7 +130,6 @@ describe('empty-text cleanup scope and ordering', () => {
     const membrane = new Membrane(adapter, {
       formatter: mode === 'native' ? new NativeFormatter() : new AnthropicXmlFormatter(),
       hooks: { beforeRequest: (_normalized, raw: any) => {
-        // A hook can add a new invalid block after formatter cleanup.
         raw.system = [{ ...text(' \n'), cache_control: { type: 'ephemeral' } }];
       } },
     });

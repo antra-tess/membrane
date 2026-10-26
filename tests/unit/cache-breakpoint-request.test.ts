@@ -1,10 +1,3 @@
-/**
- * Cache-breakpoint request structure: `cacheBreakpoint` on a normalized
- * message must surface as `cache_control` markers in the raw request.
- * Converted from the legacy tsx script test/cache-breakpoint-request.test.ts
- * (pre-vitest layout, never ran in CI).
- */
-
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { MockAdapter } from '../../src/providers/mock.js';
@@ -143,15 +136,11 @@ describe('block-level cache_control passthrough (native path)', () => {
         messageBlockCount += msg.content.filter((b: any) => b.cache_control).length;
       }
     }
-    // BuildResult names it systemContent; `built.system` was always undefined,
-    // so this count read 0 whatever the fallback did.
     const systemCount = Array.isArray(built.systemContent)
       ? (built.systemContent as any[]).filter((b: any) => b.cache_control).length
       : 0;
 
-    // Passthroughs are preserved verbatim — membrane never strips them.
     expect(messageBlockCount).toBe(2);
-    // ...and they count, so membrane adds no redundant system/tools breakpoint.
     expect(systemCount).toBe(0);
   });
 
@@ -162,7 +151,6 @@ describe('block-level cache_control passthrough (native path)', () => {
       {
         assistantParticipant: 'Claude',
         participantMode: 'multiuser',
-        // The marker is on the first block: a fallback would mark the last.
         systemPrompt: [{ type: 'text', text: 'policy', cache_control: callerCache }, { type: 'text', text: 'details' }],
         promptCaching: true,
       } as any,

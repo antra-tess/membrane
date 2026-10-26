@@ -56,12 +56,8 @@ export function stripEmptyTextMessages<T extends { content: unknown }>(
   return result;
 }
 
-/** Run after provider-specific passthrough parameters have been applied so
- * overrides cannot bypass the wire-boundary cleanup. This mutates only the
- * newly built request; caller-owned message and content objects stay intact. */
 export function stripEmptyTextAfterPassthrough<T extends { messages: { content: unknown }[]; system?: unknown }>(
   request: T,
-  /** Hears each message block removed that held whitespace (the system prompt is not a message). */
   onDropped?: (block: unknown) => void,
 ): void {
   request.messages = stripEmptyTextMessages(request.messages, onDropped);

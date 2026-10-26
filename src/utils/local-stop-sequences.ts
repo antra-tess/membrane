@@ -2,22 +2,12 @@ import type { ProviderResponse, StreamCallbacks } from '../types/provider.js';
 import type { MembraneBlockType } from '../types/streaming.js';
 import { responsesRawItemKey } from '../formatters/openai-responses.js';
 
-/**
- * The membrane block type a provider block streams as: thinking, a tool call,
- * or (anything else) text. One definition, so the stop scan below and the
- * native loops' chunk labels agree on which chunks are visible.
- */
 export function membraneBlockType(apiType: unknown): MembraneBlockType {
   if (apiType === 'thinking' || apiType === 'redacted_thinking' || apiType === 'reasoning') return 'thinking';
   if (apiType === 'tool_use' || apiType === 'function_call' || apiType === 'tool_call') return 'tool_call';
   return 'text';
 }
 
-/**
- * A block event or thinking signature no chunk has followed yet, or a
- * non-visible chunk withheld after a stop found while streaming, at the held
- * text before it.
- */
 type Waiting =
   | { kind: 'block'; index: number; block: unknown; at: number }
   | { kind: 'signature'; index: number; signature: string; at: number }
@@ -40,29 +30,19 @@ export class LocalStopSequences {
   private readonly stops: string[];
   private readonly longest: number;
 
-  // The block incoming chunks belong to, by the same rule as the loops'
-  // NativeBlockTracker: a first sighting opens a block, the open block's
-  // second sighting closes it.
   private readonly seen = new Set<number>();
   private openIndex: number | undefined;
   private openType: unknown;
 
-  // Visible text not delivered yet, and the events no chunk has followed yet:
-  // text that could still begin a stop or, once streaming has found a stop,
-  // everything from the stop on, withheld until finish().
   private held = '';
   private waiting: Waiting[] = [];
 
-  // What the caller has received: its visible text, and its text blocks.
   private delivered = '';
   private readonly releasedText = new Map<number, ReleasedTextBlock>();
   private releasedOpen: number | undefined;
 
-  /** Streaming found a stop: what streams after it is withheld until finish(). */
   private stopped = false;
-  /** The text block completed at the stop: its own later completion is not reported again. */
   private completedAtStop: number | undefined;
-  /** A delivery threw: release() hands the caller nothing more. */
   private deliveryFailed = false;
 
   constructor(stops: readonly string[] | undefined, private readonly inner: StreamCallbacks) {
@@ -77,18 +57,10 @@ export class LocalStopSequences {
     };
   }
 
-  /**
-   * The adapter threw. Before a stop, everything held was received and is
-   * delivered, so partialContent keeps it. After a stop found while
-   * streaming, there is no returned content to settle it against, so only
-   * what was delivered before the stop stands. After a delivery threw, the
-   * caller's callback has failed, so it is handed nothing more.
-   */
   release(): void {
     if (!this.stopped && !this.deliveryFailed) this.releaseTo(this.held.length, () => true);
   }
 
-  /** Run one delivery, noting a throw from it (the caller's callback, as a rule). */
   private delivering(deliver: () => void): void {
     try {
       deliver();
@@ -98,11 +70,6 @@ export class LocalStopSequences {
     }
   }
 
-  /**
-   * The adapter returned: cut its content at the first stop in the content's
-   * own visible text, and settle what is held or withheld against it (see the
-   * class comment).
-   */
   finish(result: ProviderResponse): ProviderResponse {
     const found = firstStopInStretches(result.content, this.stops);
     if (!found) {
@@ -119,7 +86,6 @@ export class LocalStopSequences {
     this.held = '';
     this.waiting = [];
     if (Array.isArray(cut.content)) {
-      // Signatures are superseded here: each delivered block is final.
       for (const event of waiting) {
         if (event.kind !== 'block' || event.index === this.completedAtStop || event.index >= cut.content.length) continue;
         if (event.index <= cut.index) this.inner.onContentBlock?.(event.index, cut.content[event.index]);
@@ -140,16 +106,11 @@ export class LocalStopSequences {
       this.inner.onChunk(chunk);
       return;
     }
-    // A non-text block waiting between held text and this chunk ends the
-    // stretch: text before it cannot begin a stop that continues after it.
     const delimiter = lastIndexWhere(this.waiting, event => event.kind === 'block' && blockType(event.block) !== 'text');
     if (delimiter >= 0) this.releaseTo(this.held.length, (_, i) => i <= delimiter);
     this.held += chunk;
     const found = this.earliestStop();
     if (found) {
-      // Settle the stop before anything reaches the caller, so a callback that
-      // throws leaves release() nothing to deliver, least of all the stop. The
-      // stop and what follows it stay held: finish() settles them.
       this.stopped = true;
       this.releaseTo(found.at, event => event.at < found.at);
       this.completeAtStop();
@@ -174,12 +135,10 @@ export class LocalStopSequences {
     this.waiting.push({ kind: 'block', index, block, at: this.held.length });
   }
 
-  /** The stop whose occurrence in the held text ends first, as a provider's token-by-token check would find it. */
   private earliestStop(): { stop: string; at: number } | undefined {
     return firstStop(this.held, this.stops);
   }
 
-  /** Length of the longest held suffix that is a proper prefix of a stop. */
   private heldStopPrefix(): number {
     for (let length = Math.min(this.longest - 1, this.held.length); length > 0; length--) {
       const suffix = this.held.slice(-length);
@@ -188,12 +147,6 @@ export class LocalStopSequences {
     return 0;
   }
 
-  /**
-   * Deliver held text before `at`, interleaved with the waiting events `due`
-   * selects, and keep the rest. The held state is consumed before any
-   * callback runs, so a callback that throws is never handed the same text or
-   * event again.
-   */
   private releaseTo(at: number, due: (event: Waiting, position: number) => boolean): void {
     const text = this.held;
     const now: Waiting[] = [];
@@ -235,7 +188,6 @@ export class LocalStopSequences {
     this.inner.onContentBlock?.(index, block);
   }
 
-  /** The text block open at the stop completes with the text before it. */
   private completeAtStop(): void {
     const index = this.releasedOpen;
     const open = index === undefined ? undefined : this.releasedText.get(index);
@@ -255,7 +207,6 @@ function visibleLength(block: unknown): number {
   return item?.type === 'text' && typeof item.text === 'string' ? item.text.length : 0;
 }
 
-/** Provider content's visible text in the coordinates of its visible offsets: its text blocks' text, in order. */
 function visibleText(content: unknown): string {
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return '';
@@ -283,11 +234,6 @@ export function firstStop(text: string, stops: readonly string[]): { stop: strin
   return best && { stop: best.stop, at: best.at };
 }
 
-/**
- * The first stop in provider content's visible text, as a visible offset.
- * Adjacent text blocks form one stretch; any other block ends it, as it does
- * while streaming.
- */
 function firstStopInStretches(content: unknown, stops: readonly string[]): { stop: string; offset: number } | undefined {
   if (typeof content === 'string') {
     const found = firstStop(content, stops);
@@ -316,14 +262,6 @@ function firstStopInStretches(content: unknown, stops: readonly string[]): { sto
   return scan();
 }
 
-/**
- * Provider content cut at a visible-text offset: the blocks before the text
- * block the offset falls in, that block truncated (dropped when nothing of it
- * remains), and nothing after it. `index` is the position of that block in
- * the original content (its length when the offset cuts nothing). A replayable
- * rawItem the cut block shares is removed from every block that kept it, by
- * the identity the Responses formatter replays items under.
- */
 export function cutVisible(content: unknown, offset: number): { content: unknown; index: number } {
   if (typeof content === 'string') return { content: content.slice(0, offset), index: 0 };
   if (!Array.isArray(content)) return { content, index: 0 };

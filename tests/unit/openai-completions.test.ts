@@ -4,7 +4,7 @@ import { OpenAICompletionsAdapter } from '../../src/providers/openai-completions
 describe('OpenAICompletionsAdapter', () => {
   const adapter = new OpenAICompletionsAdapter({
     baseURL: 'http://localhost:8000/v1',
-    warnOnImageStrip: false, // Disable warnings in tests
+    warnOnImageStrip: false,
   });
 
   describe('serializeToPrompt', () => {
@@ -229,7 +229,6 @@ describe('OpenAICompletionsAdapter', () => {
         baseURL: 'http://localhost:8000/v1',
       });
 
-      // We can't directly test private fields, but we can verify the adapter was created
       expect(defaultAdapter.name).toBe('openai-completions');
     });
 

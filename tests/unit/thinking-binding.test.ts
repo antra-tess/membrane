@@ -49,11 +49,9 @@ const reply = (...content: ContentBlock[]): NormalizedMessage => ({ participant:
 interface Turn {
   content: unknown[];
   stopReason: string;
-  /** Report entries by path; each is resolved against the request as sent. */
   report?: Array<{ type: string; reason: string; path: string }>;
 }
 
-/** A native adapter that plays a script, and reports binding entries as the real adapters do: with the request's own block at each path. */
 class BindingAdapter implements ProviderAdapter {
   readonly name = 'binding-scripted';
   readonly reportsContentAlterations = true;
@@ -140,7 +138,6 @@ describe('the request asks for the controls', () => {
     expect(adapter.requests[0]!.thinking).toEqual({ type: 'adaptive', block_binding: { prefix_mismatch_behavior: 'drop_block' } });
     expect(adapter.requests[1]!.thinking).toBeUndefined();
     expect(adapter.requests[2]!.thinking).toEqual({ type: 'adaptive', display: 'summarized', block_binding: { prefix_mismatch_behavior: 'drop_block' } });
-    // Display alone sends these models nothing: a config goes only to carry the controls.
     expect(adapter.requests[3]!.thinking).toBeUndefined();
     // These models think whatever `enabled` says.
     expect(adapter.requests[4]!.thinking).toEqual({ type: 'adaptive', block_binding: { prefix_mismatch_behavior: 'drop_block' } });
@@ -167,7 +164,6 @@ describe('the request asks for the controls', () => {
     const binding = { type: 'enabled', budget_tokens: 2000, block_binding: { prefix_mismatch_behavior: 'drop_block' } };
     await adapter.complete({ ...base, model: 'claude-opus-5-5', thinking: binding } as any);
     await adapter.complete({ ...base, model: 'claude-opus-4-5', thinking: binding } as any);
-    // A thinking config passed through `extra` is what goes out, so it counts.
     await adapter.complete({ ...base, model: 'claude-opus-5-5', extra: { thinking: binding } } as any);
     await adapter.complete({ ...base, model: 'claude-opus-5-5', thinking: { type: 'enabled', budget_tokens: 2000 } } as any);
     expect(seen.map((h) => h?.['anthropic-beta'])).toEqual([
@@ -200,7 +196,6 @@ describe('the request asks for the controls', () => {
       extra: { anthropic_beta: ['context-1m-2025-08-07'] },
     });
     expect(built.anthropic_beta).toEqual(['context-1m-2025-08-07', 'interleaved-thinking-2025-05-14', BETA]);
-    // A thinking config passed through `extra` is what goes out, so it counts here too.
     const viaExtra = adapter.buildRequest({
       model: 'claude-opus-5-5', maxTokens: 4000, messages: [{ role: 'user', content: 'hi' }],
       extra: { thinking: { type: 'enabled', budget_tokens: 2000, block_binding: { prefix_mismatch_behavior: 'drop_block' } } },
@@ -211,7 +206,6 @@ describe('the request asks for the controls', () => {
   });
 });
 
-/** An async iterable of SSE events with the surface the Anthropic adapter touches. */
 function fakeStream(events: unknown[]) {
   return {
     controller: { abort() {} },
@@ -342,8 +336,6 @@ describe('the adapters carry the provider\'s report', () => {
 
 describe('yielding rounds place each entry in the consumer\'s coordinates', () => {
   it('names the submitted message and its block when two submitted messages travel as one provider message, and leaves a provider\'s drop out of membrane\'s alterations', async () => {
-    // Two assistant messages travel as one provider message: S2's block is
-    // content 1 of messages.1 on the wire, and block 0 of message 2 here.
     const messages = [user('u1'), reply(text('note')), reply(thinking('S2'), text('a2')), user('u3')];
     const adapter = new BindingAdapter([finalTurn([
       { type: 'thinking_dropped', reason: 'prefix_binding_mismatch', path: 'messages.1.content.1' },
@@ -354,7 +346,6 @@ describe('yielding rounds place each entry in the consumer\'s coordinates', () =
       dropped: [{ reason: 'prefix_binding_mismatch', path: 'messages.1.content.1', message: 2, block: 0 }],
       mismatchAllowed: [],
     });
-    // The provider's account is beside membrane's: the request carried the block.
     expect(round!.altered).toEqual({ messages: [], injected: [] });
   });
 
@@ -374,8 +365,6 @@ describe('yielding rounds place each entry in the consumer\'s coordinates', () =
   it('names an injected message', async () => {
     const adapter = new BindingAdapter([
       { content: [{ type: 'tool_use', id: 't1', name: 'noop', input: {} }], stopReason: 'tool_use' },
-      // go | (tool_use) | (tool_result + injected, merged as one user message) ... the injected
-      // reply is an assistant message here, so it travels on its own.
       finalTurn([{ type: 'thinking_dropped', reason: 'prefix_binding_mismatch', path: 'messages.3.content.0' }]),
     ]);
     const reports = await rounds(new Membrane(adapter), request([user('go')]), [
@@ -435,7 +424,6 @@ describe('yielding rounds place each entry in the consumer\'s coordinates', () =
 
 describe('FidelityNotes.ownerOf', () => {
   it('names the one message a block was emitted for, and none for a block emitted for two', () => {
-    // No builder emits one object for two messages, so the rule is driven directly here.
     const notes = new FidelityNotes();
     const once = { type: 'thinking', thinking: '', signature: 'S1' };
     const shared = { type: 'thinking', thinking: '', signature: 'S2' };
@@ -446,7 +434,6 @@ describe('FidelityNotes.ownerOf', () => {
     expect(notes.ownerOf(once)).toBe(2);
     expect(notes.ownerOf(shared)).toBeUndefined();
     expect(notes.ownerOf({ type: 'thinking', thinking: '', signature: 'S1' })).toBeUndefined();
-    // So an alteration of it can't say which message lost content.
     notes.alterBlock(shared);
     expect(notes.unattributed).toBe(true);
   });

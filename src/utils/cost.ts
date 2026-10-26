@@ -8,14 +8,8 @@ export interface CostableUsage {
   cacheReadTokens?: number;
 }
 
-/** Unpriced models warn once each, not once per call. */
 const warnedUnpricedModels = new Set<string>();
 
-/**
- * Say once, per model, that membrane has no rates for it — so an omitted
- * `estimatedCost` reads as "unknown" rather than "free" to a caller who only
- * ever sees the absence.
- */
 export function warnUnpricedModel(modelId: string): void {
   if (warnedUnpricedModels.has(modelId)) return;
   warnedUnpricedModels.add(modelId);
@@ -26,24 +20,10 @@ export function warnUnpricedModel(modelId: string): void {
   );
 }
 
-/** Test seam: the once-per-model warn latch is process-wide otherwise. */
 export function resetUnpricedModelWarnings(): void {
   warnedUnpricedModels.clear();
 }
 
-/**
- * Add two breakdowns that may have been priced at DIFFERENT rates — the
- * multi-round case, where each round is priced under the model that served it
- * and the turn total is their sum.
- *
- * `pricingAsOf` takes the OLDER of the two: a total is only as fresh as its
- * stalest input, and a round whose source vouches for NO date is stalest of
- * all — one unstamped round leaves the sum unstamped. A currency mismatch is
- * not summable at all (the caller's
- * registry priced two rounds in different currencies and membrane has no rate
- * to convert with), so it returns undefined rather than adding dollars to
- * euros — an absent cost says "membrane does not know", which is true.
- */
 export function addCostBreakdowns(
   a: CostBreakdown,
   b: CostBreakdown,

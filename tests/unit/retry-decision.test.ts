@@ -18,16 +18,12 @@ import type { NormalizedRequest } from '../../src/types/index.js';
 import type { ProviderRequest, ProviderRequestOptions, ProviderResponse } from '../../src/types/provider.js';
 import type { StreamCallbacks } from '../../src/types/streaming.js';
 
-/** A retry config: the default with `change` laid over it. */
 const config = (change: Partial<Omit<RetryConfig, 'overloaded'>> & { overloaded?: Partial<RetryConfig['overloaded']> } = {}): RetryConfig => ({
   ...DEFAULT_RETRY_CONFIG,
   ...change,
   overloaded: { ...DEFAULT_RETRY_CONFIG.overloaded, ...change.overloaded },
 });
 const settings = MEMBRANE_RETRY_SETTINGS;
-/** Schedule changes whose step at attempt 2 isn't a finite number (and
- *  attempt 2 is inside the default bound of 3): NaN, and
- *  Infinity (given, or a product that overflows under no cap). */
 const NON_FINITE_STEPS = [
   { firstDelayMs: Number.NaN }, { multiplier: Number.NaN }, { maxDelayMs: Number.NaN },
   { firstDelayMs: Infinity, maxDelayMs: Infinity }, { multiplier: 1e308, maxDelayMs: Infinity },
@@ -53,9 +49,7 @@ describe('classifyFailure', () => {
     // Mid-stream, after the 200, an overloaded error has no status.
     expect(classifyFailure({ retryable: true, type: 'server', message: 'stream error: overloaded_error' })).toBe('overloaded');
     expect(classifyFailure({ retryable: true, type: 'server', message: 'upstream said 529' })).toBe('overloaded');
-    // A status decides, whatever the message says.
     expect(classifyFailure({ retryable: true, type: 'server', httpStatus: 503, message: 'overloaded_error' })).toBe('retryable');
-    // Prose and digits inside another number aren't the tokens.
     expect(classifyFailure({ retryable: true, type: 'server', message: 'worker pool overloaded' })).toBe('retryable');
     expect(classifyFailure({ retryable: true, type: 'server', message: 'timeout after 5290 ms' })).toBe('retryable');
     expect(classifyFailure({ retryable: true, type: 'server', message: 'request 1529 failed' })).toBe('retryable');
@@ -68,7 +62,6 @@ describe('classifyFailure', () => {
   });
 
   it('puts a failure in one class: an overloaded error typed rate_limit is overloaded', () => {
-    // Membrane's own rate limits all carry 429, so only another adapter's error can be both.
     expect(classifyFailure({ retryable: true, type: 'rate_limit', message: 'rate_limit overloaded_error' })).toBe('overloaded');
     expect(classifyFailure({ retryable: true, type: 'rate_limit', httpStatus: 529 })).toBe('overloaded');
   });
@@ -263,7 +256,6 @@ describe('retryDecision', () => {
   });
 
   it("reads a stated wait as a number: a numeric string counts as its number, and one that isn't a number as none", () => {
-    // Membrane's own parsers give numbers; another adapter's error might not.
     const asStated = (value: string) => value as unknown as number;
     expect(retryDecision('retryable', 1, asStated('5000'), settings)).toEqual({ retry: true, delayMs: 5000 });
     expect(retryDecision('retryable', 1, asStated('90000'), settings)).toEqual({ retry: false, statedWaitMs: 90_000 });
@@ -293,19 +285,12 @@ describe('retryDecision', () => {
 
 describe('the ./retry entry', () => {
   const root = fileURLToPath(new URL('../../', import.meta.url));
-  /** Every module specifier written literally that a source file can load at
-   *  run time: static imports and re-exports (but not `import type` or
-   *  `export type`), side-effect imports, dynamic imports and requires, in
-   *  either quote. A dynamic import of a computed name can't be read here;
-   *  the module has none. */
   const specifiers = (source: string): string[] => [
     ...source.matchAll(/^\s*(?:import|export)\s+(?!type\b)[^;]*?\bfrom\s*['"]([^'"]+)['"]/gm),
     ...source.matchAll(/^\s*import\s*['"]([^'"]+)['"]/gm),
     ...source.matchAll(/\bimport\s*\(\s*['"`]([^'"`]+)['"`]/g),
     ...source.matchAll(/\brequire\s*\(\s*['"`]([^'"`]+)['"`]/g),
   ].map((match) => match[1]!);
-  /** The modules the entry loads, followed from src/retry.ts through every
-   *  relative specifier; a package specifier is listed as it's written. */
   const loaded = (): string[] => {
     const seen = new Set<string>();
     const walk = (file: string) => {
@@ -364,8 +349,6 @@ describe("membrane's core asks onError after the retry's wait is decided", () =>
     messages: [{ participant: 'User', content: [{ type: 'text', text: 'zz-prompt' }] }],
     config: { model: 'zz-model-1', maxTokens: 64 },
   };
-  /** A membrane whose onError lengthens the stated wait it's handed, and the
-   *  stated waits its onError saw. */
   const lengthening = (adapter: FailsOnce) => {
     const seen: Array<number | undefined> = [];
     const membrane = new Membrane(adapter, {

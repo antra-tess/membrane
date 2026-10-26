@@ -1,31 +1,3 @@
-/**
- * Membrane's retry decision, as plain functions with plain inputs, for every
- * layer that retries a provider call: membrane's core for the calls it
- * retries itself, and a caller that passes `retry: false` and retries its own
- * calls (agent-framework's turn policy and its storm hold, context-manager's
- * compression lane), each with its own settings. One decision means a call
- * path's classes, stated-wait rule and jitter are the same wherever it is
- * retried; only the numbers are each path's.
- *
- * It's the `@animalabs/membrane/retry` entry. It loads nothing of membrane at
- * run time but the default retry config's numbers (`types/config.ts`, which
- * imports types only), so taking it doesn't load a provider SDK.
- *
- * Three things are fixed here, not settings:
- * - the classes (classifyFailure);
- * - the stated-wait rule: a provider's stated wait (`retry-after`) only ever
- *   lengthens the backoff, and one past its schedule's ceiling isn't waited
- *   out but goes back to the caller (retryDecision);
- * - the jitter: equal jitter, a whole number of milliseconds in
- *   `[floor(d/2), d)` (a zero step waits 0), on the overloaded class only,
- *   since a capacity storm is where a fleet retrying in sync re-creates
- *   the stampede it's backing off from (delayFor).
- *
- * Attempts are counted as tries made so far: after a call's first send fails,
- * the attempt is 1, and the first retry waits the schedule's `firstDelayMs`.
- * A caller counting from 0 passes its count plus one.
- */
-
 import { DEFAULT_RETRY_CONFIG, type RetryConfig } from './types/config.js';
 
 /**
@@ -115,9 +87,6 @@ export function classifyFailure(facts: FailureFacts): RetryClass {
   return 'retryable';
 }
 
-/** The schedule a class is retried on, and whether its delays are jittered:
- *  an overloaded failure whose settings have no overloaded schedule takes the
- *  retryable schedule, with no jitter. */
 function scheduleFor(cls: RetryClass, settings: RetrySettings): { schedule?: RetrySchedule; jitter: boolean } {
   if (cls === 'overloaded') {
     return settings.overloaded
@@ -127,7 +96,6 @@ function scheduleFor(cls: RetryClass, settings: RetrySettings): { schedule?: Ret
   return { schedule: settings[cls], jitter: false };
 }
 
-/** Whether `attempt` is a count of tries: a whole number of at least 1. */
 function isAttempt(attempt: number): boolean {
   return Number.isInteger(attempt) && attempt >= 1;
 }
@@ -140,9 +108,6 @@ function stepOf(schedule: RetrySchedule, attempt: number): number {
     : Math.min(schedule.firstDelayMs * Math.pow(schedule.multiplier, attempt - 1), schedule.maxDelayMs);
 }
 
-/** A step's wait: on the overloaded class a whole number of milliseconds in
- *  `[floor(step/2), step)` (a zero step waits 0), drawn with `random`; on any
- *  other, the step itself. */
 function waitOf(stepMs: number, jitter: boolean, random: () => number): number {
   return jitter ? Math.floor(stepMs / 2 + random() * (stepMs / 2)) : stepMs;
 }
@@ -210,10 +175,7 @@ export function retryDecision(
   const { schedule, jitter } = scheduleFor(cls, settings);
   if (!schedule) return { retry: false };
   if (!isAttempt(attempt)) return { retry: false };
-  // A bound that compares false with every count ends the retries rather than
-  // letting them run on.
   if (schedule.maxAttempts !== null && !(attempt < schedule.maxAttempts)) return { retry: false };
-  // Number(undefined) is NaN, so no stated wait reads as none.
   const read = Number(statedWaitMs);
   const stated = Number.isNaN(read) ? undefined : read;
   const ceiling = schedule.statedWaitCeilingMs;

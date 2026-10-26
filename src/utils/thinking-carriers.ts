@@ -1,8 +1,3 @@
-/**
- * Helpers for pairing provider-native thinking carriers (which hold the
- * signatures) with parser-derived thinking blocks (which hold the text).
- * See Membrane.mergeProviderThinkingBlocks for the pairing rules.
- */
 import type { ContentBlock } from '../types/index.js';
 
 /**
@@ -19,19 +14,6 @@ export function sameThinkingText(left: string, right: string): boolean {
   return normalizedLeft === normalized(right);
 }
 
-/**
- * Find a RUN of consecutive still-unpaired provider blocks whose concatenated
- * thinking reconstructs `parsedText` (an auto-continuation split across a
- * max_tokens boundary). Returns the provider indices in order, or undefined
- * when no run of two or more reconstructs it.
- *
- * Two joins are tried, because the round boundary itself is the one place a
- * fragment's whitespace can legitimately vanish: `buildContinuationRequest`
- * trimEnds the accumulation before re-prefilling, so the resumed text may
- * pick up exactly where the trim left off. Modelling that single
- * transformation keeps internal whitespace comparable everywhere else —
- * `sameThinkingText` treats it as payload.
- */
 export function findSpanningProviderRun(
   providerThinking: Array<{ thinking?: string; signature?: string }>,
   pairedProviderBlocks: ReadonlySet<number>,
@@ -87,11 +69,6 @@ export function isUnsignedThinking(block: unknown): boolean {
   return value?.type === 'thinking' && !value.signature;
 }
 
-/**
- * De-duplication key for a thinking / redacted_thinking carrier: two carriers
- * are the same carrier when their payload and signature match. Any other block
- * type gets a unique key so it can never collide.
- */
 export function thinkingCarrierKey(block: ContentBlock): string {
   if (block.type === 'thinking') {
     const { thinking, signature } = block as { thinking?: string; signature?: string };

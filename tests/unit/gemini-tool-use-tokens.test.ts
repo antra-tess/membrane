@@ -10,7 +10,6 @@ import { GeminiAdapter, resetPromptExcludesCacheWarning } from '../../src/provid
 import { Membrane } from '../../src/membrane.js';
 import type { NormalizedRequest, NormalizedResponse } from '../../src/types/index.js';
 
-/** The issue's reproduction. */
 const TOOL_USE_USAGE = {
   promptTokenCount: 1000,
   toolUsePromptTokenCount: 300,
@@ -68,7 +67,7 @@ const REQUEST = { model: 'gemini-3.5-flash-lite', maxTokens: 64, messages: [{ ro
 
 describe('GeminiAdapter toolUsePromptTokenCount accounting', () => {
   it('reads tool-use prompt tokens into inputTokens on complete(), and the counts reconcile', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { });
     stubCompleteResponse(TOOL_USE_USAGE);
     const adapter = new GeminiAdapter({ apiKey: 'zz-key-not-used' });
     const response = await adapter.complete(REQUEST);
@@ -79,10 +78,10 @@ describe('GeminiAdapter toolUsePromptTokenCount accounting', () => {
   });
 
   it('reads tool-use prompt tokens into inputTokens on stream(), and the counts reconcile', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { });
     stubStreamResponse(TOOL_USE_USAGE);
     const adapter = new GeminiAdapter({ apiKey: 'zz-key-not-used' });
-    const response = await adapter.stream(REQUEST, { onChunk: () => { /* noop */ } });
+    const response = await adapter.stream(REQUEST, { onChunk: () => { } });
 
     expect(response.usage.inputTokens).toBe(1300);
     expect(response.usage.outputTokens).toBe(50);
@@ -90,7 +89,7 @@ describe('GeminiAdapter toolUsePromptTokenCount accounting', () => {
   });
 
   it('reconciles tool-use prompt tokens beside thoughts', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { });
     stubCompleteResponse(URL_CONTEXT_USAGE);
     const adapter = new GeminiAdapter({ apiKey: 'zz-key-not-used' });
     const response = await adapter.complete(REQUEST);
@@ -102,7 +101,7 @@ describe('GeminiAdapter toolUsePromptTokenCount accounting', () => {
   });
 
   it('still warns when the four counts do not reconcile, and the warning names toolUsePromptTokenCount', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { });
     stubCompleteResponse({ ...TOOL_USE_USAGE, totalTokenCount: 1400 });
     const adapter = new GeminiAdapter({ apiKey: 'zz-key-not-used' });
     await adapter.complete(REQUEST);
@@ -147,15 +146,9 @@ describe('tool-use prompt tokens through Membrane', () => {
   });
 });
 
-/**
- * Beside the cache-inclusive reading: the cached span is inside
- * `promptTokenCount` and the tool-use prompt is beside it, so a hit's fresh
- * input is the prompt less the cached span, plus the tool-use prompt, and the
- * cached span is compared with the prompt count alone.
- */
 describe('tool-use prompt tokens beside a cache hit', () => {
   it('a hit subtracts the cached span from the prompt and keeps the tool-use prompt', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { });
     stubCompleteResponse({ promptTokenCount: 10_000, cachedContentTokenCount: 8_000, toolUsePromptTokenCount: 300, candidatesTokenCount: 50, totalTokenCount: 10_350 });
     const response = await new Membrane(new GeminiAdapter({ apiKey: 'zz-key-not-used' })).complete(MEMBRANE_REQUEST);
 
@@ -166,7 +159,7 @@ describe('tool-use prompt tokens beside a cache hit', () => {
 
   it('a cached span above the prompt count is read as cache-excluded, though prompt plus tool-use prompt would hold it', async () => {
     resetPromptExcludesCacheWarning();
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { });
     stubCompleteResponse({ promptTokenCount: 1_000, cachedContentTokenCount: 1_200, toolUsePromptTokenCount: 500, candidatesTokenCount: 50, totalTokenCount: 1_550 });
     const response = await new Membrane(new GeminiAdapter({ apiKey: 'zz-key-not-used' })).complete(MEMBRANE_REQUEST);
 

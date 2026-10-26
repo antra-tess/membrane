@@ -1,11 +1,3 @@
-/**
- * Provider capability and registry types
- */
-
-// ============================================================================
-// Provider Quirks
-// ============================================================================
-
 export interface ProviderQuirks {
   /** Anthropic: must trim trailing whitespace from assistant messages */
   trimAssistantTrailingWhitespace?: boolean;
@@ -26,61 +18,41 @@ export interface ProviderQuirks {
   notes?: string;
 }
 
-// ============================================================================
-// Media Capabilities
-// ============================================================================
-
 export interface MediaCapabilities {
-  // Input support
   imageInput: boolean;
   pdfInput: boolean;
   audioInput: boolean;
   videoInput: boolean;
   
-  // Output support
   imageGeneration: boolean;
   
-  // Limits
   maxImageSizeBytes?: number;
   maxImageDimensions?: { width: number; height: number };
   maxPdfPages?: number;
   maxAudioDurationSec?: number;
   maxVideoDurationSec?: number;
   
-  // Supported formats
-  imageFormats?: string[];  // ['image/jpeg', 'image/png', ...]
-  audioFormats?: string[];  // ['audio/mpeg', 'audio/wav', ...]
-  videoFormats?: string[];  // ['video/mp4', 'video/webm', ...]
+  imageFormats?: string[];
+  audioFormats?: string[];
+  videoFormats?: string[];
 }
 
-// ============================================================================
-// Provider Capabilities
-// ============================================================================
-
 export interface ProviderCapabilities {
-  // Mode support
   supportsPrefill: boolean;
   supportsChat: boolean;
   supportsCaching: boolean;
   supportsThinking: boolean;
   supportsStreaming: boolean;
   
-  // Media
   media: MediaCapabilities;
   
-  // Limits
   maxContextTokens: number;
   maxOutputTokens: number;
   maxStopSequences: number;
   maxCacheBreakpoints?: number;
   
-  // Quirks
   quirks: ProviderQuirks;
 }
-
-// ============================================================================
-// Model Pricing
-// ============================================================================
 
 /**
  * Whether a provider's prompt-token count INCLUDES the span served from cache.
@@ -124,10 +96,6 @@ export interface ModelPricing {
   asOf?: string;
 }
 
-// ============================================================================
-// Model Information
-// ============================================================================
-
 export interface ModelDefinition {
   /** Unique model identifier */
   id: string;
@@ -153,10 +121,6 @@ export interface ModelDefinition {
   /** Successor model if deprecated */
   successorId?: string;
 }
-
-// ============================================================================
-// Model Registry Interface
-// ============================================================================
 
 export interface ModelRegistry {
   /** Get capabilities for a model */
@@ -185,10 +149,6 @@ export interface ModelFilter {
   supportsImageGeneration?: boolean;
   includeDeprecated?: boolean;
 }
-
-// ============================================================================
-// Provider Adapter Interface
-// ============================================================================
 
 export interface ProviderAdapter {
   /** Provider name */
@@ -269,7 +229,6 @@ export interface ProviderAdapter {
   ): Promise<ProviderResponse>;
 }
 
-// Internal types used by adapters
 export interface ProviderRequest {
   /** Raw messages in provider format */
   messages: unknown[];

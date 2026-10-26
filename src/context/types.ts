@@ -1,12 +1,4 @@
-/**
- * Context management types
- */
-
 import type { NormalizedMessage, NormalizedResponse, AbortedResponse, GenerationConfig, ToolDefinition } from '../types/index.js';
-
-// ============================================================================
-// Cache Marker
-// ============================================================================
 
 export interface CacheMarker {
   /** Message ID (from metadata.sourceId) */
@@ -18,10 +10,6 @@ export interface CacheMarker {
   /** Estimated tokens up to this point */
   tokenEstimate: number;
 }
-
-// ============================================================================
-// Context Config (per-call)
-// ============================================================================
 
 export interface ContextConfig {
   /** Rolling configuration */
@@ -98,10 +86,6 @@ export class MembraneContextIdentityError extends Error {
   }
 }
 
-// ============================================================================
-// Context State (persisted between calls)
-// ============================================================================
-
 export interface ContextState {
   /** Current cache markers */
   cacheMarkers: CacheMarker[];
@@ -132,10 +116,6 @@ export interface ContextState {
   cachedStartMessageId?: string;
 }
 
-// ============================================================================
-// Context Input (per-call request)
-// ============================================================================
-
 export interface ContextInput {
   /** Conversation messages */
   messages: NormalizedMessage[];
@@ -152,10 +132,6 @@ export interface ContextInput {
   /** Context management config */
   context: ContextConfig;
 }
-
-// ============================================================================
-// Context Info (what happened this call)
-// ============================================================================
 
 export interface ContextInfo {
   /** Whether a roll occurred */
@@ -198,10 +174,6 @@ export interface ContextInfo {
   cachedStartMessageId?: string;
 }
 
-// ============================================================================
-// Context Output (result of processContext)
-// ============================================================================
-
 export interface ContextOutput {
   /** The LLM response (may be aborted) */
   response: NormalizedResponse | AbortedResponse;
@@ -212,10 +184,6 @@ export interface ContextOutput {
   /** Info about what happened */
   info: ContextInfo;
 }
-
-// ============================================================================
-// Stream Options
-// ============================================================================
 
 import type { ToolCall, ToolResult, ToolContext } from '../types/tools.js';
 import type { BasicUsage } from '../types/response.js';
@@ -242,8 +210,6 @@ export interface ContextStreamOptions {
   /** Abort signal */
   signal?: AbortSignal;
   
-  // ---- Tool Support ----
-  
   /** 
    * Called when tool calls are detected; return results to continue.
    * If not provided, tool calls are not executed (stream stops at tool_use).
@@ -263,10 +229,6 @@ export interface ContextStreamOptions {
   /** Maximum tool execution depth (default: 10). */
   maxToolDepth?: number;
 }
-
-// ============================================================================
-// Helpers
-// ============================================================================
 
 /**
  * Create initial empty state
@@ -299,8 +261,7 @@ export function defaultTokenEstimator(message: NormalizedMessage): number {
         : JSON.stringify(block.content);
       chars += content.length;
     } else if (block.type === 'image') {
-      // Images: ~1500 tokens regardless of size (Anthropic)
-      chars += ESTIMATED_IMAGE_TOKENS * CHARS_PER_TOKEN; // 1500 * 4
+      chars += ESTIMATED_IMAGE_TOKENS * CHARS_PER_TOKEN;
     }
   }
   return Math.ceil(chars / CHARS_PER_TOKEN);

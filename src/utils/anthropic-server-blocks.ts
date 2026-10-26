@@ -31,10 +31,8 @@ export const ANTHROPIC_SERVER_BLOCK_TYPES: ReadonlySet<string> = new Set([
   'mcp_tool_result',
 ]);
 
-/** A block whose `type` is one of {@link ANTHROPIC_SERVER_BLOCK_TYPES}, as the API sent it. */
 export type AnthropicServerBlock = { type: string } & Record<string, unknown>;
 
-/** An object whose `type` is one of {@link ANTHROPIC_SERVER_BLOCK_TYPES}. */
 export function isAnthropicServerBlock(item: unknown): item is AnthropicServerBlock {
   return (
     item !== null &&
@@ -44,11 +42,6 @@ export function isAnthropicServerBlock(item: unknown): item is AnthropicServerBl
   );
 }
 
-/**
- * The Anthropic server-tool block that `block` is, or that it carries as a
- * zero-width carrier; undefined for every other block, including a carrier
- * holding another provider's item.
- */
 function serverBlockOf(block: unknown): AnthropicServerBlock | undefined {
   const item = isAnthropicServerBlock(block)
     ? block
@@ -58,7 +51,6 @@ function serverBlockOf(block: unknown): AnthropicServerBlock | undefined {
   return isAnthropicServerBlock(item) ? item : undefined;
 }
 
-/** True for an Anthropic server-tool block, or a zero-width carrier holding one. */
 export function carriesAnthropicServerBlock(block: unknown): boolean {
   return serverBlockOf(block) !== undefined;
 }
@@ -74,7 +66,6 @@ export function anthropicServerBlockFor(block: unknown): AnthropicServerBlock | 
   return sent as AnthropicServerBlock;
 }
 
-/** The server-tool call types: a result's `tool_use_id` names a call's `id`. */
 const ANTHROPIC_SERVER_CALL_TYPES: ReadonlySet<string> = new Set(['server_tool_use', 'mcp_tool_use']);
 
 /**
@@ -90,7 +81,6 @@ const ANTHROPIC_SERVER_CALL_TYPES: ReadonlySet<string> = new Set(['server_tool_u
  */
 export function unpairedServerBlocks(turn: readonly unknown[], lastTurn: boolean): Set<unknown> {
   const unpaired = new Set<unknown>();
-  // The first call of each id, and whether a result has paired with it yet.
   const calls = new Map<string, { block: unknown; answered: boolean }>();
   for (const block of turn) {
     if (!isAnthropicServerBlock(block)) continue;
@@ -108,6 +98,5 @@ export function unpairedServerBlocks(turn: readonly unknown[], lastTurn: boolean
   if (!lastTurn) {
     for (const call of calls.values()) if (!call.answered) unpaired.add(call.block);
   }
-  // In the turn's order, as the blocks are found.
   return new Set(turn.filter((block) => unpaired.has(block)));
 }

@@ -1,9 +1,3 @@
-/**
- * Anthropic server-tool blocks (web search and the like) round-trip: response
- * parsing keeps each on a zero-width carrier, Membrane sends it back in its
- * place through the Anthropic adapter, and its other builds and request shapes
- * for other wires leave it out.
- */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { NativeFormatter } from '../../src/formatters/native.js';
@@ -39,13 +33,11 @@ const answer = { type: 'text', text: 'zz answer' };
 
 const carrier = (item: unknown, extra: Record<string, unknown> = {}): ContentBlock =>
   ({ type: 'text', text: '', rawItem: item, ...extra }) as ContentBlock;
-/** A carrier holding another wire's item: an opaque Responses reasoning item. */
 const responsesCarrier = carrier({ type: 'reasoning', id: 'rs_zz1', summary: [], encrypted_content: 'zz-rs' });
 
 const turn = (): ContentBlock[] => [
   thinking1 as ContentBlock, carrier(serverUse), carrier(searchResult), thinking2 as ContentBlock, answer as ContentBlock,
 ];
-/** The turn as Anthropic-shaped requests send it back. */
 const sentTurn = [thinking1, serverUse, searchResult, thinking2, answer];
 
 const history = (assistant: ContentBlock[] = turn()): NormalizedMessage[] => [
@@ -55,7 +47,6 @@ const history = (assistant: ContentBlock[] = turn()): NormalizedMessage[] => [
 ];
 const options = { participantMode: 'simple' as const, assistantParticipant: 'Claude', humanParticipant: 'User', anthropicServerBlocks: true };
 
-/** Every object in `value` whose `type` is one of the listed server block types. */
 function serverBlocksIn(value: unknown): unknown[] {
   if (Array.isArray(value)) return value.flatMap(serverBlocksIn);
   if (!value || typeof value !== 'object') return [];
@@ -126,7 +117,6 @@ describe('NativeFormatter', () => {
   });
 
   it('sends server blocks stored as themselves, not on carriers, back in place between signed thinking', () => {
-    // A seeded history can hold them so, as the field report's did.
     const bare = [thinking1, serverUse, searchResult, thinking2, answer] as ContentBlock[];
     const built = new NativeFormatter().buildMessages(history(bare), options);
     expect(built.messages[1]).toEqual({ role: 'assistant', content: sentTurn });
@@ -228,7 +218,6 @@ describe('toAnthropicContent', () => {
 
 describe('complete()', () => {
   it('keeps a turn\'s server blocks on carriers, and sends them back verbatim', async () => {
-    // The warning is once per type per process: forget any an earlier test gave.
     resetUnconvertibleProviderItemWarnings();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const bodies: any[] = [];
@@ -255,7 +244,6 @@ describe('complete()', () => {
       config,
     });
     expect(bodies[1].messages[1]).toEqual({ role: 'assistant', content: sentTurn });
-    // A server block is its own native form, so keeping it warns of nothing.
     expect(warn.mock.calls.map((c) => String(c[0])).filter((line) => /unconvertible|no normalized/i.test(line))).toEqual([]);
   });
 
@@ -281,8 +269,6 @@ describe('complete()', () => {
   });
 
   it('keeps a provider item with no normalized form as its native item, as the Responses adapter gives it', async () => {
-    // The Responses adapter's compaction item: a normalized-looking wrapper
-    // whose rawItem is the item the API sent.
     const native = { type: 'compaction', id: 'cmp_zz1', encrypted_content: 'zz-cmp' };
     const adapter: ProviderAdapter = {
       name: 'openai-responses', supportsModel: () => true,
@@ -344,8 +330,6 @@ describe('the native tool loop', () => {
     const messages: NormalizedMessage[] = [
       { participant: 'User', content: [{ type: 'text', text: 'zz search, and ask Other' }] },
       { participant: 'Claude', content: own, cacheBreakpoint: true },
-      // Another agent's turn, without its thinking: a reasoning block in a
-      // user turn is the normalizer's to re-role, which this test isn't about.
       { participant: 'Other', content: [carrier(serverUse), carrier(searchResult), answer as ContentBlock] },
       { participant: 'User', content: [{ type: 'text', text: 'zz now record it' }] },
     ];
@@ -411,7 +395,7 @@ describe('the native tool loop', () => {
 describe('the Anthropic adapter\'s stream', () => {
   function fakeStream(events: unknown[]) {
     return {
-      controller: { abort() { /* noop */ } },
+      controller: { abort() { } },
       [Symbol.asyncIterator]() {
         let i = 0;
         return { async next() { return i < events.length ? { value: events[i++], done: false } : { value: undefined, done: true }; } };
@@ -673,10 +657,6 @@ describe('wires with no form for them', () => {
 
 });
 
-// A provider that doesn't take server blocks back, such as Bedrock, gets the
-// request it got before they went back at all. Only the build can leave them
-// out before it places cache markers and merges consecutive turns, so it does
-// when told the provider doesn't take them.
 describe('an adapter Membrane doesn\'t replay them through', () => {
   const T = (text: string): ContentBlock => ({ type: 'text', text });
   const U = (text: string): NormalizedMessage => ({ participant: 'User', content: [T(text)] });
@@ -745,10 +725,8 @@ describe('a server call and its result go out together, or not at all', () => {
     expect([...unpairedServerBlocks([c1, naming, r1], false)]).toEqual([naming]);
     // As the request's last message, a paused turn keeps its lone calls, but not a lone result.
     expect([...unpairedServerBlocks(turn, true)]).toEqual([r3, upload]);
-    // A result before its call pairs with nothing.
     const r4 = result('d'); const c4 = call('d');
     expect([...unpairedServerBlocks([r4, c4], false)]).toEqual([r4, c4]);
-    // The MCP connector's pair, by the same rule.
     const mcpCall = { type: 'mcp_tool_use', id: 'zz-m1', name: 'zz_lookup', server_name: 'zz', input: {} };
     const mcpResult = { type: 'mcp_tool_result', tool_use_id: 'zz-m1', content: [] };
     expect(unpairedServerBlocks([mcpCall, mcpResult], false).size).toBe(0);
@@ -766,10 +744,8 @@ describe('a server call and its result go out together, or not at all', () => {
       expect([...unpairedServerBlocks([c3, r2, r3], lastTurn)], 'one call, two results').toEqual([r3]);
       const c4 = call('a'); const r4 = result('a'); const c5 = call('a'); const r5 = result('a');
       expect([...unpairedServerBlocks([c4, r4, c5, r5], lastTurn)], 'the same pair twice').toEqual([c5, r5]);
-      // A result before the first call of its id pairs with nothing, and the result after it pairs.
       const r6 = result('a'); const c6 = call('a'); const r7 = result('a');
       expect([...unpairedServerBlocks([r6, c6, r7], lastTurn)], 'a result before its call').toEqual([r6]);
-      // Two ids, each once, both pair.
       expect(unpairedServerBlocks([call('a'), result('a'), call('b'), result('b')], lastTurn).size, 'two ids').toBe(0);
     }
   });

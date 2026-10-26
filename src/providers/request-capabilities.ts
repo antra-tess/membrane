@@ -2,8 +2,6 @@ import type { ProviderRequest, ProviderRequestOptions } from '../types/index.js'
 import { unsupportedError } from '../types/errors.js';
 import { supportsAssistantPrefill } from '../registry/model-capabilities.js';
 
-/** Called by message transports on their final converted body/model, after
- * native overrides. Parser prefill on a prompt transport is a different fact. */
 export function assertMessagePrefillSupported(
   model: unknown,
   messages: unknown,
@@ -29,9 +27,6 @@ export function assertMessagePrefillSupported(
   );
 }
 
-/** Prompt adapters must not silently discard native tool definitions. A
- * context-bearing XML tool request uses an explicit caller-owned prompt;
- * ordinary normalized-message serialization bypasses formatter tool encoding. */
 export function assertPromptToolSupport(
   request: ProviderRequest,
   options: ProviderRequestOptions | undefined,

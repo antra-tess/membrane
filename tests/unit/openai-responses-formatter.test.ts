@@ -39,20 +39,13 @@ describe('OpenAIResponsesFormatter', () => {
   });
 
   it('keeps the system prompt on turn 2+ of a fresh session (rawItem history is not an import)', () => {
-    // Fresh session: turn 1 sent the system prompt as the top-level
-    // `instructions` request field, never as an input item. The response's
-    // blocks all carry rawItem, but that must NOT suppress the system prompt
-    // on subsequent turns — the adapter is stateless, so nothing else
-    // retains it.
     const formatter = new OpenAIResponsesFormatter();
 
-    // Turn 1: no history at all.
     const turn1 = formatter.buildMessages([
       { participant: 'user', content: [{ type: 'text', text: 'hello' }] },
     ], options);
     expect(turn1.systemContent).toBe('the recipe system prompt');
 
-    // Turn 2: history now contains the turn-1 response with rawItem blocks.
     const reasoning = { type: 'reasoning', id: 'rs_t1', encrypted_content: 'enc', summary: [] };
     const assistant = {
       type: 'message', id: 'msg_t1', role: 'assistant', phase: 'final_answer',

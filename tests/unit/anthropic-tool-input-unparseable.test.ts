@@ -13,7 +13,7 @@ import type { NormalizedRequest } from '../../src/types/index.js';
 
 function fakeAnthropicStream(events: unknown[]) {
   return {
-    controller: { abort() { /* noop */ } },
+    controller: { abort() { } },
     [Symbol.asyncIterator]() {
       let i = 0;
       return {
@@ -115,7 +115,6 @@ describe('AnthropicAdapter streaming: unparseable tool_use input', () => {
   });
 });
 
-/** Adapter returning a provider block that already carries the marker. */
 class TruncatedToolCallAdapter implements ProviderAdapter {
   readonly name = 'zz-truncated';
 
@@ -151,8 +150,6 @@ function createRequest(): NormalizedRequest {
 
 describe('membrane parseProviderContent', () => {
   it('surfaces the unparseable-input marker to the caller', async () => {
-    // The streamed native-tools path here; complete() carries it too
-    // (tool-input-object.test.ts).
     const response: any = await new Membrane(new TruncatedToolCallAdapter()).stream(createRequest(), {
       onChunk: () => {},
     });

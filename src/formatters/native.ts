@@ -1,14 +1,3 @@
-/**
- * Native Formatter
- *
- * Pass-through formatter that converts messages to standard user/assistant
- * format without prefill. Uses native API tool calling.
- *
- * Supports two participant modes:
- * - 'simple': Strict two-party (Human/Assistant), no names in content
- * - 'multiuser': Multiple participants, names prefixed to content
- */
-
 import { followNormalizedBlocks, isRawItemCarrier, ownBlocks, type FidelityNotes } from '../utils/fidelity.js';
 import { sanitizeToolName } from '../utils/tool-names.js';
 import { systemChangeRefusedError, unsupportedError } from '../types/errors.js';
@@ -44,10 +33,6 @@ import { convertMcpMedia } from '../utils/mcp-media.js';
 import { assertCacheMarkersWithinLimit, countWireCacheMarkers } from '../utils/cache-marker-budget.js';
 import { anthropicServerBlockFor, unpairedServerBlocks } from '../utils/anthropic-server-blocks.js';
 
-/**
- * The system prompt as it goes on the wire: `''` and an array left with no
- * blocks become undefined, and empty text blocks leave an array.
- */
 export function withoutEmptySystemText(
   system: string | ContentBlock[] | undefined,
 ): string | ContentBlock[] | undefined {
@@ -66,21 +51,15 @@ export function lastCacheableBlockIndex(blocks: Array<Record<string, unknown>>):
   return -1;
 }
 
-/** Put a cache marker on a message's last block that can hold one. */
 function markLastCacheable(blocks: Array<Record<string, unknown>>, cacheControl: Record<string, unknown>): void {
   const at = lastCacheableBlockIndex(blocks);
   if (at >= 0) blocks[at]!.cache_control = cacheControl;
 }
 
-/** A message of system changes, built, and the input index it came from. */
 interface BuiltSystemChange {
   content: Array<Record<string, unknown>>;
   at: number;
 }
-
-// ============================================================================
-// Configuration
-// ============================================================================
 
 export interface NativeFormatterConfig extends FormatterConfig {
   /**
@@ -90,14 +69,6 @@ export interface NativeFormatterConfig extends FormatterConfig {
   nameFormat?: string;
 }
 
-// ============================================================================
-// Pass-through Stream Parser
-// ============================================================================
-
-/**
- * Simple pass-through parser that doesn't do XML tracking.
- * Just accumulates content and emits text chunks.
- */
 class PassthroughParser implements StreamParser {
   private accumulated = '';
   private blockIndex = 0;
@@ -114,7 +85,6 @@ class PassthroughParser implements StreamParser {
     const emissions: StreamEmission[] = [];
     const blockEvents: BlockEvent[] = [];
 
-    // Emit block_start on first chunk
     if (!this.blockStarted) {
       const startEvent: BlockEvent = {
         event: 'block_start',
@@ -176,7 +146,6 @@ class PassthroughParser implements StreamParser {
   }
 
   isInsideBlock(): boolean {
-    // Pass-through mode never has nested blocks
     return false;
   }
 
@@ -185,13 +154,8 @@ class PassthroughParser implements StreamParser {
   }
 
   resetForNewIteration(): void {
-    // No special reset needed for pass-through mode
   }
 }
-
-// ============================================================================
-// Native Formatter
-// ============================================================================
 
 export class NativeFormatter implements PrefillFormatter {
   /** buildMessages records every consumer message it doesn't carry verbatim (utils/fidelity.ts). */
@@ -214,14 +178,7 @@ export class NativeFormatter implements PrefillFormatter {
     };
   }
 
-  // ==========================================================================
-  // REQUEST BUILDING
-  // ==========================================================================
-
   buildMessages(messages: NormalizedMessage[], options: BuildOptions): BuildResult {
-    // Media in MCP's form becomes membrane's first, for a caller that builds
-    // messages directly. Membrane's own builds have converted it already and
-    // get the same array back (utils/mcp-media.ts).
     messages = convertMcpMedia(messages);
     const {
       participantMode,
@@ -237,28 +194,17 @@ export class NativeFormatter implements PrefillFormatter {
       additionalStopSequences,
     } = options;
 
-    // Build cache_control object if prompt caching is enabled
     const cacheControl: Record<string, unknown> | undefined = promptCaching
       ? { type: 'ephemeral', ...(cacheTtl ? { ttl: cacheTtl } : {}) }
       : undefined;
 
     const providerMessages: ProviderTurnMessage[] = [];
-    // Messages of system changes stay out of the turn passes below and are
-    // placed after them; `origin` gives each turn block's input index, which
-    // the placement reads (placeSystemChanges).
     const systemChanges: BuiltSystemChange[] = [];
     const origin = new WeakMap<object, number>();
-    // The content of the turn message before the current one in input order,
-    // or the contextPrefix: where a hasCacheMarker boundary goes. A message of
-    // system changes never takes one, since it can land past later turns, so
-    // a boundary goes where it would with the request's changes left out.
     let previousContent: Array<Record<string, unknown>> | undefined;
-    // Each tool's wire name, with the caller name that holds it, so a
-    // definition in a system change can't take another tool's wire name.
     const wireNames = new Map<string, string>();
     for (const tool of tools ?? []) wireNames.set(sanitizeToolName(tool.name), tool.name);
 
-    // Add context prefix as first assistant message (for simulacrum seeding)
     if (contextPrefix) {
       const prefixBlock: Record<string, unknown> = { type: 'text', text: contextPrefix };
       if (promptCaching && cacheControl && cacheMarkers === 'membrane-system') {
@@ -271,7 +217,6 @@ export class NativeFormatter implements PrefillFormatter {
       previousContent = [prefixBlock];
     }
 
-    // Validate simple mode participants
     if (participantMode === 'simple' && !humanParticipant) {
       throw new Error('NativeFormatter in simple mode requires humanParticipant option');
     }
@@ -280,8 +225,6 @@ export class NativeFormatter implements PrefillFormatter {
       const message = messages[i];
       if (!message) continue;
 
-      // A message of system changes goes by its blocks' type, whatever its
-      // participant, and holds nothing else.
       const changes = message.content.filter(isSystemChangeContent);
       if (changes.length > 0) {
         if (changes.length !== message.content.length) {
@@ -290,7 +233,7 @@ export class NativeFormatter implements PrefillFormatter {
           );
         }
         const content = this.convertSystemChanges(changes, wireNames, () => options.fidelity?.alter(i));
-        if (content.length === 0) continue; // Nothing to change: skipped as an empty message is
+        if (content.length === 0) continue;
         ownBlocks(options.fidelity, content, i);
         if (hasCacheMarker && hasCacheMarker(message, i) && cacheControl && previousContent) {
           markLastCacheable(previousContent, cacheControl);
@@ -300,10 +243,8 @@ export class NativeFormatter implements PrefillFormatter {
         continue;
       }
 
-      // Determine role
       const isAssistant = message.participant === assistantParticipant;
 
-      // Validate participant in simple mode
       if (participantMode === 'simple') {
         if (!isAssistant && message.participant !== humanParticipant) {
           throw new Error(
@@ -315,7 +256,6 @@ export class NativeFormatter implements PrefillFormatter {
 
       const role: 'user' | 'assistant' = isAssistant ? 'assistant' : 'user';
 
-      // Convert content (recording alterations against this message's index)
       const content = this.convertContent(message.content, message.participant, {
         includeNames: participantMode === 'multiuser' && !isAssistant,
         isAssistant,
@@ -331,13 +271,11 @@ export class NativeFormatter implements PrefillFormatter {
       }
 
       if (content.length === 0) {
-        continue; // Skip empty messages
+        continue;
       }
-      // An adapter's report about one of these blocks names this message.
       ownBlocks(options.fidelity, content, i);
       for (const block of content) origin.set(block as object, i);
 
-      // hasCacheMarker: cache boundary is BEFORE this message — tag previous message's last block
       if (hasCacheMarker && hasCacheMarker(message, i) && cacheControl && previousContent) {
         markLastCacheable(previousContent, cacheControl);
       }
@@ -345,7 +283,6 @@ export class NativeFormatter implements PrefillFormatter {
       providerMessages.push({ role, content });
       previousContent = content as Array<Record<string, unknown>>;
 
-      // cacheBreakpoint: cache up to and INCLUDING this message — tag last block
       if (message.cacheBreakpoint && cacheControl && content.length > 0) {
         const bpIdx = lastCacheableBlockIndex(content as Record<string, unknown>[]);
         if (bpIdx >= 0) {
@@ -354,33 +291,14 @@ export class NativeFormatter implements PrefillFormatter {
       }
     }
 
-    // Tool-pair normalizer: wire-boundary safety net for Anthropic's
-    // structural rules on tool cycles. See `normalize-tool-pairs.ts`
-    // for the full rationale. Runs BEFORE mergeConsecutiveRoles so the
-    // merge sees role-correct envelopes.
     const normalized = normalizeToolPairs(providerMessages, {
       pendingToolCallIds: options.pendingToolCallIds,
       onEvent: options.onNormalize,
-      // A tool_result textified as an orphan or a duplicate alters the
-      // message that occurrence came from, and its replacement keeps the owner.
       ...followNormalizedBlocks(options.fidelity),
-      // The caller's synthetic user text, used where the normalizer decides a
-      // leading user turn is needed: after a contextPrefix, before
-      // assistant-first history, or after role repair moved a block forward.
       leadingUserText: options.prefillUserMessage,
     });
 
-    // Merge consecutive same-role messages into one envelope per turn. The
-    // API accepts consecutive same-role messages too, but counts one token
-    // more at each boundary than for the same blocks in one message, so the
-    // merge gives a turn one rendering however its blocks were stored.
     let mergedMessages = mergeConsecutiveRoles(normalized.messages);
-    // A server call goes out only with its result in its turn, and a result
-    // only with its call: the API refuses either alone. The request's final
-    // message, if it's the assistant's, keeps its lone calls (a paused turn
-    // is resumed there). The turn is the one sent, after the merge, so a
-    // call and its result stored as two consecutive assistant messages stay
-    // together. With server blocks off, none reached this far.
     mergedMessages = NativeFormatter.pairServerBlocks(mergedMessages, options.fidelity);
     const builtMessages: ProviderMessage[] = systemChanges.length > 0
       ? NativeFormatter.placeSystemChanges(mergedMessages, systemChanges, origin)
@@ -405,7 +323,6 @@ export class NativeFormatter implements PrefillFormatter {
       }
     } else if (Array.isArray(system)) {
       if (cacheSystem) {
-        // Add cache_control to the last system block
         systemContent = system.map((block, idx) => {
           if (idx === system.length - 1) {
             return { ...block, cache_control: cacheSystem };
@@ -417,7 +334,6 @@ export class NativeFormatter implements PrefillFormatter {
       }
     }
 
-    // Native tools
     const nativeTools = tools?.length ? this.convertToNativeTools(tools) : undefined;
     if (cacheMarkers === 'cm-owned' || !options.deferCacheBudgetCheck) {
       assertCacheMarkersWithinLimit(
@@ -436,8 +352,6 @@ export class NativeFormatter implements PrefillFormatter {
   }
 
   formatToolResults(results: ToolResult[]): string {
-    // Native mode uses API tool_result blocks, not string formatting
-    // This method is mainly for prefill modes
     return JSON.stringify(results.map(r => ({
       tool_use_id: r.toolUseId,
       content: r.content,
@@ -445,49 +359,25 @@ export class NativeFormatter implements PrefillFormatter {
     })));
   }
 
-  // ==========================================================================
-  // RESPONSE PARSING
-  // ==========================================================================
-
   createStreamParser(): StreamParser {
     return new PassthroughParser();
   }
 
   parseToolCalls(content: string): ToolCall[] {
-    // Native mode gets tool calls from API response, not from content parsing
-    // Return empty - tool calls come through the native API response
     return [];
   }
 
   hasToolUse(content: string): boolean {
-    // Native mode determines tool use from API stop_reason, not content
     return false;
   }
 
   parseContentBlocks(content: string, _tools?: ToolDefinition[], context?: ContentParseContext): ContentBlock[] {
-    // Only a wholly blank response is omitted. Whitespace-only spans of a
-    // nonblank response are still its text, including before thinking.
     if (!content || !(context?.visibleText ?? content).trim()) {
       return [];
     }
     return [{ type: 'text', text: content }];
   }
 
-  // ==========================================================================
-  // PRIVATE HELPERS
-  // ==========================================================================
-
-  /**
-   * Leave out of each assistant turn the server blocks the API refuses there
-   * (unpairedServerBlocks: a lone call or result, a second block with an id,
-   * an id that isn't a string, `container_upload`), reporting each one's
-   * message altered. The final message, if it's the assistant's, keeps its
-   * lone calls: a paused turn is resumed as the request's last message. A
-   * marker the builder put on a block left out moves to the turn's last block
-   * that can hold one, unless a kept block already carries one; with no kept
-   * block that can hold one, it goes. A turn left with nothing is dropped,
-   * its marker with it, and its neighbours merge again.
-   */
   private static pairServerBlocks(messages: ProviderTurnMessage[], fidelity?: FidelityNotes): ProviderTurnMessage[] {
     const emptied = new Set<number>();
     const paired = messages.map((message, index) => {
@@ -524,17 +414,10 @@ export class NativeFormatter implements PrefillFormatter {
     changes: BuiltSystemChange[],
     origin: WeakMap<object, number>,
   ): ProviderMessage[] {
-    // A block the adapter keeps, and a turn holding one: its empty-text
-    // cleanup drops whitespace text, and it leaves out a thinking block with
-    // no signature (#191).
     const survives = (block: { type?: string; text?: unknown }): boolean =>
       (block.type !== 'text' || hasNonEmptyText(block.text)) && !isUnsignedThinking(block);
     const kept = (message: ProviderTurnMessage): boolean =>
       Array.isArray(message.content) && (message.content as Array<{ type?: string; text?: unknown }>).some(survives);
-    // The turns as the cleanup leaves them: it drops a message with no
-    // surviving block, and the surviving messages of one role between two of
-    // the other are one turn, dated by the earliest input index among all its
-    // surviving blocks.
     type Turn = { role: ProviderTurnMessage['role']; first: number; earliest: number; after?: ProviderTurnMessage['role'] };
     const turns: Turn[] = [];
     messages.forEach((message, index) => {
@@ -549,7 +432,6 @@ export class NativeFormatter implements PrefillFormatter {
         if (at !== undefined && at < turn.earliest) turn.earliest = at;
       }
     });
-    // A point: the first surviving message of an assistant turn after a user turn.
     const points = new Map<number, number>();
     for (const turn of turns) if (turn.role === 'assistant' && turn.after === 'user') points.set(turn.first, turn.earliest);
     const placed: ProviderMessage[] = [];
@@ -575,18 +457,9 @@ export class NativeFormatter implements PrefillFormatter {
     return placed;
   }
 
-  /**
-   * A message's system changes as the blocks of a `role: 'system'` message:
-   * for each change in order, a `tool_removal` for each tool it withdraws, a
-   * `tool_addition` for each tool it defines, then a text block for each
-   * system text that isn't only whitespace, which the API refuses. A
-   * definition's wire name can't be another caller name's, as in `tools`; a
-   * removal frees the wire name of the tool it removes.
-   */
   private convertSystemChanges(
     changes: SystemChangeContent[],
     wireNames: Map<string, string>,
-    /** Called when a system text is left out, as an alteration of the message. */
     onAltered: () => void,
   ): Array<Record<string, unknown>> {
     const blocks: Array<Record<string, unknown>> = [];
@@ -629,19 +502,9 @@ export class NativeFormatter implements PrefillFormatter {
     const result: unknown[] = [];
     let hasUnsupportedMedia = false;
     let hasText = false;
-    // Any non-empty block not carried verbatim alters the consumer message.
     const altered = () => options.onAltered?.();
 
     for (const block of content) {
-      // An Anthropic server-tool block (web search and the like), kept on a
-      // zero-width carrier, goes back as the block itself in the assistant
-      // turn that produced it (see utils/anthropic-server-blocks.ts), when
-      // the build replays them (BuildOptions.anthropicServerBlocks). In a
-      // message sent as a user turn, such as another participant's, it has
-      // no place and is left out. An adapter for another wire leaves out a
-      // block type it has no form for.
-      // Sent, it is carried: the block is the carrier's item, its content.
-      // Left out, the message loses it.
       const serverBlock = anthropicServerBlockFor(block);
       if (serverBlock) {
         if (options.isAssistant && options.serverBlocks) result.push(serverBlock);
@@ -689,15 +552,9 @@ export class NativeFormatter implements PrefillFormatter {
             result.push(imageBlock);
           }
         } else {
-          // A source that isn't base64 has no branch here, and nor does no
-          // source object at all (media in MCP's form that didn't convert,
-          // utils/mcp-media.ts).
           altered();
         }
       } else if (block.type === 'audio') {
-        // Pass audio through in the same shape as images — the provider
-        // adapters convert it (Gemini → inlineData, OpenRouter → input_audio).
-        // Whether a given model accepts audio is the provider/model's concern.
         if (block.source?.type === 'base64') {
           result.push({
             type: 'audio',
@@ -708,7 +565,7 @@ export class NativeFormatter implements PrefillFormatter {
             },
           });
         } else {
-          altered(); // as for an image
+          altered();
         }
       } else if (block.type === 'tool_use') {
         result.push({
@@ -742,7 +599,6 @@ export class NativeFormatter implements PrefillFormatter {
         hasUnsupportedMedia = true;
         altered();
       } else {
-        // A block type this formatter does not convert is left out.
         altered();
       }
     }

@@ -110,14 +110,7 @@ interface Lineage {
   wire: Record<string, unknown>;
   headers: Record<string, string> | undefined;
   lane: KeepaliveLane;
-  /** Send time of the latest real (non-keepalive) request recorded on this
-   *  lineage, whichever order they were recorded in. Bounds the keepalive
-   *  window. */
   lastRealAt: number;
-  /** When the held snapshot's cache entries were last known touched: the
-   *  recorded request's send, or a later refresh's send. After a failed
-   *  refresh it's the failure's arrival instead, a back-off rather than a
-   *  touch. The next refresh falls due `refreshAfterMs` after it. */
   refreshBaselineAt: number;
   ineffective: number;
 }
@@ -153,8 +146,6 @@ export function ineligibleReason(wire: Record<string, unknown>): string | null {
   const outputConfig = wire.output_config as { format?: unknown } | undefined;
   if (outputConfig?.format) return 'structured-output';
 
-  // Only the 1h cache is worth a background timer. A 5m entry would need a poke
-  // every ~4 minutes; at 0.1x of a large prefix that costs more than it saves.
   const markers = scanCacheMarkers(wire);
   if (!markers.any) return 'no-cache-breakpoint';
   if (!markers.oneHour) return 'no-1h-breakpoint';
@@ -162,13 +153,6 @@ export function ineligibleReason(wire: Record<string, unknown>): string | null {
   return null;
 }
 
-/**
- * The request's cache_control markers in system, tools and messages, as the
- * cache-marker budget finds them (collectMarkedBlocks), so the keepalive and
- * the budget agree on which breakpoints a request has. It walks the whole
- * request rather than stopping at the first 1h marker, which costs well under
- * a millisecond on a request of megabytes.
- */
 function scanCacheMarkers(wire: Record<string, unknown>): { any: boolean; oneHour: boolean } {
   const marked = collectMarkedBlocks({ system: wire.system, tools: wire.tools, messages: wire.messages });
   const any = marked.length > 0;
@@ -250,23 +234,16 @@ export class CacheKeepalive {
     const reason = ineligibleReason(wire);
     const key = lineageKey(wire);
     if (reason) {
-      // Drop any stale snapshot: the shape changed and is no longer warmable.
       if (this.lineages.delete(key)) this.emit({ type: 'skipped', key, reason });
       return;
     }
 
     const existing = this.lineages.get(key);
-    // Re-insert to refresh LRU position.
     this.lineages.delete(key);
     this.lineages.set(key, {
       wire,
       headers,
       lane,
-      // A call sent before another on this lineage can be recorded after it.
-      // Its window still counts from the later real call, but its touch is its
-      // own send: the snapshot is now this request, whose newest cache entries
-      // started their clocks then. That's the only touch known to have reached
-      // them; a later one that did would only make this early, never late.
       lastRealAt: Math.max(sentAt, existing?.lastRealAt ?? sentAt),
       refreshBaselineAt: sentAt,
       ineffective: existing?.ineffective ?? 0,
@@ -284,7 +261,6 @@ export class CacheKeepalive {
   private ensureTimer(): void {
     if (this.timer || this.stopped) return;
     this.timer = setInterval(() => { void this.tick(); }, this.cfg.checkIntervalMs);
-    // Never hold the process open for a cache poke.
     (this.timer as unknown as { unref?: () => void }).unref?.();
   }
 
@@ -295,20 +271,12 @@ export class CacheKeepalive {
       const now = Date.now();
       for (const [key, lin] of [...this.lineages]) {
         if (this.stopped) break;
-        // An earlier poke of this tick took a round trip, and a real call may
-        // have replaced this key's lineage meanwhile (fresh, so not due) or an
-        // ineligible shape dropped it: act only on the one still recorded.
         if (this.lineages.get(key) !== lin) continue;
-        // The keepalive window is measured from the last REAL request, so pokes
-        // can never extend their own mandate.
         if (now - lin.lastRealAt >= this.cfg.maxIdleMs) {
           this.lineages.delete(key);
           this.emit({ type: 'expired', key, idleMs: now - lin.lastRealAt });
           continue;
         }
-        // Idle-gated, not blind: if real traffic already touched the entry
-        // inside the window, it refreshed the TTL for free and we do nothing.
-        // This is what keeps a busy agent's keepalive cost at ~zero.
         if (now - lin.refreshBaselineAt < this.cfg.refreshAfterMs) continue;
         await this.refresh(key, lin);
       }
@@ -328,9 +296,6 @@ export class CacheKeepalive {
       if (!wire || typeof wire !== 'object' || Array.isArray(wire)) {
         throw new Error('Keepalive request must serialize to a JSON object');
       }
-      // Only max_tokens (not part of the cache key), stream (transport) and the
-      // messages after the last one-hour marker's run differ from the recorded
-      // wire request — see file header.
       const recorded = wire as Record<string, unknown>;
       payload = { ...recorded, max_tokens: 0 };
       if (Array.isArray(recorded.messages)) payload.messages = messagesForRefresh(recorded.messages);
@@ -345,9 +310,6 @@ export class CacheKeepalive {
       const read = res.usage?.cache_read_input_tokens ?? 0;
       const wrote = res.usage?.cache_creation_input_tokens ?? 0;
 
-      // The self-check. A keepalive that WRITES has not kept anything alive —
-      // it paid 2x to create a fresh entry, which is the exact failure this
-      // whole module exists to avoid. Never assume the poke worked.
       if (read <= 0 || wrote > 0) {
         lin.ineffective += 1;
         this.emit({
@@ -358,18 +320,14 @@ export class CacheKeepalive {
           writeTokens: wrote,
         });
         if (lin.ineffective >= this.cfg.maxIneffective) {
-          // Only this lineage: a real call during the poke may have recorded a
-          // fresh one under the same key, which keeps its keepalive.
           if (this.lineages.get(key) === lin) this.lineages.delete(key);
         } else {
-          // As a real call's: the entry's clock started with the poke's send.
           lin.refreshBaselineAt = startedAt;
         }
         return;
       }
 
       lin.ineffective = 0;
-      // The read restarted the entry's clock at the poke's send, not its return.
       lin.refreshBaselineAt = startedAt;
       this.emit({ type: 'refreshed', key, lane: lin.lane, readTokens: read, idleMs });
     } catch (err) {
@@ -383,13 +341,8 @@ export class CacheKeepalive {
       this.consecutiveErrors += 1;
       this.emit({ type: 'error', key, error: message, consecutive: this.consecutiveErrors });
 
-      // Back this lineage off immediately rather than retrying on the next tick.
       lin.refreshBaselineAt = Date.now();
 
-      // Hard breaker. A background loop that keeps firing failing requests is
-      // how fable-cm produced 1033 `400 invalid_request_error` rows in 3h on
-      // 2026-08-21 — the exact error class that also trips the agent's
-      // poison-history breaker. A keepalive must never be that loop.
       if (this.consecutiveErrors >= this.cfg.maxConsecutiveErrors) {
         this.stop();
         this.emit({
@@ -403,16 +356,12 @@ export class CacheKeepalive {
   private reportCall(call: KeepaliveCall): void {
     if (!this.cfg.onCall) return;
     try {
-      // A logging callback must not be able to change the cached prefix or
-      // usage that the effectiveness check below will read.
       const receipt: KeepaliveCall = call.outcome === 'success'
         ? { ...call, request: structuredClone(call.request), response: structuredClone(call.response) }
         : { ...call, request: structuredClone(call.request) };
       void Promise.resolve(this.cfg.onCall(receipt)).catch(() => {
-        // Observers cannot turn a completed call into a keepalive failure.
       });
     } catch {
-      // Match onEvent isolation, including failures while copying the payload.
     }
   }
 
@@ -420,7 +369,6 @@ export class CacheKeepalive {
     try {
       this.cfg.onEvent?.(event);
     } catch {
-      // Observability must never break the keepalive, nor the caller.
     }
   }
 

@@ -7,10 +7,9 @@ import type { NormalizedRequest, ProviderRequest, StreamEvent } from '../../src/
 
 const MODEL = 'claude-zz-1';
 
-/** The SDK's MessageStream as the adapter uses it: async-iterable events and a controller. */
 function fakeAnthropicStream(events: unknown[]) {
   return {
-    controller: { abort() { /* noop */ } },
+    controller: { abort() { } },
     [Symbol.asyncIterator]() {
       let i = 0;
       return {
@@ -23,7 +22,6 @@ function fakeAnthropicStream(events: unknown[]) {
   };
 }
 
-/** One response: some text, then the message_delta that stops it with `stop`. */
 function round(stop: Record<string, unknown>) {
   return [
     {

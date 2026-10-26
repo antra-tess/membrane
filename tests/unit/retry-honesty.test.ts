@@ -1,17 +1,3 @@
-/**
- * Retry honesty: what the server said, and what membrane waits.
- *
- * `ErrorInfo.retryAfterMs` existed, was surfaced on MembraneError, and was
- * populated by five adapters — but the retry wait (then calculateRetryDelay,
- * since folded into membrane's retry decision) never received the error, so
- * a 429 saying "wait 60s" was answered with five attempts inside ~15s,
- * burning the whole budget inside the server's stated window.
- *
- * The companion asymmetry: complete() forced five attempts on any 429 while
- * stream() retried none of them, though a 429 arriving INSTEAD of a stream is
- * exactly as transparent to retry as the 529 membrane already retries there.
- */
-
 import { describe, it, expect, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { MockAdapter } from '../../src/providers/mock.js';
@@ -88,8 +74,6 @@ describe("membrane's retry wait honors retry-after (MAJOR-2)", () => {
     adapter.queueResponse('zz-recovered');
     const membrane = new Membrane(adapter, { retry: { maxRetries: 2, retryDelayMs: 1, maxRetryDelayMs: 40 } });
 
-    // Not sent back inside the stated wait. Parked on it, the call would time
-    // the test out.
     await expect(membrane.complete(zzRequest)).rejects.toMatchObject({
       type: 'rate_limit', retryAfterMs: 60_001,
     });
@@ -173,10 +157,6 @@ describe("membrane's retry wait honors retry-after (MAJOR-2)", () => {
   });
 });
 
-/**
- * Runs complete() on fake timers until the first send's failure has set its
- * wait, checks the second send waits the whole of it, and returns the response.
- */
 async function completeAcrossOneWait(membrane: Membrane, adapter: FailingAdapter, waitMs: number) {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
   try {
@@ -189,12 +169,10 @@ async function completeAcrossOneWait(membrane: Membrane, adapter: FailingAdapter
     await vi.advanceTimersByTimeAsync(waitMs - 1);
     expect(adapter.completeCalls).toBe(1);
     await vi.advanceTimersByTimeAsync(1);
-    // The second send goes out at the wait, with no more time passing.
     for (let hop = 0; hop < 50 && adapter.completeCalls < 2; hop++) {
       await new Promise((resolve) => setImmediate(resolve));
     }
     expect(adapter.completeCalls).toBe(2);
-    // The mock adapter's own simulated latency is a timer too.
     await vi.runAllTimersAsync();
     return await done;
   } finally {
@@ -203,9 +181,6 @@ async function completeAcrossOneWait(membrane: Membrane, adapter: FailingAdapter
 }
 
 describe('a stated wait of up to a minute is waited out, whatever the schedule\'s backoff ceiling', () => {
-  // The base schedule caps membrane's own backoff at 30 s. A provider's stated
-  // wait is another matter: AnthropicAdapter's SDK client waited out one under
-  // a minute before membrane took its retries over, so membrane does too.
   it('a 429 stating 45 s is waited out on the default schedule', async () => {
     const adapter = new FailingAdapter(1, () => rateLimit(45_000));
     adapter.queueResponse('zz-recovered');
@@ -214,8 +189,6 @@ describe('a stated wait of up to a minute is waited out, whatever the schedule\'
   });
 
   it('so is one stating exactly a minute', async () => {
-    // Membrane's ceiling is inclusive. The SDK's check was strict (under a
-    // minute), so at exactly a minute it slept its own short backoff instead.
     const adapter = new FailingAdapter(1, () => rateLimit(60_000));
     adapter.queueResponse('zz-recovered');
     const response = await completeAcrossOneWait(new Membrane(adapter), adapter, 60_000);
@@ -249,8 +222,6 @@ describe('a stated wait of up to a minute is waited out, whatever the schedule\'
         await new Promise((resolve) => setImmediate(resolve));
       }
       expect(vi.getTimerCount()).toBe(1);
-      // An hour past the first step of 2^31 - 1 ms (about 24.86 days), inside
-      // the 25 days: the wait's second step is armed.
       const platformTimerLimitMs = 2_147_483_647;
       await vi.advanceTimersByTimeAsync(platformTimerLimitMs + 60 * 60 * 1000);
       expect(adapter.completeCalls).toBe(1);
@@ -280,8 +251,6 @@ describe('the retry config: a field left out takes its default, and a value that
   const FAST = { retryDelayMs: 1, maxRetryDelayMs: 2, backoffMultiplier: 1 };
 
   it('a field given as undefined takes its default', async () => {
-    // A 5xx gets retry.maxRetries attempts, three by default. On main, the
-    // undefined replaced the default and the call wasn't retried at all.
     const adapter = new FailingAdapter(10, () => serverError('zz internal', 503));
     adapter.queueResponse('zz-never');
     const membrane = new Membrane(adapter, { retry: { ...FAST, maxRetries: undefined } });
@@ -290,7 +259,6 @@ describe('the retry config: a field left out takes its default, and a value that
   });
 
   it('so does a field of the overloaded schedule', async () => {
-    // A 529 gets overloaded.maxRetries attempts, seven by default.
     const adapter = new FailingAdapter(10, () => serverError('zz overloaded', 529));
     adapter.queueResponse('zz-never');
     const membrane = new Membrane(adapter, { retry: { overloaded: { ...FAST, maxRetries: undefined } } });
@@ -299,7 +267,6 @@ describe('the retry config: a field left out takes its default, and a value that
   });
 
   it('a delay given as undefined takes its default, not a wait of about a millisecond', async () => {
-    // The base schedule is unjittered, so a 5xx waits exactly retryDelayMs.
     const adapter = new FailingAdapter(1, () => serverError('zz internal', 503));
     adapter.queueResponse('zz-recovered');
     const membrane = new Membrane(adapter, { retry: { retryDelayMs: undefined, maxRetryDelayMs: undefined } });
@@ -321,7 +288,6 @@ describe('the retry config: a field left out takes its default, and a value that
       .toThrow(new RangeError(`[membrane] retry.${field} must be a finite number of at least 0, got NaN`));
   });
 
-  // Each field must be finite, so Infinity is refused as NaN is.
   it.each(fields)('retry.%s = Infinity is refused at construction, naming the field', (field) => {
     expect(() => new Membrane(new MockAdapter(), { retry: retryWith(field, Infinity) }))
       .toThrow(new RangeError(`[membrane] retry.${field} must be a finite number of at least 0, got Infinity`));

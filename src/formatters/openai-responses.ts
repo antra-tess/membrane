@@ -67,11 +67,6 @@ class ResponsesPassthroughParser implements StreamParser {
 
 type NativeItem = { type?: string; id?: string; [key: string]: unknown };
 
-/**
- * The identity under which a block's rawItem is replayed: by type and id, or
- * by its JSON when it has no id. Blocks of one message whose raw items share
- * a key replay that item once.
- */
 export function responsesRawItemKey(rawItem: { type?: unknown; id?: unknown }): string {
   return typeof rawItem.id === 'string'
     ? `${rawItem.type ?? ''}:${rawItem.id}`
@@ -100,9 +95,6 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
   readonly reportsAlterations = true;
 
   buildMessages(messages: NormalizedMessage[], options: BuildOptions): BuildResult {
-    // Media in MCP's form becomes membrane's first, for a caller that builds
-    // messages directly. Membrane's own builds have converted it already and
-    // get the same array back (utils/mcp-media.ts).
     messages = convertMcpMedia(messages);
     const items: NativeItem[] = [];
     let hasImportedItems = false;
@@ -117,8 +109,6 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
         continue;
       }
 
-      // Each item sent, by its key: blocks of one item share it (the adapter
-      // gives them one object; a JSON round trip, equal copies).
       const seenRawItems = new Map<string, NativeItem>();
       let pendingParts: ContentBlock[] = [];
       const flushPending = () => {
@@ -146,8 +136,6 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
           items.push(rawItem);
           seenRawItems.set(key, rawItem);
         } else if (sent !== rawItem && JSON.stringify(sent) !== JSON.stringify(rawItem)) {
-          // Another block's item went out under this key, so this block's
-          // differing item isn't carried.
           onAltered?.();
         }
       }
@@ -163,8 +151,6 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
           (item as { role?: unknown }).role === 'system'));
 
     return {
-      // BuildResult's historical type says chat envelopes, but Membrane's
-      // provider boundary deliberately accepts unknown provider-native items.
       messages: items as unknown as BuildResult['messages'],
       systemContent: hasImportedSystemItem ? undefined : options.systemPrompt,
       stopSequences: options.additionalStopSequences ?? [],
@@ -243,10 +229,6 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
         flushMessage();
         out.push({ type: 'reasoning', encrypted_content: block.data, summary: [] });
       } else {
-        // An assistant image, an image with no source object (media in MCP's
-        // form that didn't convert, utils/mcp-media.ts), a thinking block
-        // without its provider item, and any other block type have no input
-        // form here: left out.
         onAltered?.();
       }
     }

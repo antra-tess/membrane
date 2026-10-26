@@ -49,7 +49,6 @@ describe('bedrock image source conversion', () => {
     expect(source.media_type).toBe('image/png');
     expect(source.mediaType).toBeUndefined();
     expect(source.data).toBe(PNG_DATA);
-    // sibling non-image blocks pass through
     expect(built.messages[0].content[0].content[1]).toEqual({ type: 'text', text: 'a snapshot' });
   });
 
@@ -60,8 +59,6 @@ describe('bedrock image source conversion', () => {
         {
           role: 'user',
           content: [
-            // declared jpeg but PNG magic bytes — sniffing must win, as on the
-            // Anthropic adapter path
             { type: 'image', source: { type: 'base64', mediaType: 'image/jpeg', data: PNG_DATA } },
           ],
         },

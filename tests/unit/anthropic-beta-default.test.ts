@@ -1,9 +1,3 @@
-/**
- * A default `anthropic-beta` header, given in `defaultHeaders`, kept beside a beta the adapter adds for
- * one request (here, thinking-binding controls' beta). Each case reads the header the Anthropic SDK puts
- * on the request it sends: a request that adds no beta goes out with the SDK's own reading of the
- * default, and one that adds a beta must go out with those betas and its own.
- */
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { AnthropicAdapter, THINKING_BINDING_BETA } from '../../src/providers/anthropic.js';
 
@@ -22,7 +16,6 @@ const events = [
   { type: 'message_stop' },
 ];
 
-/** The betas on the request the SDK sends, with or without thinking-binding controls, through complete() or stream(). */
 async function sentBetas(defaultHeaders: unknown, binding: boolean, path: 'complete' | 'stream' = 'complete'): Promise<string[]> {
   const sent: Array<string | null> = [];
   // Stubbed before the adapter is built, since the SDK's client takes the global fetch when it's made.
@@ -45,7 +38,6 @@ async function sentBetas(defaultHeaders: unknown, binding: boolean, path: 'compl
   return (sent[0] ?? '').split(',').map((b) => b.trim()).filter(Boolean);
 }
 
-// Each shape, with the betas the SDK sends for it on a request that adds none.
 const shapes: Array<[string, unknown, string[]]> = [
   ['a string', { 'anthropic-beta': 'oauth-2025-04-20' }, ['oauth-2025-04-20']],
   ['an array', { 'anthropic-beta': ['oauth-2025-04-20'] }, ['oauth-2025-04-20']],

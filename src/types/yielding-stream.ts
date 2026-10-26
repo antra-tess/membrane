@@ -1,22 +1,8 @@
-/**
- * Yielding stream types for membrane
- *
- * This module defines the interface for a streaming API that yields control
- * back to the caller when tool calls are detected, rather than handling them
- * internally via callbacks.
- *
- * @see agent-framework/docs/yielding-stream-architecture.md
- */
-
 import type { ContentBlock } from './content.js';
 import type { NormalizedMessage } from './message.js';
 import type { ToolCall, ToolResult, ToolContext } from './tools.js';
 import type { DetailedUsage, NormalizedResponse, StopReason } from './response.js';
 import type { ChunkMeta, BlockEvent } from './streaming.js';
-
-// ============================================================================
-// Stream Events
-// ============================================================================
 
 /**
  * Token/chunk event - raw text as it arrives from the LLM, and in XML tool
@@ -237,7 +223,6 @@ export interface RetryingEvent {
   attempt: number;
   /** Configured maximum number of retries. */
   maxAttempts: number;
-  /** Always 'refusal' today; widened only if other retryable stops appear. */
   reason: 'refusal';
   /**
    * The refused attempt's category, as its adapter reports it in
@@ -277,36 +262,6 @@ export type StreamEvent =
   | ErrorEvent
   | AbortedEvent;
 
-// ============================================================================
-// Yielding Stream Interface
-// ============================================================================
-
-/**
- * A streaming inference that yields control to the caller for tool execution.
- *
- * Usage:
- * ```typescript
- * const stream = membrane.streamYielding(request, options);
- *
- * for await (const event of stream) {
- *   switch (event.type) {
- *     case 'tokens':
- *       process.stdout.write(event.content);
- *       break;
- *     case 'tool-calls':
- *       const results = await executeTools(event.calls);
- *       stream.provideToolResults(results);
- *       break;
- *     case 'complete':
- *       console.log('Done:', event.response);
- *       break;
- *     case 'error':
- *       console.error('Error:', event.error);
- *       break;
- *   }
- * }
- * ```
- */
 /**
  * A user-side message injected into the conversation between tool rounds.
  *
@@ -395,10 +350,6 @@ export interface YieldingStream extends AsyncIterable<StreamEvent> {
    */
   readonly toolDepth: number;
 }
-
-// ============================================================================
-// Yielding Stream Options
-// ============================================================================
 
 /** Options for streamYielding(). */
 export interface YieldingStreamOptions {
@@ -504,10 +455,6 @@ export interface YieldingStreamOptions {
    */
   emitUsage?: boolean;
 }
-
-// ============================================================================
-// Type Guards
-// ============================================================================
 
 export function isTokensEvent(event: StreamEvent): event is TokensEvent {
   return event.type === 'tokens';

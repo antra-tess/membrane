@@ -21,7 +21,6 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-/** Every request body the stubbed fetch received, parsed. */
 let sentBodies: any[] = [];
 
 function stubComplete(parts: unknown[]): void {
@@ -35,7 +34,6 @@ function stubComplete(parts: unknown[]): void {
   }) as typeof globalThis.fetch;
 }
 
-/** One SSE frame per inner array of parts, then a terminal frame. */
 function stubStream(framesOfParts: unknown[][]): void {
   sentBodies = [];
   const frames = [
@@ -114,8 +112,6 @@ describe('GeminiAdapter thought parts', () => {
     expect(thinkingOf(response.content)).toBe(THOUGHT_1 + THOUGHT_2);
   });
 
-  // An all-thinking response (Argon can spend a whole hop on reasoning) has no
-  // answer: it must not come back as a text block holding the reasoning.
   it('a response of only thought parts has no text block', async () => {
     stubStream([[{ text: THOUGHT_1, thought: true }]]);
     const chunks: string[] = [];
@@ -132,10 +128,6 @@ describe('GeminiAdapter thought parts', () => {
     expect(response.content).toEqual([{ type: 'text', text: ANSWER_1 }]);
   });
 
-  // A thinking block in a prior assistant turn is never sent back as answer
-  // text: the model would read its own reasoning as something it said aloud.
-  // Whether it goes back at all, flagged as a thought, is left open; today
-  // convertMessages drops it.
   it('does not send a prior turn\'s thinking block back to the model as answer text', async () => {
     stubComplete([{ text: ANSWER_2 }]);
     await new GeminiAdapter({ apiKey: 'zz-key' }).complete({
@@ -159,8 +151,6 @@ describe('GeminiAdapter thought parts', () => {
     ]);
   });
 
-  // The helper is per part, as it always was for text: unlike the adapter's
-  // response, it neither joins the thoughts nor moves them to the front.
   it('fromGeminiParts keeps interleaved thought and answer parts in order', () => {
     expect(fromGeminiParts([
       { text: THOUGHT_1, thought: true },
@@ -175,8 +165,6 @@ describe('GeminiAdapter thought parts', () => {
     ]);
   });
 
-  // fromGeminiParts now makes thinking blocks; its inverse must not send one
-  // back as answer text (it fell through to String(block): "[object Object]").
   it('toGeminiParts does not turn a thinking block into answer text', () => {
     const parts = toGeminiParts(fromGeminiParts([{ text: THOUGHT_1, thought: true }, { text: ANSWER_1 }] as any));
 
@@ -184,7 +172,6 @@ describe('GeminiAdapter thought parts', () => {
     expect(parts).toContainEqual({ text: ANSWER_1 });
   });
 
-  // Live, Argon's tool rounds start with a thought, then the call.
   it('complete(): a thought before a function call is a thinking block, and the call still parses', async () => {
     stubComplete([{ text: THOUGHT_1, thought: true }, { functionCall: { name: 'zz_tool', args: { q: 1 } } }]);
     const response = await new GeminiAdapter({ apiKey: 'zz-key' }).complete(REQUEST);
@@ -204,8 +191,6 @@ describe('GeminiAdapter thought parts', () => {
     expect(response.content[1]).toMatchObject({ type: 'tool_use', name: 'zz_tool', input: { q: 1 } });
   });
 
-  // From the house's review. Live, gemini-3.5-flash-lite returned a thought
-  // part whose text was empty; a thought part may also carry no text.
   it('a thought part with empty or no text adds nothing, to the answer or the thinking', async () => {
     const parts = [{ text: '', thought: true }, { thought: true, thoughtSignature: 'zz-sig' }, { text: ANSWER_1 }];
     stubComplete(parts);
@@ -286,8 +271,6 @@ describe('Gemini thought parts through Membrane', () => {
     expect(textOf(response.content)).toContain(ANSWER_1);
     expect(textOf(response.content)).toContain(ANSWER_2);
     expect(thinkingOf(response.content)).toBe(THOUGHT_1 + THOUGHT_2);
-    // The answer itself reaches both channels, so the checks above can't pass
-    // on a channel that carries nothing.
     expect(response.rawAssistantText).toBe(ANSWER_1 + ANSWER_2);
     expect(chunks.join('')).toBe(ANSWER_1 + ANSWER_2);
   });

@@ -1,22 +1,3 @@
-/**
- * Pricing has TWO axes and they were collapsed into one. `resolvePricing`
- * merged per-model — `registry.getPricing(actual) ?? getDefaultPricing(actual)`,
- * returning on the first hit — so membrane's shipped table for the served
- * snapshot outranked the caller's own registry entry for the requested alias.
- * A caller who prices `gpt-4o-…` at their negotiated rate and lets the provider
- * pick the snapshot got billed at membrane's guess.
- *
- * The rule is: SOURCE outranks SPECIFICITY. The caller's registry always beats
- * shipped defaults; served-model specificity only breaks ties WITHIN a source.
- * So: registry[actual] → registry[requested] → builtin[actual] → builtin[requested].
- *
- * The builtin arms need model ids the shipped table actually matches (it is
- * keyed on real provider prefixes and matched longest-prefix), so the fake ids
- * here wear a real prefix plus a `zz-` suffix that names them as fixtures at
- * sight. Their expected rates are read back out of `getDefaultPricing` rather
- * than pinned as literals: this file asserts WHICH id was chosen, not what the
- * table says it costs — `default-pricing-freshness.test.ts` owns the numbers.
- */
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { getDefaultPricing } from '../../src/registry/default-pricing.js';
@@ -32,15 +13,11 @@ import type {
   ToolResult,
 } from '../../src/types/index.js';
 
-/** Matches the shipped `gpt-4o` row. */
 const ZZ_REQUESTED_ALIAS = 'gpt-4o-zz-alias1';
-/** Matches the longer shipped `gpt-4o-2024-05-13` row, which is priced differently. */
 const ZZ_SERVED_SNAPSHOT = 'gpt-4o-2024-05-13-zz-snapshot1';
-/** Matches no shipped row at all. */
 const ZZ_SERVED_UNSHIPPED = 'zz-unshipped-model-fld1';
 
 const ZZ_TOKENS = 1_000_000;
-/** Absurd on purpose: a registry rate can never be confused with a shipped one. */
 const ZZ_REGISTRY_REQUESTED_RATE = 1_000;
 const ZZ_REGISTRY_SERVED_RATE = 10_000;
 
@@ -86,7 +63,6 @@ const ZZ_REQUEST = {
   messages: [{ role: 'user', content: [{ type: 'text', text: 'zz-prompt' }] }],
 } as unknown as NormalizedRequest;
 
-/** 1M input tokens at `perMillion` — the whole cost, since output is zero. */
 function inputCostOf(perMillion: number): number {
   return ZZ_TOKENS * perMillion / 1_000_000;
 }
@@ -175,7 +151,6 @@ const zzTool: ToolDefinition = {
   inputSchema: { type: 'object', properties: {} },
 };
 
-/** Round 1 calls a tool (so the loop runs again); round 2 ends the turn. */
 function zzTwoRoundAdapter(): ProviderAdapter {
   const servedModels = [ZZ_ROUND_ONE_SERVED, ZZ_ROUND_TWO_SERVED];
   let round = 0;
@@ -211,9 +186,6 @@ function zzTwoRoundAdapter(): ProviderAdapter {
 
 describe('pricing source precedence, per round', () => {
   it('applies the same precedence to every perRound row independently', async () => {
-    // Round 1's served model is priced by NEITHER registry entry but IS in the
-    // shipped table, so it is exactly the case the defect got wrong; round 2's
-    // served model is in the registry, so it takes the specificity arm.
     const membrane = new Membrane(zzTwoRoundAdapter(), {
       registry: zzRegistryPricing({
         [ZZ_REQUESTED_ALIAS]: ZZ_REGISTRY_REQUESTED_RATE,

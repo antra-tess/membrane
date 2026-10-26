@@ -1,14 +1,3 @@
-/**
- * OpenAI Responses API adapter.
- *
- * This is intentionally separate from `openai-responses.ts`. Despite its name,
- * that compatibility-sensitive adapter targets the Images API.
- *
- * This adapter is stateless and provider-native: `ProviderRequest.messages` is
- * sent verbatim as the Responses API `input` item array, and `outputItems`
- * exposes the response's ordered output array verbatim for the next turn.
- */
-
 import { unreportedUsage } from '../utils/usage.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { nativeInputForRequest, normalizeResponsesInput } from './responses-input.js';
@@ -35,10 +24,6 @@ import {
 } from '../types/index.js';
 import { errorFromThrown } from '../types/errors.js';
 import { createCombinedSignal, SSELineParser, toolUseInputFromText, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, isEventObject } from './utils.js';
-
-// ============================================================================
-// Provider-native Responses API types
-// ============================================================================
 
 export interface OpenAIResponsesInputItem {
   type?: string;
@@ -115,10 +100,6 @@ export interface OpenAIResponsesAPIProviderResponse extends Omit<ProviderRespons
   raw: OpenAIResponsesAPIResponse | Record<string, unknown>;
 }
 
-// ============================================================================
-// Configuration
-// ============================================================================
-
 export interface OpenAIResponsesAPIAdapterConfig {
   /** API key (defaults to OPENAI_API_KEY). */
   apiKey?: string;
@@ -155,18 +136,6 @@ export interface OpenAIResponsesAPIAdapterConfig {
   extraHeaders?: Record<string, string>;
 }
 
-/**
- * The `strict` a function tool is sent with: an explicit boolean as given,
- * `false` when omitted or null (see {@link OpenAIResponsesAPIAdapter.convertTools}),
- * and a refusal naming the tool for anything else. The refusal's message says
- * what kind of value it found, quoting only a short string, so the message
- * doesn't copy a caller's value whole. The refusal carries `rawRequest`, the
- * request as far as it was built when refused: provider params merged, and
- * the tools and input as the caller gave them, the refused tool among them.
- * It's evidence of what was refused, not a body to send. Without it, Membrane
- * would give the error the last request it sent in the turn, where there was
- * one, which isn't the one refused.
- */
 function functionToolStrictness(toolName: unknown, strict: unknown, position: number, rawRequest: unknown): boolean {
   if (strict === undefined || strict === null) return false;
   if (typeof strict === 'boolean') return strict;
@@ -190,7 +159,6 @@ function functionToolStrictness(toolName: unknown, strict: unknown, position: nu
   );
 }
 
-/** The longest `strict` string a refusal quotes; a longer one is given by its length. */
 const MAX_QUOTED_STRICT_CHARS = 40;
 
 /** A cache key is any JSON string, a header value is not: anything beyond
@@ -200,10 +168,6 @@ function headerSafeSessionId(key: string): string {
     ? key
     : createHash('sha256').update(key).digest('hex').slice(0, 32);
 }
-
-// ============================================================================
-// Adapter
-// ============================================================================
 
 export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
   readonly name: string = 'openai-responses-api';
@@ -329,10 +293,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
         } catch {
           return;
         }
-        // JSON that isn't an object (`null`, a number, a string, an array)
-        // carries no event, so its frame is dropped, as on the other adapters.
         if (!isEventObject(event)) return;
-        // A provider event is progress (comments never reach here).
         options?.onProgress?.();
         events.push(event);
 
@@ -355,12 +316,6 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
         ) {
           terminalResponse = event.response;
         } else if (event.type === 'response.failed') {
-          // This adapter dispatches on event.type rather than running the
-          // shared SSE line loop, but its error frames are the same class of
-          // payload: a structured code the caller's retry policy needs. Route
-          // both throw sites through the one classifier so the token lists
-          // have a single source of truth. A response.failed carrying no error
-          // object at all falls through to the loud generic below.
           const failed = event.response as OpenAIResponsesAPIResponse | undefined;
           throwOnStreamErrorFrame(failed, 'OpenAI Responses API', responsesRequest);
           throw new Error('OpenAI Responses API stream error (response_failed): Response failed');
@@ -416,8 +371,6 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
         try {
           this.onFastModeFallback?.(returnedTier);
         } catch (error) {
-          // The response it reports on has arrived and stands. A retry would
-          // pay for another call and wouldn't run the callback again.
           console.warn('[membrane:openai-responses] onFastModeFallback threw; the response stands:', error);
         }
       }
@@ -430,10 +383,6 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
       cleanup?.();
     }
   }
-
-  // --------------------------------------------------------------------------
-  // Request construction
-  // --------------------------------------------------------------------------
 
   private async fetchResponse(
     request: OpenAIResponsesAPIRequest,
@@ -460,14 +409,6 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
     }, this.credentials ?? { token: this.apiKey });
   }
 
-  /**
-   * Subscription mode's input, built from membrane's content blocks. Media in
-   * MCP's form becomes membrane's first, for a caller that builds a request
-   * directly (Membrane's own builds have converted it already,
-   * utils/mcp-media.ts), and a report about a block names the one the caller
-   * handed in. API mode takes native items as they are, so it converts
-   * nothing.
-   */
   private subscriptionInput(
     messages: ProviderRequest['messages'],
     onContentAltered?: (block?: unknown) => void,
@@ -520,8 +461,6 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
       responsesRequest.include = this.mergeEncryptedReasoningInclude(include);
     }
 
-    // Strictness is a property of the tools that reach the wire, whether they
-    // came as request.tools or as a provider-params override of them.
     if (Array.isArray(responsesRequest.tools)) {
       responsesRequest.tools = this.convertTools(responsesRequest.tools, responsesRequest);
     }
@@ -582,8 +521,6 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
     return tools.map((rawTool: any, position) => {
       if (rawTool?.type && rawTool.type !== 'function') return rawTool;
 
-      // Responses function definitions are flat: kept as given, apart from
-      // strict. Membrane and Chat Completions function schemas are adapted.
       if (rawTool?.type === 'function' && rawTool.name) {
         return { ...rawTool, strict: functionToolStrictness(rawTool.name, rawTool.strict, position, rawRequest) };
       }
@@ -605,10 +542,6 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
     });
   }
 
-  // --------------------------------------------------------------------------
-  // Response conversion
-  // --------------------------------------------------------------------------
-
   private parseResponse(
     response: OpenAIResponsesAPIResponse,
     requestedModel: string,
@@ -616,7 +549,6 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
   ): OpenAIResponsesAPIProviderResponse {
     const outputItems = Array.isArray(response.output) ? response.output : [];
     const content = this.outputToContent(outputItems);
-    // A reported 0 is a fact (no cache read); only an unreported count is absent.
     const cachedTokens = response.usage?.input_tokens_details?.cached_tokens;
 
     return {
@@ -759,10 +691,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
     const reason = response.incomplete_details?.reason;
     if (response.status === 'incomplete' && reason) {
       if (reason.includes('max_output_tokens')) return 'max_tokens';
-      // A filtered response is a refusal, as on the sibling OpenAI adapters.
       if (reason === 'content_filter') return 'refusal';
-      // Any other incomplete reason travels as the provider's own token, so
-      // membrane discloses and logs it instead of reading a clean end_turn.
       return reason;
     }
     return 'end_turn';
@@ -796,10 +725,6 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
       item.arguments = `${item.arguments ?? ''}${event.delta}`;
     }
   }
-
-  // --------------------------------------------------------------------------
-  // Errors
-  // --------------------------------------------------------------------------
 
   private async assertSuccessfulHTTPResponse(response: Response, rawRequest: unknown): Promise<void> {
     if (response.ok) return;

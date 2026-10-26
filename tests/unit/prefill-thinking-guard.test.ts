@@ -29,7 +29,6 @@ describe('prefill guard: thinking is stripped from BOTH channels', () => {
     expect(prefillResult.assistantPrefill).toBeDefined();
     expect(providerRequest.thinking).toBeUndefined();
     expect(providerRequest.extra?.thinking).toBeUndefined();
-    // The resolver the adapter's sampling gate and beta header share.
     expect(thinkingEnabled(providerRequest)).toBe(false);
   });
 
@@ -75,7 +74,6 @@ describe('prefill guard: thinking is stripped from BOTH channels', () => {
   });
 
   it('keeps a caller-supplied extra.thinking when the build is NOT a prefill', () => {
-    // Native/chat-shaped builds legitimately combine thinking with the request.
     const membrane = new Membrane({ name: 'zz-fake-adapter' } as any);
     const request = requestWithSmuggledThinking();
     const providerRequest = (membrane as any).buildNativeToolRequest(request, request.messages, false);

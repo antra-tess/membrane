@@ -260,7 +260,7 @@ describe('cache markers on duplicate textification', () => {
     const wire = requests[0];
     expect(blocks(wire.messages as ProviderMessage[]).find(block => block.type === 'text' && String(block.text).includes('[duplicate tool_result'))?.cache_control).toEqual(marker);
     expect(countWireCacheMarkers(wire)).toBe(1);
-    expect(wire.system).toBe('rules'); // The preserved message marker suppresses the system fallback.
+    expect(wire.system).toBe('rules');
     expect(req).toEqual(before);
   });
 });
@@ -290,15 +290,12 @@ describe('a cache marker on an orphan result', () => {
       type: 'text', text: '[orphan tool_result for zz-gone]: orphan payload', cache_control: marker,
     });
     expect(countWireCacheMarkers(wire)).toBe(1);
-    expect(wire.system).toBe('rules'); // The kept marker still stands in for the system fallback.
+    expect(wire.system).toBe('rules');
     expect(req).toEqual(before);
   });
 });
 
 describe('a normalizer refusal on the public paths', () => {
-  // Two calls sharing an id in one turn are refused before anything is sent.
-  // The id also holds words the transport classifier matches by substring
-  // ('rate', '503', '529'); the refusal is still never retried.
   const sharedId = 'toolu_rate_503_529';
   function refused(): NormalizedRequest {
     return {

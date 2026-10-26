@@ -63,7 +63,7 @@ describe('GeminiAdapter thoughtsTokenCount accounting', () => {
   it('folds thoughts into outputTokens on stream()', async () => {
     stubStreamResponse(LIVE_RECEIPT_USAGE);
     const adapter = new GeminiAdapter({ apiKey: 'zz-key-not-used' });
-    const response = await adapter.stream(REQUEST, { onChunk: () => { /* noop */ } });
+    const response = await adapter.stream(REQUEST, { onChunk: () => { } });
 
     expect(response.usage.inputTokens).toBe(35);
     expect(response.usage.outputTokens).toBe(230);
@@ -80,7 +80,7 @@ describe('GeminiAdapter thoughtsTokenCount accounting', () => {
   });
 
   it('warns when prompt + candidates + thoughts does not reconcile with total', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { });
     stubCompleteResponse({ ...LIVE_RECEIPT_USAGE, totalTokenCount: 999 });
     const adapter = new GeminiAdapter({ apiKey: 'zz-key-not-used' });
     await adapter.complete(REQUEST);
@@ -90,7 +90,7 @@ describe('GeminiAdapter thoughtsTokenCount accounting', () => {
   });
 
   it('does not warn when the counts reconcile', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { });
     stubCompleteResponse(LIVE_RECEIPT_USAGE);
     const adapter = new GeminiAdapter({ apiKey: 'zz-key-not-used' });
     await adapter.complete(REQUEST);
@@ -99,16 +99,6 @@ describe('GeminiAdapter thoughtsTokenCount accounting', () => {
   });
 });
 
-/**
- * The adapter emitting the count is only half the path. Membrane's four
- * streaming accumulators summed inputTokens / outputTokens / cache tokens and
- * dropped thinking tokens on the floor, so a real-adapter probe through
- * membrane saw outputTokens 230 with no thinking count at all — the number the
- * adapter had just measured never reached a caller on any streaming path.
- *
- * The field is `DetailedUsage.thinkingTokens`, which predates this work;
- * `reasoningTokens` was a second name for the same quantity and is gone.
- */
 const MEMBRANE_REQUEST = {
   config: { model: 'gemini-3.5-flash-lite', maxTokens: 64 },
   messages: [{ role: 'user', content: [{ type: 'text', text: 'zz-prompt' }] }],

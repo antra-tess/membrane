@@ -1,9 +1,3 @@
-/**
- * Unit tests for tool-parser.ts
- *
- * These tests would have caught the duplicate text block bug (v0.1.6)
- */
-
 import { describe, it, expect } from 'vitest';
 import { parseAccumulatedIntoBlocks, parseToolCalls, formatToolResults } from '../../src/utils/tool-parser.js';
 
@@ -98,7 +92,6 @@ describe('parseAccumulatedIntoBlocks', () => {
       expect(toolCalls[0].name).toBe('get_weather');
       expect(toolCalls[0].input).toEqual({ city: 'London' });
 
-      // Should have tool_use block
       const toolUseBlocks = blocks.filter(b => b.type === 'tool_use');
       expect(toolUseBlocks).toHaveLength(1);
     });
@@ -185,7 +178,6 @@ Let me look that up for you.
 
       const { blocks } = parseAccumulatedIntoBlocks(text);
 
-      // Should have: thinking, text, tool_use
       const types = blocks.map(b => b.type);
       expect(types).toContain('thinking');
       expect(types).toContain('text');
@@ -209,7 +201,6 @@ Based on the data, the value is 100.`;
       expect(toolCalls).toHaveLength(1);
       expect(toolResults).toHaveLength(1);
 
-      // Should have text at the end
       const lastBlock = blocks[blocks.length - 1];
       expect(lastBlock.type).toBe('text');
       expect((lastBlock as any).text).toContain('value is 100');
@@ -218,11 +209,9 @@ Based on the data, the value is 100.`;
 
   describe('block count invariants', () => {
     it('INVARIANT: text block count should not exceed text regions', () => {
-      // Plain text = 1 region = 1 block
       const plain = parseAccumulatedIntoBlocks('Just text');
       expect(plain.blocks.filter(b => b.type === 'text')).toHaveLength(1);
 
-      // Text + thinking + text = 2 text regions = 2 text blocks
       const mixed = parseAccumulatedIntoBlocks('Before\n<thinking>Middle</thinking>\nAfter');
       expect(mixed.blocks.filter(b => b.type === 'text')).toHaveLength(2);
     });
@@ -242,18 +231,16 @@ Text3`;
 
       expect(thinkingCount).toBe(1);
       expect(toolUseCount).toBe(1);
-      expect(textCount).toBe(3); // Text1, Text2, Text3
+      expect(textCount).toBe(3);
       expect(blocks.length).toBe(5);
     });
   });
 
   describe('startInsideBlock option (prefill continuation)', () => {
     it('should parse thinking when opening tag is in prefill', () => {
-      // Simulates: prefill had "<thinking>Started thinking..." and API continues with:
       const newContent = 'more thoughts</thinking>Here is my answer.';
       const { blocks } = parseAccumulatedIntoBlocks(newContent, { startInsideBlock: 'thinking' });
 
-      // Should have: thinking block, then text block
       expect(blocks).toHaveLength(2);
       expect(blocks[0].type).toBe('thinking');
       expect((blocks[0] as any).thinking).toBe('more thoughts');
@@ -262,24 +249,20 @@ Text3`;
     });
 
     it('should parse thinking with only closing tag in content', () => {
-      // Edge case: prefill ends right before </thinking>
       const newContent = '</thinking>Response text';
       const { blocks } = parseAccumulatedIntoBlocks(newContent, { startInsideBlock: 'thinking' });
 
       expect(blocks).toHaveLength(2);
       expect(blocks[0].type).toBe('thinking');
-      expect((blocks[0] as any).thinking).toBe(''); // Empty thinking content
+      expect((blocks[0] as any).thinking).toBe('');
       expect(blocks[1].type).toBe('text');
       expect((blocks[1] as any).text).toBe('Response text');
     });
 
     it('should handle no closing tag (still inside block)', () => {
-      // API response is entirely within thinking block
       const newContent = 'continued thinking without closing tag';
       const { blocks } = parseAccumulatedIntoBlocks(newContent, { startInsideBlock: 'thinking' });
 
-      // Without closing tag, content is not a complete thinking block
-      // The synthetic opening + content doesn't form a closed tag
       expect(blocks).toHaveLength(1);
       expect(blocks[0].type).toBe('text');
     });
@@ -305,7 +288,6 @@ Result of the call.`;
       expect(toolCalls[0].name).toBe('get_weather');
       expect(toolCalls[0].input).toEqual({ city: 'London' });
 
-      // Should have tool_use block and text block
       const toolUseBlocks = blocks.filter(b => b.type === 'tool_use');
       const textBlocks = blocks.filter(b => b.type === 'text');
       expect(toolUseBlocks).toHaveLength(1);
@@ -409,7 +391,6 @@ describe('formatToolResults', () => {
     const { toolCalls, toolResults } = parseAccumulatedIntoBlocks(doc);
     expect(toolCalls).toHaveLength(1);
     expect(toolResults).toHaveLength(1);
-    // Positional pairing: the parsed result claims the preceding call's id.
     expect(toolResults[0].toolUseId).toBe(toolCalls[0].id);
     expect(toolResults[0].toolName).toBe('get_data');
     expect(toolResults[0].content).toBe('payload 42');
@@ -430,7 +411,6 @@ describe('parseToolCalls large integer handling', () => {
     expect(result?.calls.length).toBe(1);
 
     const input = result?.calls[0]?.input as Record<string, unknown>;
-    // Large integers should be preserved as strings
     expect(input.channel_id).toBe('1234567890123456789');
     expect(input.user_id).toBe('9876543210987654321');
     expect(typeof input.channel_id).toBe('string');

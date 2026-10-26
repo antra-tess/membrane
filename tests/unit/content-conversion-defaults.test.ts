@@ -1,21 +1,3 @@
-/**
- * Both content-conversion switches fell through to a silent drop.
- *
- * `toAnthropicContent` (REQUEST path) had no `default`, so `audio`, `video`
- * and `generated_image` blocks vanished on their way to the provider — a
- * conversation that picked up audio on Gemini and then switched to Anthropic
- * lost it with no signal, and the model answered about content it never
- * received. `document` silently dropped its `filename`.
- *
- * `fromAnthropicContent` and `parseProviderContent` (RESPONSE path) kept only
- * the block types they recognised, so provider-native blocks — `server_tool_use`,
- * `web_search_tool_result`, `search_result`, `mcp_tool_use` — were dropped
- * without a trace.
- *
- * A dropped request block is unrecoverable, so that path now THROWS; a dropped
- * response block is recoverable if the raw item is kept, so that path warns
- * once and preserves a `rawItem` carrier.
- */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { toAnthropicContent, fromAnthropicContent } from '../../src/providers/anthropic.js';
 import { MembraneError } from '../../src/types/index.js';
@@ -61,7 +43,6 @@ describe('toAnthropicContent: the request path refuses to drop content', () => {
   });
 
   it('carries a generated_image back as an image block rather than dropping it', () => {
-    // A real PNG header: data that is no image becomes a placeholder instead.
     const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString('base64');
     const result = toAnthropicContent([
       { type: 'generated_image', data: png, mimeType: 'image/png' },
@@ -98,8 +79,7 @@ describe('toAnthropicContent: the request path refuses to drop content', () => {
 
 describe('fromAnthropicContent: the response path preserves what it cannot normalize', () => {
   it('keeps an unrecognised provider block as a rawItem carrier and warns once', () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
-    // A type membrane doesn't know (an Anthropic server-tool block is a known one).
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { });
     const unknownBlock = { type: 'zz_new_block', id: 'ite1', payload: {} };
 
     const first = fromAnthropicContent([unknownBlock] as never);
@@ -108,7 +88,6 @@ describe('fromAnthropicContent: the response path preserves what it cannot norma
     expect(first).toHaveLength(1);
     expect(first[0]).toEqual({ type: 'text', text: '', rawItem: unknownBlock });
     expect(second).toHaveLength(1);
-    // Warned about this block type once, not once per conversion.
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0]?.[0])).toContain('zz_new_block');
   });

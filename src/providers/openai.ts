@@ -1,17 +1,3 @@
-/**
- * OpenAI Direct provider adapter
- * 
- * Direct adapter for OpenAI's API with support for modern models:
- * - GPT-4o, GPT-4 Turbo
- * - GPT-5, GPT-5-mini (uses max_completion_tokens)
- * - o1, o3, o4-mini reasoning models
- * 
- * Key differences from generic OpenAI-compatible:
- * - Uses max_completion_tokens for newer models (not max_tokens)
- * - Handles reasoning models' special requirements
- * - Direct API integration with proper error handling
- */
-
 import { unreportedUsage } from '../utils/usage.js';
 import { assertMessagePrefillSupported } from './request-capabilities.js';
 
@@ -34,10 +20,6 @@ import { errorFromThrown } from '../types/errors.js';
 import { isRawItemCarrier } from '../utils/fidelity.js';
 import { convertMcpMedia } from '../utils/mcp-media.js';
 import { toolUseInputFromText, textOnlyToolResultContent, openAIImagePart, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved, streamedToolCalls, isEventObject } from './utils.js';
-
-// ============================================================================
-// Types
-// ============================================================================
 
 interface OpenAIContentPart {
   type: 'text' | 'image_url';
@@ -94,10 +76,6 @@ interface OpenAIResponse {
   };
 }
 
-// ============================================================================
-// Adapter Configuration
-// ============================================================================
-
 export interface OpenAIAdapterConfig {
   /** API key (defaults to OPENAI_API_KEY env var) */
   apiKey?: string;
@@ -112,17 +90,6 @@ export interface OpenAIAdapterConfig {
   defaultMaxTokens?: number;
 }
 
-// ============================================================================
-// Model Detection Helpers
-// ============================================================================
-
-/**
- * Major version of a first-party GPT chat model id (`gpt-5` → 5,
- * `gpt-5.4-mini` → 5, `gpt-6-astra` → 6, `gpt-4o` / `gpt-4.1` → 4). Leading
- * digits only, no delimiter required, so a digit-plus-letter name (`gpt-4o`,
- * a future `gpt-6o`) is classified by its generation too. Anything not
- * `gpt-<digits>` (o-series, chatgpt-*, third-party ids) → undefined.
- */
 function gptGeneration(model: string): number | undefined {
   const m = /^gpt-(\d+)/.exec(model);
   return m ? Number(m[1]) : undefined;
@@ -139,10 +106,6 @@ function isReasoningGenerationGpt(model: string): boolean {
   return gen !== undefined && gen >= 5;
 }
 
-/**
- * Models that require max_completion_tokens instead of max_tokens
- * (in addition to every GPT-5+ generation model, see isReasoningGenerationGpt)
- */
 const COMPLETION_TOKENS_MODELS = [
   'o1',
   'o1-mini',
@@ -152,9 +115,6 @@ const COMPLETION_TOKENS_MODELS = [
   'o4-mini',
 ];
 
-/**
- * Check if a model requires max_completion_tokens parameter
- */
 export function requiresCompletionTokens(model: string): boolean {
   return isReasoningGenerationGpt(model) || COMPLETION_TOKENS_MODELS.some(prefix => model.startsWith(prefix));
 }
@@ -163,8 +123,7 @@ export function requiresCompletionTokens(model: string): boolean {
  * Models that don't support custom temperature (only default 1.0)
  */
 const NO_TEMPERATURE_MODELS = [
-  // GPT-5+ generations are covered by isReasoningGenerationGpt
-  'o1',          // Reasoning models
+  'o1',
   'o1-mini',
   'o1-preview',
   'o3',
@@ -172,31 +131,19 @@ const NO_TEMPERATURE_MODELS = [
   'o4-mini',
 ];
 
-/**
- * Check if a model doesn't support custom temperature
- */
 export function noTemperatureSupport(model: string): boolean {
   return isReasoningGenerationGpt(model) || NO_TEMPERATURE_MODELS.some(prefix => model.startsWith(prefix));
 }
 
 /** Models that don't support stop sequences; o1 and o3-mini do. */
 const NO_STOP_MODELS = [
-  // GPT-5+ chat models (all variants) are covered by isReasoningGenerationGpt
-  // Reasoning models that still don't support stop
   'o3',          // o3 (full) doesn't support stop, but o3-mini does!
   'o4-mini',
 ];
 
-/**
- * Check if a model doesn't support stop sequences
- */
 export function noStopSupport(model: string): boolean {
   return isReasoningGenerationGpt(model) || NO_STOP_MODELS.some(prefix => model.startsWith(prefix));
 }
-
-// ============================================================================
-// OpenAI Adapter
-// ============================================================================
 
 const OPENAI_MAX_STOP_SEQUENCES = 4;
 
@@ -222,7 +169,6 @@ export class OpenAIAdapter implements ProviderAdapter {
   }
 
   supportsModel(modelId: string): boolean {
-    // OpenAI models typically start with gpt-, o1, o3, o4
     return (
       modelId.startsWith('gpt-') ||
       modelId.startsWith('o1') ||
@@ -287,28 +233,19 @@ export class OpenAIAdapter implements ProviderAdapter {
       // The model the provider served, echoed on every SSE chunk.
       let servedModel: string | undefined;
 
-      // One frame handler for both the streamed lines and the EOF flush — the
-      // trailing buffer carries real terminal frames, not leftovers.
       const processDataLine = (data: string): void => {
         if (data === '[DONE]') {
           sawTerminalEvent = true;
           return;
         }
 
-        // Parse first: a line that isn't JSON is noise to ignore. Nothing
-        // after the parse is caught here, so an error there, a caller's
-        // callback included, fails the stream. What the handler can't read is
-        // dropped below by checks, not by a catch.
         let parsed: Record<string, any>;
         try {
           parsed = JSON.parse(data);
         } catch {
           return; // Ignore parse errors (partial/keep-alive lines)
         }
-        // JSON that isn't an object (`null`, a number, a string, an array)
-        // carries no event, so its frame is dropped.
         if (!isEventObject(parsed)) return;
-        // A provider event is progress (comments never reach here).
         options?.onProgress?.();
 
         throwOnStreamErrorFrame(parsed, 'OpenAI', openAIRequest);
@@ -330,7 +267,6 @@ export class OpenAIAdapter implements ProviderAdapter {
           sawTerminalEvent = true;
         }
 
-        // Capture usage data (comes in final chunk with stream_options.include_usage)
         if (parsed.usage) {
           streamUsage = parsed.usage;
         }
@@ -364,7 +300,6 @@ export class OpenAIAdapter implements ProviderAdapter {
 
       assertTerminalEventObserved(sawTerminalEvent, 'OpenAI', openAIRequest);
 
-      // Build response with accumulated data
       const message: OpenAIMessage = {
         role: 'assistant',
         content: accumulated || null,
@@ -399,14 +334,10 @@ export class OpenAIAdapter implements ProviderAdapter {
   }
 
   private buildRequest(request: ProviderRequest): any {
-    // Media in MCP's form becomes membrane's first, for a caller that builds
-    // a request directly (Membrane's own builds have converted it already,
-    // utils/mcp-media.ts).
     const messages = this.convertMessages(convertMcpMedia(request.messages as any[]));
     const model = request.model;
     const maxTokens = request.maxTokens || this.defaultMaxTokens;
     
-    // Handle system prompt (same as openrouter.ts)
     if (request.system) {
       if (typeof request.system === 'string') {
         messages.unshift({ role: 'system' as const, content: request.system });
@@ -426,14 +357,12 @@ export class OpenAIAdapter implements ProviderAdapter {
       messages,
     };
     
-    // Use appropriate max tokens parameter based on model
     if (requiresCompletionTokens(model)) {
       params.max_completion_tokens = maxTokens;
     } else {
       params.max_tokens = maxTokens;
     }
     
-    // Some models (gpt-5, o1, o3, o4) don't support custom temperature
     if (request.temperature !== undefined && !noTemperatureSupport(model)) {
       params.temperature = request.temperature;
     }
@@ -454,8 +383,6 @@ export class OpenAIAdapter implements ProviderAdapter {
       params.repetition_penalty = request.repetitionPenalty;
     }
 
-    // Reasoning models (o1, o3, o4) don't support stop sequences
-    // OpenAI limits stop sequences to 4 — truncate to fit
     if (request.stopSequences && request.stopSequences.length > 0 && !noStopSupport(model)) {
       params.stop = request.stopSequences.slice(0, OPENAI_MAX_STOP_SEQUENCES);
     }
@@ -464,7 +391,6 @@ export class OpenAIAdapter implements ProviderAdapter {
       params.tools = this.convertTools(request.tools as any[]);
     }
     
-    // Apply extra params (filter out internal membrane fields)
     if (request.extra) {
       const { normalizedMessages, prompt, ...rest } = request.extra as Record<string, unknown>;
       Object.assign(params, rest);
@@ -474,14 +400,11 @@ export class OpenAIAdapter implements ProviderAdapter {
   }
 
   private convertMessages(messages: any[]): OpenAIMessage[] {
-    // Use flatMap to handle one-to-many expansion (multiple tool_results → multiple messages)
     return messages.flatMap(msg => {
-      // If it's already in OpenAI format, pass through
       if (msg.role && (typeof msg.content === 'string' || msg.content === null || msg.tool_calls)) {
         return [msg as OpenAIMessage];
       }
       
-      // Convert from Anthropic-style format
       if (Array.isArray(msg.content)) {
         const contentParts: OpenAIContentPart[] = [];
         const toolCalls: OpenAIToolCall[] = [];
@@ -489,14 +412,9 @@ export class OpenAIAdapter implements ProviderAdapter {
 
         for (const block of msg.content) {
           if (block.type === 'text') {
-            // A zero-width carrier (a provider item with no normalized form,
-            // such as an Anthropic server-tool block) has no text and no form
-            // on this wire: an empty part would only add a blank line.
             if (isRawItemCarrier(block)) continue;
             contentParts.push({ type: 'text', text: block.text });
           } else if (block.type === 'image') {
-            // Convert Anthropic-style image to OpenAI image_url with data URI,
-            // or to the placeholder for data these APIs don't accept
             const part = openAIImagePart(block.source);
             if (part) contentParts.push(part);
           } else if (block.type === 'tool_use') {
@@ -509,7 +427,6 @@ export class OpenAIAdapter implements ProviderAdapter {
               },
             });
           } else if (block.type === 'tool_result') {
-            // Collect ALL tool results - each becomes a separate message
             toolResults.push({
               role: 'tool' as const,
               tool_call_id: block.tool_use_id || block.toolUseId,
@@ -518,17 +435,10 @@ export class OpenAIAdapter implements ProviderAdapter {
           }
         }
 
-        // If we have tool results, emit them (possibly multiple) as
-        // role:'tool' messages. Any OTHER content sharing the envelope
-        // (e.g. a mid-turn user message injected alongside tool_results —
-        // mergeConsecutiveRoles folds the separately-pushed injected user
-        // message INTO the tool_result envelope) is emitted as a FOLLOWING
-        // user message rather than dropped — this used to silently swallow
-        // such text. Same fix in openrouter.ts / openai-compatible.ts.
         if (toolResults.length > 0) {
           const hasImagesInterloper = contentParts.some(p => p.type === 'image_url');
           const interloperText = hasImagesInterloper
-            ? '' // unused: array form carries the parts
+            ? ''
             : contentParts.filter(p => p.type === 'text').map(p => p.text!).join('\n');
           if (hasImagesInterloper || interloperText) {
             return [
@@ -542,12 +452,10 @@ export class OpenAIAdapter implements ProviderAdapter {
           return toolResults;
         }
 
-        // Skip messages with no usable content
         if (contentParts.length === 0 && toolCalls.length === 0) {
           return [];
         }
 
-        // Build message — use string content when there are no images (simpler, more compatible)
         const hasImages = contentParts.some(p => p.type === 'image_url');
         const textOnly = contentParts.filter(p => p.type === 'text').map(p => p.text!).join('\n');
 
@@ -612,8 +520,6 @@ export class OpenAIAdapter implements ProviderAdapter {
     const choice = response.choices[0];
     const message = choice?.message;
 
-    // Extract prompt caching details (OpenAI automatic caching for prompts ≥1024 tokens)
-    // A reported 0 is a fact (no cache read); only an unreported count is absent.
     const cachedTokens = response.usage?.prompt_tokens_details?.cached_tokens;
 
     return {
@@ -641,7 +547,6 @@ export class OpenAIAdapter implements ProviderAdapter {
     streamUsage?: OpenAIResponse['usage'],
     rawRequest?: unknown
   ): ProviderResponse {
-    // Extract cached tokens from stream usage if available
     const cachedTokens = streamUsage?.prompt_tokens_details?.cached_tokens;
 
     return {
@@ -667,7 +572,6 @@ export class OpenAIAdapter implements ProviderAdapter {
     const content: ContentBlock[] = [];
 
     if (message.content) {
-      // Response content is always a string (array format is request-only)
       const text = typeof message.content === 'string' ? message.content : message.content.filter(p => p.type === 'text').map(p => p.text!).join('\n');
       if (text) content.push({ type: 'text', text });
     }
@@ -687,7 +591,6 @@ export class OpenAIAdapter implements ProviderAdapter {
   }
 
   private mapFinishReason(reason: string | undefined): string {
-    // No reason (or a server's null) is a plain end of turn.
     if (reason == null) return 'end_turn';
     switch (reason) {
       case 'stop':
@@ -699,20 +602,10 @@ export class OpenAIAdapter implements ProviderAdapter {
       case 'content_filter':
         return 'refusal';
       default:
-        // Unrecognized reasons (a compatible server's own token) travel as
-        // the provider's own token: membrane's mapper reads them as end_turn,
-        // but discloses the token in details.stop.providerReason and logs it
-        // once, so the stop isn't taken for a clean one. 'error' never gets
-        // here: throwOnStreamErrorFrame throws on it first.
         return reason;
     }
   }
 
-  /**
-   * HTTP failures are classified at the fetch boundary, where status,
-   * headers and body are still live; this handles what is left — typed
-   * aborts and non-HTTP throwables — through the shared last-resort table.
-   */
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
     if (isDeadlineAbort(error)) return deadlineTimeoutError(error, rawRequest);
     if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
@@ -722,19 +615,12 @@ export class OpenAIAdapter implements ProviderAdapter {
   }
 }
 
-// ============================================================================
-// Content Conversion Utilities
-// ============================================================================
-
 /**
  * Join normalized content's text blocks into OpenAI message content: their
  * text, joined by newlines; '' when every text block is a zero-width carrier,
  * and null when there is no text block.
  */
 export function toOpenAIContent(blocks: ContentBlock[]): string | null {
-  // A zero-width carrier holds a block this wire has no form for, so it adds
-  // no line; a turn whose only text blocks are carriers is '' as before, and
-  // only a turn with no text block at all is null.
   const textBlocks = blocks.filter(b => b.type === 'text' && !isRawItemCarrier(b)) as Array<{ type: 'text'; text: string }>;
   if (textBlocks.length === 0) return blocks.some(b => b.type === 'text') ? '' : null;
   return textBlocks.map(b => b.text).join('\n');

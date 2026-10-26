@@ -1,18 +1,3 @@
-/**
- * A tool_use block's `input` is always a plain object, and arguments that
- * weren't a JSON object are marked with `unparseableInput`.
- *
- * `ToolUseContent` types `input` as `Record<string, unknown>`, and stores and
- * callers downstream rely on it. Every adapter but Anthropic's put what it got
- * there unchecked: the OpenAI-family adapters stored whatever `JSON.parse`
- * returned (`null`, a number, a string or an array when a model's arguments
- * were one), Gemini copied `functionCall.args` as it came, and Anthropic's and
- * Bedrock's stream assemblies kept a parse that wasn't an object. Where the
- * text didn't parse, the OpenAI-family adapters and Bedrock kept `{}` with
- * nothing to tell it from a real no-argument call, which Anthropic's adapter
- * already marks (`unparseableInput`). Now every adapter gives `{}` for
- * arguments that aren't an object and keeps what came in `unparseableInput`.
- */
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { toolUseInputFromText, toolUseInputFromValue } from '../../src/providers/utils.js';
 import { OpenAIAdapter, fromOpenAIContent } from '../../src/providers/openai.js';
@@ -36,7 +21,6 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-/** Argument texts that parse, but not to an object. */
 const notObjects = ['null', '42', '"zz"', 'true', '[1,2]'];
 const malformed = '{"path":"/zz/fld1.ts","n';
 
@@ -235,7 +219,7 @@ describe('Gemini', () => {
 
 function fakeAnthropicStream(events: unknown[]) {
   return {
-    controller: { abort() { /* noop */ } },
+    controller: { abort() { } },
     [Symbol.asyncIterator]() {
       let i = 0;
       return {
@@ -279,7 +263,6 @@ describe('Anthropic stream', () => {
 });
 
 describe('Bedrock stream', () => {
-  /** One tool call: `partialJson` undefined sends no input_json_delta at all. */
   async function streamToolCall(partialJson: string | undefined, opts: { stop?: boolean } = {}): Promise<{ res: any; completed: any[] }> {
     const frames = [
       chunkFrame({ type: 'message_start', message: { usage: { input_tokens: 10 } } }),
@@ -318,8 +301,6 @@ describe('Bedrock stream', () => {
     expect(toolUseOf(res.content)).toEqual({ type: 'tool_use', id: 'toolu_zz', name: 'zz_tool', input: {} });
   });
 
-  // As in the Anthropic adapter: a block the stream left open keeps
-  // content_block_start's input, and whatever arguments arrived mark it.
   it.each([
     ['did not parse', malformed],
     ['parse to an object', '{"a":1}'],
@@ -373,8 +354,6 @@ describe('Bedrock stream', () => {
   });
 });
 
-/** An adapter that answers with these tool_use blocks (id call_zz and name
- *  zz_tool unless given), and then with text. */
 function adapterAnsweringAll(blocks: Record<string, unknown>[]): ProviderAdapter {
   let calls = 0;
   const response = (): ProviderResponse => ({

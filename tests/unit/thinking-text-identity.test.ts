@@ -59,8 +59,6 @@ describe('mergeProviderThinkingBlocks: near-collision payloads keep their own si
     const content = [thinking('zz-ab c'), answer('zz visible tail')];
     merge(content, [thinking('zz-a bc', 'zz-sig-of-a-bc')]);
 
-    // The parsed block never produced `zz-a bc`, so it must stay unsigned and
-    // the provider's own carrier must survive verbatim alongside it.
     expect(carriers(content)).toEqual([
       ['zz-a bc', 'zz-sig-of-a-bc'],
       ['zz-ab c', undefined],
@@ -70,9 +68,6 @@ describe('mergeProviderThinkingBlocks: near-collision payloads keep their own si
 
 describe('findSpanningProviderRun: the continuation trimEnd join still reconstructs', () => {
   it('reconstructs a parsed block whose round boundary lost the fragment trailing space', () => {
-    // buildContinuationRequest trimEnds the accumulation before re-prefilling,
-    // so round 2 resumes from text that no longer carries round 1's trailing
-    // whitespace. The run must still be recognised as the same reasoning.
     const run = findSpanningProviderRun(
       [
         { thinking: 'zz-part one ', signature: 'zz-sig-round1' },

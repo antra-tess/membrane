@@ -25,8 +25,6 @@ function thinkingRequest(model: string, thinking = true): ProviderRequest {
   } as unknown as ProviderRequest;
 }
 
-/** Build the per-request headers through a constructed adapter, so the test
- *  exercises the real defaultHeaders extraction path too. */
 function headersFor(
   defaultHeaders: unknown,
   request: ProviderRequest,
@@ -42,7 +40,6 @@ function headersFor(
   return internals.betaHeaders(request, internals.buildRequest(request));
 }
 
-/** Build a Bedrock request body via a constructed adapter. */
 function bedrockBody(request: ProviderRequest): { anthropic_beta?: string[] } {
   const adapter = new BedrockAdapter({
     accessKeyId: 'test-access-key',

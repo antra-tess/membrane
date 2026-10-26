@@ -1,19 +1,8 @@
-/**
- * Integration tests for response assembly
- *
- * These tests would have caught:
- * - v0.1.5: Prefill content leaking into response.content
- * - v0.1.6: Duplicate text blocks
- */
-
 import { describe, it, expect, vi } from 'vitest';
 import { AnthropicXmlFormatter } from '../../src/formatters/anthropic-xml.js';
 import { Membrane } from '../../src/membrane.js';
 import type { ProviderAdapter, ProviderRequest, ProviderResponse, StreamCallbacks, NormalizedRequest } from '../../src/types/index.js';
 
-/**
- * Create a mock adapter that returns predetermined responses
- */
 function createMockAdapter(options: {
   streamChunks?: string[];
   completeResponse?: Partial<ProviderResponse>;
@@ -63,9 +52,6 @@ function createMockAdapter(options: {
   };
 }
 
-/**
- * Create a multi-call mock adapter for tool execution tests
- */
 function createMultiCallAdapter(responses: Array<{
   chunks: string[];
   stopReason: string;
@@ -111,9 +97,6 @@ function createMultiCallAdapter(responses: Array<{
   };
 }
 
-/**
- * Create a standard multi-turn request for testing
- */
 function createMultiTurnRequest(): NormalizedRequest {
   return {
     messages: [
@@ -149,7 +132,6 @@ describe('Response Assembly', () => {
 
       const result = await membrane.stream(request);
 
-      // Check that content doesn't contain input messages
       const contentText = result.content
         .filter(b => b.type === 'text')
         .map(b => (b as any).text)
@@ -159,7 +141,6 @@ describe('Response Assembly', () => {
       expect(contentText).not.toContain('I am doing well');
       expect(contentText).not.toContain('What is the weather');
 
-      // Should contain the actual response
       expect(contentText).toContain('weather is sunny');
     });
 
@@ -177,7 +158,6 @@ describe('Response Assembly', () => {
         .map(b => (b as any).text)
         .join('');
 
-      // Should not contain prefill participant markers
       expect(contentText).not.toContain('User:');
       expect(contentText).not.toContain('Claude:');
     });
@@ -192,7 +172,6 @@ describe('Response Assembly', () => {
         onChunk: (chunk) => receivedChunks.push(chunk),
       });
 
-      // rawAssistantText should match what was chunked
       expect(result.rawAssistantText).toBe(chunks.join(''));
     });
   });
@@ -208,7 +187,6 @@ describe('Response Assembly', () => {
 
       const textBlocks = result.content.filter(b => b.type === 'text');
 
-      // Should have exactly one text block, not duplicates
       expect(textBlocks.length).toBe(1);
     });
 
@@ -221,11 +199,10 @@ describe('Response Assembly', () => {
 
       const result = await membrane.stream(createMultiTurnRequest());
 
-      // Count occurrences of the response text
       const fullContent = result.content
         .filter(b => b.type === 'text')
         .map(b => (b as any).text)
-        .join('|||'); // separator to see duplicates
+        .join('|||');
 
       const occurrences = (fullContent.match(/unique response/g) || []).length;
       expect(occurrences).toBe(1);
@@ -242,7 +219,6 @@ describe('Response Assembly', () => {
         onRequest: (req) => { capturedRequest = req; },
       });
 
-      // Should have provider-specific fields
       expect(capturedRequest).toBeDefined();
       expect(capturedRequest).toHaveProperty('model');
       expect(capturedRequest).toHaveProperty('messages');
@@ -297,7 +273,6 @@ describe('Multi-request logging', () => {
   it('should call onRequest for each API request during tool execution', async () => {
     const capturedRequests: unknown[] = [];
 
-    // Build XML strings by parts to avoid escaping issues
     const fnCallsOpen = '<function_calls>';
     const fnCallsClose = '</function_calls>';
     const invokeOpen = '<invoke name="test_tool">';
@@ -316,11 +291,8 @@ describe('Multi-request logging', () => {
       '\n',
     ].join('');
 
-    // Create adapter that simulates tool execution (2 API calls)
     const adapter = createMultiCallAdapter([
-      // First call: return tool call that stops at </function_calls>
       { chunks: [toolCallXml], stopReason: 'stop_sequence', stopSequence: fnCallsClose },
-      // Second call: return final response
       { chunks: ['Done with the tool.'], stopReason: 'end_turn' },
     ]);
 
@@ -330,7 +302,6 @@ describe('Multi-request logging', () => {
     await membrane.stream(request, {
       onRequest: (req) => { capturedRequests.push(req); },
       onToolCalls: async (calls) => {
-        // Return mock tool results
         return calls.map(call => ({
           toolUseId: call.id,
           content: 'Tool result',
@@ -338,10 +309,8 @@ describe('Multi-request logging', () => {
       },
     });
 
-    // Should have captured 2 requests (initial + continuation after tool)
     expect(capturedRequests.length).toBe(2);
 
-    // Both should have different messages (second has accumulated content)
     expect(capturedRequests[0]).not.toEqual(capturedRequests[1]);
   });
 
@@ -378,7 +347,6 @@ describe('Multi-request logging', () => {
       },
     });
 
-    // Should have captured 2 responses
     expect(capturedResponses.length).toBe(2);
   });
 
@@ -394,7 +362,6 @@ describe('Multi-request logging', () => {
 
     const toolCallXml = [fnCallsOpen, invokeOpen, paramOpen, 'v', paramClose, invokeClose].join('');
 
-    // Create adapter that simulates 3 API calls (2 tool calls + final)
     const adapter = createMultiCallAdapter([
       { chunks: [toolCallXml], stopReason: 'stop_sequence', stopSequence: fnCallsClose },
       { chunks: [toolCallXml], stopReason: 'stop_sequence', stopSequence: fnCallsClose },
@@ -413,7 +380,6 @@ describe('Multi-request logging', () => {
       },
     });
 
-    // Should have captured 3 requests
     expect(capturedRequests.length).toBe(3);
   });
 
@@ -452,11 +418,9 @@ describe('Multi-request logging', () => {
 
     expect(capturedRequests.length).toBe(2);
 
-    // The second request should contain the tool results in the assistant message
     const secondRequest = capturedRequests[1];
     const assistantMessages = secondRequest.messages.filter((m: any) => m.role === 'assistant');
 
-    // Find the assistant message content (could be string or array)
     let assistantContent = '';
     for (const msg of assistantMessages) {
       if (typeof msg.content === 'string') {
@@ -470,7 +434,6 @@ describe('Multi-request logging', () => {
       }
     }
 
-    // Tool results should be in the continuation request
     expect(assistantContent).toContain('TOOL_EXECUTION_RESULT_12345');
     expect(assistantContent).toContain('<function_results>');
     expect(assistantContent).toContain('</function_results>');
@@ -502,17 +465,15 @@ describe('Multi-request logging', () => {
     await membrane.stream(createMultiTurnRequest(), {
       onRequest: (req) => { capturedRequests.push(req); },
       onToolCalls: async (calls) => {
-        // Return empty string content for tool result
         return calls.map(call => ({
           toolUseId: call.id,
-          content: '',  // Empty result
+          content: '',
         }));
       },
     });
 
     expect(capturedRequests.length).toBe(2);
 
-    // The second request should still contain function_results wrapper
     const secondRequest = capturedRequests[1];
     const assistantMessages = secondRequest.messages.filter((m: any) => m.role === 'assistant');
 
@@ -529,7 +490,6 @@ describe('Multi-request logging', () => {
       }
     }
 
-    // Even empty results should be wrapped in function_results
     expect(assistantContent).toContain('<function_results>');
     expect(assistantContent).toContain('</function_results>');
     expect(assistantContent).toContain('<result>');
@@ -562,14 +522,12 @@ describe('Multi-request logging', () => {
     await membrane.stream(createMultiTurnRequest(), {
       onRequest: (req) => { capturedRequests.push(req); },
       onToolCalls: async () => {
-        // Return empty array - no results at all
         return [];
       },
     });
 
     expect(capturedRequests.length).toBe(2);
 
-    // Should still inject empty function_results
     const secondRequest = capturedRequests[1];
     const assistantMessages = secondRequest.messages.filter((m: any) => m.role === 'assistant');
 
@@ -617,28 +575,21 @@ describe('Multi-request logging', () => {
       },
     });
 
-    // Should have block events for tool_call
     const toolCallStarts = blockEvents.filter(e => e.event === 'block_start' && e.block.type === 'tool_call');
     const toolCallCompletes = blockEvents.filter(e => e.event === 'block_complete' && e.block.type === 'tool_call');
     expect(toolCallStarts.length).toBeGreaterThanOrEqual(1);
     expect(toolCallCompletes.length).toBeGreaterThanOrEqual(1);
 
-    // Find the tool call complete with parsed data (has toolName)
-    // Note: there may be multiple tool_call block_complete events:
-    // - One from streaming flush (has content, no toolName)
-    // - One from parsed tool call (has toolName and input)
     const parsedToolCallComplete = toolCallCompletes.find(e => (e.block as any).toolName);
     expect(parsedToolCallComplete).toBeDefined();
     expect(parsedToolCallComplete!.block.toolName).toBe('test_tool');
     expect(parsedToolCallComplete!.block.input).toBeDefined();
 
-    // Should have block events for tool_result
     const toolResultStarts = blockEvents.filter(e => e.event === 'block_start' && e.block.type === 'tool_result');
     const toolResultCompletes = blockEvents.filter(e => e.event === 'block_complete' && e.block.type === 'tool_result');
     expect(toolResultStarts.length).toBeGreaterThanOrEqual(1);
     expect(toolResultCompletes.length).toBeGreaterThanOrEqual(1);
 
-    // Tool result complete should have content
     const toolResultComplete = toolResultCompletes[0];
     expect(toolResultComplete.block.content).toBe('Tool executed');
   });
@@ -666,7 +617,6 @@ describe('Multi-request logging', () => {
 
     const membrane = new Membrane(adapter, { formatter: new AnthropicXmlFormatter({ toolMode: 'xml' }) });
 
-    // Request with thinking enabled
     const request: NormalizedRequest = {
       ...createMultiTurnRequest(),
       config: {
@@ -688,7 +638,6 @@ describe('Multi-request logging', () => {
 
     expect(capturedRequests.length).toBe(2);
 
-    // The second request should have <thinking> after </function_results>
     const secondRequest = capturedRequests[1];
     const assistantMessages = secondRequest.messages.filter((m: any) => m.role === 'assistant');
 
@@ -699,11 +648,9 @@ describe('Multi-request logging', () => {
       }
     }
 
-    // Should have thinking tag after function_results
     expect(assistantContent).toContain('</function_results>');
     expect(assistantContent).toContain('<thinking>');
 
-    // The thinking tag should come AFTER function_results
     const resultsEnd = assistantContent.indexOf('</function_results>');
     const thinkingStart = assistantContent.lastIndexOf('<thinking>');
     expect(thinkingStart).toBeGreaterThan(resultsEnd);
@@ -730,10 +677,9 @@ describe('Multi-request logging', () => {
 
     const membrane = new Membrane(adapter, { formatter: new AnthropicXmlFormatter({ toolMode: 'xml' }) });
 
-    // Should throw with clear error message
     await expect(membrane.stream(createMultiTurnRequest(), {
       onToolCalls: async () => {
-        return undefined as any;  // Simulate buggy handler
+        return undefined as any;
       },
     })).rejects.toThrow('onToolCalls must return an array');
   });
@@ -748,7 +694,6 @@ describe('Edge cases', () => {
 
     const result = await membrane.stream(createMultiTurnRequest());
 
-    // Should not crash, content may be empty
     expect(result.content).toBeDefined();
   });
 
@@ -760,7 +705,6 @@ describe('Edge cases', () => {
 
     const result = await membrane.stream(createMultiTurnRequest());
 
-    // Should handle gracefully
     expect(result.content).toBeDefined();
   });
 
@@ -770,7 +714,6 @@ describe('Edge cases', () => {
     });
     const membrane = new Membrane(adapter, { formatter: new AnthropicXmlFormatter({ toolMode: 'xml' }) });
 
-    // Build a long conversation
     const messages = [];
     for (let i = 0; i < 50; i++) {
       messages.push({
@@ -786,10 +729,8 @@ describe('Edge cases', () => {
 
     const result = await membrane.stream(request);
 
-    // Response should only contain the new content
     expect(result.rawAssistantText).toBe('Short response');
 
-    // Should not contain any of the history
     const contentText = result.content
       .filter(b => b.type === 'text')
       .map(b => (b as any).text)

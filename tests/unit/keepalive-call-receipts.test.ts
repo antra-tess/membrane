@@ -209,8 +209,6 @@ describe('Anthropic adapter receipt integration', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.outcome).toBe(outcome);
     expect(calls[0]!.request).toEqual(requests[1]);
-    // Materialize JSON once per actual call, rather than invoking a caller's
-    // serializer again while creating the receipt.
     expect(metadataToJSON).toHaveBeenCalledTimes(2);
   });
 
@@ -246,9 +244,9 @@ describe('Anthropic adapter receipt integration', () => {
       system: wire().system, messages: wire().messages,
       extra: { thinking: { type: 'adaptive' } },
     });
-    expect(calls).toEqual([]); // Foreground calls already have their own observers.
+    expect(calls).toEqual([]);
     await vi.advanceTimersByTimeAsync(150);
-    expect(httpCalls).toBe(3); // One foreground call, two attempts for one poke.
+    expect(httpCalls).toBe(3);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({
       outcome: 'success', lane: 'complete', response: terminal,

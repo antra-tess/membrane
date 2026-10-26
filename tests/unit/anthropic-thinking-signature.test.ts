@@ -1,25 +1,3 @@
-/**
- * Regression test for Bug C: thinking-block signatures must round-trip
- * through the Anthropic adapter.
- *
- * Coverage:
- *   - Inbound streaming path: signature_delta events are accumulated onto
- *     contentBlocks[idx].signature during for-await on the SSE stream.
- *   - Inbound non-streaming path: fromAnthropicContent captures signature.
- *   - Outbound path: toAnthropicContent emits signature when present, and
- *     leaves out a thinking block with none (#191).
- *   - Request path: the Anthropic and Bedrock adapters leave out a thinking
- *     block with no signature, another provider's reasoning the API refuses,
- *     and report it (#191).
- *
- * Background: prior to this fix, the streaming accumulator dropped
- * signature_delta events and the outbound serializer stripped the signature
- * field. End result: a thinking block authored by the model could never be
- * faithfully re-sent in history, and any session running with extended
- * thinking enabled would 400 the moment a thinking block landed in a
- * compression chunk or got re-shipped on a tool-result follow-up.
- */
-
 import { describe, it, expect } from 'vitest';
 import {
   AnthropicAdapter,
@@ -29,14 +7,9 @@ import {
 import { BedrockAdapter } from '../../src/providers/bedrock.js';
 import type { ContentBlock } from '../../src/types/index.js';
 
-// ---------------------------------------------------------------------------
-// Fake SSE stream — async iterable with the minimal surface area the adapter
-// touches (Symbol.asyncIterator + .controller.abort()).
-// ---------------------------------------------------------------------------
-
 function fakeStream(events: any[]) {
   return {
-    controller: { abort() { /* noop */ } },
+    controller: { abort() { } },
     [Symbol.asyncIterator]() {
       let i = 0;
       return {
@@ -49,15 +22,10 @@ function fakeStream(events: any[]) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// 1. Streaming accumulator — signature_delta lands on the thinking block
-// ---------------------------------------------------------------------------
-
 describe('AnthropicAdapter streaming: signature_delta', () => {
   it('accumulates signature_delta onto the active thinking block', async () => {
     const adapter = new AnthropicAdapter({ apiKey: 'sk-test' });
 
-    // Replace the SDK client with a stub that returns our scripted stream.
     (adapter as any).client = {
       withOptions() { return this; },
       messages: {
@@ -111,9 +79,6 @@ describe('AnthropicAdapter streaming: signature_delta', () => {
   });
 
   it('does not break on signature_delta when no thinking block is active', async () => {
-    // Defensive: stray/out-of-order signature_delta on a text block must not
-    // throw or corrupt the text block. (Should not happen per protocol, but
-    // we don't want to be brittle.)
     const adapter = new AnthropicAdapter({ apiKey: 'sk-test' });
 
     (adapter as any).client = {
@@ -146,10 +111,6 @@ describe('AnthropicAdapter streaming: signature_delta', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// 2. fromAnthropicContent — non-streaming inbound path
-// ---------------------------------------------------------------------------
-
 describe('fromAnthropicContent: thinking signature', () => {
   it('captures signature on non-streaming inbound thinking blocks', () => {
     const normalized = fromAnthropicContent([
@@ -164,10 +125,6 @@ describe('fromAnthropicContent: thinking signature', () => {
     expect(thinking.signature).toBe('abc-123');
   });
 });
-
-// ---------------------------------------------------------------------------
-// 3. toAnthropicContent — outbound serialization
-// ---------------------------------------------------------------------------
 
 describe('toAnthropicContent: thinking signature', () => {
   it('emits the signature field when present', () => {
@@ -210,11 +167,6 @@ describe('toAnthropicContent: thinking signature', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// 3b. Request path — the adapters' own builders (#191)
-// ---------------------------------------------------------------------------
-
-/** A history whose assistant turn holds `blocks`, between two user turns. */
 function history(blocks: unknown[]) {
   return {
     model: 'claude-haiku-4-5',
@@ -246,8 +198,6 @@ describe.each(builders)('%s request: a thinking block with no signature', (_name
     const built = build(history([UNSIGNED, SIGNED, SIGNATURE_ONLY, ANSWER]), (block) => heard.push(block));
 
     expect(built.messages[1].content).toEqual([SIGNED, SIGNATURE_ONLY, ANSWER]);
-    // The report names the caller's own block, which Membrane's round report
-    // finds by identity (utils/fidelity.ts).
     expect(heard).toHaveLength(1);
     expect(heard[0]).toBe(UNSIGNED);
   });
@@ -271,8 +221,6 @@ describe.each(builders)('%s request: a thinking block with no signature', (_name
   });
 
   it('that was the final assistant turn\'s only block is refused, as an emptied final turn is', () => {
-    // Dropping the turn would make a continuation a fresh reply, which the
-    // empty-turn cleanup refuses (utils/empty-text.ts).
     const heard: unknown[] = [];
     const final = { ...history([UNSIGNED]), messages: history([UNSIGNED]).messages.slice(0, 2) };
 
@@ -281,14 +229,8 @@ describe.each(builders)('%s request: a thinking block with no signature', (_name
   });
 });
 
-// ---------------------------------------------------------------------------
-// 4. Round-trip — chain the three above
-// ---------------------------------------------------------------------------
-
 describe('Anthropic adapter: signature round-trip', () => {
   it('preserves signature from inbound through outbound', () => {
-    // Simulate: API returned a thinking block with signature → normalized →
-    // stored → re-serialized on the next outbound request.
     const inbound = fromAnthropicContent([
       { type: 'thinking', thinking: 'inner monologue', signature: 'sig-rt' } as any,
     ]);

@@ -80,7 +80,6 @@ describe('OpenAICompatibleAdapter reasoning_content (streamed)', () => {
 
     expect(res.content[0]).toEqual({ type: 'thinking', thinking: 'zz step one, zz step two' });
     expect(res.content[1]).toEqual({ type: 'text', text: 'zz answer' });
-    // The trace never leaks into the visible text channel.
     expect(chunks.join('')).toBe('zz answer');
   });
 

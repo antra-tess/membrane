@@ -21,10 +21,6 @@ import {
 import { errorFromThrown } from '../types/errors.js';
 import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError } from './utils.js';
 
-// ============================================================================
-// Images API Types
-// ============================================================================
-
 interface ImagesGenerateRequest {
   model: string;
   prompt: string;
@@ -39,7 +35,7 @@ interface ImagesGenerateRequest {
 interface ImagesEditRequest {
   model: string;
   prompt: string;
-  image: string[];  // base64 data URLs
+  image: string[];
   n?: number;
   size?: string;
   quality?: string;
@@ -48,7 +44,6 @@ interface ImagesEditRequest {
 
 type ImagesRequest = ImagesGenerateRequest | ImagesEditRequest;
 
-/** A base64 image found in the conversation, with its position for transcript references. */
 interface ImageRef {
   dataUrl: string;
   msgIndex: number;
@@ -77,10 +72,6 @@ interface ImagesAPIResponse {
     };
   };
 }
-
-// ============================================================================
-// Adapter Configuration
-// ============================================================================
 
 export interface OpenAIResponsesAdapterConfig {
   /** API key (defaults to OPENAI_API_KEY env var) */
@@ -146,10 +137,6 @@ export const DEFAULT_TRANSCRIPT_PREAMBLE =
   'images inside User turns were provided by users. ' +
   'Generate the image for the next Assistant turn.';
 
-// ============================================================================
-// OpenAI Images Adapter
-// ============================================================================
-
 /**
  * Adapter for OpenAI's Images API, despite its name: `/v1/images/generations`
  * for a text-only conversation, and `/v1/images/edits` when the conversation
@@ -199,10 +186,6 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
     options?: ProviderRequestOptions
   ): Promise<ProviderResponse> {
     assertPromptToolSupport(request, options, this.name, { kind: 'none', extraTools: request.extra?.tools });
-    // Media in MCP's form becomes membrane's first, for a caller that builds
-    // a request directly (Membrane's own builds have converted it already,
-    // utils/mcp-media.ts), so the images it attaches and the transcript's
-    // image numbers read one form.
     if (Array.isArray(request.messages)) {
       const messages = convertMcpMedia(request.messages as unknown[]) as ProviderRequest['messages'];
       if (messages !== request.messages) request = { ...request, messages };
@@ -231,7 +214,6 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
         if (imagesRequest.quality) formData.append('quality', String(imagesRequest.quality));
         if (imagesRequest.size) formData.append('size', String(imagesRequest.size));
 
-        // Convert base64 data URLs to Blobs and append as file uploads
         for (const dataUrl of inputImages) {
           const { buffer, mimeType } = this.dataUrlToBuffer(dataUrl);
           const ext = mimeType.split('/')[1] || 'png';
@@ -246,7 +228,6 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
         };
         fetchOptions.body = formData;
       } else {
-        // /v1/images/generations accepts JSON
         fetchOptions.headers = this.getHeaders();
         fetchOptions.body = JSON.stringify(imagesRequest);
       }
@@ -284,10 +265,6 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
     return response;
   }
 
-  // --------------------------------------------------------------------------
-  // Request Building
-  // --------------------------------------------------------------------------
-
   private getHeaders(): Record<string, string> {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.apiKey}`,
@@ -301,12 +278,6 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
     return headers;
   }
 
-  /**
-   * Collect every base64 image in the conversation, in order, remembering
-   * which message/block it came from so the transcript can reference it.
-   * Both `image` blocks and `generated_image` blocks (this adapter's own
-   * earlier outputs, when a consumer carries them forward as-is) count.
-   */
   private collectImages(request: ProviderRequest): ImageRef[] {
     const refs: ImageRef[] = [];
     if (!request.messages) return refs;
@@ -317,15 +288,10 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
         if (block?.type === 'image') {
           const source = block.source;
           if (source?.type === 'base64' && source.data) {
-            // Data that is no image the edits endpoint takes stays
-            // unattached, and the transcript shows it as an omitted image.
             const { mediaType } = imageForRequest(source.data, source.media_type ?? source.mediaType, OPENAI_IMAGE_EDIT_TYPES);
             if (mediaType) refs.push({ dataUrl: `data:${mediaType};base64,${source.data}`, msgIndex, blockIndex });
           }
         } else if (block?.type === 'generated_image' && typeof block.data === 'string' && block.data) {
-          // A previous output of this adapter carried forward verbatim in
-          // history (consumers that keep ProviderResponse content rather
-          // than rebuilding from a channel). It is an image like any other.
           const { mediaType } = imageForRequest(block.data, block.mimeType, OPENAI_IMAGE_EDIT_TYPES);
           if (mediaType) refs.push({ dataUrl: `data:${mediaType};base64,${block.data}`, msgIndex, blockIndex });
         }
@@ -335,11 +301,6 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
     return refs;
   }
 
-  /**
-   * Apply the input-image cap. Legacy keeps the FIRST N (its historical
-   * behaviour); transcript keeps the MOST RECENT N, since the latest turns
-   * are what an edit request is about.
-   */
   private selectImages(refs: ImageRef[]): ImageRef[] {
     if (refs.length <= this.maxInputImages) return refs;
     return this.promptFormat === 'transcript'
@@ -347,9 +308,6 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
       : refs.slice(0, this.maxInputImages);
   }
 
-  /**
-   * Convert a base64 data URL to a Buffer + mimeType for file upload.
-   */
   private dataUrlToBuffer(dataUrl: string): { buffer: Buffer; mimeType: string } {
     const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/s);
     if (!match || !match[1] || !match[2]) {
@@ -374,12 +332,10 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
       quality: 'auto',
     };
 
-    // Include input images for the /edits endpoint
     if (inputImages.length > 0) {
       (imagesRequest as ImagesEditRequest).image = inputImages;
     }
 
-    // Apply extra params (allow overriding size, quality, n, etc.)
     if (request.extra) {
       const { normalizedMessages, prompt: _p, ...rest } = request.extra as Record<string, unknown>;
       Object.assign(imagesRequest, rest);
@@ -388,18 +344,9 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
     return imagesRequest;
   }
 
-  /**
-   * Flatten conversation messages into a single prompt string.
-   *
-   * The Images API takes a single text prompt, not a conversation.
-   * We include the system prompt as context and concatenate all
-   * message text with role labels so the model understands the
-   * full conversation when deciding what image to generate.
-   */
   private flattenToPrompt(request: ProviderRequest): string {
     const parts: string[] = [];
 
-    // Include system prompt as context
     if (request.system) {
       const systemText =
         typeof request.system === 'string'
@@ -414,7 +361,6 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
       }
     }
 
-    // Extract text from messages with role labels
     if (request.messages) {
       for (const msg of request.messages as any[]) {
         const role = msg.role === 'assistant' ? 'Assistant' : 'User';
@@ -447,20 +393,6 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
       .join('\n');
   }
 
-  /**
-   * Flatten the conversation into a role-delimited transcript.
-   *
-   * Each message becomes (part of) a `### User` / `### Assistant` turn;
-   * consecutive same-role messages share one header. Text blocks are kept
-   * verbatim. Image blocks become `[Image N]` (N = 1-based position in the
-   * attached `image[]` list) when the image is attached, or
-   * `[Image omitted]` when it fell outside the input-image cap or its data
-   * is no image the edits endpoint takes. An
-   * assistant message that only carried an image therefore still appears
-   * as an assistant turn — that is what lets a previous generation read as
-   * the assistant's own prior output. The prompt ends with an open
-   * `### Assistant` header for the turn being generated.
-   */
   private flattenToTranscript(request: ProviderRequest, selectedImages: ImageRef[]): string {
     const attachedIndex = new Map<string, number>();
     selectedImages.forEach((ref, i) => attachedIndex.set(`${ref.msgIndex}:${ref.blockIndex}`, i + 1));
@@ -510,10 +442,6 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
     sections.push('### Assistant');
     return sections.filter(Boolean).join('\n\n');
   }
-
-  // --------------------------------------------------------------------------
-  // Response Parsing
-  // --------------------------------------------------------------------------
 
   private parseResponse(
     response: ImagesAPIResponse,
@@ -570,10 +498,6 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
 
     return content;
   }
-
-  // --------------------------------------------------------------------------
-  // Error Handling
-  // --------------------------------------------------------------------------
 
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
     if (isDeadlineAbort(error)) return deadlineTimeoutError(error, rawRequest);

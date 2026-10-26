@@ -23,13 +23,11 @@ const ZZ_ROUND_TWO_MODEL = 'zz-model-b';
 const ZZ_ROUND_TOKENS = 1_000_000;
 const ZZ_ROUND_ONE_RATE = 1_000;
 const ZZ_ROUND_TWO_RATE = 10_000;
-/** 1M at 1,000/M plus 1M at 10,000/M — what the provider actually bills. */
 const ZZ_BILLED_TOTAL = ZZ_ROUND_ONE_RATE + ZZ_ROUND_TWO_RATE;
 
 const zzRates: Record<string, number> = {
   [ZZ_ROUND_ONE_MODEL]: ZZ_ROUND_ONE_RATE,
   [ZZ_ROUND_TWO_MODEL]: ZZ_ROUND_TWO_RATE,
-  // Deliberately absurd: a fallback to the requested id shows up immediately.
   [ZZ_REQUESTED_MODEL]: 7,
 };
 
@@ -52,10 +50,6 @@ const zzTool: ToolDefinition = {
   inputSchema: { type: 'object', properties: {} },
 };
 
-/**
- * Serves one scripted round per call: round 1 asks for a tool (so the loop
- * runs again), round 2 ends the turn. Each round names its own served model.
- */
 function zzScriptedAdapter(mode: 'xml' | 'native'): ProviderAdapter {
   const servedModels = [ZZ_ROUND_ONE_MODEL, ZZ_ROUND_TWO_MODEL];
   let round = 0;
@@ -179,7 +173,6 @@ describe('multi-round pricing', () => {
 
     expect(response.usage.estimatedCost).toBeUndefined();
     expect(response.details.usage.estimatedCost).toBeUndefined();
-    // The priced round is still recoverable from the roster.
     expect(response.details.model.perRound?.[0]?.usage.estimatedCost?.total)
       .toBeCloseTo(ZZ_ROUND_ONE_RATE, 6);
     expect(response.details.model.perRound?.[1]?.usage.estimatedCost).toBeUndefined();

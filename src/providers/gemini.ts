@@ -1,16 +1,3 @@
-/**
- * Google Gemini provider adapter
- *
- * Direct adapter for Google's Generative AI REST API.
- * Supports Gemini 2.x, 2.5, 3.x models with:
- * - Text and image input
- * - Tool/function calling
- * - Streaming via SSE
- *
- * Auth: API key passed as query parameter (?key=...)
- * Endpoint: generativelanguage.googleapis.com/v1beta
- */
-
 import type {
   ProviderAdapter,
   ProviderRequest,
@@ -32,10 +19,6 @@ import { isRawItemCarrier } from '../utils/fidelity.js';
 import { imageForRequest, GEMINI_IMAGE_TYPES } from '../utils/image-media.js';
 import { convertMcpMedia } from '../utils/mcp-media.js';
 import { createCombinedSignal, textOnlyToolResultContent, toolUseInputFromValue, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved, isEventObject } from './utils.js';
-
-// ============================================================================
-// Gemini API Types
-// ============================================================================
 
 interface GeminiPart {
   text?: string;
@@ -117,7 +100,6 @@ interface GeminiResponse {
 
 interface GeminiStreamState {
   text: string;
-  /** Text of the parts flagged `thought`, kept apart from the answer. */
   thinking: string;
   toolCalls: { name: string; args: Record<string, unknown> }[];
   images: { data: string; mimeType: string }[];
@@ -170,26 +152,13 @@ function geminiUsageToProviderUsage(
   const cachedTokens = usageMetadata
     ? (typeof usageMetadata.cachedContentTokenCount === 'number' ? usageMetadata.cachedContentTokenCount : 0)
     : undefined;
-  // A cached span larger than the whole prompt can't be inside the prompt
-  // count, so the inclusive reading doesn't fit this response. Reading its
-  // prompt count as the fresh input is this adapter's choice: the response is
-  // read as cache-excluded, against the declared convention (see
-  // GeminiAdapter.usageCacheConvention for its basis).
   const promptExcludesCache = cachedTokens !== undefined && cachedTokens > promptTokens;
 
   if (usageMetadata && totalTokens != null) {
     const accountedTokens = promptTokens + toolUsePromptTokens + candidatesTokens + (thoughtsTokens ?? 0);
-    // A response read as cache-excluded counts its cached span beside its
-    // prompt, so a total that includes the span is the total membrane
-    // counts: prompt + tool-use prompt + cached + candidates + thoughts. None
-    // of the published responses GeminiAdapter.usageCacheConvention cites
-    // shows this regime, so both totals reconcile: Google's formula, which
-    // has no cached term, and that one. Meeting the regime is warned about
-    // once, below.
     const largestSum = promptExcludesCache ? accountedTokens + cachedTokens : accountedTokens;
     const reconciles = accountedTokens === totalTokens || largestSum === totalTokens;
     if (!reconciles) {
-      // Only a total above every accepted sum says where the rest is.
       const fields = promptExcludesCache
         ? 'prompt, tool-use prompt, cached, candidates and thoughts'
         : 'prompt, tool-use prompt, candidates and thoughts';
@@ -219,26 +188,16 @@ function geminiUsageToProviderUsage(
     inputTokens: promptTokens + toolUsePromptTokens,
     outputTokens: candidatesTokens + (thoughtsTokens ?? 0),
     ...(thoughtsTokens != null ? { thinkingTokens: thoughtsTokens } : {}),
-    // A reported 0 is a fact (no cache read); only an unreported count is
-    // absent. By the proto3 rule above, a present usageMetadata reports the
-    // cache-read count even when it omits it: real calls without a cache hit
-    // never send the field (see usageCacheConvention's note), and that is a 0.
     ...(cachedTokens !== undefined ? { cacheReadTokens: cachedTokens } : {}),
     ...(promptExcludesCache ? { cacheConvention: 'cache-excluded' as const } : {}),
   };
 }
 
-/** Whether the cached-above-prompt warning has been printed (once per process). */
 let warnedPromptExcludesCache = false;
 
-/** Test seam: the cached-above-prompt warning's latch is process-wide otherwise. */
 export function resetPromptExcludesCacheWarning(): void {
   warnedPromptExcludesCache = false;
 }
-
-// ============================================================================
-// Adapter Configuration
-// ============================================================================
 
 export interface GeminiAdapterConfig {
   /** Google AI API key */
@@ -250,10 +209,6 @@ export interface GeminiAdapterConfig {
   /** Default max output tokens */
   defaultMaxTokens?: number;
 }
-
-// ============================================================================
-// Gemini Adapter
-// ============================================================================
 
 const GEMINI_MAX_STOP_SEQUENCES = 5;
 
@@ -385,7 +340,6 @@ export class GeminiAdapter implements ProviderAdapter {
 
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split('\n');
-          // Keep the last potentially incomplete line in buffer
           buffer = lines.pop() ?? '';
 
           for (const line of lines) {
@@ -458,13 +412,9 @@ export class GeminiAdapter implements ProviderAdapter {
     try {
       parsed = JSON.parse(frameData) as GeminiResponse;
     } catch {
-      // A frame that isn't valid JSON carries nothing to accumulate
       return;
     }
-    // JSON that isn't an object (`null`, a number, a string, an array)
-    // carries no event, so its frame is dropped, as on the other adapters.
     if (!isEventObject(parsed)) return;
-    // A provider event is progress.
     onProgress?.();
     throwOnStreamErrorFrame(parsed, 'Gemini', rawRequest);
     if (parsed.modelVersion) streamState.lastModelVersion = parsed.modelVersion;
@@ -477,11 +427,6 @@ export class GeminiAdapter implements ProviderAdapter {
     if (candidate?.content?.parts) {
       for (const part of candidate.content.parts) {
         if (part.text && part.thought) {
-          // A thought is not answer text: it goes to the thinking block. It
-          // is not streamed through onChunk either, by choice: this follows
-          // openai-compatible's reasoning channel rather than the Anthropic
-          // adapter's thinking chunks, so a stream consumer sees the
-          // reasoning only in the final content.
           streamState.thinking += part.text;
         } else if (part.text) {
           streamState.text += part.text;
@@ -520,20 +465,12 @@ export class GeminiAdapter implements ProviderAdapter {
     }
   }
 
-  // --------------------------------------------------------------------------
-  // Request Building
-  // --------------------------------------------------------------------------
-
   private buildRequest(request: ProviderRequest): GeminiRequest {
-    // Media in MCP's form becomes membrane's first, for a caller that builds
-    // a request directly (Membrane's own builds have converted it already,
-    // utils/mcp-media.ts).
     const contents = this.convertMessages(convertMcpMedia(request.messages as any[]), request.model);
     const maxTokens = request.maxTokens || this.defaultMaxTokens;
 
     const geminiRequest: GeminiRequest = { contents };
 
-    // System instruction
     if (request.system) {
       const systemText = typeof request.system === 'string'
         ? request.system
@@ -549,7 +486,6 @@ export class GeminiAdapter implements ProviderAdapter {
       }
     }
 
-    // Generation config
     geminiRequest.generationConfig = {
       maxOutputTokens: maxTokens,
     };
@@ -567,23 +503,19 @@ export class GeminiAdapter implements ProviderAdapter {
     }
 
     if (request.stopSequences && request.stopSequences.length > 0) {
-      // Gemini API limits stop sequences to 5
       geminiRequest.generationConfig.stopSequences = request.stopSequences.slice(0, GEMINI_MAX_STOP_SEQUENCES);
     }
 
-    // Auto-detect image generation models by name
     if (request.model?.includes('image')) {
       geminiRequest.generationConfig.responseModalities = ['TEXT', 'IMAGE'];
     }
 
-    // Tools
     if (request.tools && request.tools.length > 0) {
       geminiRequest.tools = [{
         functionDeclarations: this.convertTools(request.tools as any[]),
       }];
     }
 
-    // Extra params — deep-merge generationConfig to preserve auto-detected settings
     if (request.extra) {
       const { normalizedMessages, prompt, generationConfig: extraGenConfig, ...rest } = request.extra as Record<string, unknown>;
       Object.assign(geminiRequest, rest);
@@ -608,13 +540,11 @@ export class GeminiAdapter implements ProviderAdapter {
     for (const msg of messages) {
       const role: 'user' | 'model' = msg.role === 'assistant' ? 'model' : 'user';
 
-      // Simple string content
       if (typeof msg.content === 'string') {
         contents.push({ role, parts: [{ text: msg.content }] });
         continue;
       }
 
-      // Array content blocks (Anthropic-style)
       if (Array.isArray(msg.content)) {
         const parts: GeminiPart[] = [];
         const toolResultParts: GeminiPart[] = [];
@@ -623,16 +553,11 @@ export class GeminiAdapter implements ProviderAdapter {
           if (block.type === 'text') {
             if (block.text) parts.push({ text: block.text });
           } else if (block.type === 'image') {
-            // Gemini 3.x model-role images: use URL-as-text so Gemini auto-fetches
-            // the image without needing thought_signature metadata
             if (useUrlForModelImages && role === 'model' && block.sourceUrl) {
               parts.push({ text: block.sourceUrl });
               continue;
             }
 
-            // Anthropic image format → Gemini inlineData, labelled by its
-            // header, for a format Gemini's docs list; the placeholder for
-            // data that isn't one (a GIF included)
             const source = block.source;
             if (source?.type === 'base64') {
               const { mediaType, placeholder } = imageForRequest(source.data, source.media_type ?? source.mediaType, GEMINI_IMAGE_TYPES);
@@ -641,10 +566,6 @@ export class GeminiAdapter implements ProviderAdapter {
                 : { inlineData: { mimeType: mediaType, data: source.data } });
             }
           } else if (block.type === 'audio') {
-            // Audio input → Gemini inlineData (same mechanism as images). This is
-            // pure plumbing: whether a given model accepts/understands audio is the
-            // model's concern (the caller decides what to send). Common MIME types:
-            // audio/mp3, audio/wav, audio/ogg, audio/flac.
             const source = block.source;
             if (source?.type === 'base64' && source.data) {
               parts.push({
@@ -672,7 +593,6 @@ export class GeminiAdapter implements ProviderAdapter {
           }
         }
 
-        // Tool results go in a user message
         if (toolResultParts.length > 0) {
           contents.push({ role: 'user', parts: toolResultParts });
         }
@@ -684,15 +604,11 @@ export class GeminiAdapter implements ProviderAdapter {
         continue;
       }
 
-      // Null/empty content — skip
       if (msg.content === null || msg.content === undefined) continue;
 
-      // Fallback
       contents.push({ role, parts: [{ text: String(msg.content) }] });
     }
 
-    // Gemini requires alternating user/model roles.
-    // Merge consecutive same-role messages.
     return this.mergeConsecutiveRoles(contents);
   }
 
@@ -707,7 +623,6 @@ export class GeminiAdapter implements ProviderAdapter {
       const last = merged[merged.length - 1]!;
 
       if (current.role === last.role) {
-        // Merge parts into the previous message
         last.parts.push(...current.parts);
       } else {
         merged.push(current);
@@ -732,10 +647,6 @@ export class GeminiAdapter implements ProviderAdapter {
       };
     });
   }
-
-  // --------------------------------------------------------------------------
-  // Response Parsing
-  // --------------------------------------------------------------------------
 
   private parseResponse(
     response: GeminiResponse,
@@ -824,34 +735,24 @@ export class GeminiAdapter implements ProviderAdapter {
     return content;
   }
 
-  // A prompt blocked BEFORE generation comes back as a 200 with
-  // promptFeedback.blockReason and no candidate data at all — no data.error, no
-  // finishReason — so it used to read as an empty, clean end_turn. complete()
-  // and stream() both resolve here so the two paths cannot drift apart again.
   private resolveStopReason(
     sawCandidateData: boolean,
     candidateFinishReason: string | undefined,
     promptFeedback: GeminiResponse['promptFeedback']
   ): string {
     const promptBlockReason = sawCandidateData ? undefined : promptFeedback?.blockReason;
-    // A prompt blocked before generation is a refusal whatever reason Google
-    // gives (SAFETY, OTHER, BLOCKLIST, BLOCK_REASON_UNSPECIFIED, ...): nothing
-    // was generated. providerStopReason keeps the reason itself.
     return promptBlockReason != null
       ? 'refusal'
       : this.mapFinishReason(candidateFinishReason);
   }
 
   private mapFinishReason(reason: string | undefined): string {
-    // No reason (or a null one) is a plain end of turn.
     if (reason == null) return 'end_turn';
     switch (reason) {
       case 'STOP':
         return 'end_turn';
       case 'MAX_TOKENS':
         return 'max_tokens';
-      // Every generation-blocking safety enum, not just the two that were
-      // mapped: the rest reported as a clean end_turn with empty content.
       case 'SAFETY':
       case 'RECITATION':
       case 'PROHIBITED_CONTENT':
@@ -862,19 +763,10 @@ export class GeminiAdapter implements ProviderAdapter {
       case 'TOOL_CALLS':
       case 'FUNCTION_CALL':
         return 'tool_use';
-      // MALFORMED_FUNCTION_CALL, LANGUAGE, OTHER and anything Google adds
-      // next have no membrane member; they travel as the provider's own
-      // token. Membrane normalizes it to end_turn, since callers switch on a
-      // closed union, and discloses it on details.stop.providerReason and in
-      // a log line, so it doesn't pass for a clean end silently.
       default:
         return reason;
     }
   }
-
-  // --------------------------------------------------------------------------
-  // Error Handling
-  // --------------------------------------------------------------------------
 
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {
     if (isDeadlineAbort(error)) return deadlineTimeoutError(error, rawRequest);
@@ -885,20 +777,10 @@ export class GeminiAdapter implements ProviderAdapter {
   }
 }
 
-// ============================================================================
-// Content Conversion Utilities
-// ============================================================================
-
 /**
  * Convert normalized content blocks to Gemini parts
  */
 export function toGeminiParts(blocks: ContentBlock[]): GeminiPart[] {
-  // Only text and tool calls have a form here, so every other block adds no
-  // part: a thinking or redacted_thinking block, as convertMessages drops
-  // them, and an image, which this helper doesn't convert. Each used to fall
-  // through to String(block), sending the model "[object Object]" as its
-  // words. A zero-width carrier holds a block this wire has no form for, so
-  // it adds none either, as the builder's own text branch skips empty text.
   return blocks.filter(block => (block.type === 'text' && !isRawItemCarrier(block)) || block.type === 'tool_use').map(block => {
     if (block.type === 'text') {
       return { text: (block as any).text };

@@ -12,11 +12,6 @@ import type {
 } from '../../src/types/provider.js';
 import type { StreamCallbacks } from '../../src/types/streaming.js';
 
-/**
- * Streams a long, always-progressing round that stops on a stop sequence
- * inside a block the model opened — the automatic-resumption shape. Left to
- * itself it re-sends full context until the issue-#39 round cap trips.
- */
 class ResumingAdapter implements ProviderAdapter {
   readonly name = 'zz-resuming';
   streamCalls = 0;
@@ -71,8 +66,6 @@ describe('breaking out of the loop stops the producer', () => {
     const callsAtDeparture = adapter.streamCalls;
     await settle();
 
-    // At most the round already in flight may finish. Unfixed, the loop ran
-    // to the resumption cap — ~25 full-context calls after the consumer left.
     expect(adapter.streamCalls).toBeLessThanOrEqual(callsAtDeparture + 1);
     expect(adapter.streamCalls).toBeLessThan(6);
   });
@@ -145,7 +138,6 @@ describe('external abort signal listeners', () => {
       await settle(20);
     }
 
-    // Unfixed: one closure per stream, accumulating on a long-lived signal.
     expect(getEventListeners(controller.signal, 'abort').length).toBe(0);
   });
 });

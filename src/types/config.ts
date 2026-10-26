@@ -1,16 +1,8 @@
-/**
- * Configuration types for membrane
- */
-
 import type { ModelRegistry } from './provider.js';
 import type { ErrorInfo } from './errors.js';
 import type { NormalizedRequest } from './request.js';
 import type { NormalizedResponse } from './response.js';
 import type { NormalizeEvent, PrefillFormatter } from '../formatters/types.js';
-
-// ============================================================================
-// Retry Config
-// ============================================================================
 
 export interface RetryConfig {
   /**
@@ -87,10 +79,6 @@ export type RetryConfigInput = Partial<Omit<RetryConfig, 'overloaded'>> & {
   overloaded?: Partial<OverloadedRetryConfig>;
 };
 
-// ============================================================================
-// Media Processing Config
-// ============================================================================
-
 export interface MediaConfig {
   images: {
     /** Maximum input image size in bytes */
@@ -124,10 +112,6 @@ export interface MediaConfig {
     maxDurationSec: number;
   };
 }
-
-// ============================================================================
-// Hooks
-// ============================================================================
 
 /**
  * Each hook is the caller's code, run beside the call: what one throws ends
@@ -203,20 +187,12 @@ export interface MembraneHooks {
   onNormalize?: (event: NormalizeEvent) => void;
 }
 
-// ============================================================================
-// Logger Interface
-// ============================================================================
-
 export interface MembraneLogger {
   debug(message: string, data?: Record<string, unknown>): void;
   info(message: string, data?: Record<string, unknown>): void;
   warn(message: string, data?: Record<string, unknown>): void;
   error(message: string, data?: Record<string, unknown>): void;
 }
-
-// ============================================================================
-// Membrane Config
-// ============================================================================
 
 export interface MembraneConfig {
   /** Model registry for capability lookup */
@@ -279,21 +255,11 @@ export interface MembraneConfig {
   debug?: boolean;
 }
 
-// ============================================================================
-// Default Config
-// ============================================================================
-
 export const DEFAULT_RETRY_CONFIG: RetryConfig = {
-  // 3 attempts = 2 waits: 1s → 2s, the three sends AnthropicAdapter's SDK
-  // client used to make inside each attempt, for a 5xx or a dropped
-  // connection before anything was delivered. Its retries are off now that
-  // membrane is the one retry layer.
   maxRetries: 3,
   retryDelayMs: 1000,
   backoffMultiplier: 2,
   maxRetryDelayMs: 30000,
-  // 7 attempts = 6 waits: 10s → 20s → 40s → 80s → 160s → 300s, ~10 minutes
-  // of patience in total — the scale capacity storms actually resolve on.
   overloaded: {
     maxRetries: 7,
     retryDelayMs: 10_000,
@@ -304,7 +270,7 @@ export const DEFAULT_RETRY_CONFIG: RetryConfig = {
 
 export const DEFAULT_MEDIA_CONFIG: MediaConfig = {
   images: {
-    maxSizeBytes: 5 * 1024 * 1024, // 5MB (Anthropic limit)
+    maxSizeBytes: 5 * 1024 * 1024,
     autoResize: true,
     resizeQuality: 85,
     relocateInPrefillMode: true,

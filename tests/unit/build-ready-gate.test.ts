@@ -8,14 +8,12 @@ import { MembraneError, MembraneNotReadyError } from '../../src/types/errors.js'
 import type { NormalizedRequest, NormalizedMessage } from '../../src/types/index.js';
 import type { BuildOptions, BuildResult } from '../../src/formatters/types.js';
 
-/** A formatter whose build reports an unfinished tool cycle. */
 class ZzNotReadyFormatter extends NativeFormatter {
   buildMessages(messages: NormalizedMessage[], options: BuildOptions): BuildResult {
     return { ...super.buildMessages(messages, options), ready: false };
   }
 }
 
-/** Same shape, ready — proves the gate is keyed on the flag and nothing else. */
 class ZzReadyFormatter extends NativeFormatter {
   buildMessages(messages: NormalizedMessage[], options: BuildOptions): BuildResult {
     return { ...super.buildMessages(messages, options), ready: true };
@@ -53,7 +51,6 @@ describe('BuildResult.ready gates the send', () => {
       caught = err;
     }
 
-    // The readiness gate refused it, not some other early failure.
     expect(caught).toBeInstanceOf(MembraneNotReadyError);
     expect(build).toHaveBeenCalledTimes(1);
     expect(beforeRequest).not.toHaveBeenCalled();
@@ -74,7 +71,6 @@ describe('BuildResult.ready gates the send', () => {
     expect(caught).toBeInstanceOf(MembraneError);
     expect((caught as MembraneError).type).toBe('invalid_request');
     expect((caught as MembraneError).retryable).toBe(false);
-    // A deterministic build failure must not burn the transport retry budget.
     expect(adapter.getRequestLog()).toHaveLength(0);
   });
 

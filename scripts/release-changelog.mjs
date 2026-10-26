@@ -12,7 +12,6 @@ import { join } from "node:path";
 
 const CHANGELOG = "CHANGELOG.md";
 const FRAGMENT_DIR = "changelog.d";
-// Canonical subsection order; a fragment's category must be one of these.
 const CATEGORIES = ["breaking", "added", "changed", "fixed"];
 const HEADINGS = {
   breaking: "Breaking",
@@ -36,10 +35,6 @@ const isHeading = (s) => /^#{1,6}(\s|$)/.test(s);
 const isRule = (s) => /^([-*_=])(\s*\1){2,}\s*$/.test(s);
 const isBlockConstruct = (l) => isRule(l.trim()) || isHeading(itemContent(l));
 
-// The directory is scanned fail-closed: anything that is not README.md or
-// a well-formed fragment file aborts the release, so an entry can never be
-// silently left out (e.g. a fragment created under a 'fix/' subdirectory
-// because the slug was taken verbatim from a branch name).
 function collectFragments() {
   const fragments = [];
   if (!existsSync(FRAGMENT_DIR)) return fragments;
@@ -84,11 +79,6 @@ function collectFragments() {
   return fragments;
 }
 
-// Merge fragment bullets into the Unreleased body's subsection structure.
-// Directly-filed entries are kept; a fragment joins the first subsection
-// whose title starts with its category (so audience-qualified headings like
-// '### Breaking (module authors only)' still attract 'breaking' fragments),
-// or a new canonical subsection. Output is emitted in canonical order.
 function mergeFragments(body, frags) {
   const preamble = [];
   const parts = [];
@@ -131,9 +121,6 @@ function main() {
   const text = readFileSync(CHANGELOG, "utf8");
   const fragments = collectFragments();
 
-  // Exactly one Unreleased heading. A second one silently strands entries:
-  // only the first is ever cut, so anything filed under a later heading is
-  // never released and never reaches the GitHub release notes.
   const headings = [...text.matchAll(/^## Unreleased[ \t]*$/gm)];
   if (headings.length === 0) {
     fail(`no '## Unreleased' section in ${CHANGELOG} — add one before releasing.`);
@@ -165,10 +152,6 @@ function main() {
     );
   }
 
-  // Spliced by index rather than string-replaced: `text.replace("## Unreleased", …)`
-  // would hit the first *substring* occurrence, which is not necessarily the
-  // heading the regex matched (an inline mention of `## Unreleased` in prose
-  // comes first) and would inject the version heading into the wrong place.
   const date = new Date().toISOString().slice(0, 10);
   writeFileSync(
     CHANGELOG,

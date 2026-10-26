@@ -1,13 +1,3 @@
-/**
- * The XML tool parser's two silent-failure boundaries, seen from membrane.
- *
- * hasUnclosedToolBlock/endsWithPartialToolBlock existed with ZERO call sites,
- * so a max_tokens-truncated tool block was persisted bare (finding F3, and
- * finding K8's interaction: the loop does not resume on a length stop). And a
- * <function_calls> block that parses to zero invokes executed nothing, recorded
- * nothing, and closed the turn (finding F8).
- */
-
 import { describe, it, expect } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import type {
