@@ -398,7 +398,11 @@ export class AnthropicAdapter implements ProviderAdapter {
       const client = observeBody
         ? this.client.withOptions({ fetch: observeBodyActivity((input, init) => fetch(input, init), observeBody) })
         : this.client;
-      return { client, signal, failure: () => undefined };
+      // Derived, as the resolver branch's signal is: SDK 0.52's fetchWithTimeout
+      // adds an abort listener to the signal it's given and never removes it
+      // (#212), so handing it the caller's own signal grows that signal by one
+      // listener per call. A derived signal dies with the request instead.
+      return { client, signal: signal ? AbortSignal.any([signal]) : undefined, failure: () => undefined };
     }
     const abort = new AbortController();
     const combined = signal ? AbortSignal.any([signal, abort.signal]) : abort.signal;
