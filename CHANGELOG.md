@@ -12,6 +12,142 @@ Releases up to and including 0.5.75 predate this file; for their contents see
 
 ## Unreleased
 
+## 0.8.0 — 2026-10-26
+
+### Added
+
+- `progressBounds` on `stream()` and `streamYielding()`: bounds, off by default, that end a streamed
+  call which stops making progress while its connection stays open. `true` takes `PROGRESS_BOUNDS`:
+  60 s from the send to content, or, once a thinking block has started, the later of that and its
+  `max_tokens` at 87 tokens a second from its start, and 150 s between provider events once
+  content has begun. An object replaces any of the three. They apply on `AnthropicAdapter` and
+  `BedrockAdapter`, run beside `progressTimeoutMs`, and end a call as aborted with reason
+  `'timeout'`, which membrane doesn't send again. The README's "Progress bounds" says where the
+  values come from and what they weren't measured on.
+- `@animalabs/membrane/progress-bounds` exports `PROGRESS_BOUNDS`, `ProgressBounds`,
+  `resolveProgressBounds` and `trackProgress`, and imports nothing else of membrane's.
+- `AbortedResponse` and the `aborted` stream event carry `message`, what ended the call when the
+  caller didn't: a deadline's names the bound that ran out, `progressTimeoutMs`'s included.
+- **Provider adapters and decorators:** `ProgressSeen` gains `'think'`, which an adapter that
+  reports content (`SendReport.reportsContent`) passes for a thinking block's start unless the
+  body asks for summarized thinking. `AnthropicAdapter` and `BedrockAdapter` do. With progress
+  bounds on, a decorator that forwards `onSend` but drops `onProgress` or its argument has every
+  call still running `beforeContentMs` after its send ended.
+
+### Changed
+
+- Inside a `tool_result` on Bedrock, only what the Anthropic adapter
+  sends there now goes: a text block's type and text, and an image with a
+  base64 or URL source as its type and source. A document, a search
+  result, a tool reference, a browser state or an image with a `file`
+  source there is now left out and reported, and a `cache_control`, a text
+  block's `citations` or an image's `transformations` there no longer
+  goes. Bedrock's adapter sent each as it came, so a request whose history
+  holds one now goes without it, and its prompt cache is written again
+  from that block on. One whose only breakpoints sat inside a
+  `tool_result` goes uncached while that block is in history, as on the
+  Anthropic adapter today: by our reading, the breakpoint budget still
+  counts them, so `NativeFormatter` adds no system breakpoint. membrane
+  builds none of them inside a `tool_result`, and MCP's content types
+  include none of them.
+- Whitespace-only text inside a `tool_result` on Bedrock is now removed as
+  the adapter builds the content, and reported as its `tool_result`, as the
+  Anthropic adapter does, where the empty-text cleanup removed it after the
+  build and reported the text block.
+
+### Fixed
+
+- The Anthropic and Bedrock adapters build each block at the top of a
+  message from the Messages API's own fields for its type (text, image,
+  document, `tool_use`, `tool_result`, `thinking` and `redacted_thinking`)
+  (#161). A field the API doesn't define, which it refuses ("Extra inputs
+  are not permitted"), is left behind: MCP's `annotations` and `_meta`,
+  membrane's `sourceUrl`, `tokenEstimate` and `rawItem`, a tool call's
+  `rawXml`, or a host's own. Before, such a field reached the wire on a
+  block the adapter passed on as it came, and since the block stays in
+  history, every later request carrying it was refused. That included an
+  image's `tokenEstimate` at the top of a message, and a `redacted_thinking`
+  block's `tokenEstimate` on both adapters (agent-framework, whose stamp
+  that is, leaves it off its requests since anima-research/agent-framework#571).
+  A block of another type, such as a server-tool block the API produced,
+  still goes as it came (on Bedrock without `cache_control.ttl`, as
+  before), and so do the blocks of a passthrough `extra.messages`.
+- Inside a `tool_result` on Bedrock, the content is now built as the
+  Anthropic adapter already builds it: text as its type and text, an image
+  with a base64 or URL source as its type and source, labelled by its bytes
+  or sent as the placeholder, and any other block left out and reported.
+  Before, Bedrock's adapter kept every field on each block there, so an MCP
+  text block's `annotations` or an image's `sourceUrl` got every later
+  request refused (#161).
+- A document in membrane's form now goes with `media_type`, and its
+  `filename` as its `title`, as `toAnthropicContent` sends it, where a
+  request built directly sent `mediaType` and was refused (#161).
+- An error `tool_result`, which the API takes with text only and never
+  without content, now goes as the API takes it, on both adapters and from
+  `toAnthropicContent`: an image there goes as a note saying it wasn't
+  shown (or as the placeholder, when its data is no image the API accepts,
+  as before), and one that would go with no content carries a note saying
+  it carries no content this request can show. Before, Bedrock's adapter
+  sent each block there, Anthropic's sent an image there, and an error
+  result left empty went out empty, and the API refused each.
+- A block that isn't an object, such as a `null`, at the top of a message
+  or inside a `tool_result`'s content, is now left out and reported, on
+  both adapters. Before, both adapters threw building a request with one at
+  the top of a message, and inside a `tool_result` Anthropic's adapter threw
+  and Bedrock's sent it and the API refused it.
+
+- Published docs that said something the code doesn't do now say what it does. The code is unchanged:
+  - **Retry** (`@animalabs/membrane/retry`): an overloaded failure whose settings have no overloaded
+    schedule is retried on the `retryable` schedule, without jitter (`RetrySettings`, `delayFor`,
+    `retryDecision`). `RetrySchedule`'s formula is the un-jittered step, not the wait itself.
+    `MEMBRANE_RETRY_SETTINGS`' schedules stay frozen in a spread copy, so a change replaces whole
+    schedules.
+  - **Errors:** a `TimeoutAbortError` also comes from the progress deadline. `terminalQuota` marks
+    only a quota that no retry within a call, or a backoff, can outlast: one with no allocation, or a
+    daily one.
+  - **Streams and responses:** `TokensEvent` also carries an XML tool loop's tool results. A
+    deadline of the call's own ends a stream as `aborted` with reason `'timeout'` (`stream()`
+    returns an `AbortedResponse`), whether retries are on or off. A per-request `formatter` doesn't
+    replace a Responses formatter on the Responses adapter. `CompleteOptions.refusalRetries` no
+    longer says a discarded attempt leaves no trace: its response still reaches `onResponse`.
+    `onBlock` names every block type it reports.
+    `complete()` can make more than one provider call. `discardedAttempts` is read on
+    `details.usage`; on `complete()` the top-level `usage` is the same object, its counts the
+    surviving attempt's.
+  - **Requests:** `temperature` isn't clamped; the provider's range applies. A thinking config
+    strips a custom `top_p` only below 0.95. `promptCaching: false` still sends a `cache_control`
+    a content block carries. With one free marker slot, `floatingCacheMarker` can't keep the
+    previous round's cache entry across a round wider than the provider's ~20-block backward
+    search. `contextPrefix` is marked for caching only when membrane places the markers. In an XML
+    tool loop, the first tool result with images the request can send has them sent as images.
+  - **Context management:** truncation to the hard limits keeps at least the newest message and
+    doesn't split a tool call from its result where it can avoid it, so a limit can still be
+    exceeded, as `residualOverflow` reports. The module places at most 3 cache points.
+    `cachedStartMessageId` is unset after a new conversation or branch switch until the next roll.
+  - **Keepalive:** requests that share model, system prompt and tools share one lineage whatever
+    their lane, and the one recorded later replaces the other's snapshot (`cacheLineageKey`).
+    `maxIneffective` counts pokes that read nothing from the cache as well as those that wrote, and
+    `cacheKeepaliveIneligibleReason` also skips a request with no one-hour marker. A keepalive
+    replay resends the headers its request was recorded with and doesn't call `dynamicHeaders`.
+  - **Adapters:** on `BedrockAdapter`, `region` reads `AWS_REGION` before its default,
+    `anthropicVersion` is the `anthropic_version` body field, a gateway `baseURL` still needs a
+    non-empty `secretAccessKey`, and `reportsContentAlterations` covers unsigned thinking and
+    sourceless media too. `MockAdapter` answers from its queue, then its generator, then its echo,
+    then its default. `OpenAIAdapter`'s `baseURL` doc no longer gives Azure advice that doesn't
+    work, and `toOpenAIContent` returns a content string or null. A blank `reasoning_content`
+    loses to a substantive alias. `OpenAICompletionsAdapter`'s `assistantName` ends the prompt and
+    gets no stop sequence; it doesn't identify messages. The Images adapter's
+    `allowImageEditing` counts only base64 and generated images, `maxInputImages` is clamped to
+    [1, 16], and its usage reports input and output tokens with no cache counts. The Responses API
+    adapter's `onFastModeFallback` fires only for a request that asked for the priority tier.
+  - **Formatters:** `unsupportedMedia` governs documents (and audio in `AnthropicXmlFormatter`), and
+    `CompletionsFormatter` always strips them; an image in a format the API doesn't take becomes a
+    text placeholder either way. Not every normalizer repair emits a `NormalizeEvent`, and a
+    non-zero count isn't always a producer's bug. A parsed `string` parameter loses one layout
+    newline after its opening tag and one before its closing tag.
+    `normalizeToolPairs` joins consecutive same-role messages. `AnthropicXmlFormatterConfig`'s
+    `toolMode: 'xml'` puts the definitions where `toolInjectionMode` says.
+
 ## 0.7.2 — 2026-10-26
 
 ### Added
