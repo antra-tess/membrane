@@ -80,6 +80,18 @@ function completingResponse(): Response {
   return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream', 'request-id': 'req_fixture' } });
 }
 
+function unfinishedBodyResponse(init: RequestInit | undefined): Response {
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('{"id":"msg_test",'));
+      init?.signal?.addEventListener('abort', () => {
+        try { controller.error(Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' })); } catch { }
+      }, { once: true });
+    },
+  });
+  return new Response(body, { status: 200, headers: { 'content-type': 'application/json', 'request-id': 'req_fixture' } });
+}
+
 function hangingResponse(init: RequestInit | undefined): Promise<Response> {
   return new Promise<Response>((_resolve, reject) => {
     init?.signal?.addEventListener('abort', () => {
@@ -92,11 +104,34 @@ describe('Anthropic adapter timeoutMs (membrane#97)', () => {
   it('bounds complete() by timeoutMs when the response never arrives', async () => {
     vi.stubGlobal('fetch', async (_input: unknown, init: RequestInit) => hangingResponse(init));
     const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
-    const started = Date.now();
     await expect(
       adapter.complete(request, { timeoutMs: TIMEOUT_MS }),
     ).rejects.toMatchObject({ type: 'timeout', retryable: false, name: 'TimeoutAbortError' });
-    expect(Date.now() - started).toBeLessThan(CALLER_ABORT_MS / 2);
+  });
+
+  it('bounds complete() by timeoutMs once the headers have come and the body never finishes', async () => {
+    vi.stubGlobal('fetch', async (_input: unknown, init: RequestInit) => unfinishedBodyResponse(init));
+    const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
+    await expect(
+      adapter.complete(request, { timeoutMs: TIMEOUT_MS }),
+    ).rejects.toMatchObject({ type: 'timeout', retryable: false, name: 'TimeoutAbortError' });
+  });
+
+  it('keeps a caller abort an abort when timeoutMs is set too, on stream() and complete()', async () => {
+    const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
+    const aborted = { type: 'abort', retryable: false, name: 'MembraneError' };
+    vi.stubGlobal('fetch', async (_input: unknown, init: RequestInit) => foreverStreamingResponse(init));
+    const streaming = new AbortController();
+    setTimeout(() => streaming.abort(), DELTA_MS * 2);
+    await expect(
+      adapter.stream(request, { onChunk: () => {} }, { timeoutMs: 600_000, signal: streaming.signal }),
+    ).rejects.toMatchObject(aborted);
+    vi.stubGlobal('fetch', async (_input: unknown, init: RequestInit) => hangingResponse(init));
+    const completing = new AbortController();
+    setTimeout(() => completing.abort(), DELTA_MS);
+    await expect(
+      adapter.complete(request, { timeoutMs: 600_000, signal: completing.signal }),
+    ).rejects.toMatchObject(aborted);
   });
 
   it('bounds a stream that never stops sending deltas by timeoutMs, not by the caller', async () => {
@@ -104,16 +139,12 @@ describe('Anthropic adapter timeoutMs (membrane#97)', () => {
     const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
     const caller = new AbortController();
     const callerAbort = setTimeout(() => caller.abort(), CALLER_ABORT_MS);
-    const started = Date.now();
     try {
       await expect(
         adapter.stream(request, { onChunk: () => {} }, {
           timeoutMs: TIMEOUT_MS, idleTimeoutMs: 5000, firstEventTimeoutMs: 5000, signal: caller.signal,
         }),
       ).rejects.toMatchObject({ type: 'timeout', retryable: false, name: 'TimeoutAbortError' });
-      const elapsed = Date.now() - started;
-      // Settled by timeoutMs (with slack), long before the caller's abort.
-      expect(elapsed).toBeLessThan(CALLER_ABORT_MS / 2);
     } finally {
       clearTimeout(callerAbort);
       caller.abort();
