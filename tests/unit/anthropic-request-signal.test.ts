@@ -45,7 +45,6 @@ const events = [
   frame('message_stop', {}),
 ].join('');
 
-// Stubs the API and keeps a weak reference to the signal each request hands fetch.
 function stubAnthropic(): WeakRef<AbortSignal>[] {
   const seen: WeakRef<AbortSignal>[] = [];
   vi.stubGlobal('fetch', async (_input: unknown, init: RequestInit) => {
@@ -78,6 +77,18 @@ const adapters = {
 
 afterEach(() => vi.unstubAllGlobals());
 
+it('complete() whose credentials resolver fails leaves no listener on a reused caller signal', async () => {
+  vi.stubGlobal('fetch', async () => new Response(JSON.stringify(message), { status: 200, headers: { 'content-type': 'application/json' } }));
+  const adapter = new AnthropicAdapter({
+    credentials: async () => { throw new Error('zz no credential'); }, cacheKeepalive: { enabled: false },
+  });
+  const caller = new AbortController();
+  for (let i = 0; i < 3; i++) {
+    await expect(adapter.complete(request, { signal: caller.signal })).rejects.toMatchObject({ type: 'auth' });
+  }
+  expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
+});
+
 describe("the signal the Anthropic adapter hands the SDK (membrane#212)", () => {
   describe.each(Object.entries(adapters))('with %s', (_auth, create) => {
     it('complete() on one reused caller signal keeps no request alive', async () => {
@@ -102,8 +113,18 @@ describe("the signal the Anthropic adapter hands the SDK (membrane#212)", () => 
       expect(await stillAlive(seen)).toBeLessThanOrEqual(SLACK);
     });
 
-    // The request's own signal follows the caller's: a caller's abort, with a
-    // reason of its own, still ends the request, and as an abort.
+    it('complete() that fails leaves no listener on a reused caller signal', async () => {
+      vi.stubGlobal('fetch', async () => new Response(JSON.stringify({
+        type: 'error', error: { type: 'invalid_request_error', message: 'zz bad request' },
+      }), { status: 400, headers: { 'content-type': 'application/json', 'request-id': 'req_fixture' } }));
+      const adapter = create();
+      const caller = new AbortController();
+      for (let i = 0; i < 3; i++) {
+        await expect(adapter.complete(request, { signal: caller.signal })).rejects.toMatchObject({ httpStatus: 400 });
+      }
+      expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
+    });
+
     for (const method of ['complete', 'stream'] as const) {
       it(`a caller's abort still ends a ${method}() request, as an abort`, async () => {
         const handed: AbortSignal[] = [];

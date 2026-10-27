@@ -194,8 +194,7 @@ describe('Anthropic adapter timeoutMs (membrane#97)', () => {
   // resolver credentialSession used to hand it the caller's own signal. With
   // no timeoutMs there is no combined signal in between, so a caller reusing
   // one signal gained one listener per complete() — 3 after 3 calls on the
-  // unfixed adapter. credentialSession now hands the SDK a signal of the
-  // request's own, and releases it when the request settles.
+  // unfixed adapter.
   it('complete() with an API key and no timeoutMs leaves no listener on a reused caller signal (#212)', async () => {
     vi.stubGlobal('fetch', async () => new Response(JSON.stringify({
       ...message, content: [{ type: 'text', text: 'hello back' }], stop_reason: 'end_turn',
