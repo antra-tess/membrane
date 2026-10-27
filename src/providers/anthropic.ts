@@ -882,6 +882,8 @@ export class AnthropicAdapter implements ProviderAdapter {
       callSignal?.removeEventListener('abort', onExternalAbort);
       cleanup?.();
 
+      const aborted = callerAbort(options?.signal, session?.failure() ?? error, fullRequest);
+      if (aborted) throw aborted;
       // The idle watchdog fired: whatever the SDK wrapped the abort in
       // (AbortError, APIUserAbortError "Request was aborted.", a connection
       // error), the cause is the stalled stream.
@@ -896,8 +898,6 @@ export class AnthropicAdapter implements ProviderAdapter {
           rawRequest: fullRequest,
         }));
       }
-      const aborted = callerAbort(options?.signal, error, fullRequest);
-      if (aborted) throw aborted;
       // A deadline on the combined signal (the caller's progressTimeoutMs or
       // progressBounds, or timeoutMs here) is a timeout with its own message,
       // whatever the SDK wrapped the abort in.

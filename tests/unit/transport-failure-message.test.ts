@@ -105,6 +105,17 @@ describe("every adapter's error names the host it tried and what happened", () =
     expect(error.message).toBe('Credential resolution failed: fetch failed');
   });
 
+  it("a resolved credential whose headers can't be read keeps that failure's own text and names no host", async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}')));
+    const credential = {
+      token: 'zz-token',
+      get headers(): Record<string, string> { throw Object.assign(new Error('zz headers unreadable'), { code: 'ECONNRESET' }); },
+    };
+    const adapter = new OpenAIResponsesAPIAdapter({ baseURL: BASE, credentials: async () => credential });
+    expect((await failure(adapter, 'complete')).message).toBe('zz headers unreadable');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("a call aborted while its credential is resolved, or before, is the caller's abort and names no host", async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}')));
     const reason = () => Object.assign(new Error('zz caller gave up'), { code: 'ECONNRESET' });
