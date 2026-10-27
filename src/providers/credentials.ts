@@ -1,4 +1,5 @@
 import { authError } from '../types/index.js';
+import { failedElsewhere } from '../types/errors.js';
 
 /** Credential acquisition stays with the application; transports resolve per attempt. */
 export interface ResolvedCredential {
@@ -25,16 +26,21 @@ export async function fetchWithCredentials(
 ): Promise<Response> {
   const signal = init.signal ?? undefined;
   for (const forceRefresh of [false, true]) {
-    signal?.throwIfAborted();
-    const credential = typeof credentials === 'function'
-      ? await resolveWithSignal(credentials, forceRefresh, signal)
-      : credentials;
-    signal?.throwIfAborted();
-    validateCredential(credential);
-    const headers = new Headers(init.headers);
-    for (const [key, value] of Object.entries(credential.headers ?? {})) headers.set(key, value);
-    if (typeof credentials === 'function' || !headers.has('Authorization')) {
-      headers.set('Authorization', `Bearer ${credential.token}`);
+    let headers: Headers;
+    try {
+      signal?.throwIfAborted();
+      const credential = typeof credentials === 'function'
+        ? await resolveWithSignal(credentials, forceRefresh, signal)
+        : credentials;
+      signal?.throwIfAborted();
+      validateCredential(credential);
+      headers = new Headers(init.headers);
+      for (const [key, value] of Object.entries(credential.headers ?? {})) headers.set(key, value);
+      if (typeof credentials === 'function' || !headers.has('Authorization')) {
+        headers.set('Authorization', `Bearer ${credential.token}`);
+      }
+    } catch (error) {
+      throw failedElsewhere(error);
     }
     const response = await fetch(input, { ...init, headers });
     if (response.status !== 401 || typeof credentials !== 'function' || forceRefresh) return response;

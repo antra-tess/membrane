@@ -773,7 +773,7 @@ export class GeminiAdapter implements ProviderAdapter {
     if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
     if (isTypedAbortError(error)) return abortError(undefined, rawRequest);
 
-    return errorFromThrown(error, rawRequest);
+    return errorFromThrown(error, rawRequest, this.baseURL);
   }
 }
 

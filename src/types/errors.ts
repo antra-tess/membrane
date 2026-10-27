@@ -203,10 +203,18 @@ export function serverError(message: string, httpStatus?: number, raw?: unknown,
   });
 }
 
-export function networkError(message: string, raw?: unknown, rawRequest?: unknown): MembraneError {
+/**
+ * When `raw`, or a cause down its chain, carries a code, the message says what
+ * failed: that the request to `target`'s host and port failed (never its path,
+ * query or userinfo), and each code once, in plain words for a transport code
+ * and after `message` for any other, with the addresses it was met at that
+ * aren't the target's. Without `target` it names no host, only those
+ * addresses.
+ */
+export function networkError(message: string, raw?: unknown, rawRequest?: unknown, target?: string): MembraneError {
   return new MembraneError({
     type: 'network',
-    message,
+    message: transportFailureText(raw, target, message) ?? message,
     retryable: true,
     rawError: raw,
     rawRequest,
@@ -406,12 +414,27 @@ const ACCOUNT_REFUSAL_PATTERN =
 /** A retry hint stated only in prose: Azure OpenAI's "Please retry after 60 seconds." */
 const RETRY_AFTER_PROSE = /\bretry after (\d+(?:\.\d+)?) ?(?:s|secs?|seconds?)(?=\s*(?:[.!;,)]|$))/i;
 
-/** Socket-level failure codes on an error or its `cause` (Node, undici, Bun). */
-const NETWORK_ERROR_CODES = new Set([
-  'econnreset', 'econnrefused', 'enotfound', 'eai_again', 'epipe', 'ehostunreach', 'enetunreach', 'econnaborted',
-  'und_err_socket', 'connectionrefused', 'connectionclosed', 'connectionreset',
-]);
-const TIMEOUT_ERROR_CODES = new Set(['etimedout', 'und_err_connect_timeout', 'und_err_headers_timeout', 'und_err_body_timeout']);
+/** Transport failure codes on an error or its `cause` (Node, undici, Bun). */
+const TRANSPORT_CODES: ReadonlyMap<string, { words: string; type?: 'network' | 'timeout' }> = new Map(
+  ([
+    ['network', 'the connection was refused', ['econnrefused']],
+    ['network', "the connection was refused or the host name didn't resolve", ['connectionrefused']],
+    ['network', "the host name didn't resolve", ['enotfound', 'eai_again']],
+    ['network', 'the connection was reset', ['econnreset', 'connectionreset']],
+    ['network', 'the connection was closed', ['epipe', 'econnaborted', 'und_err_socket', 'connectionclosed']],
+    ['network', "the host couldn't be reached", ['ehostunreach', 'enetunreach']],
+    ['timeout', 'the connection timed out', ['etimedout', 'und_err_connect_timeout']],
+    ['timeout', 'no response arrived in time', ['und_err_headers_timeout']],
+    ['timeout', 'the response stopped arriving', ['und_err_body_timeout']],
+    [undefined, "the server's certificate isn't trusted", [
+      'depth_zero_self_signed_cert', 'self_signed_cert_in_chain', 'unable_to_get_issuer_cert',
+      'unable_to_get_issuer_cert_locally', 'unable_to_verify_leaf_signature',
+    ]],
+    [undefined, "the server's certificate has expired", ['cert_has_expired']],
+    [undefined, "the server's certificate isn't valid yet", ['cert_not_yet_valid']],
+    [undefined, "the server's certificate is for another name", ['err_tls_cert_altname_invalid']],
+  ] as const).flatMap(([type, words, codes]) => codes.map((code) => [code, { words, type }] as const)),
+);
 /**
  * Undici's own deadlines on a request it already sent: no response headers
  * within headersTimeout, or no body data within bodyTimeout (300 s each by
@@ -790,8 +813,9 @@ function renderBody(body: unknown): string {
  * path it arrived by, among errors already judged retryable: a non-retryable
  * error is never an overload. A status in hand decides: only 529 is an
  * overload. Only
- * a status-less error falls back to the message, with the same narrow tokens
- * as classifyError (`529` word-boundary anchored, exact `overloaded_error`).
+ * a status-less error other than a `network` or `timeout` one falls back to
+ * the message, with the same narrow tokens as classifyError (`529`
+ * word-boundary anchored, exact `overloaded_error`).
  */
 export function isOverloadedError(info: ErrorInfo): boolean {
   return classifyFailure(info) === 'overloaded';
@@ -844,8 +868,8 @@ function classifyMessage(rawMessage: string, ownText: string = rawMessage): {
  */
 function classifySocketCode(error: Error): { type: MembraneErrorType; retryable: boolean; httpStatus?: number } | undefined {
   for (const key of socketCodes(error)) {
-    if (NETWORK_ERROR_CODES.has(key)) return { type: 'network', retryable: true };
-    if (TIMEOUT_ERROR_CODES.has(key)) return { type: 'timeout', retryable: true };
+    const type = TRANSPORT_CODES.get(key)?.type;
+    if (type) return { type, retryable: true };
   }
   return undefined;
 }
@@ -874,10 +898,86 @@ function causeChain(error: unknown): object[] {
   return chain;
 }
 
-export function errorFromThrown(error: unknown, rawRequest?: unknown): MembraneError {
+const notFromTarget = new WeakSet<object>();
+
+export function failedElsewhere<E>(error: E): E {
+  if (typeof error === 'object' && error !== null) notFromTarget.add(error);
+  return error;
+}
+
+/**
+ * Node puts the code two causes down, and for a name with several addresses,
+ * each attempt's in an AggregateError's `errors`.
+ */
+function transportFailureText(error: unknown, target: string | undefined, said: string): string | undefined {
+  if (notFromTarget.has(error as object)) return undefined;
+  const tried = target === undefined ? undefined : targetOf(target);
+  const places = new Map<string, Set<string>>();
+  for (const link of causeChain(error).flatMap((link) => [link, ...attemptsOf(link)])) {
+    const code = (link as { code?: unknown }).code;
+    if (typeof code !== 'string') continue;
+    const met = places.get(code) ?? new Set<string>();
+    places.set(code, met);
+    const place = placeOf(link);
+    if (place && !(tried && place.host === tried.hostname && (place.port ?? tried.port) === tried.port)) {
+      met.add(place.text);
+    }
+  }
+  if (places.size === 0) return undefined;
+  const own = said.replace(/\.+$/, '');
+  const parts: string[] = [];
+  const unworded: string[] = [];
+  let followsOwn = false;
+  for (const [code, met] of places) {
+    const detail = met.size > 0 ? `${code} at ${[...met].join(', ')}` : code;
+    const words = TRANSPORT_CODES.get(code.toLowerCase())?.words;
+    if (words) {
+      parts.push(`${words} (${detail})`);
+      continue;
+    }
+    followsOwn = true;
+    if (met.size > 0 || !own.split(/[^A-Za-z0-9_]+/).includes(code)) unworded.push(detail);
+  }
+  if (followsOwn) {
+    parts.push(unworded.length === 0 ? own : own === '' ? unworded.join(', ') : `${own} (${unworded.join(', ')})`);
+  }
+  return `The request${tried ? ` to ${tried.host}` : ''} failed: ${parts.join('; ')}.`;
+}
+
+function attemptsOf(link: object): object[] {
+  const errors = (link as { errors?: unknown }).errors;
+  return Array.isArray(errors) ? errors.filter((e): e is object => typeof e === 'object' && e !== null) : [];
+}
+
+function placeOf(link: object): { host: string; port?: number; text: string } | undefined {
+  const { address, port, hostname } = link as { address?: unknown; port?: unknown; hostname?: unknown };
+  if (typeof address === 'string') {
+    const shown = address.includes(':') ? `[${address}]` : address;
+    return typeof port === 'number' ? { host: address, port, text: `${shown}:${port}` } : { host: address, text: shown };
+  }
+  if (typeof hostname === 'string') return { host: hostname, text: hostname };
+  return undefined;
+}
+
+const DEFAULT_PORTS: Record<string, number> = { 'http:': 80, 'https:': 443 };
+
+function targetOf(target: string): { host: string; hostname: string; port?: number } | undefined {
+  if (!URL.canParse(target)) return undefined;
+  const url = new URL(target);
+  return {
+    host: url.host,
+    hostname: url.hostname.replace(/^\[(.*)\]$/, '$1'),
+    port: url.port !== '' ? Number(url.port) : DEFAULT_PORTS[url.protocol],
+  };
+}
+
+export function errorFromThrown(error: unknown, rawRequest?: unknown, target?: string): MembraneError {
   if (error instanceof MembraneError) return withRawRequest(error, rawRequest);
   const info = classifyError(error);
   info.rawRequest = rawRequest;
+  if (info.type === 'network' || info.type === 'timeout') {
+    info.message = transportFailureText(error, target, info.message) ?? info.message;
+  }
   const typed = new MembraneError(info);
   return isSentRequestDeadline(error) || isDeadlineExpiry(error) ? deadlineExpired(typed) : typed;
 }
