@@ -338,9 +338,10 @@ export interface ProviderRequestOptions {
    * `abort`, not retryable, unless it fired for one of membrane's own
    * deadlines, which rejects as a `timeout`. Where it ended the request with
    * a reason that is already a MembraneError of type `abort`, every adapter
-   * but AnthropicAdapter, whose SDK rejects with an error of its own, and
-   * MockAdapter passes that error on, with the request attached if it
-   * carries none and isn't frozen. */
+   * that makes requests but AnthropicAdapter passes that error on, with the
+   * request attached if it carries none and can take a new property.
+   * AnthropicAdapter's SDK rejects with an error of its own, and MockAdapter
+   * makes its own `abort`. */
   signal?: AbortSignal;
   timeoutMs?: number;
   /** Anthropic idle deadline after the first SDK event (default: 600000 ms).
