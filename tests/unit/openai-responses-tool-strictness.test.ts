@@ -1,6 +1,10 @@
 /**
- * Without a `strict` field, a function tool's validation is the provider's
- * default, and strict validation makes every property one the model must send.
+ * Responses attempts to normalize an omitted `strict` into strict mode when
+ * possible; that mode requires every property. Explicit `strict: false` opts
+ * out, preserving the caller's optional-property semantics.
+ * https://developers.openai.com/api/docs/guides/function-calling#strict-mode
+ * These mocked tests assert the outbound contract, not the model's choice of
+ * tool arguments.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OpenAIResponsesAPIAdapter } from '../../src/providers/openai-responses-api.js';
@@ -288,8 +292,27 @@ const SAVE_RECENT_IMAGE: ToolDefinition = frozen({
   },
 });
 
-describe('save_recent_image through Membrane', () => {
-  it('reaches the Responses wire with strict:false and its own required list (API key, Responses formatter)', async () => {
+// Schema shape from agent-framework 0.22.1, with abbreviated descriptions.
+// This fixture does not track that module: Membrane must preserve any schema
+// revision unchanged and send strict:false, regardless of its paging rules.
+const WORKSPACE_READ: ToolDefinition = frozen({
+  name: 'workspace--read',
+  description: 'Read workspace text using either line or character paging, never both.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      path: { type: 'string' },
+      offset: { type: 'number' },
+      limit: { type: 'number' },
+      offsetChars: { type: 'integer' },
+      limitChars: { type: 'integer' },
+    },
+    required: ['path'],
+  },
+});
+
+describe('function tools through Membrane', () => {
+  it.each([SAVE_RECENT_IMAGE, WORKSPACE_READ])('$name reaches the Responses wire with strict:false and its own required list (API key, Responses formatter)', async (fixture) => {
     const fetchMock = stubFetch(completedJson);
     const membrane = new Membrane(
       new OpenAIResponsesAPIAdapter({ apiKey: 'sk-test' }),
@@ -297,17 +320,17 @@ describe('save_recent_image through Membrane', () => {
     );
 
     await membrane.complete({
-      messages: [{ participant: 'nissa', content: [{ type: 'text', text: 'Keep that screenshot.' }] }],
+      messages: [{ participant: 'nissa', content: [{ type: 'text', text: 'Use the requested tool.' }] }],
       config: { model: 'gpt-5.6', maxTokens: 100 },
-      tools: [SAVE_RECENT_IMAGE],
+      tools: [fixture],
     });
 
     const [tool] = sentTools(fetchMock) as Array<Record<string, any>>;
     expect(tool).toEqual({
       type: 'function',
-      name: 'save_recent_image',
-      description: SAVE_RECENT_IMAGE.description,
-      parameters: SAVE_RECENT_IMAGE.inputSchema,
+      name: fixture.name,
+      description: fixture.description,
+      parameters: fixture.inputSchema,
       strict: false,
     });
     expect(tool!.parameters.required).toEqual(['path']);
@@ -398,7 +421,7 @@ describe('save_recent_image through Membrane', () => {
     expect(((error as MembraneError).rawRequest as { tools?: unknown }).tools).toEqual(refusedTools);
   });
 
-  it('reaches the subscription wire with strict:false from an Anthropic-shaped input_schema (native formatter)', async () => {
+  it.each([SAVE_RECENT_IMAGE, WORKSPACE_READ])('$name reaches the subscription wire with strict:false from an Anthropic-shaped input_schema (native formatter)', async (fixture) => {
     const fetchMock = stubFetch(completedSse);
     const membrane = new Membrane(
       new OpenAIResponsesAPIAdapter({ mode: 'subscription', credentials: async () => ({ token: 'subscription-token' }) }),
@@ -406,17 +429,17 @@ describe('save_recent_image through Membrane', () => {
     );
 
     await membrane.complete({
-      messages: [{ participant: 'nissa', content: [{ type: 'text', text: 'Keep that screenshot.' }] }],
+      messages: [{ participant: 'nissa', content: [{ type: 'text', text: 'Use the requested tool.' }] }],
       config: { model: 'gpt-5.4', maxTokens: 100 },
-      tools: [SAVE_RECENT_IMAGE],
+      tools: [fixture],
     });
 
     const [tool] = sentTools(fetchMock) as Array<Record<string, any>>;
     expect(tool).toEqual({
       type: 'function',
-      name: 'save_recent_image',
-      description: SAVE_RECENT_IMAGE.description,
-      parameters: SAVE_RECENT_IMAGE.inputSchema,
+      name: fixture.name,
+      description: fixture.description,
+      parameters: fixture.inputSchema,
       strict: false,
     });
     expect(tool!.parameters.required).toEqual(['path']);
