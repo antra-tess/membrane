@@ -24,8 +24,9 @@
   as its `rawError` what the adapter caught, such as the caller's reason or
   what the Anthropic SDK threw, where it carried the adapter's own error or
   nothing. A deadline of the call's own (`timeoutMs`, `progressTimeoutMs`,
-  progress bounds) stays a `timeout`, unless the caller's signal has also
-  fired by the time the error is handled; then it's an `abort`, as through
+  progress bounds, and `AnthropicAdapter.stream()`'s idle and first-event
+  watchdogs) stays a `timeout`, unless the caller's signal has also fired by
+  the time the error is handled; then it's an `abort`, as through
   `Membrane`. agent-framework 0.27.0, connectome-host at `b98d9765` and
   context-manager at `f7cd5b67` cope: they reach adapters through
   `Membrane`, and connectome-host's logging adapters, which call the adapter
