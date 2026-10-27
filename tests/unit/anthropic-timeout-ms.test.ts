@@ -194,7 +194,8 @@ describe('Anthropic adapter timeoutMs (membrane#97)', () => {
   // resolver credentialSession used to hand it the caller's own signal. With
   // no timeoutMs there is no combined signal in between, so a caller reusing
   // one signal gained one listener per complete() — 3 after 3 calls on the
-  // unfixed adapter. credentialSession now derives a signal per call.
+  // unfixed adapter. credentialSession now hands the SDK a signal of the
+  // request's own, and releases it when the request settles.
   it('complete() with an API key and no timeoutMs leaves no listener on a reused caller signal (#212)', async () => {
     vi.stubGlobal('fetch', async () => new Response(JSON.stringify({
       ...message, content: [{ type: 'text', text: 'hello back' }], stop_reason: 'end_turn',
@@ -208,7 +209,7 @@ describe('Anthropic adapter timeoutMs (membrane#97)', () => {
     expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
   });
 
-  it('a caller abort still aborts complete() through the derived signal (#212)', async () => {
+  it("a caller abort still aborts complete() through the request's own signal (#212)", async () => {
     vi.stubGlobal('fetch', async (_input: unknown, init: RequestInit) => hangingResponse(init));
     const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
     const caller = new AbortController();

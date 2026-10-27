@@ -392,20 +392,26 @@ export class AnthropicAdapter implements ProviderAdapter {
         );
   }
 
+  // The SDK gets this request's own controller's signal, never the one it's
+  // given: SDK 0.52 adds an abort listener to the signal it's handed and never
+  // removes it (#212). The controller follows the given signal, and release()
+  // removes that listener once the request settles, so nothing outlives the
+  // request. A signal from AbortSignal.any isn't used here: on Node 22.12 and
+  // Bun, one that holds a listener stays alive until a source aborts.
   private credentialSession(signal?: AbortSignal, observeBody?: () => void) {
+    const abort = new AbortController();
+    const follow = () => abort.abort(signal!.reason);
+    if (signal?.aborted) abort.abort(signal.reason);
+    else signal?.addEventListener('abort', follow, { once: true });
+    const release = () => signal?.removeEventListener('abort', follow);
     const credentials = this.credentials;
     if (!credentials) {
       const client = observeBody
         ? this.client.withOptions({ fetch: observeBodyActivity((input, init) => fetch(input, init), observeBody) })
         : this.client;
-      // Derived, as the resolver branch's signal is: SDK 0.52's fetchWithTimeout
-      // adds an abort listener to the signal it's given and never removes it
-      // (#212), so handing it the caller's own signal grows that signal by one
-      // listener per call. A derived signal dies with the request instead.
-      return { client, signal: signal ? AbortSignal.any([signal]) : undefined, failure: () => undefined };
+      return { client, signal: signal ? abort.signal : undefined, failure: () => undefined, release };
     }
-    const abort = new AbortController();
-    const combined = signal ? AbortSignal.any([signal, abort.signal]) : abort.signal;
+    const combined = abort.signal;
     let failure: MembraneError | undefined;
     const client = this.client.withOptions({
       fetch: observeBodyActivity((input, init) => {
@@ -432,7 +438,7 @@ export class AnthropicAdapter implements ProviderAdapter {
         });
       }, observeBody),
     });
-    return { client, signal: combined, failure: () => failure };
+    return { client, signal: combined, failure: () => failure, release };
   }
 
   private async createMessage(
@@ -446,6 +452,8 @@ export class AnthropicAdapter implements ProviderAdapter {
       return await session.client.messages.create(request, { headers, signal: session.signal, ...retries });
     } catch (error) {
       throw session.failure() ?? error;
+    } finally {
+      session.release();
     }
   }
 
@@ -805,6 +813,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       if (idleTimer) clearTimeout(idleTimer);
       callSignal?.removeEventListener('abort', onExternalAbort);
       cleanup?.();
+      session.release();
 
       if (openBlockIndex >= 0) {
         finalizeContentBlock(openBlockIndex, false);
@@ -883,6 +892,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       if (idleTimer) clearTimeout(idleTimer);
       callSignal?.removeEventListener('abort', onExternalAbort);
       cleanup?.();
+      session?.release();
 
       // The idle watchdog fired: whatever the SDK wrapped the abort in
       // (AbortError, APIUserAbortError "Request was aborted.", a connection
