@@ -336,10 +336,13 @@ export interface ProviderRequestOptions {
   /** If it has fired by the time sending the request or reading its response
    * fails, membrane's adapters reject the call with a MembraneError of type
    * `abort`, not retryable, unless it fired for one of membrane's own
-   * deadlines, which rejects as a `timeout`. Where it ended the request with
-   * a reason that is already a MembraneError of type `abort`, every adapter
-   * that makes requests but AnthropicAdapter passes that error on, with the
-   * request attached if it carries none and can take a new property.
+   * deadlines, which rejects as a `timeout`. Where the adapter caught a
+   * reason that is already a MembraneError of type `abort`, as every adapter
+   * that makes requests but AnthropicAdapter does when that reason ended the
+   * request, it passes that error on, with the request attached if it
+   * carries none and can take a new property. A runtime's fetch can instead
+   * reject a body read begun after the signal fired with an AbortError of its
+   * own (Node 22.12.0's does), and the adapter then builds a new `abort`.
    * AnthropicAdapter's SDK rejects with an error of its own, and MockAdapter
    * makes its own `abort`. */
   signal?: AbortSignal;

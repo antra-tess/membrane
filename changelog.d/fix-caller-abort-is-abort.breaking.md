@@ -5,9 +5,13 @@
   `rawError` holds what the adapter caught, an `Error` as its serialized
   fields and anything else as it is: for `AnthropicAdapter`, what its SDK
   threw, or a credential failure that ended the request first. Where the
-  signal ended the request with a reason that is already a `MembraneError`
-  of type `abort`, every such adapter but `AnthropicAdapter`, whose SDK
-  rejects with an error of its own, passes that error on, as before. Before,
+  adapter caught a reason that is already a `MembraneError` of type `abort`,
+  as every such adapter but `AnthropicAdapter`, whose SDK rejects with an
+  error of its own, does when that reason ended the request, it passes that
+  error on, as before. A runtime's `fetch` can instead reject a body read
+  begun after the signal fired with an `AbortError` of its own (Node
+  22.12.0's does). The adapter then builds a new `abort` with that error as
+  its `rawError`, where it gave the same `abort` with none before. Before,
   every such adapter but `AnthropicAdapter` typed the abort as it would a
   failure of the request, by the reason's code, name or words: a reason
   coded `ECONNRESET`, or wrapping one as its `cause`, was `network` and

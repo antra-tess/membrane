@@ -70,6 +70,11 @@ function abortAt(when: (typeof timings)[number], method: 'complete' | 'stream', 
   }
 }
 
+function caughtAtBodyRead(rawError: unknown, reason: unknown): 'the reason' | 'its own AbortError' | 'something else' {
+  if (rawError === reason || JSON.stringify(rawError) === JSON.stringify(serializeError(reason))) return 'the reason';
+  return (rawError as { name?: unknown } | null | undefined)?.name === 'AbortError' ? 'its own AbortError' : 'something else';
+}
+
 async function rejection(adapter: ProviderAdapter, method: 'complete' | 'stream', signal: AbortSignal, onRequest?: (sent: unknown) => void): Promise<MembraneError> {
   const call = method === 'complete'
     ? adapter.complete(request, { signal, onRequest })
@@ -97,9 +102,12 @@ describe("a call its caller's signal ends is an abort, with what was caught as i
                 .toEqual({ type: 'abort', retryable: false, message: 'Request was aborted' });
               expect(sent).toBeDefined();
               expect(error.rawRequest).toBe(sent);
-              // fetch rejects with the signal's reason itself; the Anthropic SDK with its own error, but
-              // with the platform's AbortError once it reads a non-streaming response's body.
-              if (name !== 'anthropic') expect(error.rawError).toEqual(serializeError(controller.signal.reason));
+              // fetch rejects with the signal's reason itself, except that Node 22.12.0's rejects a body read begun
+              // after the abort with an AbortError of its own; the Anthropic SDK with its own error, but with
+              // the platform's AbortError once it reads a non-streaming response's body.
+              if (name !== 'anthropic' && when === 'once the response has begun') {
+                expect(['the reason', 'its own AbortError']).toContain(caughtAtBodyRead(error.rawError, controller.signal.reason));
+              } else if (name !== 'anthropic') expect(error.rawError).toEqual(serializeError(controller.signal.reason));
               else if (method === 'complete' && when === 'once the response has begun') expect(error.rawError).toMatchObject({ name: 'AbortError' });
               else expect(error.rawError).toMatchObject({ name: 'Error', message: 'Request was aborted.' });
             } finally {
@@ -124,7 +132,11 @@ describe("a caller's reason that is already a membrane abort is passed on, carry
           let sent: unknown;
           try {
             const error = await rejection(make(base), method, controller.signal, (built) => { sent = built; });
-            expect(error).toBe(given);
+            if (when === 'once the response has begun' && error !== given) {
+              expect({ type: error.type, retryable: error.retryable, message: error.message })
+                .toEqual({ type: 'abort', retryable: false, message: 'Request was aborted' });
+              expect(caughtAtBodyRead(error.rawError, given)).toBe('its own AbortError');
+            } else expect(error).toBe(given);
             expect(sent).toBeDefined();
             expect(error.rawRequest).toBe(sent);
           } finally {
@@ -134,6 +146,28 @@ describe("a caller's reason that is already a membrane abort is passed on, carry
         }, 10_000);
       }
     }
+  }
+});
+
+describe("the abort's rawError is what the adapter caught, not the signal's reason", () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  for (const method of ['complete', 'stream'] as const) {
+    it(`openai ${method}`, async () => {
+      const controller = new AbortController();
+      const caught = new Error('zz the body read failed');
+      vi.stubGlobal('fetch', async () => {
+        controller.abort(new Error('zz caller gave up'));
+        return new Response(new ReadableStream({ pull(stream) { stream.error(caught); } }), {
+          status: 200,
+          headers: { 'content-type': method === 'stream' ? 'text/event-stream' : 'application/json' },
+        });
+      });
+      const error = await rejection(new OpenAIAdapter({ apiKey: 'zz-key', baseURL: `${base}/v1` }), method, controller.signal);
+      expect({ type: error.type, retryable: error.retryable, message: error.message })
+        .toEqual({ type: 'abort', retryable: false, message: 'Request was aborted' });
+      expect(error.rawError).toEqual(serializeError(caught));
+    });
   }
 });
 
