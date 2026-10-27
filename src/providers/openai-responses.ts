@@ -19,7 +19,7 @@ import {
   withRawRequest,
 } from '../types/index.js';
 import { errorFromThrown } from '../types/errors.js';
-import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError } from './utils.js';
+import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, callerAbort } from './utils.js';
 
 interface ImagesGenerateRequest {
   model: string;
@@ -241,7 +241,7 @@ export class OpenAIResponsesAdapter implements ProviderAdapter {
       const data = (await response.json()) as ImagesAPIResponse;
       return this.parseResponse(data, request.model, imagesRequest);
     } catch (error) {
-      throw this.handleError(error, imagesRequest);
+      throw callerAbort(options?.signal, error, imagesRequest) ?? this.handleError(error, imagesRequest);
     } finally {
       cleanup?.();
     }

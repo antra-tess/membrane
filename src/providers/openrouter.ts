@@ -21,7 +21,7 @@ import {
 import { errorFromThrown } from '../types/errors.js';
 import { isRawItemCarrier } from '../utils/fidelity.js';
 import { convertMcpMedia } from '../utils/mcp-media.js';
-import { toolUseInputFromText, textOnlyToolResultContent, openAIImagePart, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved, streamedToolCalls, isEventObject } from './utils.js';
+import { toolUseInputFromText, textOnlyToolResultContent, openAIImagePart, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved, streamedToolCalls, isEventObject, callerAbort } from './utils.js';
 
 /** Content block for messages through OpenRouter */
 type OpenRouterContentBlock =
@@ -192,7 +192,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
       const response = await this.makeRequest(openRouterRequest, options);
       return this.parseResponse(response, request.model, openRouterRequest);
     } catch (error) {
-      throw this.handleError(error, openRouterRequest);
+      throw callerAbort(options?.signal, error, openRouterRequest) ?? this.handleError(error, openRouterRequest);
     }
   }
 
@@ -342,7 +342,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
       return this.parseStreamedResponse(message, finishReason, servedModel ?? request.model, streamUsage, openRouterRequest);
 
     } catch (error) {
-      throw this.handleError(error, openRouterRequest);
+      throw callerAbort(options?.signal, error, openRouterRequest) ?? this.handleError(error, openRouterRequest);
     } finally {
       cleanup?.();
     }

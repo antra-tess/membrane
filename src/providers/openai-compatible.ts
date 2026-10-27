@@ -19,7 +19,7 @@ import {
 } from '../types/index.js';
 import { errorFromThrown } from '../types/errors.js';
 import { isRawItemCarrier } from '../utils/fidelity.js';
-import { toolUseInputFromText, textOnlyToolResultContent, openAIImagePart, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved, streamedToolCalls, isEventObject } from './utils.js';
+import { toolUseInputFromText, textOnlyToolResultContent, openAIImagePart, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved, streamedToolCalls, isEventObject, callerAbort } from './utils.js';
 import { requiresCompletionTokens, noTemperatureSupport, noStopSupport } from './openai.js';
 import { convertMcpMedia } from '../utils/mcp-media.js';
 
@@ -159,7 +159,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       const response = await this.makeRequest(openAIRequest, options);
       return this.parseResponse(response, request.model, openAIRequest);
     } catch (error) {
-      throw this.handleError(error, openAIRequest);
+      throw callerAbort(options?.signal, error, openAIRequest) ?? this.handleError(error, openAIRequest);
     }
   }
 
@@ -288,7 +288,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       return this.parseStreamedResponse(message, finishReason, request.model, streamUsage, openAIRequest);
 
     } catch (error) {
-      throw this.handleError(error, openAIRequest);
+      throw callerAbort(options?.signal, error, openAIRequest) ?? this.handleError(error, openAIRequest);
     } finally {
       cleanup?.();
     }

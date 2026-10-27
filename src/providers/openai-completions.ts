@@ -17,7 +17,7 @@ import {
   withRawRequest,
 } from '../types/index.js';
 import { errorFromThrown } from '../types/errors.js';
-import { createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved, isEventObject } from './utils.js';
+import { createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved, isEventObject, callerAbort } from './utils.js';
 import { isRawItemCarrier } from '../utils/fidelity.js';
 
 interface CompletionsRequest {
@@ -141,7 +141,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
       const response = await this.makeRequest(completionsRequest, options);
       return this.parseResponse(response, request.model, completionsRequest);
     } catch (error) {
-      throw this.handleError(error, completionsRequest);
+      throw callerAbort(options?.signal, error, completionsRequest) ?? this.handleError(error, completionsRequest);
     }
   }
 
@@ -275,7 +275,7 @@ export class OpenAICompletionsAdapter implements ProviderAdapter {
       return this.buildStreamedResponse(accumulated, finishReason, request.model, streamUsage, completionsRequest, eotFound);
 
     } catch (error) {
-      throw this.handleError(error, completionsRequest);
+      throw callerAbort(options?.signal, error, completionsRequest) ?? this.handleError(error, completionsRequest);
     } finally {
       cleanup?.();
     }

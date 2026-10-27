@@ -105,7 +105,18 @@ describe("every adapter's error names the host it tried and what happened", () =
     expect(error.message).toBe('Credential resolution failed: fetch failed');
   });
 
-  it("a call aborted while its credential is resolved, or before, keeps the abort reason's own text and names no host", async () => {
+  it("a resolved credential whose headers can't be read keeps that failure's own text and names no host", async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}')));
+    const credential = {
+      token: 'zz-token',
+      get headers(): Record<string, string> { throw Object.assign(new Error('zz headers unreadable'), { code: 'ECONNRESET' }); },
+    };
+    const adapter = new OpenAIResponsesAPIAdapter({ baseURL: BASE, credentials: async () => credential });
+    expect((await failure(adapter, 'complete')).message).toBe('zz headers unreadable');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("a call aborted while its credential is resolved, or before, is the caller's abort and names no host", async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}')));
     const reason = () => Object.assign(new Error('zz caller gave up'), { code: 'ECONNRESET' });
     const rejected = (adapter: ProviderAdapter, signal: AbortSignal) =>
@@ -115,11 +126,13 @@ describe("every adapter's error names the host it tried and what happened", () =
       baseURL: BASE,
       credentials: () => { setTimeout(() => during.abort(reason()), 0); return new Promise<never>(() => {}); },
     });
-    expect((await rejected(resolving, during.signal)).message).toBe('zz caller gave up');
+    const aborted = { type: 'abort', retryable: false, message: 'Request was aborted' };
+    const shown = (error: MembraneError) => ({ type: error.type, retryable: error.retryable, message: error.message });
+    expect(shown(await rejected(resolving, during.signal))).toEqual(aborted);
     const before = new AbortController();
     before.abort(reason());
     const resolved = new OpenAIResponsesAPIAdapter({ baseURL: BASE, credentials: async () => ({ token: 'zz-token' }) });
-    expect((await rejected(resolved, before.signal)).message).toBe('zz caller gave up');
+    expect(shown(await rejected(resolved, before.signal))).toEqual(aborted);
     expect(fetch).not.toHaveBeenCalled();
   });
 

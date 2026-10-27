@@ -37,7 +37,9 @@ that still fails after the refresh, with `x-should-retry: true`, is retried
 under membrane's `retry` config as a new attempt, with a refresh of its own,
 unless the call passes `retry: false`. Only a cache-keepalive replay keeps the SDK's own retries. Resolver failures are
 separate: they abort that SDK operation before connection retries can run and
-surface the original MembraneError (or an auth error for an untyped failure).
+surface the original MembraneError (or an auth error for an untyped failure),
+unless the caller's signal has fired by the time the error is handled, which
+ends the call as an abort.
 Empty/non-string tokens fail the same way, before HTTP. The SDK request signal also
 bounds waiting on the resolver. Refresh serialization and OAuth exchanges remain
 application responsibilities.

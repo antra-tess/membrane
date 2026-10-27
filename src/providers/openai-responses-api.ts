@@ -23,7 +23,7 @@ import {
   withRawRequest,
 } from '../types/index.js';
 import { errorFromThrown } from '../types/errors.js';
-import { createCombinedSignal, SSELineParser, toolUseInputFromText, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, isEventObject } from './utils.js';
+import { createCombinedSignal, SSELineParser, toolUseInputFromText, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, isEventObject, callerAbort } from './utils.js';
 
 export interface OpenAIResponsesInputItem {
   type?: string;
@@ -254,7 +254,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
       this.assertSuccessfulAPIResponse(data, responsesRequest, 'response error');
       return this.parseResponse(data, request.model, responsesRequest);
     } catch (error) {
-      throw this.handleError(error, responsesRequest);
+      throw callerAbort(options?.signal, error, responsesRequest) ?? this.handleError(error, responsesRequest);
     } finally {
       cleanup?.();
     }
@@ -378,7 +378,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
       parsed.content.forEach((block, index) => callbacks.onContentBlock?.(index, block));
       return parsed;
     } catch (error) {
-      throw this.handleError(error, responsesRequest);
+      throw callerAbort(options?.signal, error, responsesRequest) ?? this.handleError(error, responsesRequest);
     } finally {
       cleanup?.();
     }

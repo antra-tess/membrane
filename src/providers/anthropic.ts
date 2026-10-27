@@ -33,7 +33,7 @@ import {
 import { markSystemChangeRefused, runCallerCode, statusForProviderCode, deadlineExpired, isDeadlineExpiry, errorFromThrown } from '../types/errors.js';
 import { flattenRootSchemaUnion } from './anthropic-tool-schema.js';
 import { isPlainObject } from '../utils/tool-schema.js';
-import { assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, isToolCallBlock, isToolCallArgumentsDelta, progressOfAnthropicEvent } from './utils.js';
+import { assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, isToolCallBlock, isToolCallArgumentsDelta, progressOfAnthropicEvent, callerAbort } from './utils.js';
 import { fetchWithCredentials, validateCredential, type CredentialContext, type CredentialResolver } from './credentials.js';
 import { CacheKeepalive, type CacheKeepaliveConfig } from '../cache-keepalive.js';
 
@@ -475,6 +475,8 @@ export class AnthropicAdapter implements ProviderAdapter {
 
       return this.parseResponse(response, fullRequest);
     } catch (error) {
+      const aborted = callerAbort(options?.signal, error, fullRequest);
+      if (aborted) throw aborted;
       // A deadline on the combined signal (the caller's progressTimeoutMs, or
       // timeoutMs here) is a timeout, as on every adapter; the SDK's abort
       // error can't say so.
@@ -880,6 +882,8 @@ export class AnthropicAdapter implements ProviderAdapter {
       callSignal?.removeEventListener('abort', onExternalAbort);
       cleanup?.();
 
+      const aborted = callerAbort(options?.signal, session?.failure() ?? error, fullRequest);
+      if (aborted) throw aborted;
       // The idle watchdog fired: whatever the SDK wrapped the abort in
       // (AbortError, APIUserAbortError "Request was aborted.", a connection
       // error), the cause is the stalled stream.
