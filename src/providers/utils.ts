@@ -1,4 +1,4 @@
-import { TimeoutAbortError, errorFromProviderStatus, networkError } from '../types/errors.js';
+import { MembraneError, TimeoutAbortError, errorFromProviderStatus, networkError } from '../types/errors.js';
 import { imageForRequest, urlImageForRequest } from '../utils/image-media.js';
 import { trackProgress, type ProgressBounds, type ProgressTracker } from '../progress-bounds.js';
 import type { ProgressSeen, SendReport } from '../types/provider.js';
@@ -346,6 +346,11 @@ export function isDeadlineAbort(error: unknown): boolean {
     error !== null &&
     (error as Record<symbol, unknown>)[DEADLINE_ABORT] === true
   );
+}
+
+export function callerAbort(signal: AbortSignal | undefined, error: unknown, rawRequest?: unknown): MembraneError | undefined {
+  if (!signal?.aborted || isDeadlineAbort(signal.reason)) return undefined;
+  return new MembraneError({ type: 'abort', message: 'Request was aborted', retryable: false, rawError: error, rawRequest });
 }
 
 export function deadlineTimeoutError(error: unknown, rawRequest?: unknown): TimeoutAbortError {

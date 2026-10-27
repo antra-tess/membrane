@@ -21,7 +21,7 @@ import {
 } from '../types/index.js';
 import { errorFromThrown } from '../types/errors.js';
 import { stripEmptyTextAfterPassthrough } from '../utils/empty-text.js';
-import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, streamIndex, isEventObject, isToolCallBlock, isToolCallArgumentsDelta, progressOfAnthropicEvent } from './utils.js';
+import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, streamIndex, isEventObject, isToolCallBlock, isToolCallArgumentsDelta, progressOfAnthropicEvent, callerAbort } from './utils.js';
 import {
   INTERLEAVED_THINKING_BETA,
   THINKING_BINDING_BETA,
@@ -378,7 +378,7 @@ export class BedrockAdapter implements ProviderAdapter {
       const response = await this.invokeModel(bedrockModelId, bedrockRequest, combinedSignal, fullRequest);
       return this.parseResponse(response, fullRequest);
     } catch (error) {
-      throw this.handleError(error, fullRequest);
+      throw callerAbort(options?.signal, error, fullRequest) ?? this.handleError(error, fullRequest);
     } finally {
       cleanup?.();
     }
@@ -400,7 +400,7 @@ export class BedrockAdapter implements ProviderAdapter {
     try {
       return await this.invokeModelWithStream(bedrockModelId, bedrockRequest, callbacks, combinedSignal, fullRequest, options?.onProgress);
     } catch (error) {
-      throw this.handleError(error, fullRequest);
+      throw callerAbort(options?.signal, error, fullRequest) ?? this.handleError(error, fullRequest);
     } finally {
       cleanup?.();
     }

@@ -18,7 +18,7 @@ import { errorFromThrown } from '../types/errors.js';
 import { isRawItemCarrier } from '../utils/fidelity.js';
 import { imageForRequest, GEMINI_IMAGE_TYPES } from '../utils/image-media.js';
 import { convertMcpMedia } from '../utils/mcp-media.js';
-import { createCombinedSignal, textOnlyToolResultContent, toolUseInputFromValue, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved, isEventObject } from './utils.js';
+import { createCombinedSignal, textOnlyToolResultContent, toolUseInputFromValue, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved, isEventObject, callerAbort } from './utils.js';
 
 interface GeminiPart {
   text?: string;
@@ -285,7 +285,7 @@ export class GeminiAdapter implements ProviderAdapter {
 
       return this.parseResponse(data, request.model, geminiRequest);
     } catch (error) {
-      throw this.handleError(error, geminiRequest);
+      throw callerAbort(options?.signal, error, geminiRequest) ?? this.handleError(error, geminiRequest);
     } finally {
       cleanup?.();
     }
@@ -393,7 +393,7 @@ export class GeminiAdapter implements ProviderAdapter {
         },
       };
     } catch (error) {
-      throw this.handleError(error, geminiRequest);
+      throw callerAbort(options?.signal, error, geminiRequest) ?? this.handleError(error, geminiRequest);
     } finally {
       cleanup?.();
     }

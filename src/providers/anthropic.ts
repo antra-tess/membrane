@@ -33,7 +33,7 @@ import {
 import { markSystemChangeRefused, runCallerCode, statusForProviderCode, deadlineExpired, isDeadlineExpiry, errorFromThrown } from '../types/errors.js';
 import { flattenRootSchemaUnion } from './anthropic-tool-schema.js';
 import { isPlainObject } from '../utils/tool-schema.js';
-import { assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, isDeadlineAbort, deadlineTimeoutError, isToolCallBlock, isToolCallArgumentsDelta, progressOfAnthropicEvent } from './utils.js';
+import { assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, isDeadlineAbort, deadlineTimeoutError, isToolCallBlock, isToolCallArgumentsDelta, progressOfAnthropicEvent, callerAbort } from './utils.js';
 import { fetchWithCredentials, validateCredential, type CredentialContext, type CredentialResolver } from './credentials.js';
 import { CacheKeepalive, type CacheKeepaliveConfig } from '../cache-keepalive.js';
 
@@ -474,7 +474,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       // A deadline on the caller's signal (Membrane's progressTimeoutMs) is a
       // timeout, as on every adapter; the SDK's abort error can't say so.
       if (isDeadlineAbort(options?.signal?.reason)) throw deadlineTimeoutError(options!.signal!.reason, fullRequest);
-      throw this.handleError(error, fullRequest);
+      throw callerAbort(options?.signal, error, fullRequest) ?? this.handleError(error, fullRequest);
     }
   }
 
@@ -884,7 +884,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       // progressBounds) is a timeout with its own message, whatever the SDK
       // wrapped the abort in.
       if (isDeadlineAbort(options?.signal?.reason)) throw deadlineTimeoutError(options!.signal!.reason, fullRequest);
-      throw this.handleError(session?.failure() ?? error, fullRequest);
+      throw callerAbort(options?.signal, error, fullRequest) ?? this.handleError(session?.failure() ?? error, fullRequest);
     }
   }
 

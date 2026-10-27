@@ -333,6 +333,9 @@ export interface ProviderRequestOptions {
    * Explicit extra.prompt/normalizedMessages retain precedence in
    * OpenAICompletionsAdapter. */
   promptMessages?: import('./message.js').NormalizedMessage[];
+  /** Once it fires during a call, membrane's adapters reject the call with a
+   * MembraneError of type `abort`, not retryable, whatever reason the caller
+   * gave and whatever was in flight. */
   signal?: AbortSignal;
   timeoutMs?: number;
   /** Anthropic idle deadline after the first SDK event (default: 600000 ms).
