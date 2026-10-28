@@ -158,8 +158,11 @@ npm test              # vitest run
 npx tsc --noEmit      # typecheck
 ```
 
-Push-time CI (`ci.yml`) builds, typechecks and tests every push and PR on
-ubuntu and macos, installing with `npm ci`. The lockfile is committed and
+Push-time CI (`ci.yml`) builds, typechecks and runs the whole suite for every
+pull request and every push to `main` once, on ubuntu at Node 22.12.0, the
+floor. On macos, and on the newer Node versions, it installs with `npm ci`,
+packs the package and imports it. Every leg installs with `npm ci`. The
+lockfile is committed and
 strict: `npm install` on npm >= 11 will quietly re-resolve platform packages
 missing from the lock, so only `npm ci` fails loudly on a lock that is broken
 or out of sync. If you change dependencies, commit the regenerated lock — and

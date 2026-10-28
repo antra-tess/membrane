@@ -11,21 +11,8 @@ permissions:
 
 jobs:
   build-and-test:
-    name: Build & Test (${{ matrix.os }}, node ${{ matrix.node }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      # A package-lock.json regenerated over an existing node_modules tree
-      # records only that machine's native binaries, so a lock made on macOS
-      # breaks Linux installs and vice versa. Each Node major ships its own
-      # built-in fetch (Undici), and stdio flushing around process exit
-      # differs between versions and platforms.
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-        node: ['22.12.0', 24, latest]
-        exclude:
-          - os: macos-latest
-            node: 24
+    name: Build & Test (ubuntu-latest, node 22.12.0)
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -35,7 +22,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: ${{ matrix.node }}
+          node-version: '22.12.0'
 
       # npm ci installs the lock verbatim: npm >= 11 'npm install' silently
       # re-resolves platform packages missing from the lock, so only npm ci
@@ -49,7 +36,45 @@ jobs:
       - name: Build
         run: npm run build
 
-      # Process and stdio behaviour differs between platforms: pipes are
-      # asynchronous on macOS.
       - name: Test
         run: npm test
+
+  install-and-start:
+    name: Install & start (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      # A package-lock.json regenerated over an existing node_modules tree
+      # records only that machine's native binaries, so a lock made on macOS
+      # breaks Linux installs and vice versa.
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: ['22.12.0', 24, latest]
+        exclude:
+          - os: ubuntu-latest
+            node: '22.12.0'
+          - os: macos-latest
+            node: 24
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Install dependencies (strict lockfile)
+        run: npm ci
+
+      - name: Pack, install the package into an empty project, and import it
+        shell: bash
+        run: |
+          npm pack --pack-destination "$RUNNER_TEMP"
+          mkdir "$RUNNER_TEMP/consumer"
+          cd "$RUNNER_TEMP/consumer"
+          npm init -y > /dev/null
+          npm install "$RUNNER_TEMP"/animalabs-membrane-*.tgz
+          node --input-type=module -e "await import('@animalabs/membrane'); await import('@animalabs/membrane/retry'); await import('@animalabs/membrane/progress-bounds');"
