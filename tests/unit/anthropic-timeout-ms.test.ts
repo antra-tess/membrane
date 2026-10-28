@@ -189,6 +189,35 @@ describe('Anthropic adapter timeoutMs (membrane#97)', () => {
     expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
   });
 
+  // membrane#212: the SDK's fetchWithTimeout adds an abort listener to the
+  // signal it's handed and never removes it, and without a credentials
+  // resolver credentialSession used to hand it the caller's own signal. With
+  // no timeoutMs there is no combined signal in between, so a caller reusing
+  // one signal gained one listener per complete() — 3 after 3 calls on the
+  // unfixed adapter.
+  it('complete() with an API key and no timeoutMs leaves no listener on a reused caller signal (#212)', async () => {
+    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({
+      ...message, content: [{ type: 'text', text: 'hello back' }], stop_reason: 'end_turn',
+    }), { status: 200, headers: { 'content-type': 'application/json', 'request-id': 'req_fixture' } }));
+    const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
+    const caller = new AbortController();
+    for (let i = 0; i < 3; i++) {
+      const result = await adapter.complete(request, { signal: caller.signal });
+      expect(result.stopReason).toBe('end_turn');
+    }
+    expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
+  });
+
+  it("a caller abort still aborts complete() through the request's own signal (#212)", async () => {
+    vi.stubGlobal('fetch', async (_input: unknown, init: RequestInit) => hangingResponse(init));
+    const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
+    const caller = new AbortController();
+    const pending = adapter.complete(request, { signal: caller.signal });
+    setTimeout(() => caller.abort(), 20);
+    await expect(pending).rejects.toMatchObject({ type: 'abort' });
+    expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
+  });
+
   it('releases the caller-signal listener when a stream or complete() fails', async () => {
     vi.stubGlobal('fetch', async () => new Response(JSON.stringify({
       type: 'error', error: { type: 'invalid_request_error', message: 'zz bad request' },
