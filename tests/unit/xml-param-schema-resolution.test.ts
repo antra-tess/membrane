@@ -974,35 +974,38 @@ describe('root-level unions', () => {
   });
 
   describe('alternatives that disagree on a parameter', () => {
-    const tool = toolWith('zz_root_disagreeing_tool', {
-      type: 'object',
-      oneOf: [
-        {
-          type: 'object',
-          properties: { kind: { const: 'zz-text' }, fld2: { type: 'string' } },
-          required: ['kind', 'fld2'],
-        },
-        {
-          type: 'object',
-          properties: { kind: { const: 'zz-json' }, fld2: { type: 'object' } },
-          required: ['kind', 'fld2'],
-        },
-      ],
-    });
-    const call = (kind: string, value: string) =>
+    const disagreeing = (name: string) =>
+      toolWith(name, {
+        type: 'object',
+        oneOf: [
+          {
+            type: 'object',
+            properties: { kind: { const: 'zz-text' }, fld2: { type: 'string' } },
+            required: ['kind', 'fld2'],
+          },
+          {
+            type: 'object',
+            properties: { kind: { const: 'zz-json' }, fld2: { type: 'object' } },
+            required: ['kind', 'fld2'],
+          },
+        ],
+      });
+    const tool = disagreeing('zz_root_disagreeing_tool');
+    const call = (kind: string, value: string, on: ToolDefinition = tool) =>
       parseToolCalls(
-        '<function_calls>\n<invoke name="zz_root_disagreeing_tool">\n' +
+        `<function_calls>\n<invoke name="${on.name}">\n` +
           `<parameter name="kind">${kind}</parameter>\n` +
           `<parameter name="fld2">${value}</parameter>\n` +
           '</invoke>\n</function_calls>',
-        { tools: [tool] }
+        { tools: [on] }
       )!.calls[0]!.input;
 
     it('parses a valid call to the SECOND alternative as main did', () => {
-      const { result, messages } = captureWarnings(() => call('zz-json', '{"ite1": 1}'));
+      const own = disagreeing('zz_root_disagreeing_second_tool');
+      const { result, messages } = captureWarnings(() => call('zz-json', '{"ite1": 1}', own));
       expect(result).toEqual({ kind: 'zz-json', fld2: { ite1: 1 } });
       expect(messages).toHaveLength(1);
-      expect(messages[0]).toContain('zz_root_disagreeing_tool');
+      expect(messages[0]).toContain('zz_root_disagreeing_second_tool');
       expect(messages[0]).toContain('"fld2"');
       expect(messages[0]).toContain('[{"type":"string"},{"type":"object"}]');
     });

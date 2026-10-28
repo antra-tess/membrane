@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import { createProgressDeadline } from '../../src/providers/utils.js';
 import type { ProviderRequest } from '../../src/types/index.js';
@@ -93,6 +93,16 @@ const newAdapter = (extra: ConstructorParameters<typeof AnthropicAdapter>[0] = {
   new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false }, ...extra });
 const timing = { idleTimeoutMs: IDLE_MS, firstEventTimeoutMs: IDLE_MS };
 
+async function settled<T>(promise: Promise<T>): Promise<T> {
+  let done = false;
+  promise.then(() => { done = true; }, () => { done = true; });
+  for (let step = 0; !done; step += 1) {
+    if (step > 10_000) throw new Error('the stream never settled');
+    await vi.advanceTimersByTimeAsync(PING_MS);
+  }
+  return promise;
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -101,6 +111,10 @@ afterEach(() => {
 });
 
 describe('Anthropic stream idle watchdog with live transport', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
   it('does not time out a body carrying only keepalives after message_start', async () => {
     stubFetch(init => liveResponse(init, async io => {
       io.emit(messageStart());
@@ -109,7 +123,7 @@ describe('Anthropic stream idle watchdog with live transport', () => {
       io.close();
     }));
     const chunks: string[] = [];
-    const result = await newAdapter().stream(request, { onChunk: chunk => chunks.push(chunk) }, timing);
+    const result = await settled(newAdapter().stream(request, { onChunk: chunk => chunks.push(chunk) }, timing));
     expect(result.stopReason).toBe('end_turn');
     expect(result.content).toMatchObject([{ type: 'text', text: 'hello back' }]);
     expect(chunks).toEqual(['hello back']);
@@ -122,7 +136,7 @@ describe('Anthropic stream idle watchdog with live transport', () => {
       for (const part of answer()) io.emit(part);
       io.close();
     }));
-    await expect(newAdapter().stream(request, { onChunk: () => {} }, timing)).rejects.toMatchObject({
+    await expect(settled(newAdapter().stream(request, { onChunk: () => {} }, timing))).rejects.toMatchObject({
       type: 'timeout', retryable: true, message: expect.stringMatching(/first-event timeout/),
     });
     expect(probes[0]?.torn).toBe(true);
@@ -137,9 +151,9 @@ describe('Anthropic stream idle watchdog with live transport', () => {
     }));
     const progress = createProgressDeadline(undefined, 2 * LIVE_MS);
     try {
-      await expect(newAdapter().stream(request, { onChunk: () => {} }, {
+      await expect(settled(newAdapter().stream(request, { onChunk: () => {} }, {
         ...timing, signal: progress.signal, onProgress: progress.onProgress,
-      })).rejects.toMatchObject({
+      }))).rejects.toMatchObject({
         type: 'timeout', retryable: true, message: expect.stringMatching(/first-event timeout/),
       });
       expect(progress.signal?.aborted).toBe(false);
@@ -160,7 +174,7 @@ describe('Anthropic stream idle watchdog with live transport', () => {
       for (const part of answer()) io.emit(part);
       io.close();
     }));
-    await expect(newAdapter().stream(request, { onChunk: () => {} }, timing)).rejects.toMatchObject({
+    await expect(settled(newAdapter().stream(request, { onChunk: () => {} }, timing))).rejects.toMatchObject({
       type: 'timeout', retryable: true, message: expect.stringMatching(/first-event timeout/),
     });
     expect(probes[0]?.torn).toBe(true);
@@ -174,11 +188,27 @@ describe('Anthropic stream idle watchdog with live transport', () => {
       for (const part of answer()) io.emit(part);
       io.close();
     }));
-    const result = await newAdapter().stream(request, { onChunk: () => {} }, {
+    const result = await settled(newAdapter().stream(request, { onChunk: () => {} }, {
       ...timing, firstEventTimeoutMs: 6 * IDLE_MS,
-    });
+    }));
     expect(result.stopReason).toBe('end_turn');
     expect(result.content).toMatchObject([{ type: 'text', text: 'hello back' }]);
+  });
+
+  it('ends the same pings with a first-event timeout once they run past that deadline', async () => {
+    stubFetch(init => liveResponse(init, async io => {
+      await io.sleep(2 * IDLE_MS);
+      await keepalives(io, 6 * IDLE_MS);
+      io.emit(messageStart());
+      for (const part of answer()) io.emit(part);
+      io.close();
+    }));
+    await expect(settled(newAdapter().stream(request, { onChunk: () => {} }, {
+      ...timing, firstEventTimeoutMs: 6 * IDLE_MS,
+    }))).rejects.toMatchObject({
+      type: 'timeout', retryable: true, message: expect.stringMatching(/first-event timeout/),
+    });
+    expect(probes[0]?.torn).toBe(true);
   });
 
   it('still classifies real silence after message_start as the typed idle timeout', async () => {
@@ -186,7 +216,7 @@ describe('Anthropic stream idle watchdog with live transport', () => {
       io.emit(messageStart());
       await io.untilDone();
     }));
-    await expect(newAdapter().stream(request, { onChunk: () => {} }, timing)).rejects.toMatchObject({
+    await expect(settled(newAdapter().stream(request, { onChunk: () => {} }, timing))).rejects.toMatchObject({
       type: 'timeout', retryable: true, message: expect.stringMatching(/idle timeout/),
     });
     expect(probes[0]?.torn).toBe(true);
@@ -194,7 +224,7 @@ describe('Anthropic stream idle watchdog with live transport', () => {
 
   it('still classifies silence before any byte as the first-event timeout', async () => {
     stubFetch(init => liveResponse(init, io => io.untilDone()));
-    await expect(newAdapter().stream(request, { onChunk: () => {} }, timing)).rejects.toMatchObject({
+    await expect(settled(newAdapter().stream(request, { onChunk: () => {} }, timing))).rejects.toMatchObject({
       type: 'timeout', retryable: true, message: expect.stringMatching(/first-event timeout/),
     });
     expect(probes[0]?.torn).toBe(true);
@@ -208,7 +238,7 @@ describe('Anthropic stream idle watchdog with live transport', () => {
       await keepalives(io, LIVE_MS);
       io.close();
     }));
-    await expect(newAdapter().stream(request, { onChunk: () => {} }, timing)).rejects.toMatchObject({
+    await expect(settled(newAdapter().stream(request, { onChunk: () => {} }, timing))).rejects.toMatchObject({
       retryable: true, message: expect.stringMatching(/stream ended before a terminal event/),
     });
   });
@@ -221,7 +251,7 @@ describe('Anthropic stream idle watchdog with live transport', () => {
     const caller = new AbortController();
     const pending = newAdapter().stream(request, { onChunk: () => {} }, { ...timing, signal: caller.signal });
     setTimeout(() => caller.abort(), 2 * IDLE_MS);
-    await expect(pending).rejects.toMatchObject({ type: 'abort' });
+    await expect(settled(pending)).rejects.toMatchObject({ type: 'abort' });
     expect(probes[0]?.torn).toBe(true);
   });
 
@@ -244,7 +274,7 @@ describe('Anthropic stream idle watchdog with live transport', () => {
       adapter.stream(withText('finish'), { onChunk: () => {} }, timing),
     ]);
     setTimeout(() => aborted.abort(), 2 * IDLE_MS);
-    const [first, second] = await results;
+    const [first, second] = await settled(results);
     expect(first).toMatchObject({ status: 'rejected', reason: { type: 'abort' } });
     expect(second).toMatchObject({ status: 'fulfilled', value: { stopReason: 'end_turn' } });
   });
@@ -264,7 +294,7 @@ describe('Anthropic stream idle watchdog with live transport', () => {
     const adapter = newAdapter({
       credentials: ({ forceRefresh }) => { flags.push(forceRefresh); return { token: forceRefresh ? 'fresh' : 'expired' }; },
     });
-    const result = await adapter.stream(request, { onChunk: () => {} }, timing);
+    const result = await settled(adapter.stream(request, { onChunk: () => {} }, timing));
     expect(result.stopReason).toBe('end_turn');
     expect(flags).toEqual([false, true]);
     expect(calls).toHaveLength(2);
