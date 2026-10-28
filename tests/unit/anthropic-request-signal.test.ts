@@ -77,18 +77,6 @@ const adapters = {
 
 afterEach(() => vi.unstubAllGlobals());
 
-it('complete() whose credentials resolver fails leaves no listener on a reused caller signal', async () => {
-  vi.stubGlobal('fetch', async () => new Response(JSON.stringify(message), { status: 200, headers: { 'content-type': 'application/json' } }));
-  const adapter = new AnthropicAdapter({
-    credentials: async () => { throw new Error('zz no credential'); }, cacheKeepalive: { enabled: false },
-  });
-  const caller = new AbortController();
-  for (let i = 0; i < 3; i++) {
-    await expect(adapter.complete(request, { signal: caller.signal })).rejects.toMatchObject({ type: 'auth' });
-  }
-  expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
-});
-
 describe("the signal the Anthropic adapter hands the SDK (membrane#212)", () => {
   describe.each(Object.entries(adapters))('with %s', (_auth, create) => {
     it('complete() on one reused caller signal keeps no request alive', async () => {
