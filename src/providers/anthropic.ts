@@ -392,8 +392,8 @@ export class AnthropicAdapter implements ProviderAdapter {
         );
   }
 
-  // The SDK gets this request's own controller's signal, never the one it's
-  // given: SDK 0.52 adds an abort listener to the signal it's handed and never
+  // When given a signal, the SDK gets this request's own controller's signal
+  // instead: SDK 0.52 adds an abort listener to the signal it's handed and never
   // removes it (#212). The controller follows the given signal, and release()
   // removes that listener once the request settles, so nothing outlives the
   // request. A signal from AbortSignal.any isn't used here: on Node 22.12 and
