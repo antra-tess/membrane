@@ -1,4 +1,4 @@
-/** vitest isolates each test file, so this case, which fills the process-wide memory of logged stop reasons, has a file of its own. */
+/** This case fills the process-wide memory of logged stop reasons, so it has a file of its own, which runs alone in a fresh worker since it spies on console (vitest.config.ts). */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';

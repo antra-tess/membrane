@@ -573,9 +573,13 @@ describe('AnthropicAdapter under progress bounds', () => {
 
 describe('BedrockAdapter under progress bounds', () => {
   it('end a stream that sends only pings after message_start, as a timeout naming the bound, and send it once', async () => {
+    vi.useFakeTimers();
     const calls: RequestInit[] = [];
+    let sent!: () => void;
+    const sending = new Promise<void>((resolve) => { sent = resolve; });
     vi.stubGlobal('fetch', async (_input: unknown, init: RequestInit) => {
       calls.push(init);
+      sent();
       let done = false;
       let controller!: ReadableStreamDefaultController<Uint8Array>;
       const body = new ReadableStream<Uint8Array>({
@@ -601,10 +605,14 @@ describe('BedrockAdapter under progress bounds', () => {
       new BedrockAdapter({ accessKeyId: 'zz-key', secretAccessKey: 'zz-secret', region: 'us-east-1' }),
       { formatter: new NativeFormatter() },
     );
-    const result = await membrane.stream(
+    const streaming = membrane.stream(
       { ...NATIVE_REQUEST, tools: undefined },
       { progressBounds: { beforeContentMs: 300, betweenEventsMs: 300, thinkTokensPerSecond: 50 } },
     );
+    // Signing awaits crypto.subtle, which fake timers don't drive, so the clock moves only once the request is out.
+    await sending;
+    await vi.advanceTimersByTimeAsync(400);
+    const result = await streaming;
     expect(result).toMatchObject({ aborted: true, reason: 'timeout' });
     expect((result as { message?: string }).message).toMatch(/^No content within 0\.3s of the send: /);
     expect(calls).toHaveLength(1);

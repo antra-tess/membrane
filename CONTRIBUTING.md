@@ -158,8 +158,11 @@ npm test              # vitest run
 npx tsc --noEmit      # typecheck
 ```
 
-Push-time CI (`ci.yml`) builds, typechecks and tests every push and PR on
-ubuntu and macos, installing with `npm ci`. The lockfile is committed and
+Push-time CI (`ci.yml`) builds, typechecks and runs the whole suite for every
+pull request and every push to `main` once, on ubuntu at Node 22.12.0, the
+floor. On macos, and on the newer Node versions, it installs with `npm ci`,
+packs the package and imports it. Every leg installs with `npm ci`. The
+lockfile is committed and
 strict: `npm install` on npm >= 11 will quietly re-resolve platform packages
 missing from the lock, so only `npm ci` fails loudly on a lock that is broken
 or out of sync. If you change dependencies, commit the regenerated lock — and
@@ -168,3 +171,29 @@ only your platform's native binaries, which is why CI installs on both.
 
 Provider credentials come from the environment; tests that would need real
 ones are mocked, so the suite runs without keys.
+
+Most test files share their worker's modules, so membrane is imported once per
+worker rather than once per file. A file that watches or changes process-wide
+state runs alone in a fresh worker instead: one that spies on or assigns to
+`console`, writes `process.env` (`vi.stubEnv` included) or `globalThis`,
+mocks a module, or never undoes a `vi.stubGlobal` or `vi.useFakeTimers`.
+`vitest.config.ts` routes each file by scanning it (`tests/isolation.ts`), so
+there's no list to keep. This matters because `src` logs some warnings once
+per process, such as an unmapped stop reason, and a file that asserts on
+what's logged would otherwise see another file's logging. A shared file that
+leaves `console`, `process`, `process.env`, `globalThis` or fake timers
+changed fails at its end (`tests/shared-setup.ts`), naming what it left;
+restore it in `afterEach` or `afterAll`.
+
+- vitest restores spies after every file, isolated or shared, but only after
+  that check has run, so a shared file restores its own spies on `process` or
+  `globalThis`.
+- Anything else you change is yours to restore: the check compares only the
+  string-keyed own properties of `console`, `process`, `process.env` and
+  `globalThis` (not `process.chdir`) and whether fake timers are on, so it
+  doesn't see an assignment such as `Date.now = …`, a prototype patch, a
+  symbol-keyed global, a changed working directory, or a value kept behind an
+  accessor, such as `process.exitCode`.
+- The scan reads the test file, not the helpers it imports. A file that
+  imports a helper which spies on `console` or leaves process-wide state
+  changed adds a `// vitest: isolate` line.

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import type { CredentialContext } from '../../src/providers/credentials.js';
 import type { ProviderRequest } from '../../src/types/index.js';
+import { authError } from '../../src/index.js';
 
 const request: ProviderRequest = {
   model: 'claude-sonnet-4-6', maxTokens: 32,
@@ -139,7 +140,6 @@ describe('Anthropic rotating credentials through the real SDK', () => {
 
 for (const lane of ['complete', 'stream'] as const) {
   it.each(['throw', 'empty'] as const)(`preserves credential failures without SDK reacquisition (${lane}, %s)`, async kind => {
-    const { authError } = await import('../../src/index.js');
     const failure = authError('login required');
     let resolutions = 0;
     const fetch = vi.fn();
@@ -158,7 +158,6 @@ for (const lane of ['complete', 'stream'] as const) {
 }
 
 it('does not reacquire after the forced-refresh resolver fails', async () => {
-  const { authError } = await import('../../src/index.js');
   const failure = authError('refresh token expired');
   const flags: boolean[] = [];
   const fetch = vi.fn(async () => unauthorized());
@@ -174,7 +173,6 @@ it('does not reacquire after the forced-refresh resolver fails', async () => {
 });
 
 it('isolates a failing acquisition from concurrent successful requests', async () => {
-  const { authError } = await import('../../src/index.js');
   const failure = authError('login required');
   let acquisitions = 0;
   vi.stubGlobal('fetch', async () => completed());

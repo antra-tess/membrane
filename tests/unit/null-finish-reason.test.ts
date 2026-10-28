@@ -1,7 +1,8 @@
 /**
  * A server can end a choice or candidate with `finish_reason: null` (or
- * Gemini's `finishReason: null`). Vitest runs each file in a module of its
- * own, so these are the first stop reasons this process logs.
+ * Gemini's `finishReason: null`). This file spies on console, so it runs
+ * alone in a fresh worker (vitest.config.ts), and these are the first stop
+ * reasons its process logs.
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
