@@ -175,7 +175,7 @@ describe('OpenAIResponsesAPIAdapter', () => {
 
     const body = JSON.parse(String(init.body));
     expect(body.input).toEqual(input);
-    expect(rawRequest.input).toBe(input);
+    expect(rawRequest.input).toEqual(input);
     expect(body.store).toBe(false);
     expect(body.include).toEqual([
       'message.output_text.logprobs',

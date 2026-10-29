@@ -28,7 +28,7 @@ afterEach(() => {
 describe('the unmapped stop-reason log is bounded', () => {
   it('logs the first 64 distinct reasons, says once that it stops, and then stays quiet', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const membrane = new Membrane(new FreshReasonAdapter());
+    const membrane = new Membrane(new FreshReasonAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 }));
     for (let i = 0; i < 80; i++) {
       const response = await membrane.complete(zzRequest);
       expect(response.details.stop.providerReason).toBe(`zz_fresh_reason_${i}`);

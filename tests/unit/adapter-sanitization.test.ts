@@ -3,105 +3,84 @@
  * `normalizedMessages`, with a 400.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { AnthropicAdapter } from '../../src/providers/anthropic.js';
+import { BedrockAdapter } from '../../src/providers/bedrock.js';
+import { GeminiAdapter } from '../../src/providers/gemini.js';
+import { OpenAIAdapter } from '../../src/providers/openai.js';
+import { OpenAICompatibleAdapter } from '../../src/providers/openai-compatible.js';
+import { OpenAICompletionsAdapter } from '../../src/providers/openai-completions.js';
+import { OpenAIResponsesAdapter } from '../../src/providers/openai-responses.js';
+import { OpenAIResponsesAPIAdapter } from '../../src/providers/openai-responses-api.js';
+import { OpenRouterAdapter } from '../../src/providers/openrouter.js';
+import type { ProviderAdapter, ProviderRequest } from '../../src/types/provider.js';
 
-describe('Adapter Request Sanitization', () => {
-  describe('extra params filtering', () => {
-    it('should filter normalizedMessages from extra params', () => {
-      const extra = {
-        normalizedMessages: [{ participant: 'User', content: [] }],
-        prompt: 'some prompt',
-        customParam: 'value',
-        anotherParam: 123,
+const adapters: Array<[string, () => ProviderAdapter]> = [
+  ['anthropic', () => new AnthropicAdapter({ apiKey: 'zz-key', maxRetries: 0, cacheKeepalive: { enabled: false } })],
+  ['bedrock', () => new BedrockAdapter({ region: 'us-east-1', accessKeyId: 'zz-key-id', secretAccessKey: 'zz-secret' })],
+  ['gemini', () => new GeminiAdapter({ apiKey: 'zz-key' })],
+  ['openai', () => new OpenAIAdapter({ apiKey: 'zz-key' })],
+  ['openai-compatible', () => new OpenAICompatibleAdapter({ apiKey: 'zz-key', baseURL: 'http://zz-host.invalid/v1' })],
+  ['openai-responses', () => new OpenAIResponsesAdapter({ apiKey: 'zz-key' })],
+  ['openai-responses-api', () => new OpenAIResponsesAPIAdapter({ apiKey: 'zz-key' })],
+  ['openrouter', () => new OpenRouterAdapter({ apiKey: 'zz-key' })],
+];
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("an adapter sends a caller's extra params, and none of membrane's own", () => {
+  for (const [name, make] of adapters) {
+    it(name, async () => {
+      const bodies: string[] = [];
+      vi.stubGlobal('fetch', async (_input: unknown, init?: RequestInit) => {
+        bodies.push(String(init?.body));
+        return new Response(JSON.stringify({ error: { message: 'zz refused' } }), { status: 400, headers: { 'content-type': 'application/json' } });
+      });
+      const request: ProviderRequest = {
+        model: 'claude-sonnet-4-5',
+        messages: [{ role: 'user', content: 'zz hello' }],
+        maxTokens: 16,
+        extra: {
+          normalizedMessages: [{ participant: 'zz-internal-participant', content: [] }],
+          prompt: 'zz-internal-prompt',
+          zz_custom_param: 'zz-custom-value',
+        },
       };
+      await make().complete(request).catch(() => undefined);
 
-      const { normalizedMessages, prompt, ...rest } = extra as Record<string, unknown>;
-
-      expect(rest).not.toHaveProperty('normalizedMessages');
-      expect(rest).not.toHaveProperty('prompt');
-      expect(rest).toHaveProperty('customParam', 'value');
-      expect(rest).toHaveProperty('anotherParam', 123);
-    });
-
-    it('should handle extra without internal fields', () => {
-      const extra = {
-        customParam: 'value',
-      };
-
-      const { normalizedMessages, prompt, ...rest } = extra as Record<string, unknown>;
-
-      expect(normalizedMessages).toBeUndefined();
-      expect(prompt).toBeUndefined();
-      expect(rest).toHaveProperty('customParam', 'value');
-    });
-
-    it('should handle undefined extra', () => {
-      const extra = undefined;
-
-      if (extra) {
-        const { normalizedMessages, prompt, ...rest } = extra as Record<string, unknown>;
-        expect(true).toBe(false);
-      } else {
-        expect(true).toBe(true);
+      expect(bodies.length).toBeGreaterThan(0);
+      for (const body of bodies) {
+        expect(body).not.toContain('normalizedMessages');
+        expect(body).not.toContain('zz-internal-participant');
+        expect(body).not.toContain('zz-internal-prompt');
+        expect(body).toContain('"zz_custom_param":"zz-custom-value"');
       }
     });
+  }
 
-    it('should handle empty extra', () => {
-      const extra = {};
-
-      const { normalizedMessages, prompt, ...rest } = extra as Record<string, unknown>;
-
-      expect(rest).toEqual({});
+  it('openai-completions, which builds its prompt from normalizedMessages', async () => {
+    const bodies: string[] = [];
+    vi.stubGlobal('fetch', async (_input: unknown, init?: RequestInit) => {
+      bodies.push(String(init?.body));
+      return new Response(JSON.stringify({ error: { message: 'zz refused' } }), { status: 400, headers: { 'content-type': 'application/json' } });
     });
-  });
+    const adapter = new OpenAICompletionsAdapter({ baseURL: 'http://zz-host.invalid/v1', apiKey: 'zz-key' });
+    await adapter.complete({
+      model: 'zz-base-model',
+      messages: [{ role: 'user', content: 'zz hello' }],
+      maxTokens: 16,
+      extra: {
+        normalizedMessages: [{ participant: 'User', content: [{ type: 'text', text: 'zz hello' }] }],
+        zz_custom_param: 'zz-custom-value',
+      },
+    }).catch(() => undefined);
 
-  describe('OpenRouter adapter filtering', () => {
-    it('verifies OpenRouter uses correct filtering pattern', async () => {
-      const fs = await import('fs');
-      const path = await import('path');
-      const adapterPath = path.join(process.cwd(), 'src/providers/openrouter.ts');
-      const source = fs.readFileSync(adapterPath, 'utf-8');
-
-      expect(source).toContain('const { normalizedMessages, prompt, ...rest }');
-      expect(source).toContain('Object.assign(params, rest)');
-      expect(source).not.toMatch(/Object\.assign\(params,\s*request\.extra\)/);
-    });
-  });
-
-  describe('OpenAI adapter filtering', () => {
-    it('verifies OpenAI uses correct filtering pattern', async () => {
-      const fs = await import('fs');
-      const path = await import('path');
-      const adapterPath = path.join(process.cwd(), 'src/providers/openai.ts');
-      const source = fs.readFileSync(adapterPath, 'utf-8');
-
-      expect(source).toContain('const { normalizedMessages, prompt, ...rest }');
-      expect(source).toContain('Object.assign(params, rest)');
-      expect(source).not.toMatch(/Object\.assign\(params,\s*request\.extra\)/);
-    });
-  });
-
-  describe('OpenAI-compatible adapter filtering', () => {
-    it('verifies OpenAI-compatible uses correct filtering pattern', async () => {
-      const fs = await import('fs');
-      const path = await import('path');
-      const adapterPath = path.join(process.cwd(), 'src/providers/openai-compatible.ts');
-      const source = fs.readFileSync(adapterPath, 'utf-8');
-
-      expect(source).toContain('const { normalizedMessages, prompt, ...rest }');
-      expect(source).toContain('Object.assign(params, rest)');
-      expect(source).not.toMatch(/Object\.assign\(params,\s*request\.extra\)/);
-    });
-  });
-
-  describe('Anthropic adapter filtering', () => {
-    it('verifies Anthropic uses correct filtering pattern', async () => {
-      const fs = await import('fs');
-      const path = await import('path');
-      const adapterPath = path.join(process.cwd(), 'src/providers/anthropic.ts');
-      const source = fs.readFileSync(adapterPath, 'utf-8');
-
-      expect(source).toContain('const { normalizedMessages, prompt, ...rest }');
-    });
+    expect(bodies.length).toBeGreaterThan(0);
+    for (const body of bodies) {
+      expect(body).not.toContain('normalizedMessages');
+      expect(body).toContain('"zz_custom_param":"zz-custom-value"');
+    }
   });
 });

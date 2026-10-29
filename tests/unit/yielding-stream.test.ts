@@ -90,7 +90,7 @@ describe('YieldingStream', () => {
   describe('cancellation', () => {
     it('can be cancelled via cancel()', async () => {
       adapter = new MockAdapter({
-        streamChunkDelayMs: 50,
+        streamChunkDelayMs: 1,
         streamChunkSize: 1,
       });
       membrane = new Membrane(adapter);
@@ -115,7 +115,7 @@ describe('YieldingStream', () => {
 
     it('can be cancelled via AbortSignal', async () => {
       adapter = new MockAdapter({
-        streamChunkDelayMs: 50,
+        streamChunkDelayMs: 1,
         streamChunkSize: 1,
       });
       membrane = new Membrane(adapter);
@@ -136,12 +136,6 @@ describe('YieldingStream', () => {
 
       const abortedEvents = events.filter(e => e.type === 'aborted');
       expect(abortedEvents.length).toBe(1);
-    });
-
-    it('cancel() sets isCancelled flag', () => {
-      const stream = membrane.streamYielding(createRequest());
-      expect(stream.isWaitingForTools).toBe(false);
-      stream.cancel();
     });
   });
 

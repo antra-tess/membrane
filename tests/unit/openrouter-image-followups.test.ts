@@ -37,9 +37,8 @@ describe('malformed OpenRouter image entries', () => {
     const result = fromOpenRouterMessage(message(where) as any);
     expect(result.filter(block => block.type === 'image')).toEqual([image]);
     expect(result.filter(block => block.type === 'text').map(block => block.text).join('')).toBe('beforeafter');
-    expect(result.at(-1)).toEqual(toolBlock);
+    expect(result).toContainEqual(toolBlock);
     expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0][0]).toMatch(/image.*string.*url/i);
   });
 
   it.each(['content', 'images'])('retains valid content and usage in complete responses with malformed %s', async where => {

@@ -39,11 +39,14 @@ describe('AnthropicXmlFormatter', () => {
         assistantParticipant: 'Claude',
       });
 
-      expect(result.messages.length).toBeGreaterThan(0);
       const lastMsg = result.messages[result.messages.length - 1];
       expect(lastMsg?.role).toBe('assistant');
       expect(typeof lastMsg?.content).toBe('string');
-      expect(lastMsg?.content).toContain('Claude:');
+      expect(String(lastMsg?.content).trimEnd().endsWith('Claude:')).toBe(true);
+      const transcript = result.messages.map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n');
+      const at = ['User: Hello', 'Claude: Hi there!', 'User: How are you?'].map((line) => transcript.indexOf(line));
+      expect(at.every((index) => index >= 0)).toBe(true);
+      expect([...at].sort((x, y) => x - y)).toEqual(at);
     });
 
     it('generates stop sequences from participants', () => {
@@ -948,8 +951,14 @@ describe('CompletionsFormatter', () => {
       const formatter = new CompletionsFormatter();
       const parser = formatter.createStreamParser();
 
-      expect(parser).toBeDefined();
+      const first = parser.processChunk('<thinking>zz held');
       expect(parser.isInsideBlock()).toBe(false);
+      const second = parser.processChunk('</thinking> zz after');
+      expect(parser.isInsideBlock()).toBe(false);
+      const content = [first, second].flatMap((result) => result.emissions).flatMap((emission) => (emission.kind === 'content' ? [emission] : []));
+      expect(content.map((emission) => emission.text).join('')).toBe('<thinking>zz held</thinking> zz after');
+      expect(content.every((emission) => emission.meta.type === 'text' && emission.meta.visible)).toBe(true);
+      expect(parser.getAccumulated()).toBe('<thinking>zz held</thinking> zz after');
     });
 
     it('parser accumulates content', () => {

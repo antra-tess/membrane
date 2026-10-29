@@ -527,7 +527,7 @@ describe('flattenRootSchemaUnion', () => {
 
     const result = flattenRootSchemaUnion(schema) as Record<string, any>;
 
-    expect(Object.keys(result.properties)).toEqual(['constructor', 'a', 'b']);
+    expect(Object.keys(result.properties).sort()).toEqual(['a', 'b', 'constructor']);
     expect(result.properties.constructor).toEqual({ type: 'string' });
     expect(result.required).toEqual(['constructor']);
   });
@@ -575,7 +575,7 @@ describe('AnthropicAdapter: tool input_schema union flattening', () => {
     ]);
   });
 
-  it('leaves well-formed tools untouched (same object reference)', async () => {
+  it('leaves well-formed tools untouched', async () => {
     const { adapter, captured } = captureAdapter();
 
     const tool = {
@@ -588,12 +588,14 @@ describe('AnthropicAdapter: tool input_schema union flattening', () => {
       },
     };
 
+    const given = structuredClone(tool);
     await adapter.complete({
       ...baseRequest,
       model: 'claude-sonnet-4-5',
       tools: [tool],
     } as any);
 
-    expect(captured[0].tools[0]).toBe(tool);
+    expect(captured[0].tools[0]).toEqual(given);
+    expect(tool).toEqual(given);
   });
 });

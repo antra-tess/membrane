@@ -60,7 +60,7 @@ describe('supportsAssistantPrefill', () => {
 
 describe('resolveToolMode default', () => {
   it('defaults to native tools with the default AnthropicXmlFormatter', async () => {
-    const adapter = new MockAdapter();
+    const adapter = new MockAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 });
     const membrane = new Membrane(adapter);
 
     const request: NormalizedRequest = {
@@ -79,7 +79,7 @@ describe('resolveToolMode default', () => {
   });
 
   it('keeps XML tools when the caller asks for them on a prefill-capable model', async () => {
-    const adapter = new MockAdapter();
+    const adapter = new MockAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 });
     const membrane = new Membrane(adapter);
 
     const request: NormalizedRequest = {
@@ -99,7 +99,7 @@ describe('resolveToolMode default', () => {
     expect(content).toContain('zz_lookup1');
   });
 
-  it('falls back to XML for a formatter that cannot carry native tools', () => {
+  it('declares native tools only for the formatters that can carry them', () => {
     expect(new CompletionsFormatter().supportsNativeTools).toBe(false);
     expect(new AnthropicXmlFormatter().supportsNativeTools).toBe(true);
     expect(new NativeFormatter().supportsNativeTools).toBe(true);
@@ -116,7 +116,7 @@ describe('formatter tool-carrier declarations', () => {
   });
 
   it('rejects tool declarations that CompletionsFormatter cannot encode', async () => {
-    const adapter = new MockAdapter();
+    const adapter = new MockAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 });
     const membrane = new Membrane(adapter, { formatter: new CompletionsFormatter() });
 
     const request: NormalizedRequest = {
@@ -130,7 +130,7 @@ describe('formatter tool-carrier declarations', () => {
   });
 
   it('lets CompletionsFormatter reach a prefill-refusing model id with no tools', async () => {
-    const adapter = new MockAdapter();
+    const adapter = new MockAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 });
     const membrane = new Membrane(adapter, { formatter: new CompletionsFormatter() });
 
     const request: NormalizedRequest = {
@@ -143,7 +143,7 @@ describe('formatter tool-carrier declarations', () => {
   });
 
   it('lets a per-request CompletionsFormatter override through the same gate', async () => {
-    const adapter = new MockAdapter();
+    const adapter = new MockAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 });
     const membrane = new Membrane(adapter);
 
     const request: NormalizedRequest = {

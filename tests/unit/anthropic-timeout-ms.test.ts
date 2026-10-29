@@ -165,8 +165,7 @@ describe('Anthropic adapter timeoutMs (membrane#97)', () => {
   // it, a finished call leaves the deadline timer armed (setLongTimeout is a
   // plain setTimeout, not unref'd — a 600s timeoutMs keeps a script's process
   // alive ten minutes after its last stream) and a dead listener on the
-  // caller's signal. The listener on the caller's signal is the observable
-  // half, so it is the pin.
+  // caller's signal.
   it('releases the caller-signal listener once a stream completes, with or without timeoutMs', async () => {
     vi.stubGlobal('fetch', async () => completingResponse());
     const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
@@ -184,9 +183,15 @@ describe('Anthropic adapter timeoutMs (membrane#97)', () => {
     }), { status: 200, headers: { 'content-type': 'application/json', 'request-id': 'req_fixture' } }));
     const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
     const caller = new AbortController();
-    const result = await adapter.complete(request, { timeoutMs: 600_000, signal: caller.signal });
-    expect(result.stopReason).toBe('end_turn');
-    expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const result = await adapter.complete(request, { timeoutMs: 600_000, signal: caller.signal });
+      expect(result.stopReason).toBe('end_turn');
+      expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // membrane#212: the SDK's fetchWithTimeout adds an abort listener to the

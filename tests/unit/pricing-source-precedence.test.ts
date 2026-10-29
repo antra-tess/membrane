@@ -74,11 +74,6 @@ function shippedInputRate(modelId: string): number {
 }
 
 describe('pricing source precedence', () => {
-  it('is only discriminating while the two shipped fixture rows differ', () => {
-    expect(shippedInputRate(ZZ_SERVED_SNAPSHOT)).not.toBe(shippedInputRate(ZZ_REQUESTED_ALIAS));
-    expect(getDefaultPricing(ZZ_SERVED_UNSHIPPED)).toBeUndefined();
-  });
-
   it('prefers the registry on the REQUESTED alias over a builtin on the served snapshot', async () => {
     const membrane = new Membrane(
       adapterServing(ZZ_SERVED_SNAPSHOT),
@@ -115,6 +110,7 @@ describe('pricing source precedence', () => {
   });
 
   it('falls to the builtin on the SERVED snapshot when no registry is configured', async () => {
+    expect(shippedInputRate(ZZ_SERVED_SNAPSHOT)).not.toBe(shippedInputRate(ZZ_REQUESTED_ALIAS));
     const membrane = new Membrane(adapterServing(ZZ_SERVED_SNAPSHOT));
     const response = await membrane.complete(ZZ_REQUEST);
 
@@ -123,6 +119,7 @@ describe('pricing source precedence', () => {
   });
 
   it('falls to the builtin on the requested alias when the served id ships no row', async () => {
+    expect(getDefaultPricing(ZZ_SERVED_UNSHIPPED)).toBeUndefined();
     const membrane = new Membrane(adapterServing(ZZ_SERVED_UNSHIPPED));
     const response = await membrane.complete(ZZ_REQUEST);
 

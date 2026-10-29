@@ -50,13 +50,13 @@ describe('AnthropicAdapter dynamicHeaders', () => {
       'x-gate-debt-chunks': null, 'x-empty': '', 'x-undef': undefined,
     }));
     await adapter.complete(REQUEST);
-    expect(create.mock.calls[0][1].headers).toBeUndefined();
+    expect(create.mock.calls[0][1]?.headers ?? {}).toEqual({});
   });
 
   it('is a no-op when unconfigured', async () => {
     const { adapter, create } = adapterWith(undefined);
     await adapter.complete(REQUEST);
-    expect(create.mock.calls[0][1].headers).toBeUndefined();
+    expect(create.mock.calls[0][1]?.headers ?? {}).toEqual({});
   });
 
   it('keepalive records PRE-merge headers — a replay never resends a stale stamp', async () => {

@@ -134,7 +134,7 @@ function adapterGiving(stopReason: () => unknown) {
     ): Promise<ProviderResponse> {
       return { ...(await super.stream(request, callbacks, options)), stopReason: stopReason() as string };
     }
-  })();
+  })({ completeDelayMs: 0, streamChunkDelayMs: 0 });
 }
 
 const disclosed = "details.stop.providerReason carries the adapter's providerStopReason if that's a non-empty string, " +

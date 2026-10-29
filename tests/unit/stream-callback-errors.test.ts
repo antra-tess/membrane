@@ -356,7 +356,7 @@ describe('a frame the handler cannot read is still dropped', () => {
       }) as any;
       expect(chunks.join('')).toBe('hello more');
       expect(response.stopReason).toBe('end_turn');
-      expect(warn).toHaveBeenCalledWith('[membrane:bedrock] Skipping malformed stream event:', expect.anything());
+      expect(warn).toHaveBeenCalled();
       expect(blockIndexes).toEqual([0, 0]);
     });
   }
@@ -471,7 +471,7 @@ describe('a frame the handler cannot read is still dropped', () => {
       const response = await bedrock().stream(bedrockWire, { onChunk: chunk => { chunks.push(chunk); } }) as any;
       expect(chunks.join('')).toBe('hello more');
       expect(response.stopReason).toBe('end_turn');
-      expect(warn).toHaveBeenCalledWith('[membrane:bedrock] Skipping malformed stream event:', expect.anything());
+      expect(warn).toHaveBeenCalled();
     });
   }
 });

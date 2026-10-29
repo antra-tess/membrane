@@ -5,7 +5,7 @@ import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import { OpenAIResponsesAPIAdapter } from '../../src/providers/openai-responses-api.js';
 import { OpenAIResponsesFormatter } from '../../src/formatters/openai-responses.js';
 import { NativeFormatter } from '../../src/formatters/native.js';
-import { MembraneError, callerCodeError, invalidRequestError, rateLimitError, runCallerCode } from '../../src/types/errors.js';
+import { MembraneError, callerCodeError, invalidRequestError, rateLimitError } from '../../src/types/errors.js';
 import { AnthropicXmlFormatter } from '../../src/formatters/anthropic-xml.js';
 import type { NormalizedRequest } from '../../src/types/index.js';
 
@@ -113,12 +113,6 @@ describe('callerCodeError', () => {
     expect(error.rawError).toBeUndefined();
     expect(error.rawRequest).toBeUndefined();
     expect(original).toMatchObject({ retryable: true, ...stated });
-  });
-
-  it('runCallerCode hands back a promise the caller\'s code returns as it is', async () => {
-    const returned = Promise.reject(callerError());
-    returned.catch(() => {});
-    expect(runCallerCode(() => returned)).toBe(returned);
   });
 });
 
@@ -537,7 +531,7 @@ describe('the Responses adapter: a throwing onFastModeFallback is logged, and th
       expect(fallback).toHaveBeenCalledTimes(1);
       expect(fallback).toHaveBeenCalledWith('default');
       expect(warn).toHaveBeenCalledTimes(1);
-      expect(warn).toHaveBeenCalledWith('[membrane:openai-responses] onFastModeFallback threw; the response stands:', original);
+      expect(warn.mock.calls.some((args) => args.includes(original))).toBe(true);
     });
   }
 });

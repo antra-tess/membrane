@@ -71,14 +71,11 @@ describe('every row of the table', () => {
     }
   });
 
-  it('has no price only where a shorter row would otherwise price its ids', () => {
+  it("gives an id under a row with no price no price, not a shorter row's", () => {
     const unpricedRows = PRICING_TABLE.filter((row) => row.pricing === null);
     expect(unpricedRows.length).toBeGreaterThan(0);
     for (const row of unpricedRows) {
-      const shadowed = PRICING_TABLE.some((other) => (
-        other.pricing !== null && other.prefix.length < row.prefix.length && row.prefix.startsWith(other.prefix)
-      ));
-      expect(shadowed, `${row.prefix} stands in front of a priced row`).toBe(true);
+      expect(getDefaultPricing(`${row.prefix}-zz-variant`), row.prefix).toBeUndefined();
     }
   });
 });

@@ -1,10 +1,14 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { MockAdapter } from '../../src/providers/mock.js';
 import { MembraneError, serverError } from '../../src/types/errors.js';
-import type { NormalizedRequest } from '../../src/types/index.js';
+import type { NormalizedRequest, NormalizedResponse } from '../../src/types/index.js';
 import type { ProviderRequest, ProviderRequestOptions, ProviderResponse } from '../../src/types/provider.js';
 import type { StreamCallbacks } from '../../src/types/streaming.js';
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 class FailingAdapter extends MockAdapter {
   completeCalls = 0;
@@ -60,13 +64,9 @@ describe("membrane's retry wait honors retry-after (MAJOR-2)", () => {
     adapter.queueResponse('zz-recovered');
     const membrane = new Membrane(adapter, { retry: { maxRetries: 2, retryDelayMs: 1, maxRetryDelayMs: 30_000 } });
 
-    const startedAt = Date.now();
-    const response = await membrane.complete(zzRequest);
-    const elapsedMs = Date.now() - startedAt;
+    const response = await acrossOneWait(membrane, adapter, 180);
 
-    expect(adapter.completeCalls).toBe(2);
     expect(response.content[0]).toMatchObject({ type: 'text', text: 'zz-recovered' });
-    expect(elapsedMs).toBeGreaterThanOrEqual(150);
   });
 
   it('gives the caller a stated wait longer than a minute and than maxRetryDelayMs instead of retrying inside it', async () => {
@@ -85,10 +85,7 @@ describe("membrane's retry wait honors retry-after (MAJOR-2)", () => {
     adapter.queueResponse('zz-recovered');
     const membrane = new Membrane(adapter, { retry: { maxRetries: 2, retryDelayMs: 200, maxRetryDelayMs: 30_000 } });
 
-    const startedAt = Date.now();
-    await membrane.complete(zzRequest);
-    expect(adapter.completeCalls).toBe(2);
-    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(150);
+    await acrossOneWait(membrane, adapter, 200);
   });
 
   it('keeps the plain backoff when no retry-after was sent', async () => {
@@ -115,9 +112,16 @@ describe("membrane's retry wait honors retry-after (MAJOR-2)", () => {
     adapter.queueResponse('zz-recovered');
     const membrane = new Membrane(adapter, { retry: { retryDelayMs: 0, backoffMultiplier: 1e308 } });
 
-    const response = await membrane.complete(zzRequest);
-    expect(adapter.completeCalls).toBe(4);
-    expect(response.details.timing.retryDelaysMs).toEqual([50, 50, 50]);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const done = membrane.complete(zzRequest);
+      await vi.runAllTimersAsync();
+      const response = await done;
+      expect(adapter.completeCalls).toBe(4);
+      expect(response.details.timing.retryDelaysMs).toEqual([50, 50, 50]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('complete(): a call that succeeds at its first send lists no waits', async () => {
@@ -151,30 +155,29 @@ describe("membrane's retry wait honors retry-after (MAJOR-2)", () => {
     adapter.queueResponse('zz-recovered');
     const membrane = new Membrane(adapter, { retry: { maxRetries: 2, retryDelayMs: 1, maxRetryDelayMs: 30_000 } });
 
-    const startedAt = Date.now();
-    await membrane.stream(zzRequest, { onChunk: () => {} });
-    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(150);
+    await acrossOneWait(membrane, adapter, 180, 'stream');
   });
 });
 
-async function completeAcrossOneWait(membrane: Membrane, adapter: FailingAdapter, waitMs: number) {
+async function acrossOneWait(membrane: Membrane, adapter: FailingAdapter, waitMs: number, method: 'complete' | 'stream' = 'complete'): Promise<NormalizedResponse> {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
   try {
-    const done = membrane.complete(zzRequest);
+    const done = method === 'complete' ? membrane.complete(zzRequest) : membrane.stream(zzRequest, { onChunk: () => {} });
+    const sends = () => (method === 'complete' ? adapter.completeCalls : adapter.streamCalls);
     for (let hop = 0; hop < 50 && vi.getTimerCount() === 0; hop++) {
       await new Promise((resolve) => setImmediate(resolve));
     }
     expect(vi.getTimerCount()).toBe(1);
-    expect(adapter.completeCalls).toBe(1);
+    expect(sends()).toBe(1);
     await vi.advanceTimersByTimeAsync(waitMs - 1);
-    expect(adapter.completeCalls).toBe(1);
+    expect(sends()).toBe(1);
     await vi.advanceTimersByTimeAsync(1);
-    for (let hop = 0; hop < 50 && adapter.completeCalls < 2; hop++) {
+    for (let hop = 0; hop < 50 && sends() < 2; hop++) {
       await new Promise((resolve) => setImmediate(resolve));
     }
-    expect(adapter.completeCalls).toBe(2);
+    expect(sends()).toBe(2);
     await vi.runAllTimersAsync();
-    return await done;
+    return (await done) as NormalizedResponse;
   } finally {
     vi.useRealTimers();
   }
@@ -184,14 +187,14 @@ describe('a stated wait of up to a minute is waited out, whatever the schedule\'
   it('a 429 stating 45 s is waited out on the default schedule', async () => {
     const adapter = new FailingAdapter(1, () => rateLimit(45_000));
     adapter.queueResponse('zz-recovered');
-    const response = await completeAcrossOneWait(new Membrane(adapter), adapter, 45_000);
+    const response = await acrossOneWait(new Membrane(adapter), adapter, 45_000);
     expect(response.details.timing.retryDelaysMs).toEqual([45_000]);
   });
 
   it('so is one stating exactly a minute', async () => {
     const adapter = new FailingAdapter(1, () => rateLimit(60_000));
     adapter.queueResponse('zz-recovered');
-    const response = await completeAcrossOneWait(new Membrane(adapter), adapter, 60_000);
+    const response = await acrossOneWait(new Membrane(adapter), adapter, 60_000);
     expect(response.details.timing.retryDelaysMs).toEqual([60_000]);
   });
 
@@ -199,7 +202,7 @@ describe('a stated wait of up to a minute is waited out, whatever the schedule\'
     const adapter = new FailingAdapter(1, () => rateLimit(90_000));
     adapter.queueResponse('zz-recovered');
     const membrane = new Membrane(adapter, { retry: { maxRetryDelayMs: 120_000 } });
-    const response = await completeAcrossOneWait(membrane, adapter, 90_000);
+    const response = await acrossOneWait(membrane, adapter, 90_000);
     expect(response.details.timing.retryDelaysMs).toEqual([90_000]);
 
     const longer = new FailingAdapter(1, () => rateLimit(120_001));
@@ -242,7 +245,7 @@ describe('a stated wait of up to a minute is waited out, whatever the schedule\'
     const adapter = new FailingAdapter(1, () => rateLimit(25 * day));
     adapter.queueResponse('zz-recovered');
     const membrane = new Membrane(adapter, { retry: { maxRetryDelayMs: 30 * day } });
-    const response = await completeAcrossOneWait(membrane, adapter, 25 * day);
+    const response = await acrossOneWait(membrane, adapter, 25 * day);
     expect(response.details.timing.retryDelaysMs).toEqual([25 * day]);
   });
 });
@@ -270,7 +273,7 @@ describe('the retry config: a field left out takes its default, and a value that
     const adapter = new FailingAdapter(1, () => serverError('zz internal', 503));
     adapter.queueResponse('zz-recovered');
     const membrane = new Membrane(adapter, { retry: { retryDelayMs: undefined, maxRetryDelayMs: undefined } });
-    const response = await completeAcrossOneWait(membrane, adapter, 1000);
+    const response = await acrossOneWait(membrane, adapter, 1000);
     expect(response.details.timing.retryDelaysMs).toEqual([1000]);
   });
 

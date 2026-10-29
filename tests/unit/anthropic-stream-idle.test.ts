@@ -1,3 +1,4 @@
+import { getEventListeners } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import { createProgressDeadline } from '../../src/providers/utils.js';
@@ -307,16 +308,13 @@ describe('Anthropic stream setup and alternate SDK response bodies', () => {
   it('cleans the watchdog and caller listener when SDK session creation throws', async () => {
     vi.useFakeTimers();
     const caller = new AbortController();
-    const added = vi.spyOn(caller.signal, 'addEventListener');
-    const removed = vi.spyOn(caller.signal, 'removeEventListener');
     const adapter = newAdapter();
     const error = new Error('SDK client setup failed');
     const client = (adapter as unknown as { client: { withOptions: () => unknown } }).client;
     vi.spyOn(client, 'withOptions').mockImplementation(() => { throw error; });
     const failure = await adapter.stream(request, { onChunk: () => {} }, { signal: caller.signal }).catch(error => error);
     expect(vi.getTimerCount()).toBe(0);
-    expect(added).toHaveBeenCalledWith('abort', expect.any(Function), { once: true });
-    expect(removed).toHaveBeenCalledWith('abort', added.mock.calls[0]?.[1]);
+    expect(getEventListeners(caller.signal, 'abort')).toEqual([]);
     expect(failure).toMatchObject({
       type: 'unknown', rawError: { message: error.message }, rawRequest: expect.objectContaining({ stream: true }),
     });

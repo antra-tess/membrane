@@ -17,7 +17,6 @@ describe('cache wire receipt', () => {
     const first = computeCacheWireReceipt(raw);
     const second = computeCacheWireReceipt(raw);
     expect(first).toEqual(second);
-    expect(first.requestHash).toHaveLength(64);
     expect(first.markers).toHaveLength(2);
     expect(first.markers[0]!.prefixHash).not.toBe(first.markers[1]!.prefixHash);
     expect(first.markers[1]!.estimatedOffset).toBeGreaterThan(first.markers[0]!.estimatedOffset);

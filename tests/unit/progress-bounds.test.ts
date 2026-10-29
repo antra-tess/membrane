@@ -1,12 +1,10 @@
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import { BedrockAdapter } from '../../src/providers/bedrock.js';
 import { NativeFormatter } from '../../src/formatters/native.js';
 import { chunkFrame } from '../helpers/bedrock-event-stream.js';
+import { loadedBy } from '../helpers/imports.js';
 import { MockAdapter } from '../../src/providers/mock.js';
 import { createProgressDeadline, deadlineTimeoutError, isDeadlineAbort } from '../../src/providers/utils.js';
 import { PROGRESS_BOUNDS, resolveProgressBounds, type ProgressBounds } from '../../src/progress-bounds.js';
@@ -15,7 +13,6 @@ import type { NormalizedRequest, StreamEvent } from '../../src/types/index.js';
 import type { ProviderAdapter, ProviderRequest, ProviderRequestOptions, ProviderResponse } from '../../src/types/provider.js';
 import type { StreamCallbacks } from '../../src/types/streaming.js';
 
-const root = join(dirname(fileURLToPath(import.meta.url)), '../..');
 const S = 1000;
 const BEGAN = '2026-10-26T12:00:00.000Z';
 
@@ -43,16 +40,15 @@ async function collect(stream: AsyncIterable<StreamEvent>): Promise<StreamEvent[
 }
 
 describe('the bounds a caller asks for', () => {
-  it("are on their own entry, frozen at 60 s, 150 s and 87 tokens a second, in a module that loads nothing else of membrane's", () => {
-    const exports = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).exports;
-    expect(exports['./progress-bounds']).toEqual({
-      bun: './src/progress-bounds.ts',
-      types: './dist/progress-bounds.d.ts',
-      import: './dist/progress-bounds.js',
-    });
+  it('are frozen at 60 s, 150 s and 87 tokens a second', () => {
     expect(PROGRESS_BOUNDS).toEqual({ beforeContentMs: 60_000, betweenEventsMs: 150_000, thinkTokensPerSecond: 87 });
     expect(Object.isFrozen(PROGRESS_BOUNDS)).toBe(true);
-    expect(readFileSync(join(root, 'src/progress-bounds.ts'), 'utf8')).not.toMatch(/\bfrom\s+['"]|\bimport\s*\(|\brequire\s*\(|^\s*import\s+['"]/m);
+  });
+
+  it("are on an entry that imports nothing else of membrane's", () => {
+    const membranes = (name: string) => name === 'package @animalabs/membrane' || name.startsWith('package @animalabs/membrane/');
+    const otherPackage = (name: string) => name.startsWith('package ') && !membranes(name);
+    expect(loadedBy('src/progress-bounds.ts').filter((name) => !otherPackage(name))).toEqual(['src/progress-bounds.ts']);
   });
 
   it('are the defaults for true, the defaults with a given value in its place for an object, and none for false or unset', () => {
@@ -520,10 +516,13 @@ describe('AnthropicAdapter under progress bounds', () => {
     frame('message_stop', {}),
   ];
 
-  function stubThinkingThatPingsFor(pingMs: number): RequestInit[] {
+  function stubThinkingThatPingsFor(pingMs: number): { calls: RequestInit[]; sending: Promise<void> } {
     const calls: RequestInit[] = [];
+    let sent!: () => void;
+    const sending = new Promise<void>((resolve) => { sent = resolve; });
     vi.stubGlobal('fetch', async (_input: unknown, init: RequestInit) => {
       calls.push(init);
+      sent();
       const encoder = new TextEncoder();
       let done = false;
       let controller!: ReadableStreamDefaultController<Uint8Array>;
@@ -549,20 +548,28 @@ describe('AnthropicAdapter under progress bounds', () => {
       })();
       return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream', 'request-id': 'req_fixture' } });
     });
-    return calls;
+    return { calls, sending };
   }
   const anthropic = (): AnthropicAdapter => new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
   const TWO_SECONDS_FOR_100_TOKENS = { beforeContentMs: 300, betweenEventsMs: 300, thinkTokensPerSecond: 50 };
 
   it("keep a stream whose thinking block pings past the 300 ms before content but within its 2 s allowance", async () => {
-    stubThinkingThatPingsFor(600);
-    const result = await new Membrane(anthropic()).stream(REQUEST, { progressBounds: TWO_SECONDS_FOR_100_TOKENS });
+    vi.useFakeTimers();
+    const { sending } = stubThinkingThatPingsFor(600);
+    const streaming = new Membrane(anthropic()).stream(REQUEST, { progressBounds: TWO_SECONDS_FOR_100_TOKENS });
+    await sending;
+    await vi.advanceTimersByTimeAsync(700);
+    const result = await streaming;
     expect(isAbortedResponse(result)).toBe(false);
   });
 
   it("end a stream whose thinking block pings past its allowance, naming it", async () => {
-    const calls = stubThinkingThatPingsFor(4000);
-    const result = await new Membrane(anthropic()).stream(REQUEST, { progressBounds: TWO_SECONDS_FOR_100_TOKENS });
+    vi.useFakeTimers();
+    const { calls, sending } = stubThinkingThatPingsFor(4000);
+    const streaming = new Membrane(anthropic()).stream(REQUEST, { progressBounds: TWO_SECONDS_FOR_100_TOKENS });
+    await sending;
+    await vi.advanceTimersByTimeAsync(2100);
+    const result = await streaming;
     expect(result).toMatchObject({ aborted: true, reason: 'timeout' });
     expect((result as { message?: string }).message).toMatch(
       /^No content within 2s of a thinking block's start \(max_tokens 100 at 50 tokens a second\): /,

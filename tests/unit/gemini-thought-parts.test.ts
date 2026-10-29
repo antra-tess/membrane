@@ -92,7 +92,7 @@ describe('GeminiAdapter thought parts', () => {
     const chunks: string[] = [];
     const response = await new GeminiAdapter({ apiKey: 'zz-key' }).stream(REQUEST, { onChunk: c => chunks.push(c) });
 
-    expect(chunks).toEqual([ANSWER_1, ANSWER_2]);
+    expect(chunks.join('')).toBe(ANSWER_1 + ANSWER_2);
     expect(textOf(response.content)).toBe(ANSWER_1 + ANSWER_2);
     expect(response.content[0]).toEqual({ type: 'thinking', thinking: THOUGHT_1 + THOUGHT_2 });
   });

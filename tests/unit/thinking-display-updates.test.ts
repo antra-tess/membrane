@@ -140,7 +140,7 @@ describe('the adapters add the beta', () => {
       thinking: { type: 'adaptive', display: 'updates' },
       extra: { anthropic_beta: ['context-1m-2025-08-07'] },
     });
-    expect(built.anthropic_beta).toEqual(['context-1m-2025-08-07', BETA]);
+    expect([...built.anthropic_beta].sort()).toEqual(['context-1m-2025-08-07', BETA].sort());
     const viaExtra = adapter.buildRequest({ ...base, extra: { thinking: { type: 'adaptive', display: 'updates' } } });
     expect(viaExtra.anthropic_beta).toEqual([BETA]);
     const summarized = adapter.buildRequest({ ...base, thinking: { type: 'adaptive', display: 'summarized' } });

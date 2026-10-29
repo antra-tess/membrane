@@ -103,7 +103,7 @@ describe('AnthropicXmlFormatter: no-properties tools', () => {
 
 describe('Membrane: assistantParticipant role mapping', () => {
   it('maps non-Claude participant to assistant role via request field (stream path)', async () => {
-    const adapter = new MockAdapter();
+    const adapter = new MockAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 });
     const membrane = new Membrane(adapter, {
       formatter: new NativeFormatter(),
     });
@@ -129,7 +129,7 @@ describe('Membrane: assistantParticipant role mapping', () => {
   });
 
   it('maps non-Claude participant to assistant role via config (complete path)', async () => {
-    const adapter = new MockAdapter();
+    const adapter = new MockAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 });
     const membrane = new Membrane(adapter, {
       formatter: new NativeFormatter(),
       assistantParticipant: 'agent',
@@ -152,7 +152,7 @@ describe('Membrane: assistantParticipant role mapping', () => {
   });
 
   it('request-level assistantParticipant overrides config-level (stream path)', async () => {
-    const adapter = new MockAdapter();
+    const adapter = new MockAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 });
     const membrane = new Membrane(adapter, {
       formatter: new NativeFormatter(),
       assistantParticipant: 'wrong-name',
@@ -176,7 +176,7 @@ describe('Membrane: assistantParticipant role mapping', () => {
   });
 
   it('defaults to Claude when no assistantParticipant specified', async () => {
-    const adapter = new MockAdapter();
+    const adapter = new MockAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 });
     const membrane = new Membrane(adapter, {
       formatter: new NativeFormatter(),
     });
@@ -200,7 +200,7 @@ describe('Membrane: assistantParticipant role mapping', () => {
 
 describe('Membrane: resolveToolMode', () => {
   it('uses native tool mode when NativeFormatter is configured', async () => {
-    const adapter = new MockAdapter();
+    const adapter = new MockAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 });
     const membrane = new Membrane(adapter, {
       formatter: new NativeFormatter(),
     });
@@ -220,7 +220,7 @@ describe('Membrane: resolveToolMode', () => {
   });
 
   it('complete() with explicit XML and the default formatter injects XML tools', async () => {
-    const adapter = new MockAdapter();
+    const adapter = new MockAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 });
     const membrane = new Membrane(adapter);
 
     const request: NormalizedRequest = {
@@ -244,7 +244,7 @@ describe('Membrane: resolveToolMode', () => {
   });
 
   it('explicit native toolMode with XML formatter sends tools natively', async () => {
-    const adapter = new MockAdapter();
+    const adapter = new MockAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 });
     const membrane = new Membrane(adapter);
 
     const request: NormalizedRequest = {

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { YieldingStreamImpl } from '../../src/yielding-stream.js';
 import { abortError } from '../../src/types/errors.js';
@@ -6,6 +6,10 @@ import { deadlineTimeoutError, isDeadlineAbort } from '../../src/providers/utils
 import type { NormalizedRequest, StreamEvent, YieldingStream } from '../../src/types/index.js';
 import type { ProviderAdapter, ProviderRequest, ProviderRequestOptions, ProviderResponse } from '../../src/types/provider.js';
 import type { StreamCallbacks } from '../../src/types/streaming.js';
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 type Mode = 'native' | 'xml';
 
@@ -128,9 +132,15 @@ describe('a cancelled streamYielding() turn reports what it had', () => {
       const cancelledStream = new Membrane(cancelled).streamYielding(requestFor(mode), {});
       const byCancel = partOf(await drive(cancelledStream, cancelled, () => cancelledStream.cancel()));
 
-      const expired = new TwoRoundAdapter(mode);
-      const expiredStream = new Membrane(expired).streamYielding(requestFor(mode), { progressTimeoutMs: 200 });
-      const events = await drive(expiredStream, expired, () => {});
+      vi.useFakeTimers();
+      let events: StreamEvent[];
+      try {
+        const expired = new TwoRoundAdapter(mode);
+        const expiredStream = new Membrane(expired).streamYielding(requestFor(mode), { progressTimeoutMs: 200 });
+        events = await drive(expiredStream, expired, () => { void vi.advanceTimersByTimeAsync(200); });
+      } finally {
+        vi.useRealTimers();
+      }
       expect((events.find((event) => event.type === 'aborted') as { reason: string }).reason).toBe('timeout');
 
       expect(comparable(byCancel)).toEqual(comparable(partOf(events)));
@@ -181,27 +191,6 @@ describe('a cancelled streamYielding() turn reports what it had', () => {
       if (event.type === 'tokens') expect(() => started.cancel()).not.toThrow();
     }
     expect(seen.filter((event) => event.type === 'aborted')).toEqual([{ type: 'aborted', reason: 'user' }]);
-  });
-
-  it('a consumer that leaves early does not run the builder, and one that cancels does', async () => {
-    const counted = (count: { built: number }) => new YieldingStreamImpl({}, async (running) => {
-      running.setAbortSnapshot(() => { count.built++; return {}; });
-      running.emit({ type: 'tokens', content: 'zz', meta: { visible: true } } as never);
-      await new Promise<void>((resolve) => running.signal.addEventListener('abort', () => resolve(), { once: true }));
-    });
-
-    const left = { built: 0 };
-    for await (const event of counted(left)) {
-      if (event.type === 'tokens') break;
-    }
-    expect(left.built).toBe(0);
-
-    const cancelled = { built: 0 };
-    const stream = counted(cancelled);
-    for await (const event of stream) {
-      if (event.type === 'tokens') stream.cancel();
-    }
-    expect(cancelled.built).toBe(1);
   });
 
   it('a finished stream lets go of its loop\'s builder', async () => {

@@ -14,7 +14,7 @@ import type { ProviderAdapter, ProviderRequest, ProviderRequestOptions, Provider
 
 class FixedStopReasonAdapter extends MockAdapter {
   constructor(private providerStopReason: string) {
-    super();
+    super({ completeDelayMs: 0, streamChunkDelayMs: 0 });
   }
 
   override async complete(request: ProviderRequest, options?: ProviderRequestOptions): Promise<ProviderResponse> {
@@ -288,7 +288,7 @@ describe('gemini: a prompt blocked before generation is a refusal whatever the r
 
 class BareStopReasonAdapter extends MockAdapter {
   constructor(private bareStopReason: unknown, private rawToken?: unknown, text?: string) {
-    super(text === undefined ? {} : { defaultResponse: text });
+    super({ completeDelayMs: 0, streamChunkDelayMs: 0, ...(text === undefined ? {} : { defaultResponse: text }) });
   }
 
   private withStop(response: ProviderResponse): ProviderResponse {

@@ -67,6 +67,8 @@ const ASH_SPIN: ScriptedRound[] = [
 
 describe('stall guard (consecutive no-progress resumptions)', () => {
   const STALLED_RESUMPTIONS_THAT_END_A_SPIN = 3;
+  const warnedOfTheTrip = (logger: ReturnType<typeof mockLogger>) => logger.warn.mock.calls.some(([line]) =>
+    String(line).includes('no_progress') && new RegExp(`\\b${STALLED_RESUMPTIONS_THAT_END_A_SPIN}\\b`).test(String(line)));
 
   it('ends the spin with stopReason no_progress on stream()', async () => {
     const adapter = new ScriptedAdapter(ASH_SPIN);
@@ -75,7 +77,7 @@ describe('stall guard (consecutive no-progress resumptions)', () => {
     const response = await membrane.stream(REQUEST, {});
     expect('stopReason' in response && response.stopReason).toBe('no_progress');
     expect(adapter.streamCalls).toBe(1 + STALLED_RESUMPTIONS_THAT_END_A_SPIN);
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('no progress'));
+    expect(warnedOfTheTrip(logger)).toBe(true);
   });
 
   it('ends the spin on the yielding path too (where Ash actually ran)', async () => {
@@ -91,6 +93,7 @@ describe('stall guard (consecutive no-progress resumptions)', () => {
     }
     expect(finalStopReason).toBe('no_progress');
     expect(adapter.streamCalls).toBe(1 + STALLED_RESUMPTIONS_THAT_END_A_SPIN);
+    expect(warnedOfTheTrip(logger)).toBe(true);
   });
 
   it('does not fire while rounds are making progress inside a function_calls block left unclosed', async () => {
@@ -198,16 +201,17 @@ describe('tool rounds are not resumptions', () => {
 });
 
 describe('round telemetry', () => {
-  it('warns once when resumptions reach the visibility threshold', async () => {
+  it.each(['stream', 'yielding'] as const)('warns once at resumption round 5 on %s, naming the round and the input tokens spent so far', async (path) => {
     const adapter = new ScriptedAdapter([
       { text: '<function_calls>\n<invoke name="keeps-on-opening-blocks">', stopReason: 'stop_sequence' },
     ]);
     const logger = mockLogger();
     const membrane = new Membrane(adapter, { logger });
-    await membrane.stream(REQUEST, { maxResumptionRounds: 7 });
-    const roundWarnings = logger.warn.mock.calls.filter(
-      (c) => typeof c[0] === 'string' && c[0].includes('at round 5'),
-    );
-    expect(roundWarnings.length).toBe(1);
+    if (path === 'stream') await membrane.stream(REQUEST, { maxResumptionRounds: 7 });
+    else for await (const _event of membrane.streamYielding(REQUEST, { maxResumptionRounds: 7 })) void _event;
+    const callsBeforeRound5 = 5;
+    const atRound5 = logger.warn.mock.calls.map((c) => String(c[0])).filter((line) => /\bround 5\b/.test(line));
+    expect(atRound5).toHaveLength(1);
+    expect(atRound5[0]).toMatch(new RegExp(`\\b${callsBeforeRound5 * 100}\\b`));
   });
 });

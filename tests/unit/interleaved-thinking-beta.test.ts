@@ -109,11 +109,12 @@ describe('needsInterleavedThinkingBeta', () => {
 
 describe('AnthropicAdapter.betaHeaders (oauth default-beta re-carry)', () => {
   const request = thinkingRequest('claude-opus-4-1-20250805');
+  const asSet = (headers: Record<string, string> | undefined) =>
+    headers && { names: Object.keys(headers), betas: headers['anthropic-beta']?.split(',').sort() };
+  const betas = (...values: string[]) => ({ names: ['anthropic-beta'], betas: values.sort() });
 
   it('re-carries a default beta alongside the interleaved beta', () => {
-    expect(headersFor({ 'anthropic-beta': OAUTH_BETA }, request)).toEqual({
-      'anthropic-beta': `${OAUTH_BETA},${INTERLEAVED}`,
-    });
+    expect(asSet(headersFor({ 'anthropic-beta': OAUTH_BETA }, request))).toEqual(betas(OAUTH_BETA, INTERLEAVED));
   });
 
   it('emits just the interleaved beta when no default is configured', () => {
@@ -136,21 +137,15 @@ describe('AnthropicAdapter.betaHeaders (oauth default-beta re-carry)', () => {
   });
 
   it('reads the default beta from a Headers instance', () => {
-    expect(headersFor(new Headers({ 'anthropic-beta': OAUTH_BETA }), request)).toEqual({
-      'anthropic-beta': `${OAUTH_BETA},${INTERLEAVED}`,
-    });
+    expect(asSet(headersFor(new Headers({ 'anthropic-beta': OAUTH_BETA }), request))).toEqual(betas(OAUTH_BETA, INTERLEAVED));
   });
 
   it('reads the default beta from an entries array, case-insensitively', () => {
-    expect(headersFor([['Anthropic-Beta', OAUTH_BETA]], request)).toEqual({
-      'anthropic-beta': `${OAUTH_BETA},${INTERLEAVED}`,
-    });
+    expect(asSet(headersFor([['Anthropic-Beta', OAUTH_BETA]], request))).toEqual(betas(OAUTH_BETA, INTERLEAVED));
   });
 
   it('does not duplicate an interleaved beta already in the defaults', () => {
-    expect(headersFor({ 'anthropic-beta': `${OAUTH_BETA},${INTERLEAVED}` }, request)).toEqual({
-      'anthropic-beta': `${OAUTH_BETA},${INTERLEAVED}`,
-    });
+    expect(asSet(headersFor({ 'anthropic-beta': `${OAUTH_BETA},${INTERLEAVED}` }, request))).toEqual(betas(OAUTH_BETA, INTERLEAVED));
   });
 });
 
@@ -217,6 +212,6 @@ describe('BedrockAdapter anthropic_beta body field', () => {
       ...thinkingRequest('claude-opus-4-1-20250805'),
       extra: { anthropic_beta: ['some-other-beta', INTERLEAVED] },
     } as unknown as ProviderRequest;
-    expect(bedrockBody(request).anthropic_beta).toEqual(['some-other-beta', INTERLEAVED]);
+    expect([...(bedrockBody(request).anthropic_beta ?? [])].sort()).toEqual(['some-other-beta', INTERLEAVED].sort());
   });
 });

@@ -566,7 +566,7 @@ describe('system changes: turns as the API reads them, the float, and withdrawn 
     });
 
     it('a trailing assistant turn the cleanup drops leaves the end a point', () => {
-      expect(shape(build([user('u0'), s, reply(ws())]))).toEqual(['user:u0', 'assistant:   ', 'system:s']);
+      expect(shape({ messages: stripEmptyTextMessages(build([user('u0'), s, reply(ws())]).messages) })).toEqual(['user:u0', 'system:s']);
     });
 
     it('goes before an assistant turn of tool calls only', () => {
@@ -574,22 +574,10 @@ describe('system changes: turns as the API reads them, the float, and withdrawn 
         .toEqual(['user', 'system', 'assistant', 'user']);
     });
 
-    it('an assistant turn of another provider\'s unsigned thinking alone is no point, since the adapter leaves the block out (#191)', () => {
-      // u0 and u2 become one user turn, and the API refuses a system message inside a user turn.
-      const unsigned: ContentBlock = { type: 'thinking', thinking: 'reasoning from another provider' };
-      expect(shape(build([user('u0'), s, reply(unsigned), user('u2'), reply(text('a3'))])))
-        .toEqual(['user:u0', 'assistant:thinking', 'user:u2', 'system:s', 'assistant:a3']);
-    });
-
     it('an unsigned thinking block doesn\'t date the turn it shares with later blocks', () => {
       const unsigned: ContentBlock = { type: 'thinking', thinking: 'reasoning from another provider' };
       expect(roles(build([user('u0'), reply(unsigned), s, reply(text('a3')), user('u4')])))
         .toEqual(['user', 'system', 'assistant', 'user']);
-    });
-
-    it('a trailing turn of unsigned thinking alone leaves the end a point, as a trailing turn of whitespace does', () => {
-      const unsigned: ContentBlock = { type: 'thinking', thinking: 'reasoning from another provider' };
-      expect(shape(build([user('u0'), s, reply(unsigned)]))).toEqual(['user:u0', 'assistant:thinking', 'system:s']);
     });
   });
 

@@ -5,7 +5,7 @@ describe('MockAdapter', () => {
   let adapter: MockAdapter;
 
   beforeEach(() => {
-    adapter = new MockAdapter();
+    adapter = new MockAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 });
   });
 
   describe('complete()', () => {
@@ -52,6 +52,7 @@ describe('MockAdapter', () => {
 
     it('uses response generator', async () => {
       const customAdapter = new MockAdapter({
+        completeDelayMs: 0, streamChunkDelayMs: 0,
         responseGenerator: (req) => `Model: ${req.model}`,
       });
 
@@ -81,7 +82,7 @@ describe('MockAdapter', () => {
 
   describe('echo mode', () => {
     it('echoes back user message', async () => {
-      const echoAdapter = createEchoAdapter();
+      const echoAdapter = createEchoAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 });
 
       const response = await echoAdapter.complete({
         model: 'test',
@@ -94,7 +95,7 @@ describe('MockAdapter', () => {
     });
 
     it('handles content blocks', async () => {
-      const echoAdapter = createEchoAdapter();
+      const echoAdapter = createEchoAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 });
 
       const response = await echoAdapter.complete({
         model: 'test',
@@ -109,7 +110,7 @@ describe('MockAdapter', () => {
 
   describe('createCannedAdapter', () => {
     it('creates adapter with pre-queued responses', async () => {
-      const canned = createCannedAdapter(['First', 'Second', 'Third']);
+      const canned = createCannedAdapter(['First', 'Second', 'Third'], { completeDelayMs: 0, streamChunkDelayMs: 0 });
 
       const r1 = await canned.complete({ model: 'test', messages: [] });
       const r2 = await canned.complete({ model: 'test', messages: [] });

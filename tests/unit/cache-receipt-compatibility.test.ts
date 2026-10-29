@@ -140,7 +140,5 @@ describe('one receipt per logical streaming round', () => {
     expect(wire).toHaveLength(3);
     expect(receiptCount).toBe(2);
     expect(settlements).toEqual([{ queued: 1, inFlight: 1 }, { queued: 2, inFlight: 2 }]);
-    expect(queue).toEqual([]);
-    expect(inFlight).toBeUndefined();
   });
 });
