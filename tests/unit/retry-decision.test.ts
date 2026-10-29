@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   MEMBRANE_RETRY_SETTINGS,
@@ -14,6 +14,7 @@ import { DEFAULT_RETRY_CONFIG, type RetryConfig } from '../../src/types/config.j
 import { isOverloadedError, MembraneError } from '../../src/types/errors.js';
 import { Membrane } from '../../src/membrane.js';
 import { MockAdapter } from '../../src/providers/mock.js';
+import { loadedBy, runtimeSpecifiers } from '../helpers/imports.js';
 import type { NormalizedRequest } from '../../src/types/index.js';
 import type { ProviderRequest, ProviderRequestOptions, ProviderResponse } from '../../src/types/provider.js';
 import type { StreamCallbacks } from '../../src/types/streaming.js';
@@ -285,31 +286,9 @@ describe('retryDecision', () => {
 
 describe('the ./retry entry', () => {
   const root = fileURLToPath(new URL('../../', import.meta.url));
-  const specifiers = (source: string): string[] => [
-    ...source.matchAll(/^\s*(?:import|export)\s+(?!type\b)[^;]*?\bfrom\s*['"]([^'"]+)['"]/gm),
-    ...source.matchAll(/^\s*import\s*['"]([^'"]+)['"]/gm),
-    ...source.matchAll(/\bimport\s*\(\s*['"`]([^'"`]+)['"`]/g),
-    ...source.matchAll(/\brequire\s*\(\s*['"`]([^'"`]+)['"`]/g),
-  ].map((match) => match[1]!);
-  const loaded = (): string[] => {
-    const seen = new Set<string>();
-    const walk = (file: string) => {
-      const name = relative(root, file);
-      if (seen.has(name)) return;
-      seen.add(name);
-      for (const spec of specifiers(readFileSync(file, 'utf8'))) {
-        if (!spec.startsWith('.')) { seen.add(`package ${spec}`); continue; }
-        const target = join(dirname(file), spec).replace(/\.js$/, '.ts');
-        if (!existsSync(target)) { seen.add(`missing ${spec}`); continue; }
-        walk(target);
-      }
-    };
-    walk(join(root, 'src/retry.ts'));
-    return [...seen].sort();
-  };
 
   it('finds every literal form of run-time import', () => {
-    expect(specifiers([
+    expect(runtimeSpecifiers([
       "import { a } from './a.js';",
       'export { b } from "./b.js";',
       "export * from './c.js';",
@@ -324,7 +303,7 @@ describe('the ./retry entry', () => {
   it("is exported, and loads nothing of membrane's but the default retry config, and no package", () => {
     const exports = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).exports;
     expect(exports['./retry']).toEqual({ bun: './src/retry.ts', types: './dist/retry.d.ts', import: './dist/retry.js' });
-    expect(loaded()).toEqual(['src/retry.ts', 'src/types/config.ts']);
+    expect(loadedBy('src/retry.ts')).toEqual(['src/retry.ts', 'src/types/config.ts']);
   });
 });
 

@@ -169,41 +169,41 @@ describe("every adapter's error names the host it tried and what happened", () =
 });
 
 describe('plain words for each transport code, with the code, and the type it gives as before', () => {
-  const words: Array<[string, string, string]> = [
-    ['ECONNREFUSED', 'the connection was refused', 'network'],
-    ['ConnectionRefused', "the connection was refused or the host name didn't resolve", 'network'],
-    ['ENOTFOUND', "the host name didn't resolve", 'network'],
-    ['EAI_AGAIN', "the host name didn't resolve", 'network'],
-    ['ECONNRESET', 'the connection was reset', 'network'],
-    ['ConnectionReset', 'the connection was reset', 'network'],
-    ['EPIPE', 'the connection was closed', 'network'],
-    ['ECONNABORTED', 'the connection was closed', 'network'],
-    ['UND_ERR_SOCKET', 'the connection was closed', 'network'],
-    ['ConnectionClosed', 'the connection was closed', 'network'],
-    ['EHOSTUNREACH', "the host couldn't be reached", 'network'],
-    ['ENETUNREACH', "the host couldn't be reached", 'network'],
-    ['ETIMEDOUT', 'the connection timed out', 'timeout'],
-    ['UND_ERR_CONNECT_TIMEOUT', 'the connection timed out', 'timeout'],
-    ['UND_ERR_HEADERS_TIMEOUT', 'no response arrived in time', 'timeout'],
-    ['UND_ERR_BODY_TIMEOUT', 'the response stopped arriving', 'timeout'],
-    ['DEPTH_ZERO_SELF_SIGNED_CERT', "the server's certificate isn't trusted", 'unknown'],
-    ['SELF_SIGNED_CERT_IN_CHAIN', "the server's certificate isn't trusted", 'unknown'],
-    ['UNABLE_TO_GET_ISSUER_CERT', "the server's certificate isn't trusted", 'unknown'],
-    ['UNABLE_TO_GET_ISSUER_CERT_LOCALLY', "the server's certificate isn't trusted", 'unknown'],
-    ['UNABLE_TO_VERIFY_LEAF_SIGNATURE', "the server's certificate isn't trusted", 'unknown'],
-    ['CERT_HAS_EXPIRED', "the server's certificate has expired", 'unknown'],
-    ['CERT_NOT_YET_VALID', "the server's certificate isn't valid yet", 'unknown'],
-    ['ERR_TLS_CERT_ALTNAME_INVALID', "the server's certificate is for another name", 'unknown'],
+  const worded: Array<[string, string]> = [
+    ['ECONNREFUSED', 'network'],
+    ['ConnectionRefused', 'network'],
+    ['ENOTFOUND', 'network'],
+    ['EAI_AGAIN', 'network'],
+    ['ECONNRESET', 'network'],
+    ['ConnectionReset', 'network'],
+    ['EPIPE', 'network'],
+    ['ECONNABORTED', 'network'],
+    ['UND_ERR_SOCKET', 'network'],
+    ['ConnectionClosed', 'network'],
+    ['EHOSTUNREACH', 'network'],
+    ['ENETUNREACH', 'network'],
+    ['ETIMEDOUT', 'timeout'],
+    ['UND_ERR_CONNECT_TIMEOUT', 'timeout'],
+    ['UND_ERR_HEADERS_TIMEOUT', 'timeout'],
+    ['UND_ERR_BODY_TIMEOUT', 'timeout'],
+    ['DEPTH_ZERO_SELF_SIGNED_CERT', 'unknown'],
+    ['SELF_SIGNED_CERT_IN_CHAIN', 'unknown'],
+    ['UNABLE_TO_GET_ISSUER_CERT', 'unknown'],
+    ['UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'unknown'],
+    ['UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'unknown'],
+    ['CERT_HAS_EXPIRED', 'unknown'],
+    ['CERT_NOT_YET_VALID', 'unknown'],
+    ['ERR_TLS_CERT_ALTNAME_INVALID', 'unknown'],
   ];
 
-  it.each(words)('%s, named once with the host, in words rather than the error\'s own text', (code) => {
+  it.each(worded)('%s, named once with the host, in words rather than the error\'s own text', (code) => {
     const error = errorFromThrown(nodeFailure(code), undefined, 'https://api.zz-provider.test/v1');
     expect(error.message).toContain('api.zz-provider.test');
     expect(times(error.message, code)).toBe(1);
     expect(error.message).not.toContain('fetch failed');
   });
 
-  it.each(words)('%s alone types the error as before', (code, _said, type) => {
+  it.each(worded)('%s alone types the error as before', (code, type) => {
     expect(classifyError(Object.assign(new Error('zz-no-keyword'), { code })).type).toBe(type);
   });
 

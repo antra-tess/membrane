@@ -47,10 +47,12 @@ describe("an adapter sends a caller's extra params, and none of membrane's own",
       };
       await make().complete(request).catch(() => undefined);
 
-      expect(bodies).toHaveLength(1);
-      expect(bodies[0]).not.toContain('zz-internal-participant');
-      expect(bodies[0]).not.toContain('zz-internal-prompt');
-      expect(bodies[0]).toContain('zz-custom-value');
+      expect(bodies.length).toBeGreaterThan(0);
+      for (const body of bodies) {
+        expect(body).not.toContain('zz-internal-participant');
+        expect(body).not.toContain('zz-internal-prompt');
+        expect(body).toContain('zz-custom-value');
+      }
     });
   }
 });

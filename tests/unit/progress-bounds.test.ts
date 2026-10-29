@@ -1,12 +1,10 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import { BedrockAdapter } from '../../src/providers/bedrock.js';
 import { NativeFormatter } from '../../src/formatters/native.js';
 import { chunkFrame } from '../helpers/bedrock-event-stream.js';
+import { loadedBy } from '../helpers/imports.js';
 import { MockAdapter } from '../../src/providers/mock.js';
 import { createProgressDeadline, deadlineTimeoutError, isDeadlineAbort } from '../../src/providers/utils.js';
 import { PROGRESS_BOUNDS, resolveProgressBounds, type ProgressBounds } from '../../src/progress-bounds.js';
@@ -48,27 +46,7 @@ describe('the bounds a caller asks for', () => {
   });
 
   it("are on an entry that imports nothing else of membrane's", () => {
-    const root = fileURLToPath(new URL('../../', import.meta.url));
-    const specifiers = (source: string): string[] => [
-      ...source.matchAll(/^\s*(?:import|export)\s+(?!type\b)[^;]*?\bfrom\s*['"]([^'"]+)['"]/gm),
-      ...source.matchAll(/^\s*import\s*['"]([^'"]+)['"]/gm),
-      ...source.matchAll(/\bimport\s*\(\s*['"`]([^'"`]+)['"`]/g),
-      ...source.matchAll(/\brequire\s*\(\s*['"`]([^'"`]+)['"`]/g),
-    ].map((match) => match[1]!);
-    const seen = new Set<string>();
-    const walk = (file: string): void => {
-      const name = relative(root, file);
-      if (seen.has(name)) return;
-      seen.add(name);
-      for (const spec of specifiers(readFileSync(file, 'utf8'))) {
-        if (!spec.startsWith('.')) continue;
-        const target = join(dirname(file), spec).replace(/\.js$/, '.ts');
-        if (!existsSync(target)) { seen.add(`missing ${spec}`); continue; }
-        walk(target);
-      }
-    };
-    walk(join(root, 'src/progress-bounds.ts'));
-    expect([...seen]).toEqual(['src/progress-bounds.ts']);
+    expect(loadedBy('src/progress-bounds.ts').filter((name) => !name.startsWith('package '))).toEqual(['src/progress-bounds.ts']);
   });
 
   it('are the defaults for true, the defaults with a given value in its place for an object, and none for false or unset', () => {
