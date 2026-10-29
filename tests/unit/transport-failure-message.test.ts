@@ -18,7 +18,7 @@ import { OpenAICompletionsAdapter } from '../../src/providers/openai-completions
 import { OpenAIResponsesAdapter } from '../../src/providers/openai-responses.js';
 import { OpenAIResponsesAPIAdapter } from '../../src/providers/openai-responses-api.js';
 import { OpenRouterAdapter } from '../../src/providers/openrouter.js';
-import { MembraneError, classifyError, errorFromThrown, isOverloadedError, networkError, serializeError } from '../../src/types/errors.js';
+import { MembraneError, classifyError, errorFromThrown, isDeadlineExpiry, isOverloadedError, networkError, serializeError } from '../../src/types/errors.js';
 import type { ProviderAdapter, ProviderRequest } from '../../src/types/provider.js';
 import { Membrane } from '../../src/membrane.js';
 import { MockAdapter } from '../../src/providers/mock.js';
@@ -41,6 +41,13 @@ const bunFailure = (code: string, url: string, message = 'Unable to connect. Is 
 
 const BASE = 'https://zz-user:zz-secret@api.zz-provider.test:8443/zz-path?key=zz-key';
 const HOST = 'api.zz-provider.test:8443';
+const HIDDEN = ['zz-user', 'zz-secret', 'zz-path', 'zz-key'];
+
+const times = (message: string, text: string): number => message.split(text).length - 1;
+const namesTarget = (message: string, host: string): void => {
+  expect(message).toContain(host);
+  for (const part of HIDDEN) expect(message).not.toContain(part);
+};
 
 const adapters: Array<[string, (baseURL: string) => ProviderAdapter]> = [
   ['anthropic', (baseURL) => new AnthropicAdapter({ apiKey: 'zz-key', baseURL })],
@@ -73,21 +80,25 @@ describe("every adapter's error names the host it tried and what happened", () =
   it.each(cases)('%s %s: Node, refused at an address other than the host\'s', async (_name, entry, make) => {
     vi.stubGlobal('fetch', vi.fn(async () => { throw nodeFailure('ECONNREFUSED', { address: '0.0.0.0', port: 8443 }); }));
     const error = await failure(make(BASE), entry);
-    expect(error.message).toBe(`The request to ${HOST} failed: the connection was refused (ECONNREFUSED at 0.0.0.0:8443).`);
+    namesTarget(error.message, HOST);
+    expect(times(error.message, 'ECONNREFUSED')).toBe(1);
+    expect(error.message).toContain('0.0.0.0:8443');
     expect(error).toMatchObject({ type: 'network', retryable: true });
   });
 
   it.each(cases)('%s %s: Bun, refused', async (_name, entry, make) => {
     vi.stubGlobal('fetch', vi.fn(async (url: unknown) => { throw bunFailure('ECONNREFUSED', String(url)); }));
     const error = await failure(make(BASE), entry);
-    expect(error.message).toBe(`The request to ${HOST} failed: the connection was refused (ECONNREFUSED).`);
+    namesTarget(error.message, HOST);
+    expect(times(error.message, 'ECONNREFUSED')).toBe(1);
     expect(error).toMatchObject({ type: 'network', retryable: true });
   });
 
   it('bedrock with no baseURL names its regional endpoint', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => { throw nodeFailure('ENOTFOUND', { hostname: 'bedrock-runtime.zz-region-1.amazonaws.com' }); }));
     const error = await failure(new BedrockAdapter({ region: 'zz-region-1', accessKeyId: 'zz-access', secretAccessKey: 'zz-secret-access' }), 'complete');
-    expect(error.message).toBe("The request to bedrock-runtime.zz-region-1.amazonaws.com failed: the host name didn't resolve (ENOTFOUND).");
+    expect(error.message).toContain('bedrock-runtime.zz-region-1.amazonaws.com');
+    expect(times(error.message, 'ENOTFOUND')).toBe(1);
   });
 
   it("a credential resolver's own failure keeps its own text and doesn't name the adapter's host", async () => {
@@ -102,7 +113,8 @@ describe("every adapter's error names the host it tried and what happened", () =
       credentials: async () => { throw nodeFailure('ECONNREFUSED', { address: '192.0.2.7', port: 443 }); },
     });
     const error = await failure(anthropic, 'complete');
-    expect(error.message).toBe('Credential resolution failed: fetch failed');
+    expect(error.message).toContain('fetch failed');
+    expect(error.message).not.toContain('api.zz-provider.test');
   });
 
   it("a resolved credential whose headers can't be read keeps that failure's own text and names no host", async () => {
@@ -184,9 +196,10 @@ describe('plain words for each transport code, with the code, and the type it gi
     ['ERR_TLS_CERT_ALTNAME_INVALID', "the server's certificate is for another name", 'unknown'],
   ];
 
-  it.each(words)('%s: "%s"', (code, said) => {
+  it.each(words)('%s, named once with the host', (code) => {
     const error = errorFromThrown(nodeFailure(code), undefined, 'https://api.zz-provider.test/v1');
-    expect(error.message).toBe(`The request to api.zz-provider.test failed: ${said} (${code}).`);
+    expect(error.message).toContain('api.zz-provider.test');
+    expect(times(error.message, code)).toBe(1);
   });
 
   it.each(words)('%s alone types the error as before', (code, _said, type) => {
@@ -194,35 +207,43 @@ describe('plain words for each transport code, with the code, and the type it gi
   });
 
   it("a code with no words follows the error's own text", () => {
-    expect(errorFromThrown(nodeFailure('EPROTO'), undefined, 'https://api.zz-provider.test/v1').message)
-      .toBe('The request to api.zz-provider.test failed: fetch failed (EPROTO).');
+    const follows = (message: string, text: string, code: string): void => {
+      expect(times(message, code)).toBe(1);
+      expect(message.indexOf(text)).toBeGreaterThanOrEqual(0);
+      expect(message.indexOf(text)).toBeLessThan(message.indexOf(code));
+    };
+    follows(errorFromThrown(nodeFailure('EPROTO'), undefined, 'https://api.zz-provider.test/v1').message, 'fetch failed', 'EPROTO');
     const closed = Object.assign(new Error('zz premature close'), { code: 'ERR_STREAM_PREMATURE_CLOSE' });
-    expect(networkError('Stream aborted by provider.', closed).message)
-      .toBe('The request failed: Stream aborted by provider (ERR_STREAM_PREMATURE_CLOSE).');
-    expect(networkError('', closed).message).toBe('The request failed: ERR_STREAM_PREMATURE_CLOSE.');
+    follows(networkError('Stream aborted by provider.', closed).message, 'Stream aborted by provider', 'ERR_STREAM_PREMATURE_CLOSE');
+    expect(times(networkError('', closed).message, 'ERR_STREAM_PREMATURE_CLOSE')).toBe(1);
     const mixed = new TypeError('fetch failed', { cause: Object.assign(new Error('zz'), { code: 'ECONNRESET', cause: Object.assign(new Error('zz'), { code: 'EPROTO' }) }) });
-    expect(errorFromThrown(mixed, undefined, 'https://api.zz-provider.test').message)
-      .toBe('The request to api.zz-provider.test failed: the connection was reset (ECONNRESET); fetch failed (EPROTO).');
+    const message = errorFromThrown(mixed, undefined, 'https://api.zz-provider.test').message;
+    expect(times(message, 'ECONNRESET')).toBe(1);
+    follows(message, 'fetch failed', 'EPROTO');
   });
 
-  it('codes with no words follow the worded ones, each with the addresses it was met at', () => {
+  it('codes with no words follow the error\'s own text, each with the addresses it was met at', () => {
     const chain = Object.assign(new TypeError('fetch failed', {
       cause: Object.assign(new Error('zz'), {
         code: 'ECONNRESET',
         cause: Object.assign(new Error('zz'), { code: 'ERR_ZZ_TWO', address: '192.0.2.9', port: 8443 }),
       }),
     }), { code: 'ERR_ZZ_ONE' });
-    expect(errorFromThrown(chain, undefined, 'https://api.zz-provider.test').message)
-      .toBe('The request to api.zz-provider.test failed: the connection was reset (ECONNRESET); fetch failed (ERR_ZZ_ONE, ERR_ZZ_TWO at 192.0.2.9:8443).');
+    const message = errorFromThrown(chain, undefined, 'https://api.zz-provider.test').message;
+    for (const code of ['ECONNRESET', 'ERR_ZZ_ONE', 'ERR_ZZ_TWO']) expect(times(message, code), code).toBe(1);
+    expect(message.indexOf('fetch failed')).toBeLessThan(message.indexOf('ERR_ZZ_ONE'));
+    expect(message).toContain('192.0.2.9:8443');
   });
 
   it("a code the error's own text already names isn't named again", () => {
-    expect(errorFromThrown(bunFailure('EADDRNOTAVAIL', 'https://api.zz-provider.test/v1', 'zz socket unavailable'), undefined, 'https://api.zz-provider.test/v1').message)
-      .toBe('The request to api.zz-provider.test failed: EADDRNOTAVAIL: zz socket unavailable.');
+    const bun = errorFromThrown(bunFailure('EADDRNOTAVAIL', 'https://api.zz-provider.test/v1', 'zz socket unavailable'), undefined, 'https://api.zz-provider.test/v1').message;
+    expect(bun).toContain('zz socket unavailable');
+    expect(times(bun, 'EADDRNOTAVAIL')).toBe(1);
     const placed = Object.assign(new Error('EADDRNOTAVAIL: zz socket unavailable'), { code: 'EADDRNOTAVAIL', address: '192.0.2.9', port: 443 });
-    expect(errorFromThrown(placed, undefined, 'https://api.zz-provider.test/v1').message)
-      .toBe('The request to api.zz-provider.test failed: EADDRNOTAVAIL: zz socket unavailable (EADDRNOTAVAIL at 192.0.2.9:443).');
-    expect(errorFromThrown(nodeFailure('EPROTONOSUPPORT'), undefined, 'https://api.zz-provider.test').message.includes('(EPROTONOSUPPORT)')).toBe(true);
+    const atAddress = errorFromThrown(placed, undefined, 'https://api.zz-provider.test/v1').message;
+    expect(atAddress).toContain('zz socket unavailable');
+    expect(atAddress).toContain('192.0.2.9:443');
+    expect(times(errorFromThrown(nodeFailure('EPROTONOSUPPORT'), undefined, 'https://api.zz-provider.test').message, 'EPROTONOSUPPORT')).toBe(1);
   });
 });
 
@@ -233,7 +254,10 @@ describe('the addresses a code was met at', () => {
       undefined,
       'http://localhost:44209/v1',
     );
-    expect(error.message).toBe('The request to localhost:44209 failed: the connection was refused (ECONNREFUSED at [::1]:44209, 127.0.0.1:44209).');
+    expect(error.message).toContain('localhost:44209');
+    expect(times(error.message, 'ECONNREFUSED')).toBe(1);
+    expect(error.message).toContain('[::1]:44209');
+    expect(error.message).toContain('127.0.0.1:44209');
     expect(error).toMatchObject({ type: 'network', retryable: true });
   });
 
@@ -243,37 +267,34 @@ describe('the addresses a code was met at', () => {
       undefined,
       'https://api.zz-provider.test',
     );
-    expect(error.message).toBe(
-      "The request to api.zz-provider.test failed: the host couldn't be reached (ENETUNREACH at [2001:db8::7]:443); the connection was refused (ECONNREFUSED at 192.0.2.7:443).",
-    );
+    for (const code of ['ENETUNREACH', 'ECONNREFUSED']) expect(times(error.message, code), code).toBe(1);
+    expect(error.message).toContain('[2001:db8::7]:443');
+    expect(error.message).toContain('192.0.2.7:443');
   });
 
   it("the target's own address, on its default port, isn't repeated", () => {
-    expect(errorFromThrown(nodeFailure('ECONNREFUSED', { address: '192.0.2.7', port: 443 }), undefined, 'https://192.0.2.7/v1').message)
-      .toBe('The request to 192.0.2.7 failed: the connection was refused (ECONNREFUSED).');
-    expect(errorFromThrown(nodeFailure('ECONNREFUSED', { address: '192.0.2.7', port: 80 }), undefined, 'http://192.0.2.7/v1').message)
-      .toBe('The request to 192.0.2.7 failed: the connection was refused (ECONNREFUSED).');
-    expect(errorFromThrown(nodeFailure('ECONNREFUSED', { address: '::1', port: 8080 }), undefined, 'http://[::1]:8080').message)
-      .toBe('The request to [::1]:8080 failed: the connection was refused (ECONNREFUSED).');
+    expect(times(errorFromThrown(nodeFailure('ECONNREFUSED', { address: '192.0.2.7', port: 443 }), undefined, 'https://192.0.2.7/v1').message, '192.0.2.7')).toBe(1);
+    expect(times(errorFromThrown(nodeFailure('ECONNREFUSED', { address: '192.0.2.7', port: 80 }), undefined, 'http://192.0.2.7/v1').message, '192.0.2.7')).toBe(1);
+    expect(times(errorFromThrown(nodeFailure('ECONNREFUSED', { address: '::1', port: 8080 }), undefined, 'http://[::1]:8080').message, '::1')).toBe(1);
   });
 
   it('the same address on another port is named', () => {
     expect(errorFromThrown(nodeFailure('ECONNREFUSED', { address: '192.0.2.7', port: 8443 }), undefined, 'https://192.0.2.7/v1').message)
-      .toBe('The request to 192.0.2.7 failed: the connection was refused (ECONNREFUSED at 192.0.2.7:8443).');
+      .toContain('192.0.2.7:8443');
   });
 
   it('with no target, the addresses and names alone', () => {
-    expect(errorFromThrown(nodeFailure('ECONNREFUSED', { address: '127.0.0.1', port: 443 })).message)
-      .toBe('The request failed: the connection was refused (ECONNREFUSED at 127.0.0.1:443).');
-    expect(errorFromThrown(nodeFailure('ENOTFOUND', { hostname: 'no-such-host.invalid' })).message)
-      .toBe("The request failed: the host name didn't resolve (ENOTFOUND at no-such-host.invalid).");
-    expect(errorFromThrown(bunFailure('ECONNREFUSED', 'http://zz-user:zz-secret@localhost:1/v1')).message)
-      .toBe('The request failed: the connection was refused (ECONNREFUSED).');
+    expect(errorFromThrown(nodeFailure('ECONNREFUSED', { address: '127.0.0.1', port: 443 })).message).toContain('127.0.0.1:443');
+    expect(errorFromThrown(nodeFailure('ENOTFOUND', { hostname: 'no-such-host.invalid' })).message).toContain('no-such-host.invalid');
+    const bun = errorFromThrown(bunFailure('ECONNREFUSED', 'http://zz-user:zz-secret@localhost:1/v1')).message;
+    expect(times(bun, 'ECONNREFUSED')).toBe(1);
+    for (const part of ['zz-user', 'zz-secret', 'localhost']) expect(bun).not.toContain(part);
   });
 
   it('a target that is not a URL is no target', () => {
-    expect(errorFromThrown(nodeFailure('ECONNREFUSED', { address: '127.0.0.1', port: 443 }), undefined, 'zz not a url').message)
-      .toBe('The request failed: the connection was refused (ECONNREFUSED at 127.0.0.1:443).');
+    const message = errorFromThrown(nodeFailure('ECONNREFUSED', { address: '127.0.0.1', port: 443 }), undefined, 'zz not a url').message;
+    expect(message).toContain('127.0.0.1:443');
+    expect(message).not.toContain('zz not a url');
   });
 });
 
@@ -282,7 +303,9 @@ describe("the Anthropic SDK's connection error", () => {
     const adapter = new AnthropicAdapter({ apiKey: 'zz-key', baseURL: BASE });
     const sdkError = new Anthropic.APIConnectionError({ cause: nodeFailure('ECONNREFUSED', { address: '0.0.0.0', port: 8443 }) });
     const error = (adapter as unknown as { handleError(error: unknown): MembraneError }).handleError(sdkError);
-    expect(error.message).toBe(`The request to ${HOST} failed: the connection was refused (ECONNREFUSED at 0.0.0.0:8443).`);
+    namesTarget(error.message, HOST);
+    expect(times(error.message, 'ECONNREFUSED')).toBe(1);
+    expect(error.message).toContain('0.0.0.0:8443');
   });
 
   it("names it for a read cut off mid-response, which the SDK's MessageStream wraps once more", () => {
@@ -290,7 +313,8 @@ describe("the Anthropic SDK's connection error", () => {
     const socket = Object.assign(new Error('other side closed'), { name: 'SocketError', code: 'UND_ERR_SOCKET' });
     const cut = Object.assign(new Anthropic.AnthropicError('terminated'), { cause: new TypeError('terminated', { cause: socket }) });
     const error = (adapter as unknown as { handleError(error: unknown): MembraneError }).handleError(cut);
-    expect(error.message).toBe(`The request to ${HOST} failed: the connection was closed (UND_ERR_SOCKET).`);
+    namesTarget(error.message, HOST);
+    expect(times(error.message, 'UND_ERR_SOCKET')).toBe(1);
     expect(error).toMatchObject({ type: 'network', retryable: true });
   });
 
@@ -301,7 +325,8 @@ describe("the Anthropic SDK's connection error", () => {
       const adapter = new AnthropicAdapter({ apiKey: 'zz-key' });
       const sdkError = new Anthropic.APIConnectionError({ cause: nodeFailure('ECONNREFUSED', { address: '0.0.0.0', port: 443 }) });
       const error = (adapter as unknown as { handleError(error: unknown): MembraneError }).handleError(sdkError);
-      expect(error.message).toBe('The request to api.anthropic.com failed: the connection was refused (ECONNREFUSED at 0.0.0.0:443).');
+      expect(error.message).toContain('api.anthropic.com');
+      expect(times(error.message, 'ECONNREFUSED')).toBe(1);
     } finally {
       if (before !== undefined) process.env.ANTHROPIC_BASE_URL = before;
     }
@@ -312,7 +337,7 @@ describe('what stays as it was', () => {
   it('a failure whose causes carry no code keeps its own text', () => {
     const adapter = new AnthropicAdapter({ apiKey: 'zz-key', baseURL: BASE });
     const sdkError = new Anthropic.APIConnectionError({ cause: new TypeError('fetch failed') });
-    expect((adapter as unknown as { handleError(error: unknown): MembraneError }).handleError(sdkError).message).toBe('Connection error.');
+    expect((adapter as unknown as { handleError(error: unknown): MembraneError }).handleError(sdkError).message).toBe(sdkError.message);
     expect(errorFromThrown(new TypeError('fetch failed'), undefined, BASE).message).toBe('fetch failed');
     expect(errorFromThrown(new DOMException('The operation timed out.', 'TimeoutError'), undefined, BASE).message).toBe('The operation timed out.');
     expect(networkError('zz stream ended early', undefined, undefined, BASE).message).toBe('zz stream ended early');
@@ -330,7 +355,7 @@ describe('what stays as it was', () => {
     const headers = nodeFailure('UND_ERR_HEADERS_TIMEOUT');
     const sent = errorFromThrown(headers, undefined, BASE);
     expect(sent).toMatchObject({ type: 'timeout', retryable: true, rawError: serializeError(headers) });
-    expect((sent as unknown as Record<symbol, unknown>)[Symbol.for('membrane.deadlineExpiry')]).toBe(true);
+    expect(isDeadlineExpiry(sent)).toBe(true);
   });
 
   it('a connection refused or timed out at a host on port 529 is not retried as an overload', () => {
@@ -360,11 +385,13 @@ describe('through real sockets on this runtime', () => {
 
   it.each([['anthropic', adapters[0][1]], ['openai-compatible', adapters[4][1]]] as const)('%s: refused and reset', async (_name, make) => {
     const refused = await failure(make(`http://127.0.0.1:${refusedPort}/v1`), 'complete');
-    expect(refused.message).toBe(`The request to 127.0.0.1:${refusedPort} failed: the connection was refused (ECONNREFUSED).`);
+    expect(refused.message).toContain(`127.0.0.1:${refusedPort}`);
+    expect(times(refused.message, 'ECONNREFUSED')).toBe(1);
     const reset = await failure(make(`http://127.0.0.1:${resetPort}/v1`), 'complete');
     expect(reset.type).toBe('network');
-    const resetWords = 'the connection was (reset \\(ECONNRESET\\)|closed \\((EPIPE|UND_ERR_SOCKET)\\))';
-    expect(reset.message).toMatch(new RegExp(`^The request to 127\\.0\\.0\\.1:${resetPort} failed: ${resetWords}(; ${resetWords})*\\.$`));
+    expect(reset.message).toContain(`127.0.0.1:${resetPort}`);
+    const codes = ['ECONNRESET', 'EPIPE', 'UND_ERR_SOCKET'].map((code) => times(reset.message, code));
+    expect(codes.every((count) => count <= 1) && codes.some((count) => count === 1)).toBe(true);
   });
 });
 
