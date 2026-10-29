@@ -63,17 +63,31 @@ export function collectMarkedBlocks(surfaces: WireCacheSurfaces): Array<Record<s
   return marked;
 }
 
+export function ownMessageBlocks(messages: unknown, onCopy?: (original: unknown, copy: unknown) => void): unknown {
+  if (!Array.isArray(messages)) return messages;
+  return messages.map((message) => {
+    const content = (message as { content?: unknown } | null)?.content;
+    if (!Array.isArray(content)) return message;
+    return { ...(message as Record<string, unknown>), content: content.map((block) => copyBlockTree(block, 0, onCopy)) };
+  });
+}
+
 export function ownSystemBlocks(system: unknown): unknown {
   if (!Array.isArray(system)) return system;
   if (system.length === 0) return undefined;
   return system.map((block) => copyBlockTree(block, 0));
 }
 
-function copyBlockTree(candidate: unknown, depth: number): unknown {
+function copyBlockTree(
+  candidate: unknown,
+  depth: number,
+  onCopy?: (original: unknown, copy: unknown) => void
+): unknown {
   if (!candidate || typeof candidate !== 'object') return candidate;
   const copy = { ...(candidate as Record<string, unknown>) };
+  onCopy?.(candidate, copy);
   const nested = nestedContentBlocks(copy, depth);
-  if (nested) copy.content = nested.map((child) => copyBlockTree(child, depth + 1));
+  if (nested) copy.content = nested.map((child) => copyBlockTree(child, depth + 1, onCopy));
   return copy;
 }
 

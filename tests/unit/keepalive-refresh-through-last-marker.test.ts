@@ -86,18 +86,18 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(Date.parse('2026-10-19T0
 afterEach(() => { vi.useRealTimers(); });
 
 describe('a keepalive refresh after a tool-using turn', () => {
-  it("replays only the compiled messages when the context manager holds every marker, leaving out the turn's rounds", async () => {
+  it("replays every message when the float marks the last round, though the context manager placed all four markers", async () => {
     const { adapter, membrane, sent, refreshes } = rig();
     await runTurn(membrane, request('cm-owned', [2, 4, 6, 8]));
     expect(sent).toHaveLength(3);
     expect(sent[2].messages).toHaveLength(13);
-    expect(sent[2].messages.slice(9).some(marked)).toBe(false);
+    expect(marked(sent[2].messages.at(-1))).toBe(true);
+    expect(marked(sent[2].messages[2])).toBe(false);
 
     await vi.advanceTimersByTimeAsync(50 * 60_000);
     expect(refreshes).toHaveLength(1);
     expect(refreshes[0].max_tokens).toBe(0);
-    expect(JSON.stringify(refreshes[0].messages)).toBe(JSON.stringify(sent[2].messages.slice(0, 9)));
-    expect(JSON.stringify(refreshes[0].messages)).toBe(JSON.stringify(sent[0].messages));
+    expect(JSON.stringify(refreshes[0].messages)).toBe(JSON.stringify(sent[2].messages));
     adapter.cacheKeepalive!.stop();
   });
 

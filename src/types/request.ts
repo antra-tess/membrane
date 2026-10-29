@@ -218,9 +218,10 @@ export interface NormalizedRequest {
   promptCaching?: boolean;
 
   /** Marker ownership policy. `cm-owned` disables every formatter-generated
-   * system/context-prefix marker, so a request carries only the markers its
-   * caller placed, such as its message breakpoints and a marker a
-   * `beforeRequest` hook adds. */
+   * system/context-prefix marker, so a turn's first request carries only the
+   * markers its caller placed, such as its message breakpoints and a marker a
+   * `beforeRequest` hook adds. The native tool loop's later requests can add
+   * the floating marker (`floatingCacheMarker`), after that hook. */
   cacheMarkers?: 'membrane-system' | 'cm-owned';
 
   /**
@@ -234,13 +235,22 @@ export interface NormalizedRequest {
    * Float a trailing cache_control marker onto the newest message when the
    * native tool loop rebuilds the request between tool-execution rounds, so
    * the growing tool-round suffix caches incrementally: each round writes its
-   * delta and cache-reads everything before it. Placed only from the request's
+   * delta and cache-reads everything before it. Under the default
+   * `cacheMarkers: 'membrane-system'` it is placed only from the request's
    * residual breakpoint budget: the marker is withheld when upstream markers
    * already occupy all 4 Anthropic cache_control slots, so upstream breakpoints
-   * are never displaced or stripped. With two or more slots free, the message
-   * before the round's calling turn is marked too; with one, a round that
-   * appends more blocks than Anthropic's ~20-block backward cache search covers
-   * writes again what it could have read.
+   * are never displaced or stripped. Under `cacheMarkers: 'cm-owned'` it is
+   * placed after the `beforeRequest` hook, once the caller's markers have
+   * passed the check a first request's markers get, and when they
+   * occupy all 4 slots it takes the earliest message marker's slot: within one
+   * tool loop membrane changes nothing before the turn's opening, so that
+   * marker's prefix lies inside the newest marker's. It never takes a system
+   * or tools marker, which may serve a prefix other requests share, so a
+   * request whose 4 markers all sit there gets no float. With two or more
+   * slots free, the message before the round's calling turn is marked too;
+   * with one, a round long enough to pass the provider's backward cache search
+   * writes again what it could have read. Under either policy no float is
+   * placed on a call whose normalization repair rewrote the prefix.
    * Defaults to true (when promptCaching is enabled). Set false for context
    * strategies whose request prefix churns between rounds, where a trailing
    * marker would be pure cache-write cost.
