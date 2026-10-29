@@ -46,7 +46,8 @@ describe('the bounds a caller asks for', () => {
   });
 
   it("are on an entry that imports nothing else of membrane's", () => {
-    const otherPackage = (name: string) => name.startsWith('package ') && !name.startsWith('package @animalabs/membrane');
+    const membranes = (name: string) => name === 'package @animalabs/membrane' || name.startsWith('package @animalabs/membrane/');
+    const otherPackage = (name: string) => name.startsWith('package ') && !membranes(name);
     expect(loadedBy('src/progress-bounds.ts').filter((name) => !otherPackage(name))).toEqual(['src/progress-bounds.ts']);
   });
 
