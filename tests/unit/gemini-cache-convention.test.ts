@@ -195,8 +195,8 @@ describe('a response the inclusive reading cannot explain', () => {
       expect(line).toContain('10005');
       expect(line).toContain(total);
     }
-    expect(underBoth).not.toContain('outside');
-    expect(overBoth).toContain('outside');
+    expect(underBoth).not.toContain('billed');
+    expect(overBoth).toContain('billed');
   });
 
   it('a response the inclusive reading explains gets no such allowance: a total that adds the cached span again warns', async () => {
