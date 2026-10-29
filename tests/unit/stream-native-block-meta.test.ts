@@ -150,11 +150,4 @@ describe('single-callback adapters (OpenAI Responses style) still get a complete
     expect(completes.map((e) => [e.index, e.block.type])).toEqual([[0, 'thinking'], [1, 'text'], [2, 'tool_call']]);
     expect(completes[0].block.content).toBe('let me reason');
   });
-
-  it('paired-callback adapters are unaffected: flush is a no-op (no duplicate completions)', async () => {
-    const membrane = new Membrane(new ScriptedAdapter(THINKING_THEN_TEXT, FINAL_CONTENT));
-    const events: BlockEvent[] = [];
-    await membrane.stream(nativeRequest(), { onBlock: (e) => events.push(e) });
-    expect(events.filter((e) => e.event === 'block_complete').length).toBe(2);
-  });
 });

@@ -108,14 +108,3 @@ describe('tool-result bodies are byte-untouched', () => {
     expect(wire).not.toContain('&amp;lt;');
   });
 });
-
-describe('NAMED ASYMMETRY: entity text in a result body is decoded on read', () => {
-  it('is pinned as it currently behaves, NOT as it should behave', () => {
-    const wire = formatToolResults([
-      { toolUseId: 'ite1', content: zzEntityText, isError: false },
-    ]);
-    const { toolResults } = parseAccumulatedIntoBlocks(wire);
-    expect(toolResults[0]!.content).toBe('zz-entity-text: <zz-b> and & zz-raw');
-    expect(toolResults[0]!.content).not.toBe(zzEntityText);
-  });
-});

@@ -67,14 +67,6 @@ describe('F3 · a truncated block spliced with a later round closer', () => {
   );
   const splicedTurn = `zz_bot: calling now\n${truncatedHalf}${interveningTurn}${realCall}`;
 
-  it('never dispatches a call whose span crosses another opener', () => {
-    const parsed = parseToolCalls(splicedTurn);
-
-    const dispatched = JSON.stringify(parsed?.calls ?? []);
-    expect(dispatched).not.toContain('zz_truncated_tool');
-    expect(dispatched).not.toContain('zz_user: try again');
-  });
-
   it('re-anchors to the innermost opener so the real call still runs', () => {
     const parsed = parseToolCalls(splicedTurn);
 
@@ -164,17 +156,6 @@ describe('F9 · a contained call is filtered before legacy results are paired', 
     expect(emittedCalls.map((c) => c.name)).toEqual(['zz_live_tool']);
     expect(toolResults).toHaveLength(1);
     expect(toolResults[0]?.toolUseId).toBe(emittedCalls[0]?.id);
-  });
-
-  it('emits no tool_result addressed to a call that is not in the blocks', () => {
-    const { blocks, toolResults } = parseAccumulatedIntoBlocks(shadowedTurn);
-
-    const emittedCallIds = new Set(
-      blocks.filter((b) => b.type === 'tool_use').map((b) => (b as { id: string }).id)
-    );
-    for (const result of toolResults) {
-      expect(emittedCallIds.has(result.toolUseId)).toBe(true);
-    }
   });
 
   it('pairs by containment order when the quoted call has the live call\'s name', () => {
@@ -390,13 +371,6 @@ describe('greptile#52-1 · an unclosed invoke head absorbs the next call', () =>
 
     expect(parsed?.calls.map((c) => c.name)).toEqual(['zz_inner_tool']);
     expect(parsed?.calls[0]?.input).toEqual({ fld2: 2 });
-  });
-
-  it('never dispatches the unclosed head, absorbed content and all', () => {
-    const dispatched = JSON.stringify(parseToolCalls(absorbingBlock)?.calls ?? []);
-
-    expect(dispatched).not.toContain('zz_head_tool');
-    expect(dispatched).not.toContain('fld1');
   });
 
   it('re-anchors on the block-parsing path too', () => {

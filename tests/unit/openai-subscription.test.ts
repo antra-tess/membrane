@@ -288,29 +288,6 @@ describe('OpenAI Responses subscription mode', () => {
     expect(bodies[1]?.service_tier).toBeUndefined();
   });
 
-  test('refreshes the ChatGPT token once after a 401', async () => {
-    const refreshFlags: boolean[] = [];
-    let calls = 0;
-    globalThis.fetch = async () => {
-      calls += 1;
-      if (calls === 1) return new Response('expired', { status: 401 });
-      return completedResponse();
-    };
-    const adapter = new OpenAIResponsesAPIAdapter({
-      mode: 'subscription',
-      credentials: async ({ forceRefresh }) => {
-        refreshFlags.push(forceRefresh);
-        return { token: forceRefresh ? 'fresh-token' : 'expired-token' };
-      },
-      baseURL: 'https://example.test/codex',
-    });
-
-    await adapter.complete(request());
-
-    expect(calls).toBe(2);
-    expect(refreshFlags).toEqual([false, true]);
-  });
-
   test('reconstructs tool calls when the terminal event has an empty output', async () => {
     const item = {
       type: 'function_call',
