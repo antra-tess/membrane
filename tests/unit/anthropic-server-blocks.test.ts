@@ -127,7 +127,7 @@ describe('NativeFormatter', () => {
     expect(built.messages[1]!.content).toEqual(sentTurn);
   });
 
-  it('leaves them out of another participant\'s message, which goes as a user turn', () => {
+  it('leaves them out of another participant\'s message, keeping its text', () => {
     const messages: NormalizedMessage[] = [
       { participant: 'User', content: [{ type: 'text', text: 'zz ask the other agent' }] },
       { participant: 'Other', content: turn() },

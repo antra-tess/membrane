@@ -1,10 +1,14 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { MockAdapter } from '../../src/providers/mock.js';
 import { MembraneError, serverError } from '../../src/types/errors.js';
 import type { NormalizedRequest, NormalizedResponse } from '../../src/types/index.js';
 import type { ProviderRequest, ProviderRequestOptions, ProviderResponse } from '../../src/types/provider.js';
 import type { StreamCallbacks } from '../../src/types/streaming.js';
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 class FailingAdapter extends MockAdapter {
   completeCalls = 0;

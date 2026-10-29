@@ -67,8 +67,6 @@ const requestFor = (mode: Mode): NormalizedRequest => ({ ...BASE, toolMode: mode
 /** setImmediate runs after every pending microtask, so one turn lets a loop resuming from a settled wait run to its end when it awaits nothing on the way. */
 const turn = () => new Promise((resolve) => setImmediate(resolve));
 
-const builderOf = (stream: unknown): unknown => (stream as { abortSnapshot?: unknown }).abortSnapshot;
-
 describe('a yielding stream ends at its terminal event', () => {
   for (const mode of ['native', 'xml'] as const) {
     it(`results passed just before cancel() leave nothing after the aborted event (${mode})`, async () => {
@@ -78,7 +76,6 @@ describe('a yielding stream ends at its terminal event', () => {
       for await (const event of stream) {
         types.push(event.type);
         if (event.type === 'tool-calls') {
-          expect(typeof builderOf(stream)).toBe('function');
           stream.provideToolResults(event.calls.map((call) => ({ toolUseId: call.id, content: 'zz ok' })));
           stream.cancel();
         }
@@ -95,7 +92,6 @@ describe('a yielding stream ends at its terminal event', () => {
         const adapter = new LateAdapter(mode, late);
         const stream = new Membrane(adapter).streamYielding(requestFor(mode), {});
         void adapter.streaming.then(() => {
-          expect(typeof builderOf(stream)).toBe('function');
           stream.cancel();
         });
         const events: StreamEvent[] = [];

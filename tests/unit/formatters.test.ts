@@ -951,10 +951,13 @@ describe('CompletionsFormatter', () => {
       const formatter = new CompletionsFormatter();
       const parser = formatter.createStreamParser();
 
-      parser.processChunk('<thinking>zz held');
+      const first = parser.processChunk('<thinking>zz held');
       expect(parser.isInsideBlock()).toBe(false);
-      parser.processChunk('</thinking> zz after');
+      const second = parser.processChunk('</thinking> zz after');
       expect(parser.isInsideBlock()).toBe(false);
+      const content = [first, second].flatMap((result) => result.emissions).flatMap((emission) => (emission.kind === 'content' ? [emission] : []));
+      expect(content.map((emission) => emission.text).join('')).toBe('<thinking>zz held</thinking> zz after');
+      expect(content.every((emission) => emission.meta.type === 'text' && emission.meta.visible)).toBe(true);
       expect(parser.getAccumulated()).toBe('<thinking>zz held</thinking> zz after');
     });
 

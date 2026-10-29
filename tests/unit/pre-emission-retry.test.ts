@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { MockAdapter } from '../../src/providers/mock.js';
 import { NativeFormatter } from '../../src/formatters/native.js';
@@ -13,6 +13,10 @@ import type {
   StreamEvent,
   ToolDefinition,
 } from '../../src/types/index.js';
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 const zzTool: ToolDefinition = {
   name: 'zz_tool',

@@ -44,6 +44,8 @@ const HOST = 'api.zz-provider.test:8443';
 const HIDDEN = ['zz-user', 'zz-secret', 'zz-path', 'zz-key'];
 
 const times = (message: string, text: string): number => message.split(text).length - 1;
+const nearestCode = (message: string, place: string, codes: string[]): string | undefined =>
+  [...codes].sort((a, b) => Math.abs(message.indexOf(a) - message.indexOf(place)) - Math.abs(message.indexOf(b) - message.indexOf(place)))[0];
 const namesTarget = (message: string, host: string): void => {
   expect(message).toContain(host);
   for (const part of HIDDEN) expect(message).not.toContain(part);
@@ -232,8 +234,10 @@ describe('plain words for each transport code, with the code, and the type it gi
     }), { code: 'ERR_ZZ_ONE' });
     const message = errorFromThrown(chain, undefined, 'https://api.zz-provider.test').message;
     for (const code of ['ECONNRESET', 'ERR_ZZ_ONE', 'ERR_ZZ_TWO']) expect(times(message, code), code).toBe(1);
-    expect(message.indexOf('fetch failed')).toBeLessThan(message.indexOf('ERR_ZZ_ONE'));
+    expect(message).toContain('fetch failed');
+    for (const code of ['ERR_ZZ_ONE', 'ERR_ZZ_TWO']) expect(message.indexOf('fetch failed'), code).toBeLessThan(message.indexOf(code));
     expect(message).toContain('192.0.2.9:8443');
+    expect(nearestCode(message, '192.0.2.9:8443', ['ECONNRESET', 'ERR_ZZ_ONE', 'ERR_ZZ_TWO'])).toBe('ERR_ZZ_TWO');
   });
 
   it("a code the error's own text already names isn't named again", () => {
@@ -271,6 +275,8 @@ describe('the addresses a code was met at', () => {
     for (const code of ['ENETUNREACH', 'ECONNREFUSED']) expect(times(error.message, code), code).toBe(1);
     expect(error.message).toContain('[2001:db8::7]:443');
     expect(error.message).toContain('192.0.2.7:443');
+    expect(nearestCode(error.message, '[2001:db8::7]:443', ['ENETUNREACH', 'ECONNREFUSED'])).toBe('ENETUNREACH');
+    expect(nearestCode(error.message, '192.0.2.7:443', ['ENETUNREACH', 'ECONNREFUSED'])).toBe('ECONNREFUSED');
   });
 
   it("the target's own address, on its default port, isn't repeated", () => {

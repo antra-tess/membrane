@@ -132,7 +132,16 @@ describe('F3/K8 · a tool block left open by a length stop', () => {
   it('does not flag a turn that closed its block', async () => {
     const logger = new RecordingLogger();
     const response = await streamOnce(
-      makeMembrane([{ text: 'zz_bot: nothing to call here', stopReason: 'end_turn' }], logger)
+      makeMembrane(
+        [
+          {
+            text: `zz_bot: calling now\n${FUNCTION_CALLS_OPEN}\n<invoke name="zz_slow_tool">\n<parameter name="fld1">whole</parameter>\n</invoke>\n</function_calls>`,
+            stopReason: 'stop_sequence',
+            stopSequence: '</function_calls>',
+          },
+        ],
+        logger
+      )
     );
 
     expect(response.details.stop.unclosedToolBlock).not.toBe(true);

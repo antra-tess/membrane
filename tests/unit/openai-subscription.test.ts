@@ -85,6 +85,11 @@ describe('OpenAI Responses subscription mode', () => {
     expect(seen[5].header!.startsWith('pinned')).toBe(true);
     expect(seen[6].header!.startsWith('pinned')).toBe(true);
     expect(seen[6].header).not.toBe(seen[5].header);
+
+    await new OpenAIResponsesAPIAdapter({ mode: 'subscription', credentials, sessionId: 'pinned' }).complete(request());
+    expect(seen[7].header).toBe(seen[5].header);
+    await new OpenAIResponsesAPIAdapter({ mode: 'subscription', credentials }).complete(request());
+    expect(seen[8].header).not.toBe(seen[0].header);
   });
 
   test('extraHeaders overrides the computed session_id in any casing, without joining', async () => {

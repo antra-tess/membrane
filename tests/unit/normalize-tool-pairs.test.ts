@@ -1355,7 +1355,9 @@ describe('normalizeToolPairs', () => {
         assistant(u('ite2')),
         user(r('ite2')),
       ];
-      expect(normalize(input).messages).toEqual(input);
+      const given = structuredClone(input);
+      expect(normalize(input).messages).toEqual(given);
+      expect(input).toEqual(given);
     });
   });
 

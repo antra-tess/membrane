@@ -1446,6 +1446,9 @@ describe("the instructions' values and the kinds reading agree", () => {
     for (const [name, declared] of Object.entries(pure)) {
       expect(parameters.get(name)?.enum, name).toEqual(declared.enum);
     }
+    for (const name of Object.keys(mixed)) {
+      expect(parameters.get(name)?.enum?.length, name).toBeGreaterThan(0);
+    }
     for (const [name, declaration] of parameters) {
       for (const value of (declaration.enum ?? []) as unknown[]) {
         const where = `${name}: ${JSON.stringify(value)}`;

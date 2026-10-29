@@ -588,12 +588,14 @@ describe('AnthropicAdapter: tool input_schema union flattening', () => {
       },
     };
 
+    const given = structuredClone(tool);
     await adapter.complete({
       ...baseRequest,
       model: 'claude-sonnet-4-5',
       tools: [tool],
     } as any);
 
-    expect(captured[0].tools[0]).toEqual(tool);
+    expect(captured[0].tools[0]).toEqual(given);
+    expect(tool).toEqual(given);
   });
 });

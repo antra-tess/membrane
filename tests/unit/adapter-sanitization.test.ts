@@ -9,6 +9,7 @@ import { BedrockAdapter } from '../../src/providers/bedrock.js';
 import { GeminiAdapter } from '../../src/providers/gemini.js';
 import { OpenAIAdapter } from '../../src/providers/openai.js';
 import { OpenAICompatibleAdapter } from '../../src/providers/openai-compatible.js';
+import { OpenAICompletionsAdapter } from '../../src/providers/openai-completions.js';
 import { OpenAIResponsesAdapter } from '../../src/providers/openai-responses.js';
 import { OpenRouterAdapter } from '../../src/providers/openrouter.js';
 import type { ProviderAdapter, ProviderRequest } from '../../src/types/provider.js';
@@ -49,10 +50,35 @@ describe("an adapter sends a caller's extra params, and none of membrane's own",
 
       expect(bodies.length).toBeGreaterThan(0);
       for (const body of bodies) {
+        expect(body).not.toContain('normalizedMessages');
         expect(body).not.toContain('zz-internal-participant');
         expect(body).not.toContain('zz-internal-prompt');
-        expect(body).toContain('zz-custom-value');
+        expect(body).toContain('"zz_custom_param":"zz-custom-value"');
       }
     });
   }
+
+  it('openai-completions, which builds its prompt from normalizedMessages', async () => {
+    const bodies: string[] = [];
+    vi.stubGlobal('fetch', async (_input: unknown, init?: RequestInit) => {
+      bodies.push(String(init?.body));
+      return new Response(JSON.stringify({ error: { message: 'zz refused' } }), { status: 400, headers: { 'content-type': 'application/json' } });
+    });
+    const adapter = new OpenAICompletionsAdapter({ baseURL: 'http://zz-host.invalid/v1', apiKey: 'zz-key' });
+    await adapter.complete({
+      model: 'zz-base-model',
+      messages: [{ role: 'user', content: 'zz hello' }],
+      maxTokens: 16,
+      extra: {
+        normalizedMessages: [{ participant: 'User', content: [{ type: 'text', text: 'zz hello' }] }],
+        zz_custom_param: 'zz-custom-value',
+      },
+    }).catch(() => undefined);
+
+    expect(bodies.length).toBeGreaterThan(0);
+    for (const body of bodies) {
+      expect(body).not.toContain('normalizedMessages');
+      expect(body).toContain('"zz_custom_param":"zz-custom-value"');
+    }
+  });
 });

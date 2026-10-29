@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { YieldingStreamImpl } from '../../src/yielding-stream.js';
 import { abortError } from '../../src/types/errors.js';
@@ -6,6 +6,10 @@ import { deadlineTimeoutError, isDeadlineAbort } from '../../src/providers/utils
 import type { NormalizedRequest, StreamEvent, YieldingStream } from '../../src/types/index.js';
 import type { ProviderAdapter, ProviderRequest, ProviderRequestOptions, ProviderResponse } from '../../src/types/provider.js';
 import type { StreamCallbacks } from '../../src/types/streaming.js';
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 type Mode = 'native' | 'xml';
 
