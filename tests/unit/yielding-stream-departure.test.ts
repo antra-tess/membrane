@@ -52,7 +52,7 @@ const REQUEST: NormalizedRequest = {
   config: { model: 'zz-model', maxTokens: 100 },
 };
 
-const settle = (ms = 250) => new Promise((resolve) => setTimeout(resolve, ms));
+const settle = (ms = 10) => new Promise((resolve) => setTimeout(resolve, ms));
 
 describe('breaking out of the loop stops the producer', () => {
   it('stops buying tokens once the consumer departs', async () => {
