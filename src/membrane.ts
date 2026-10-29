@@ -941,6 +941,7 @@ export class Membrane {
               parser.incrementBlockIndex();
             }
 
+            signal?.throwIfAborted();
             executedToolCalls.push(...parsed.calls);
 
             const context: ToolContext = {
@@ -1318,6 +1319,7 @@ export class Membrane {
 
           const toolCalls: ToolCall[] = toolUseBlocks.map(toolCallOf);
 
+          signal?.throwIfAborted();
           executedToolCalls.push(...toolCalls);
 
           const context: ToolContext = {
