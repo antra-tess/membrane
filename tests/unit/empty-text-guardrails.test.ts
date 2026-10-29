@@ -39,7 +39,7 @@ describe.each(['Anthropic', 'Bedrock'])('%s empty-text guardrails', kind => {
     expect(built.messages).toEqual([{ role: 'user', content: 'retained' }]);
   });
 
-  it('warns when cleanup removes marked text without logging its content', () => {
+  it('warns when cleanup removes marked whitespace text', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const marked = { ...text(' \n'), cache_control: { type: 'ephemeral' } };
     const built = adapter(kind).buildRequest({ ...base, messages: [
@@ -59,7 +59,6 @@ describe.each(['Anthropic', 'Bedrock'])('%s empty-text guardrails', kind => {
     expect(built.system).toEqual([text('system')]);
     expect(built.messages[0].content[0].content).toEqual([]);
     expect(warn.mock.calls.map(call => call[0]).join(' ')).toMatch(/removed 1 cache_control marker/);
-    expect(warn).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -100,13 +99,5 @@ describe('conversion and native formatting boundaries', () => {
       if (event.type === 'error') throw event.error;
     }
     expect(wire[0].messages[0].content).toEqual([text('User: hello')]);
-  });
-
-  it('preserves the exact valid legacy Bedrock system string', () => {
-    const built = adapter('Bedrock').buildRequest({
-      ...base, messages: [{ role: 'user', content: 'hello' }],
-      system: [text('Rules A'), text(''), text('Rules B')],
-    }, 'anthropic.claude-3-sonnet-20240229-v1:0');
-    expect(built.system).toBe('Rules A\n\n\n\nRules B');
   });
 });

@@ -185,13 +185,14 @@ describe('a response the inclusive reading cannot explain', () => {
     const sums = '[membrane:gemini] usageMetadata does not reconcile: promptTokenCount(2000)'
       + ' + toolUsePromptTokenCount(0) + candidatesTokenCount(5) + thoughtsTokenCount(0)'
       + ' = 2005 (10005 with cachedContentTokenCount(8000))';
+    const reconcileWarnings = () => warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes('does not reconcile'));
     stubComplete({ promptTokenCount: 2_000, cachedContentTokenCount: 8_000, candidatesTokenCount: 5, totalTokenCount: 9_000 });
     await membrane.complete(REQUEST);
-    expect(warn.mock.calls[0]).toEqual([`${sums}, but totalTokenCount = 9000.`]);
-    expect(warn).toHaveBeenCalledTimes(2);
+    expect(reconcileWarnings()).toEqual([`${sums}, but totalTokenCount = 9000.`]);
     stubComplete({ promptTokenCount: 2_000, cachedContentTokenCount: 8_000, candidatesTokenCount: 5, totalTokenCount: 12_000 });
     await membrane.complete(REQUEST);
-    expect(warn.mock.calls[2]).toEqual([
+    expect(reconcileWarnings()).toEqual([
+      `${sums}, but totalTokenCount = 9000.`,
       `${sums}, but totalTokenCount = 12000.`
       + ' Some billed tokens are in a usageMetadata field outside prompt, tool-use prompt, cached, candidates and thoughts.',
     ]);

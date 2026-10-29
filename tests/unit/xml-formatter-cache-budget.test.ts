@@ -134,7 +134,8 @@ describe('AnthropicXmlFormatter: caller-marked system array', () => {
     const blocks = injected.systemContent as any[];
     expect(blocks).toHaveLength(2);
     expect(blocks[0].text).toBe('zz stable preamble');
-    expect(blocks[1].text).toContain('available_tools');
+    expect(blocks[1].text).toContain('zz_shell');
+    expect(blocks[1].text).toContain('zz run');
     expect(blocks.filter((b) => b.cache_control)).toHaveLength(2);
     expect((conversationModeResult.systemContent as any[])[1].text).toBe('zz tail');
   });

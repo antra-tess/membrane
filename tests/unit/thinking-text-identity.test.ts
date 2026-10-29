@@ -47,7 +47,7 @@ describe('sameThinkingText: internal whitespace is payload, not noise', () => {
     expect(sameThinkingText('\n  zz-body one\n', 'zz-body one')).toBe(true);
   });
 
-  it('keeps signature-only carriers prepend-only', () => {
+  it('matches no payload to a blank or empty thinking text', () => {
     expect(sameThinkingText('', '')).toBe(false);
     expect(sameThinkingText('   ', 'zz-body one')).toBe(false);
   });

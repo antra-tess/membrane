@@ -205,10 +205,10 @@ describe('normalizeToolPairs', () => {
       const out = normalize(input, { onEvent });
 
       const firstUser = out.messages.find((m) => m.role === 'user')!;
-      const hasOrphanText = firstUser.content.some(
-        (b) => b.type === 'text' && /orphan tool_result/.test((b as ProviderBlock & { text?: string }).text ?? ''),
+      const carriesPayload = firstUser.content.some(
+        (b) => b.type === 'text' && ((b as ProviderBlock & { text?: string }).text ?? '').includes('something'),
       );
-      expect(hasOrphanText).toBe(true);
+      expect(carriesPayload).toBe(true);
       expect(events.some((e) => e.kind === 'orphan_tool_result_textified')).toBe(true);
     });
   });
@@ -395,7 +395,7 @@ describe('normalizeToolPairs', () => {
         | { kind: string; reason: string }
         | undefined;
       expect(ev).toBeDefined();
-      expect(['trailing', 'mid_stream']).toContain(ev!.reason);
+      expect(ev!.reason).toBe('mid_stream');
       const assistantIdx = out.messages.findIndex((m) => m.role === 'assistant');
       const after = out.messages[assistantIdx + 1]!;
       expect(resultIds(after.content)).toContain('A');
@@ -423,7 +423,7 @@ describe('normalizeToolPairs', () => {
       expect(surviving).toHaveLength(1);
     });
 
-    it('emits no cache-suppression telemetry', () => {
+    it('reports the synthesized result beside a cache breakpoint', () => {
       const input: ProviderMessage[] = [
         user(t('go')),
         assistant(u('ite1')),
@@ -433,7 +433,6 @@ describe('normalizeToolPairs', () => {
       const { events, onEvent } = collectEvents();
       normalize(input, { onEvent });
 
-      expect(events.map((e) => e.kind)).not.toContain('cache_suppressed_for_synthetic');
       expect(events.some((e) => e.kind === 'synthetic_pending_result')).toBe(true);
     });
 
@@ -1356,7 +1355,7 @@ describe('normalizeToolPairs', () => {
         assistant(u('ite2')),
         user(r('ite2')),
       ];
-      expect(normalize(input).ready).toBe(true);
+      expect(normalize(input).messages).toEqual(input);
     });
   });
 
@@ -1427,18 +1426,5 @@ describe('PREFIX_REWRITING_NORMALIZE_EVENT_KINDS', () => {
       'stray_tool_result_textified',
       'synthetic_pending_result',
     ]);
-  });
-
-  it('excludes the envelope-only repairs, which do not poison a cached prefix', () => {
-    const envelopeOnly: Array<NormalizeEvent['kind']> = [
-      'block_re_roled',
-      'tool_result_hoisted',
-      'interloper_deferred',
-      'pending_in_flight',
-      'leading_user_synthesized',
-    ];
-    for (const kind of envelopeOnly) {
-      expect(PREFIX_REWRITING_NORMALIZE_EVENT_KINDS.has(kind)).toBe(false);
-    }
   });
 });

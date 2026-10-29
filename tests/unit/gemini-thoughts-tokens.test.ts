@@ -85,8 +85,7 @@ describe('GeminiAdapter thoughtsTokenCount accounting', () => {
     const adapter = new GeminiAdapter({ apiKey: 'zz-key-not-used' });
     await adapter.complete(REQUEST);
 
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(String(warn.mock.calls[0]?.[0])).toContain('usageMetadata does not reconcile');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('999'));
   });
 
   it('does not warn when the counts reconcile', async () => {

@@ -276,11 +276,8 @@ describe('deadlines past the platform timer limit', () => {
 
   it('a progress deadline past the limit expires on time', () => {
     vi.useFakeTimers();
-    const armed = vi.spyOn(globalThis, 'setTimeout');
     const deadline = createProgressDeadline(undefined, PAST_LIMIT_MS);
-    vi.advanceTimersByTime(10);
-    expect(armed).toHaveBeenCalledTimes(1);
-    vi.advanceTimersByTime(PAST_LIMIT_MS - 11);
+    vi.advanceTimersByTime(PAST_LIMIT_MS - 1);
     expect(deadline.signal!.aborted).toBe(false);
     vi.advanceTimersByTime(1);
     expect(deadline.signal!.aborted).toBe(true);

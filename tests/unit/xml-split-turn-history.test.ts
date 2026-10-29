@@ -340,9 +340,9 @@ describe('a split image round, kept in the response', () => {
       resultSpans: [{ at: 7, block: 0, result: 0, count: 2 }],
     };
     const round = { xml, docAt: 7, at: 10, imageResult: 1, results: [textResult('zz1'), imageResult('zz2'), textResult('zz3')] };
+    const given = structuredClone({ blocks: parsed.blocks, toolResults: parsed.toolResults });
     const attached = attachSplitResults(parsed, [round]);
-    expect(attached.blocks).toBe(parsed.blocks);
-    expect(attached.toolResults).toBe(parsed.toolResults);
+    expect({ blocks: attached.blocks, toolResults: attached.toolResults }).toEqual(given);
   });
 
   it('gives a round nothing when the block where it wrote its own holds other text', () => {
@@ -353,9 +353,9 @@ describe('a split image round, kept in the response', () => {
       resultSpans: [{ at: 7, block: 0, result: 0, count: 1 }],
     };
     const round = { xml: blockOf('zz shot ok'), docAt: 7, at: 10, imageResult: 0, results: [imageResult('zz1')] };
+    const given = structuredClone({ blocks: parsed.blocks, toolResults: parsed.toolResults });
     const attached = attachSplitResults(parsed, [round]);
-    expect(attached.blocks).toBe(parsed.blocks);
-    expect(attached.toolResults).toBe(parsed.toolResults);
+    expect({ blocks: attached.blocks, toolResults: attached.toolResults }).toEqual(given);
   });
 
   it('keeps the image in the partial content of a turn aborted after the split round, on both loops', async () => {

@@ -165,7 +165,6 @@ describe('tool-use prompt tokens beside a cache hit', () => {
 
     expect(response.usage.inputTokens).toBe(1_500);
     expect(response.details.usage.cacheReadTokens).toBe(1_200);
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(String(warn.mock.calls[0]?.[0])).toContain('cachedContentTokenCount(1200) exceeds promptTokenCount(1000)');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('cachedContentTokenCount(1200) exceeds promptTokenCount(1000)'));
   });
 });

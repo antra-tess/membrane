@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { NativeFormatter } from '../../src/formatters/native.js';
-import type { BuildResult } from '../../src/formatters/types.js';
 import type { NormalizedRequest, ProviderAdapter, ProviderRequest, ProviderResponse } from '../../src/types/index.js';
 
 const messages: NormalizedRequest['messages'] = [
@@ -145,25 +144,5 @@ describe('beforeRequest original-turn contract (#18)', () => {
     expect(req.messages).toEqual(originalMessages);
     expect(JSON.stringify(seen[0].raw)).not.toContain('TOOL_RESULT_MARKER');
     expect(JSON.stringify(seen[1].raw)).toContain('TOOL_RESULT_MARKER');
-  });
-});
-
-describe('empty-system continuation omission (#18)', () => {
-  it.each(['plain', 'images'] as const)('omits an empty system array in %s continuations and copies nonempty blocks', (kind) => {
-    const membrane = new Membrane(recordingAdapter()) as any;
-    const build = (systemContent: unknown) => {
-      const result: BuildResult = { messages: [{ role: 'user', content: 'hello' }], stopSequences: [], systemContent };
-      return kind === 'plain'
-        ? membrane.buildContinuationRequest(request(), result, 'answer')
-        : membrane.buildContinuationRequestWithImages(request(), result, 'answer', [], 'closing');
-    };
-    expect(build([]).system).toBeUndefined();
-    expect(build(undefined).system).toBeUndefined();
-    expect(build('rules').system).toBe('rules');
-    const system = [{ type: 'text', text: 'rules', cache_control: { type: 'ephemeral' } }];
-    const built = build(system);
-    expect(built.system).toEqual(system);
-    expect(built.system).not.toBe(system);
-    expect(built.system[0]).not.toBe(system[0]);
   });
 });

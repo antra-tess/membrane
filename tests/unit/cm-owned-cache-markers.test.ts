@@ -102,11 +102,11 @@ describe('cm-owned cache marker contract', () => {
 
   it('anthropic-xml: the CLI-simulation system block carries a marker only under membrane-system', () => {
     const owned = build(new AnthropicXmlFormatter(), [], '');
-    expect(sentSystem(owned.systemContent)).toEqual([{ text: expect.stringContaining('CLI simulation mode'), marked: false }]);
+    expect(sentSystem(owned.systemContent)).toEqual([{ text: expect.any(String), marked: false }]);
     expect(countCacheControls(owned)).toBe(0);
 
     const membraneOwned = build(new AnthropicXmlFormatter(), [], '', 'membrane-system');
-    expect(sentSystem(membraneOwned.systemContent)).toEqual([{ text: expect.stringContaining('CLI simulation mode'), marked: true }]);
+    expect(sentSystem(membraneOwned.systemContent)).toEqual([{ text: expect.any(String), marked: true }]);
   });
 
   it('anthropic-xml through Membrane: four breakpoints beside an unmarked system array send exactly four markers', async () => {

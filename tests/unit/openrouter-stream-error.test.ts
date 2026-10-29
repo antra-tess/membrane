@@ -57,6 +57,7 @@ describe('OpenRouterAdapter stream error events', () => {
     const chunks: string[] = [];
     const res: any = await streamOnce(adapter, chunks);
     expect(chunks).toEqual(['hello']);
-    expect(res.choices?.[0]?.message?.content ?? res.content?.[0]?.text ?? res.rawText ?? 'hello').toBeTruthy();
+    expect(res.content).toEqual([{ type: 'text', text: 'hello' }]);
+    expect(res.stopReason).toBe('end_turn');
   });
 });

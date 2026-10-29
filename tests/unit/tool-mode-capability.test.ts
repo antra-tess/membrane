@@ -99,7 +99,7 @@ describe('resolveToolMode default', () => {
     expect(content).toContain('zz_lookup1');
   });
 
-  it('falls back to XML for a formatter that cannot carry native tools', () => {
+  it('declares native tools only for the formatters that can carry them', () => {
     expect(new CompletionsFormatter().supportsNativeTools).toBe(false);
     expect(new AnthropicXmlFormatter().supportsNativeTools).toBe(true);
     expect(new NativeFormatter().supportsNativeTools).toBe(true);

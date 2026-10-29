@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { OpenAICompletionsAdapter } from '../../src/providers/openai-completions.js';
 
 describe('OpenAICompletionsAdapter', () => {
@@ -224,12 +224,28 @@ describe('OpenAICompletionsAdapter', () => {
   });
 
   describe('configuration', () => {
-    it('should use default stop sequences', () => {
-      const defaultAdapter = new OpenAICompletionsAdapter({
-        baseURL: 'http://localhost:8000/v1',
+    it('should use default stop sequences', async () => {
+      let sent: { stop?: string[] } | undefined;
+      vi.stubGlobal('fetch', async (_url: unknown, init?: RequestInit) => {
+        sent = JSON.parse(String(init?.body));
+        return new Response(
+          JSON.stringify({ choices: [{ text: 'ok', finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1 } }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
       });
+      try {
+        await new OpenAICompletionsAdapter({ baseURL: 'http://localhost:8000/v1' }).complete({
+          model: 'zz-model', maxTokens: 16,
+          messages: [{ participant: 'Alice', content: 'Hello' }, { participant: 'Assistant', content: 'Hi' }],
+        } as never);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+      expect([...(sent?.stop ?? [])].sort()).toEqual(['\n\nAlice:', '\nAlice:', '<|eot|>'].sort());
+    });
 
-      expect(defaultAdapter.name).toBe('openai-completions');
+    it('is named openai-completions by default', () => {
+      expect(new OpenAICompletionsAdapter({ baseURL: 'http://localhost:8000/v1' }).name).toBe('openai-completions');
     });
 
     it('should allow custom provider name', () => {

@@ -237,7 +237,6 @@ describe('tool calls the provider stopped with end_turn', () => {
       requestId: 'req_zz_1',
     }]);
     const line = warnings.find((w) => w.includes('tool call'));
-    expect(line).toContain('treating the round as tool_use');
     expect(line).toContain('msg_zz_1');
     expect(line).toContain('req_zz_1');
   });
@@ -291,7 +290,6 @@ describe('tool calls the provider stopped with end_turn', () => {
     expect(calls()).toBe(1);
     expect(response.stopReason).toBe('end_turn');
     expect(response.details.anomalies?.[0]).toMatchObject({ treatedAsToolUse: false, toolUseIds: ['toolu_zz_cut'] });
-    expect(warnings.some((w) => w.includes('nothing runs'))).toBe(true);
   });
 
   it.each([

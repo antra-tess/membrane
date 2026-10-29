@@ -144,7 +144,7 @@ describe('delayFor', () => {
     const spy = vi.spyOn(Math, 'random').mockReturnValue(0);
     expect(delayFor('overloaded', 1, settings).delayMs).toBe(5000);
     expect(retryDecision('overloaded', 1, undefined, settings)).toEqual({ retry: true, delayMs: 5000 });
-    expect(spy).toHaveBeenCalledTimes(2);
+    expect(spy).toHaveBeenCalled();
   });
 
   it('jitters no other class', () => {

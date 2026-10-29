@@ -182,41 +182,32 @@ describe('Temperature enforcement for thinking', () => {
 
 describe('Abort signal during retry', () => {
   it('aborts promptly during retry delay instead of waiting', async () => {
-    const adapter = new MockAdapter({
-      defaultResponse: 'Hello',
-    });
-
-    const originalComplete = adapter.complete.bind(adapter);
-    let callCount = 0;
-    adapter.complete = async (request: any, options: any) => {
-      callCount++;
-      const error = new Error('429 Too Many Requests');
-      (error as any).status = 429;
-      throw error;
-    };
-
-    const membrane = new Membrane(adapter, {
-      retry: {
-        maxRetries: 5,
-        retryDelayMs: 5000,
-        backoffMultiplier: 1,
-        maxRetryDelayMs: 10000,
-      },
-    });
-
-    const controller = new AbortController();
-
-    setTimeout(() => controller.abort(), 100);
-
-    const startTime = Date.now();
-
-    await expect(
+    vi.useFakeTimers();
+    try {
+      const adapter = new MockAdapter({ defaultResponse: 'Hello' });
+      let callCount = 0;
+      adapter.complete = async () => {
+        callCount++;
+        throw Object.assign(new Error('429 Too Many Requests'), { status: 429 });
+      };
+      const membrane = new Membrane(adapter, {
+        retry: { maxRetries: 5, retryDelayMs: 5000, backoffMultiplier: 1, maxRetryDelayMs: 10000 },
+      });
+      const controller = new AbortController();
+      let outcome: unknown = 'pending';
       membrane.complete(makeRequest(), { signal: controller.signal })
-    ).rejects.toThrow();
+        .then(() => { outcome = 'resolved'; }, (error: unknown) => { outcome = error; });
 
-    const elapsed = Date.now() - startTime;
+      await vi.advanceTimersByTimeAsync(100);
+      expect(callCount).toBe(1);
+      expect(outcome).toBe('pending');
 
-    expect(elapsed).toBeLessThan(1000);
-    expect(callCount).toBeGreaterThanOrEqual(1);
+      controller.abort();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(outcome).toMatchObject({ type: 'abort' });
+      expect(callCount).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

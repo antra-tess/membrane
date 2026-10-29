@@ -223,15 +223,15 @@ describe('shared native readiness and budget ownership', () => {
 
 describe('cache markers on duplicate textification', () => {
   it.each(['duplicate_in_cycle', 'cycle_closed'])('retains the marker and payload for $0', reason => {
-    const duplicate = { ...result('duplicate'), cache_control: marker };
+    const duplicate = { ...result('zz-second-copy'), cache_control: marker };
     const input = reason === 'duplicate_in_cycle'
       ? [message('user', text('go')), message('assistant', use()), message('user', result('first'), duplicate)]
       : [message('user', text('go')), message('assistant', use()), message('user', result('first')), message('assistant', text('later')), message('user', duplicate)];
     const before = structuredClone(input);
     const output = normalizeToolPairs(input).messages;
-    expect(blocks(output).find(block => block.type === 'text' && String(block.text).includes('[duplicate tool_result'))).toEqual({
-      type: 'text', text: '[duplicate tool_result for u]: duplicate', cache_control: marker,
-    });
+    const textified = blocks(output).filter(block => block.type === 'text' && String(block.text).includes('zz-second-copy'));
+    expect(textified).toHaveLength(1);
+    expect(textified[0]).toMatchObject({ cache_control: marker });
     expect(countWireCacheMarkers({ messages: output })).toBe(1);
     expect(input).toEqual(before);
   });
