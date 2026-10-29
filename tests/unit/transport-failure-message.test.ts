@@ -196,10 +196,11 @@ describe('plain words for each transport code, with the code, and the type it gi
     ['ERR_TLS_CERT_ALTNAME_INVALID', "the server's certificate is for another name", 'unknown'],
   ];
 
-  it.each(words)('%s, named once with the host', (code) => {
+  it.each(words)('%s, named once with the host, in words rather than the error\'s own text', (code) => {
     const error = errorFromThrown(nodeFailure(code), undefined, 'https://api.zz-provider.test/v1');
     expect(error.message).toContain('api.zz-provider.test');
     expect(times(error.message, code)).toBe(1);
+    expect(error.message).not.toContain('fetch failed');
   });
 
   it.each(words)('%s alone types the error as before', (code, _said, type) => {

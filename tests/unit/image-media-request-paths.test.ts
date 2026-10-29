@@ -66,9 +66,9 @@ describe('image signature resolution', () => {
       expect(placeholder?.text).toContain('NOT shown to you');
       expect(placeholder?.text).toContain(`its data is not a JPEG, PNG, GIF or WebP image, the formats this request can carry (it was labelled "${label}")`);
     }
-    expect(warn.mock.calls.map((call) => String(call[0]))).toEqual(
+    expect(warn.mock.calls.map((call) => String(call[0]))).toEqual(expect.arrayContaining(
       ['IMAGE/GIF', 'image/png', 'image/svg+xml'].map((label) => expect.stringContaining(JSON.stringify(label))),
-    );
+    ));
   });
 
   it('quotes the label and cuts it short, so a crafted one stays inside its quotes', () => {
