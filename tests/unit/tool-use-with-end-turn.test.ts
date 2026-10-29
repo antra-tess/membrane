@@ -290,6 +290,7 @@ describe('tool calls the provider stopped with end_turn', () => {
     expect(calls()).toBe(1);
     expect(response.stopReason).toBe('end_turn');
     expect(response.details.anomalies?.[0]).toMatchObject({ treatedAsToolUse: false, toolUseIds: ['toolu_zz_cut'] });
+    expect(warnings.filter((w) => w.includes('msg_zz_5'))).toHaveLength(1);
   });
 
   it.each([
@@ -677,7 +678,7 @@ describe('tool calls the provider stopped with end_turn', () => {
     });
 
     expect(response.details.anomalies?.map((a) => [a.round, a.messageId])).toEqual([[1, 'msg_zz_41'], [2, 'msg_zz_42']]);
-    expect(warnings.filter((w) => w.includes('treating the round as tool_use'))).toHaveLength(2);
+    for (const id of ['msg_zz_41', 'msg_zz_42']) expect(warnings.filter((w) => w.includes(id))).toHaveLength(1);
   });
 
   it("details.stop describes the final round, while the anomaly keeps its own round's token", async () => {

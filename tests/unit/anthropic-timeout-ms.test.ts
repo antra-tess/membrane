@@ -183,12 +183,15 @@ describe('Anthropic adapter timeoutMs (membrane#97)', () => {
     }), { status: 200, headers: { 'content-type': 'application/json', 'request-id': 'req_fixture' } }));
     const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
     const caller = new AbortController();
-    const timers = () => process.getActiveResourcesInfo().filter((resource) => resource === 'Timeout').length;
-    const timersBefore = timers();
-    const result = await adapter.complete(request, { timeoutMs: 600_000, signal: caller.signal });
-    expect(result.stopReason).toBe('end_turn');
-    expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
-    expect(timers()).toBeLessThanOrEqual(timersBefore);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const result = await adapter.complete(request, { timeoutMs: 600_000, signal: caller.signal });
+      expect(result.stopReason).toBe('end_turn');
+      expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // membrane#212: the SDK's fetchWithTimeout adds an abort listener to the

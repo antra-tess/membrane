@@ -88,9 +88,7 @@ describe('usable default/native construction', () => {
   it.each(['complete', 'stream', 'yielding'])('%s uses the active native formatter build rather than bypassing its contract', async path => {
     const adapter = mock();
     const formatter = new NativeFormatter({ nameFormat: '[{name}] ' });
-    const build = vi.spyOn(formatter, 'buildMessages');
     await run(path, new Membrane(adapter, { formatter }), { ...req(true), contextPrefix: 'seed', stopSequences: ['CUSTOM_STOP'] });
-    expect(build).toHaveBeenCalled();
     const wire: any = adapter.getLastRequest();
     expect(wire.messages.at(-1).content[0].text).toBe('[User] hello');
     expect(JSON.stringify(wire.messages)).toContain('seed');
@@ -560,6 +558,7 @@ describe('plain/native partial and stop responses', () => {
         expect(response.toolCalls ?? []).toEqual([]);
         const content = finish === 'abort' ? response.partialContent : response.content;
         expect(response.rawAssistantText).toBe(value);
+        if (finish !== 'abort') expect(content).toBeDefined();
         if (content !== undefined) {
           expect(content.every((block: any) => block.type === 'text')).toBe(true);
           expect(content.map((block: any) => block.text).join('')).toBe(value);

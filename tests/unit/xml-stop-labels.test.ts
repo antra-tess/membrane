@@ -207,7 +207,10 @@ describe.each([
       ['Found it.'],
     ), { request: WITH_TOOLS });
     expect(visible(pieces)).toBe('Let me look.Found it.');
+    expect(pieces.filter((p) => p.type === 'tool_call').map((p) => p.text).join('')).toBe('\n\nzz\n\n');
     expect(pieces.filter((p) => p.type === 'tool_call').every((p) => !p.visible)).toBe(true);
+    expect(blocks.filter((b) => b.event === 'block_complete' && b.block.type === 'tool_call').map((b) => (b.block as { toolName?: string }).toolName))
+      .toEqual([undefined, 'zz_look']);
     expect(blocks).toContainEqual(expect.objectContaining({
       event: 'block_complete', block: expect.objectContaining({ type: 'tool_call', toolName: 'zz_look', input: { q: 'zz' } }),
     }));
@@ -415,7 +418,7 @@ describe.each([
     ), { formatter: xmlBlocksNoXmlTools() });
     expect(blocks.filter((b) => b.event === 'block_complete').map((b) => b.index), 'the premise: the provider completed a block at index 1 each round').toEqual([1, 1]);
     expect(sent.some((s) => 'piece' in s), 'the premise: the rounds\' text went out').toBe(true);
-    expect(outsideProviderBlocks(sent).map(({ index: _index, ...piece }) => piece)).toEqual([{ text: '\nuser:', type: 'thinking', visible: false }]);
+    expect(outsideProviderBlocks(sent)).toEqual([{ text: '\nuser:', type: 'thinking', visible: false, index: 0 }]);
   });
 
   it('labels each piece before a stop the loop found by its own block, with the provider\'s index, and sends nothing after the stop', async () => {
@@ -434,7 +437,7 @@ describe.each([
       ['zz <function_calls><invoke name="zz_look">', '</function_calls> zz after'],
       [' They met.'],
     ), { formatter: xmlBlocksNoXmlTools() });
-    expect(outsideProviderBlocks(sent).map(({ index: _index, ...piece }) => piece)).toEqual([{ text: '</function_calls>', type: 'tool_call', visible: false }]);
+    expect(outsideProviderBlocks(sent)).toEqual([{ text: '</function_calls>', type: 'tool_call', visible: false, index: 0 }]);
   });
 
   it.each([

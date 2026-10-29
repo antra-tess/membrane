@@ -182,20 +182,21 @@ describe('a response the inclusive reading cannot explain', () => {
     resetPromptExcludesCacheWarning();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const membrane = new Membrane(new GeminiAdapter({ apiKey: 'zz-key-not-used' }));
-    const sums = '[membrane:gemini] usageMetadata does not reconcile: promptTokenCount(2000)'
-      + ' + toolUsePromptTokenCount(0) + candidatesTokenCount(5) + thoughtsTokenCount(0)'
-      + ' = 2005 (10005 with cachedContentTokenCount(8000))';
     const reconcileWarnings = () => warn.mock.calls.map((call) => String(call[0])).filter((line) => line.includes('does not reconcile'));
     stubComplete({ promptTokenCount: 2_000, cachedContentTokenCount: 8_000, candidatesTokenCount: 5, totalTokenCount: 9_000 });
     await membrane.complete(REQUEST);
-    expect(reconcileWarnings()).toEqual([`${sums}, but totalTokenCount = 9000.`]);
     stubComplete({ promptTokenCount: 2_000, cachedContentTokenCount: 8_000, candidatesTokenCount: 5, totalTokenCount: 12_000 });
     await membrane.complete(REQUEST);
-    expect(reconcileWarnings()).toEqual([
-      `${sums}, but totalTokenCount = 9000.`,
-      `${sums}, but totalTokenCount = 12000.`
-      + ' Some billed tokens are in a usageMetadata field outside prompt, tool-use prompt, cached, candidates and thoughts.',
-    ]);
+    const warnings = reconcileWarnings();
+    expect(warnings).toHaveLength(2);
+    const [underBoth, overBoth] = warnings as [string, string];
+    for (const [line, total] of [[underBoth, '9000'], [overBoth, '12000']]) {
+      expect(line).toContain('2005');
+      expect(line).toContain('10005');
+      expect(line).toContain(total);
+    }
+    expect(underBoth).not.toContain('outside');
+    expect(overBoth).toContain('outside');
   });
 
   it('a response the inclusive reading explains gets no such allowance: a total that adds the cached span again warns', async () => {

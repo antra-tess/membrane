@@ -119,6 +119,25 @@ describe('N1: role-shaped messages without a participant', () => {
 
     expect(output.info.messagesKept).toBe(30);
   });
+
+  it('placeCacheMarkers treats a missing participant as a user turn', () => {
+    const asUser = zzAlternating(60, 200).map((m, i) => (i % 2 === 0 ? m : { ...m, participant: 'Claude' }));
+    const participantless = asUser.map((m, i) => {
+      if (i % 2 !== 0) return m;
+      const { participant: _dropped, ...rest } = m;
+      return rest as unknown as NormalizedMessage;
+    });
+    const indices = (messages: NormalizedMessage[], preferUserMessages: boolean) => placeCacheMarkers(
+      messages,
+      withTokens(messages),
+      createInitialState(),
+      false,
+      baseConfig({ assistantParticipant: 'Claude', cache: { preferUserMessages } })
+    ).map((marker) => marker.messageIndex);
+
+    expect(indices(asUser, true), 'the premise: preferring a user turn moves a marker').not.toEqual(indices(asUser, false));
+    expect(indices(participantless, true)).toEqual(indices(asUser, true));
+  });
 });
 
 describe('F6: processContext refuses messages without stable ids', () => {
@@ -238,7 +257,10 @@ describe('F3: cache markers land on the field request builders read', () => {
 
     expect(marked[1]!.cacheBreakpoint).toBe(true);
     expect(marked[1]!.metadata?.cacheControl).toEqual({ type: 'ephemeral' });
-    expect(marked[0]!.cacheBreakpoint).toBeFalsy();
+    for (const index of [0, 2, 3]) {
+      expect(marked[index]!.cacheBreakpoint).toBeFalsy();
+      expect(marked[index]!.metadata?.cacheControl).toBeUndefined();
+    }
   });
 
   it('produces cache_control on the wire through the default XML formatter', () => {

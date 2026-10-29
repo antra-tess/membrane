@@ -97,3 +97,21 @@ describe('empty system normalization', () => {
     expect(JSON.stringify(built)).not.toContain('"system":[]');
   });
 });
+
+describe('nonempty system in continuations', () => {
+  it.each(['continuation', 'image-continuation'])('carries a nonempty system in the %s builder', builder => {
+    const membrane = new Membrane(new MockAdapter(), { formatter: new NativeFormatter() }) as any;
+    const req: NormalizedRequest = {
+      messages: [{ participant: 'User', content: [{ type: 'text', text: 'hello' }] }],
+      config: { model: 'test-model', maxTokens: 128 }, promptCaching: false,
+    };
+    const build = (systemContent: unknown) => {
+      const prefill = { messages: [{ role: 'user', content: 'hello' }], systemContent, stopSequences: [] };
+      return builder === 'continuation' ? membrane.buildContinuationRequest(req, prefill, 'answer')
+        : membrane.buildContinuationRequestWithImages(req, prefill, 'answer', [], 'closing');
+    };
+    expect(build('rules').system).toBe('rules');
+    const system = [{ type: 'text', text: 'rules', cache_control: { type: 'ephemeral' } }];
+    expect(build(system).system).toEqual(system);
+  });
+});

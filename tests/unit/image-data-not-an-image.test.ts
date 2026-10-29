@@ -734,7 +734,8 @@ describe('round reports name a message whose image became the placeholder', () =
     expect(heard[0]).toBe(part);
     expect(heard[1]).toBe(nested);
     const items = [{ type: 'message', role: 'user', content: [{ type: 'input_image', image_url: PNG_URL }] }];
-    nativeInputForRequest(items as any, () => heard.push('none expected'));
+    const itemsAsGiven = structuredClone(items);
+    expect(nativeInputForRequest(items as any, () => heard.push('none expected'))).toEqual(itemsAsGiven);
     expect(heard).toHaveLength(2);
   });
 

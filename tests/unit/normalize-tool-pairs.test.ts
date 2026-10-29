@@ -433,7 +433,7 @@ describe('normalizeToolPairs', () => {
       const { events, onEvent } = collectEvents();
       normalize(input, { onEvent });
 
-      expect(events.some((e) => e.kind === 'synthetic_pending_result')).toBe(true);
+      expect(events).toContainEqual({ kind: 'synthetic_pending_result', toolUseId: 'ite1', reason: 'mid_stream' });
     });
 
     it('the synthetic payload is byte-stable across compiles', () => {
