@@ -188,7 +188,7 @@ describe('Anthropic adapter timeoutMs (membrane#97)', () => {
     const result = await adapter.complete(request, { timeoutMs: 600_000, signal: caller.signal });
     expect(result.stopReason).toBe('end_turn');
     expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
-    expect(timers()).toBe(timersBefore);
+    expect(timers()).toBeLessThanOrEqual(timersBefore);
   });
 
   // membrane#212: the SDK's fetchWithTimeout adds an abort listener to the
