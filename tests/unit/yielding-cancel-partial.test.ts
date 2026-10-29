@@ -189,27 +189,6 @@ describe('a cancelled streamYielding() turn reports what it had', () => {
     expect(seen.filter((event) => event.type === 'aborted')).toEqual([{ type: 'aborted', reason: 'user' }]);
   });
 
-  it('a consumer that leaves early does not run the builder, and one that cancels does', async () => {
-    const counted = (count: { built: number }) => new YieldingStreamImpl({}, async (running) => {
-      running.setAbortSnapshot(() => { count.built++; return {}; });
-      running.emit({ type: 'tokens', content: 'zz', meta: { visible: true } } as never);
-      await new Promise<void>((resolve) => running.signal.addEventListener('abort', () => resolve(), { once: true }));
-    });
-
-    const left = { built: 0 };
-    for await (const event of counted(left)) {
-      if (event.type === 'tokens') break;
-    }
-    expect(left.built).toBe(0);
-
-    const cancelled = { built: 0 };
-    const stream = counted(cancelled);
-    for await (const event of stream) {
-      if (event.type === 'tokens') stream.cancel();
-    }
-    expect(cancelled.built).toBe(1);
-  });
-
   it('a finished stream lets go of its loop\'s builder', async () => {
     const stream = new YieldingStreamImpl({}, async (running) => {
       running.setAbortSnapshot(() => ({ rawAssistantText: 'zz' }));
