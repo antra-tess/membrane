@@ -44,6 +44,7 @@ const HOST = 'api.zz-provider.test:8443';
 const HIDDEN = ['zz-user', 'zz-secret', 'zz-path', 'zz-key'];
 
 const times = (message: string, text: string): number => message.split(text).length - 1;
+const wordsIn = (text: string): number => (text.match(/[A-Za-z]{2,}/g) ?? []).length;
 const nearestCode = (message: string, place: string, codes: string[]): string | undefined =>
   [...codes].sort((a, b) => Math.abs(message.indexOf(a) - message.indexOf(place)) - Math.abs(message.indexOf(b) - message.indexOf(place)))[0];
 const namesTarget = (message: string, host: string): void => {
@@ -198,11 +199,18 @@ describe('plain words for each transport code, with the code, and the type it gi
     ['ERR_TLS_CERT_ALTNAME_INVALID', 'unknown'],
   ];
 
+  const frameWords = wordsIn(
+    errorFromThrown(nodeFailure('ERR_ZZ_UNWORDED'), undefined, 'https://api.zz-provider.test/v1').message
+      .replace('fetch failed', '')
+      .replace('ERR_ZZ_UNWORDED', ''),
+  );
+
   it.each(worded)('%s, named once with the host, in words rather than the error\'s own text', (code) => {
     const error = errorFromThrown(nodeFailure(code), undefined, 'https://api.zz-provider.test/v1');
     expect(error.message).toContain('api.zz-provider.test');
     expect(times(error.message, code)).toBe(1);
     expect(error.message).not.toContain('fetch failed');
+    expect(wordsIn(error.message.replace(code, '')), 'words beyond the sentence an unworded code gets').toBeGreaterThan(frameWords);
   });
 
   it.each(worded)('%s alone types the error as before', (code, type) => {
