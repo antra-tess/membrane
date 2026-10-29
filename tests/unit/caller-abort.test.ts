@@ -15,6 +15,7 @@ import { Membrane } from '../../src/membrane.js';
 import type { ProviderAdapter, ProviderRequest } from '../../src/types/provider.js';
 
 const request: ProviderRequest = { model: 'zz-model-1', messages: [{ role: 'user', content: 'zz-prompt' }], maxTokens: 16 };
+const OWN_DEADLINE_MS = 10;
 
 let server: Server;
 let base = '';
@@ -191,8 +192,8 @@ describe("the caller's abort wins when a deadline of the call's own fired first"
         callerAbortsOnDeadline(controller, new Error('zz caller gave up'));
         const adapter = make(base);
         const call = method === 'complete'
-          ? adapter.complete(request, { signal: controller.signal, timeoutMs: 100 })
-          : adapter.stream(request, { onChunk: () => {} }, { signal: controller.signal, timeoutMs: 100 });
+          ? adapter.complete(request, { signal: controller.signal, timeoutMs: OWN_DEADLINE_MS })
+          : adapter.stream(request, { onChunk: () => {} }, { signal: controller.signal, timeoutMs: OWN_DEADLINE_MS });
         const error = await call.then(() => { throw new Error('expected the call to reject'); }, (caught: unknown) => caught as MembraneError);
         expect({ type: error.type, retryable: error.retryable, message: error.message })
           .toEqual({ type: 'abort', retryable: false, message: 'Request was aborted' });
@@ -204,7 +205,7 @@ describe("the caller's abort wins when a deadline of the call's own fired first"
     const controller = new AbortController();
     callerAbortsOnDeadline(controller, new Error('zz caller gave up'));
     const adapter = new AnthropicAdapter({ apiKey: 'zz-key', baseURL: base, maxRetries: 0 });
-    const error = await adapter.stream(request, { onChunk: () => {} }, { signal: controller.signal, firstEventTimeoutMs: 100 })
+    const error = await adapter.stream(request, { onChunk: () => {} }, { signal: controller.signal, firstEventTimeoutMs: OWN_DEADLINE_MS })
       .then(() => { throw new Error('expected the call to reject'); }, (caught: unknown) => caught as MembraneError);
     expect({ type: error.type, retryable: error.retryable, message: error.message })
       .toEqual({ type: 'abort', retryable: false, message: 'Request was aborted' });
@@ -219,8 +220,8 @@ describe("a deadline of the call's own stays a timeout", () => {
       it(`${name} ${method}, timeoutMs`, async () => {
         const adapter = make(base);
         const call = method === 'complete'
-          ? adapter.complete(request, { timeoutMs: 100 })
-          : adapter.stream(request, { onChunk: () => {} }, { timeoutMs: 100 });
+          ? adapter.complete(request, { timeoutMs: OWN_DEADLINE_MS })
+          : adapter.stream(request, { onChunk: () => {} }, { timeoutMs: OWN_DEADLINE_MS });
         const error = await call.then(() => { throw new Error('expected the call to reject'); }, (caught: unknown) => caught as MembraneError);
         expect(error.type).toBe('timeout');
       }, 10_000);
@@ -228,11 +229,11 @@ describe("a deadline of the call's own stays a timeout", () => {
       it(`${name} ${method}, Membrane's progress deadline`, async () => {
         const membrane = new Membrane(make(base), { retry: { maxRetries: 0 } });
         if (method === 'complete') {
-          const error = await membrane.complete(membraneRequest, { progressTimeoutMs: 100 })
+          const error = await membrane.complete(membraneRequest, { progressTimeoutMs: OWN_DEADLINE_MS })
             .then(() => { throw new Error('expected the call to reject'); }, (caught: unknown) => caught as MembraneError);
           expect(error.type).toBe('timeout');
         } else {
-          expect(await membrane.stream(membraneRequest, { progressTimeoutMs: 100 })).toMatchObject({ aborted: true, reason: 'timeout' });
+          expect(await membrane.stream(membraneRequest, { progressTimeoutMs: OWN_DEADLINE_MS })).toMatchObject({ aborted: true, reason: 'timeout' });
         }
       }, 10_000);
     }

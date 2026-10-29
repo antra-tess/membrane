@@ -43,7 +43,7 @@ describe('native formatter: empty system prompt', () => {
   });
 
   it("an empty prompt reaches the provider request with no system field", async () => {
-    const adapter = new MockAdapter();
+    const adapter = new MockAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 });
     adapter.queueResponse('ok');
     let raw: { system?: unknown } | null = null;
     await new Membrane(adapter, { formatter: new NativeFormatter() }).complete(

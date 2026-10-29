@@ -20,7 +20,7 @@ describe('Request Sanitization', () => {
   let membrane: Membrane;
 
   beforeEach(() => {
-    adapter = new MockAdapter();
+    adapter = new MockAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 });
     membrane = new Membrane(adapter);
   });
 

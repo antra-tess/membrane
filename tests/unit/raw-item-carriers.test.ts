@@ -49,7 +49,7 @@ function expectNoEmptyOrCarrierText(providerMessages: any[]): void {
 describe('zero-width rawItem carrier blocks', () => {
   it('never reach an Anthropic-bound request via the formatter path', async () => {
     let captured: any;
-    const membrane = new Membrane(new MockAdapter({ defaultResponse: 'ok' }), {
+    const membrane = new Membrane(new MockAdapter({ defaultResponse: 'ok', completeDelayMs: 0, streamChunkDelayMs: 0 }), {
       formatter: new NativeFormatter(),
     });
 
@@ -62,7 +62,7 @@ describe('zero-width rawItem carrier blocks', () => {
   });
 
   it('never reach an Anthropic-bound request via the native-tools path', () => {
-    const membrane = new Membrane(new MockAdapter(), { formatter: new NativeFormatter() });
+    const membrane = new Membrane(new MockAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 }), { formatter: new NativeFormatter() });
     const request: NormalizedRequest = {
       messages: historyWithCarriers,
       config: { model: 'claude-haiku-4-5-20251001', maxTokens: 100 },

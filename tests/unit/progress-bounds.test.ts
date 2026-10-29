@@ -520,10 +520,13 @@ describe('AnthropicAdapter under progress bounds', () => {
     frame('message_stop', {}),
   ];
 
-  function stubThinkingThatPingsFor(pingMs: number): RequestInit[] {
+  function stubThinkingThatPingsFor(pingMs: number): { calls: RequestInit[]; sending: Promise<void> } {
     const calls: RequestInit[] = [];
+    let sent!: () => void;
+    const sending = new Promise<void>((resolve) => { sent = resolve; });
     vi.stubGlobal('fetch', async (_input: unknown, init: RequestInit) => {
       calls.push(init);
+      sent();
       const encoder = new TextEncoder();
       let done = false;
       let controller!: ReadableStreamDefaultController<Uint8Array>;
@@ -549,20 +552,28 @@ describe('AnthropicAdapter under progress bounds', () => {
       })();
       return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream', 'request-id': 'req_fixture' } });
     });
-    return calls;
+    return { calls, sending };
   }
   const anthropic = (): AnthropicAdapter => new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
   const TWO_SECONDS_FOR_100_TOKENS = { beforeContentMs: 300, betweenEventsMs: 300, thinkTokensPerSecond: 50 };
 
   it("keep a stream whose thinking block pings past the 300 ms before content but within its 2 s allowance", async () => {
-    stubThinkingThatPingsFor(600);
-    const result = await new Membrane(anthropic()).stream(REQUEST, { progressBounds: TWO_SECONDS_FOR_100_TOKENS });
+    vi.useFakeTimers();
+    const { sending } = stubThinkingThatPingsFor(600);
+    const streaming = new Membrane(anthropic()).stream(REQUEST, { progressBounds: TWO_SECONDS_FOR_100_TOKENS });
+    await sending;
+    await vi.advanceTimersByTimeAsync(700);
+    const result = await streaming;
     expect(isAbortedResponse(result)).toBe(false);
   });
 
   it("end a stream whose thinking block pings past its allowance, naming it", async () => {
-    const calls = stubThinkingThatPingsFor(4000);
-    const result = await new Membrane(anthropic()).stream(REQUEST, { progressBounds: TWO_SECONDS_FOR_100_TOKENS });
+    vi.useFakeTimers();
+    const { calls, sending } = stubThinkingThatPingsFor(4000);
+    const streaming = new Membrane(anthropic()).stream(REQUEST, { progressBounds: TWO_SECONDS_FOR_100_TOKENS });
+    await sending;
+    await vi.advanceTimersByTimeAsync(2100);
+    const result = await streaming;
     expect(result).toMatchObject({ aborted: true, reason: 'timeout' });
     expect((result as { message?: string }).message).toMatch(
       /^No content within 2s of a thinking block's start \(max_tokens 100 at 50 tokens a second\): /,

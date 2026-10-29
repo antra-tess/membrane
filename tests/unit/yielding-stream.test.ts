@@ -90,7 +90,7 @@ describe('YieldingStream', () => {
   describe('cancellation', () => {
     it('can be cancelled via cancel()', async () => {
       adapter = new MockAdapter({
-        streamChunkDelayMs: 50,
+        streamChunkDelayMs: 1,
         streamChunkSize: 1,
       });
       membrane = new Membrane(adapter);
@@ -115,7 +115,7 @@ describe('YieldingStream', () => {
 
     it('can be cancelled via AbortSignal', async () => {
       adapter = new MockAdapter({
-        streamChunkDelayMs: 50,
+        streamChunkDelayMs: 1,
         streamChunkSize: 1,
       });
       membrane = new Membrane(adapter);
