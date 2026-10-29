@@ -11,6 +11,7 @@ import { OpenAIAdapter } from '../../src/providers/openai.js';
 import { OpenAICompatibleAdapter } from '../../src/providers/openai-compatible.js';
 import { OpenAICompletionsAdapter } from '../../src/providers/openai-completions.js';
 import { OpenAIResponsesAdapter } from '../../src/providers/openai-responses.js';
+import { OpenAIResponsesAPIAdapter } from '../../src/providers/openai-responses-api.js';
 import { OpenRouterAdapter } from '../../src/providers/openrouter.js';
 import type { ProviderAdapter, ProviderRequest } from '../../src/types/provider.js';
 
@@ -21,6 +22,7 @@ const adapters: Array<[string, () => ProviderAdapter]> = [
   ['openai', () => new OpenAIAdapter({ apiKey: 'zz-key' })],
   ['openai-compatible', () => new OpenAICompatibleAdapter({ apiKey: 'zz-key', baseURL: 'http://zz-host.invalid/v1' })],
   ['openai-responses', () => new OpenAIResponsesAdapter({ apiKey: 'zz-key' })],
+  ['openai-responses-api', () => new OpenAIResponsesAPIAdapter({ apiKey: 'zz-key' })],
   ['openrouter', () => new OpenRouterAdapter({ apiKey: 'zz-key' })],
 ];
 

@@ -11,10 +11,6 @@ export const runtimeSpecifiers = (source: string): string[] => [
   ...source.matchAll(/\brequire\s*\(\s*['"`]([^'"`]+)['"`]/g),
 ].map((match) => match[1]!);
 
-/**
- * Every file the entry loads at run time, as paths from the repository root, sorted. A package it imports
- * is listed as `package NAME`, and a relative import with no file behind it as `missing SPEC`.
- */
 export function loadedBy(entry: string): string[] {
   const seen = new Set<string>();
   const walk = (file: string) => {

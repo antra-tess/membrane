@@ -46,7 +46,8 @@ describe('the bounds a caller asks for', () => {
   });
 
   it("are on an entry that imports nothing else of membrane's", () => {
-    expect(loadedBy('src/progress-bounds.ts').filter((name) => !name.startsWith('package '))).toEqual(['src/progress-bounds.ts']);
+    const otherPackage = (name: string) => name.startsWith('package ') && !name.startsWith('package @animalabs/membrane');
+    expect(loadedBy('src/progress-bounds.ts').filter((name) => !otherPackage(name))).toEqual(['src/progress-bounds.ts']);
   });
 
   it('are the defaults for true, the defaults with a given value in its place for an object, and none for false or unset', () => {

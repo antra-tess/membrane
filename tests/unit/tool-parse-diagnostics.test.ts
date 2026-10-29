@@ -131,19 +131,25 @@ describe('F3/K8 · a tool block left open by a length stop', () => {
 
   it('does not flag a turn that closed its block', async () => {
     const logger = new RecordingLogger();
-    const response = await streamOnce(
-      makeMembrane(
-        [
-          {
-            text: `zz_bot: calling now\n${FUNCTION_CALLS_OPEN}\n<invoke name="zz_slow_tool">\n<parameter name="fld1">whole</parameter>\n</invoke>\n</function_calls>`,
-            stopReason: 'stop_sequence',
-            stopSequence: '</function_calls>',
-          },
-        ],
-        logger
-      )
-    );
+    const called: string[] = [];
+    const response = await makeMembrane(
+      [
+        {
+          text: `zz_bot: calling now\n${FUNCTION_CALLS_OPEN}\n<invoke name="zz_slow_tool">\n<parameter name="fld1">whole</parameter>\n</invoke>\n`,
+          stopReason: 'stop_sequence',
+          stopSequence: '</function_calls>',
+        },
+      ],
+      logger
+    ).stream(makeRequest(), {
+      onToolCalls: async (calls) => {
+        called.push(...calls.map((call) => call.name));
+        return [];
+      },
+    });
+    if (!('details' in response)) throw new Error('expected a completed response');
 
+    expect(called).toEqual(['zz_slow_tool']);
     expect(response.details.stop.unclosedToolBlock).not.toBe(true);
     expect(logger.warnings).toEqual([]);
   });
