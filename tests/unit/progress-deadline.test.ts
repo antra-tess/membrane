@@ -114,6 +114,21 @@ async function keepalives(io: Io, emit: () => string, ms: number): Promise<void>
   }
 }
 
+async function onFakeTime<T>(start: () => Promise<T>): Promise<T> {
+  vi.useFakeTimers();
+  let settled = false;
+  const outcome = start().then(
+    (value) => { settled = true; return { value }; },
+    (error: unknown) => { settled = true; return { error }; },
+  );
+  for (let elapsed = 0; !settled && elapsed < 40 * LIVE_MS; elapsed += TICK_MS) {
+    await vi.advanceTimersByTimeAsync(TICK_MS);
+  }
+  const result = await outcome;
+  if ('error' in result) throw result.error;
+  return result.value;
+}
+
 async function collect(stream: AsyncIterable<StreamEvent>, onEvent?: (event: StreamEvent) => void): Promise<StreamEvent[]> {
   const events: StreamEvent[] = [];
   for await (const event of stream) {
@@ -519,13 +534,13 @@ describe('Membrane core: one renewable deadline per provider call', () => {
 
   it('keeps a mock stream alive while its chunks come faster than the deadline', async () => {
     const steady = new MockAdapter({ defaultResponse: 'zz one two three four', streamChunkSize: 3, streamChunkDelayMs: PROGRESS_MS / 6 });
-    const result = await new Membrane(steady).stream(REQUEST, { progressTimeoutMs: PROGRESS_MS });
+    const result = await onFakeTime(() => new Membrane(steady).stream(REQUEST, { progressTimeoutMs: PROGRESS_MS }));
     expect(isAbortedResponse(result)).toBe(false);
   });
 
   it('ends a mock stream whose chunks come slower than the deadline, as a timeout', async () => {
     const slow = new MockAdapter({ defaultResponse: 'zz one two three', streamChunkSize: 4, streamChunkDelayMs: 4 * PROGRESS_MS });
-    const result = await new Membrane(slow).stream(REQUEST, { progressTimeoutMs: PROGRESS_MS });
+    const result = await onFakeTime(() => new Membrane(slow).stream(REQUEST, { progressTimeoutMs: PROGRESS_MS }));
     expect(isAbortedResponse(result)).toBe(true);
     expect((result as { reason: string }).reason).toBe('timeout');
   });
@@ -537,7 +552,7 @@ describe('Anthropic: the deadline follows SDK events, not keepalives', () => {
       io.emit(messageStart());
       await keepalives(io, ping, 20 * LIVE_MS);
     }));
-    const result = await new Membrane(anthropic()).stream(REQUEST, { progressTimeoutMs: PROGRESS_MS });
+    const result = await onFakeTime(() => new Membrane(anthropic()).stream(REQUEST, { progressTimeoutMs: PROGRESS_MS }));
     expect(isAbortedResponse(result)).toBe(true);
     expect((result as { reason: string }).reason).toBe('timeout');
     expect(torn[0]).toBe(true);
@@ -559,10 +574,12 @@ describe('Anthropic: the deadline follows SDK events, not keepalives', () => {
       }
       io.close();
     }));
-    const stream = new Membrane(anthropic()).streamYielding(NATIVE_REQUEST, { progressTimeoutMs: PROGRESS_MS });
-    const events = await collect(stream, (event) => {
-      if (event.type !== 'tool-calls') return;
-      setTimeout(() => stream.provideToolResults([{ toolUseId: event.calls[0]!.id, content: 'zz ok' }]), 3 * PROGRESS_MS);
+    const events = await onFakeTime(() => {
+      const stream = new Membrane(anthropic()).streamYielding(NATIVE_REQUEST, { progressTimeoutMs: PROGRESS_MS });
+      return collect(stream, (event) => {
+        if (event.type !== 'tool-calls') return;
+        setTimeout(() => stream.provideToolResults([{ toolUseId: event.calls[0]!.id, content: 'zz ok' }]), 3 * PROGRESS_MS);
+      });
     });
     expect(events.filter((e) => e.type === 'aborted')).toEqual([]);
     expect(events.some((e) => e.type === 'tool-calls')).toBe(true);
@@ -574,7 +591,7 @@ describe('Anthropic: the deadline follows SDK events, not keepalives', () => {
       io.emit(messageStart());
       await keepalives(io, ping, 20 * LIVE_MS);
     }));
-    const events = await collect(new Membrane(anthropic()).streamYielding(REQUEST, { progressTimeoutMs: PROGRESS_MS }));
+    const events = await onFakeTime(() => collect(new Membrane(anthropic()).streamYielding(REQUEST, { progressTimeoutMs: PROGRESS_MS })));
     const aborted = events.filter((e) => e.type === 'aborted');
     expect(aborted).toHaveLength(1);
     expect((aborted[0] as { reason: string }).reason).toBe('timeout');
@@ -584,8 +601,7 @@ describe('Anthropic: the deadline follows SDK events, not keepalives', () => {
     stubFetch((init) => new Promise<Response>((_resolve, reject) => {
       init.signal?.addEventListener('abort', () => reject(init.signal!.reason), { once: true });
     }));
-    const error = await new Membrane(anthropic())
-      .complete(REQUEST, { progressTimeoutMs: PROGRESS_MS })
+    const error = await onFakeTime(() => new Membrane(anthropic()).complete(REQUEST, { progressTimeoutMs: PROGRESS_MS }))
       .then(() => undefined, (e: unknown) => e);
     expect(error).toBeInstanceOf(TimeoutAbortError);
     expect((error as TimeoutAbortError).message).toMatch(
@@ -669,7 +685,7 @@ describe('SSE adapters: data frames renew the deadline, comments do not', () => 
       io.emit(delta('zz'));
       await keepalives(io, () => ': keepalive\n\n', 20 * LIVE_MS);
     }));
-    const result = await new Membrane(sse()).stream(REQUEST, { progressTimeoutMs: PROGRESS_MS });
+    const result = await onFakeTime(() => new Membrane(sse()).stream(REQUEST, { progressTimeoutMs: PROGRESS_MS }));
     expect(isAbortedResponse(result)).toBe(true);
     expect((result as { reason: string }).reason).toBe('timeout');
     expect(torn[0]).toBe(true);
@@ -681,7 +697,7 @@ describe('SSE adapters: data frames renew the deadline, comments do not', () => 
       for (const part of finish()) io.emit(part);
       io.close();
     }));
-    const result = await new Membrane(sse()).stream(REQUEST, { progressTimeoutMs: PROGRESS_MS });
+    const result = await onFakeTime(() => new Membrane(sse()).stream(REQUEST, { progressTimeoutMs: PROGRESS_MS }));
     expect(isAbortedResponse(result)).toBe(false);
   });
 });
