@@ -755,7 +755,9 @@ export class AnthropicAdapter implements ProviderAdapter {
               callbacks.onThinkingSignature?.(currentBlockIndex, block.signature as string);
             }
           } else if ((event.delta as { type: string }).type === 'input_json_delta') {
-            currentBlockInputJson += (event.delta as { partial_json: string }).partial_json;
+            const partialJson = (event.delta as { partial_json: string }).partial_json;
+            currentBlockInputJson += partialJson;
+            if (partialJson) callbacks.onToolInputDelta?.(currentBlockIndex, partialJson);
           } else {
             noteUnhandled(event);
           }

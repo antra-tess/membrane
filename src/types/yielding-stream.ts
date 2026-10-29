@@ -466,6 +466,17 @@ export interface YieldingStreamOptions {
    * (`UsageEvent.round`). Default: true
    */
   emitUsage?: boolean;
+
+  /**
+   * Whether to emit a native tool call's argument JSON as it streams:
+   * 'tokens' events with `meta.type: 'tool_call'`, `meta.toolCallPart:
+   * 'input'`, the block's `toolId` and `toolName`, and the raw fragment as
+   * content (not valid JSON on its own). Needs emitTokens. Native tool mode
+   * with an adapter that streams tool arguments (Anthropic) only; the
+   * finished call in the 'tool-calls' event stays authoritative.
+   * Default: false
+   */
+  emitToolInputDeltas?: boolean;
 }
 
 export function isTokensEvent(event: StreamEvent): event is TokensEvent {

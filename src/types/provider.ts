@@ -547,4 +547,12 @@ export interface StreamCallbacks {
    * cut off part-way is not thereby valid for replay.
    */
   onThinkingSignature?: (index: number, signature: string) => void;
+  /**
+   * A tool call's argument JSON as it streams (Anthropic `input_json_delta`):
+   * each fragment, in order, by the position of the tool_use block it belongs
+   * to. Fragments are raw and need not be valid JSON on their own; the block's
+   * finished payload (onContentBlock) stays authoritative. Only adapters that
+   * stream tool arguments call it (Anthropic); others never do.
+   */
+  onToolInputDelta?: (index: number, partialJson: string) => void;
 }
