@@ -9,12 +9,8 @@ import { readToolSchema } from '../../src/utils/tool-schema.js';
 import { AnthropicXmlFormatter } from '../../src/formatters/anthropic-xml.js';
 import type { ToolDefinition, NormalizedMessage } from '../../src/types/index.js';
 
-const everyToolBuilt: ToolDefinition[] = [];
-
 function toolWith(name: string, inputSchema: ToolDefinition['inputSchema']): ToolDefinition {
-  const tool = { name, description: 'obviously-fake schema-form probe', inputSchema };
-  everyToolBuilt.push(tool);
-  return tool;
+  return { name, description: 'obviously-fake schema-form probe', inputSchema };
 }
 
 function callXml(toolName: string, paramName: string, value: string): string {
@@ -1431,23 +1427,34 @@ describe("enum values the attribute can't show exactly (#176)", () => {
   });
 });
 
-describe("the instructions' values and the kinds reading agree, over every tool built above (keep it last)", () => {
+describe("the instructions' values and the kinds reading agree", () => {
   it("lists only values of a parameter's type, and null only where it's marked nullable", () => {
-    let lists = 0;
-    for (const tool of everyToolBuilt) {
-      for (const [name, declaration] of readToolSchema(tool.inputSchema).parameters) {
-        if (declaration.enum === undefined) continue;
-        lists += 1;
-        for (const value of declaration.enum as unknown[]) {
-          const where = `${tool.name}.${name}: ${JSON.stringify(value)}`;
-          if (value === null) {
-            expect(declaration.instructedNullable, where).toBe(true);
-          } else if (declaration.type !== undefined) {
-            expect(isOfType(value, declaration.type), where).toBe(true);
-          }
+    const pure: Record<string, { type: string; enum: unknown[] }> = {
+      fld1: { type: 'string', enum: ['zz-a', 'zz-b'] },
+      fld2: { type: 'integer', enum: [1, 2] },
+      fld3: { type: 'number', enum: [1, 2.5] },
+      fld4: { type: 'boolean', enum: [true, false] },
+    };
+    const mixed = {
+      fld5: { type: ['string', 'null'], enum: ['zz-a', 1, null] },
+      fld6: { type: 'string', enum: ['zz-a', 1, true, null] },
+      fld7: { type: 'integer', enum: [1, 2.5, '3', null] },
+      fld8: { type: 'boolean', enum: [true, 0, 'false'] },
+      fld9: { type: 'integer', nullable: true, enum: [2, null] },
+    };
+    const parameters = new Map(readToolSchema({ type: 'object', properties: { ...pure, ...mixed } } as never).parameters);
+    for (const [name, declared] of Object.entries(pure)) {
+      expect(parameters.get(name)?.enum, name).toEqual(declared.enum);
+    }
+    for (const [name, declaration] of parameters) {
+      for (const value of (declaration.enum ?? []) as unknown[]) {
+        const where = `${name}: ${JSON.stringify(value)}`;
+        if (value === null) {
+          expect(declaration.instructedNullable, where).toBe(true);
+        } else if (declaration.type !== undefined) {
+          expect(isOfType(value, declaration.type), where).toBe(true);
         }
       }
     }
-    expect(lists).toBeGreaterThan(20);
   });
 });

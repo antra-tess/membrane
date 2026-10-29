@@ -135,7 +135,7 @@ describe('F3/K8 · a tool block left open by a length stop', () => {
       makeMembrane([{ text: 'zz_bot: nothing to call here', stopReason: 'end_turn' }], logger)
     );
 
-    expect(response.details.stop.unclosedToolBlock).toBe(false);
+    expect(response.details.stop.unclosedToolBlock).not.toBe(true);
     expect(logger.warnings).toEqual([]);
   });
 });

@@ -566,7 +566,7 @@ describe('system changes: turns as the API reads them, the float, and withdrawn 
     });
 
     it('a trailing assistant turn the cleanup drops leaves the end a point', () => {
-      expect(shape(build([user('u0'), s, reply(ws())]))).toEqual(['user:u0', 'assistant:   ', 'system:s']);
+      expect(shape({ messages: stripEmptyTextMessages(build([user('u0'), s, reply(ws())]).messages) })).toEqual(['user:u0', 'system:s']);
     });
 
     it('goes before an assistant turn of tool calls only', () => {

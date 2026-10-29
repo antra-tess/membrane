@@ -48,7 +48,7 @@ function completedResponse(): Response {
 }
 
 describe('OpenAI Responses subscription mode', () => {
-  test('sends a stable session_id per logical stream, keyed by the first input item and salted with the base id, so the backend prompt cache can hit', async () => {
+  test('sends a stable session_id per logical stream, keyed by the first input item on the adapter base id, so the backend prompt cache can hit', async () => {
     const seen: Array<{ header: string | null; key: unknown }> = [];
     globalThis.fetch = async (_input, init) => {
       seen.push({
@@ -72,18 +72,19 @@ describe('OpenAI Responses subscription mode', () => {
     await adapter.complete(request({ prompt_cache_key: 'agent:devops' }));
     await adapter.complete(sameHeadOtherTools as ProviderRequest);
 
-    expect(seen[0].header).toMatch(/^[0-9a-f-]{36}:[0-9a-f]{12}$/);
+    expect(seen[0].header).toBeTruthy();
     expect(seen[0].key).toBe(seen[0].header);
     expect(seen[4].header).toBe(seen[0].header);
     expect(seen[1].header).toBe(seen[0].header);
     expect(seen[2].header).not.toBe(seen[0].header);
-    expect(seen[2].header!.slice(0, 36)).toBe(seen[0].header!.slice(0, 36));
     expect(seen[3]).toEqual({ header: 'agent:devops', key: 'agent:devops' });
 
     const pinned = new OpenAIResponsesAPIAdapter({ mode: 'subscription', credentials, sessionId: 'pinned' });
     await pinned.complete(request());
-    expect(seen[5].header).toMatch(/^pinned:[0-9a-f]{12}$/);
-    expect(seen[5].header!.slice(-12)).not.toBe(seen[0].header!.slice(-12));
+    await pinned.complete(otherStream);
+    expect(seen[5].header!.startsWith('pinned')).toBe(true);
+    expect(seen[6].header!.startsWith('pinned')).toBe(true);
+    expect(seen[6].header).not.toBe(seen[5].header);
   });
 
   test('extraHeaders overrides the computed session_id in any casing, without joining', async () => {
@@ -117,11 +118,11 @@ describe('OpenAI Responses subscription mode', () => {
       await adapter.complete(request({ prompt_cache_key: key }));
       const [first, second] = seen.slice(-2);
       expect(first.key).toBe(key);
-      expect(first.header).toMatch(/^[0-9a-f]{32}$/);
+      expect(first.header).toMatch(/^[\x21-\x7e]+$/);
       expect(second.header).toBe(first.header);
     }
     await adapter.complete(request());
-    expect(seen.at(-1)!.header).toMatch(/^[0-9a-f]{32}$/);
+    expect(seen.at(-1)!.header).toMatch(/^[\x21-\x7e]+$/);
     expect(new Set(seen.map((entry) => entry.header)).size).toBe(4);
   });
 

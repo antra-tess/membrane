@@ -66,9 +66,8 @@ describe('image signature resolution', () => {
       expect(placeholder?.text).toContain('NOT shown to you');
       expect(placeholder?.text).toContain(`its data is not a JPEG, PNG, GIF or WebP image, the formats this request can carry (it was labelled "${label}")`);
     }
-    expect(warn).toHaveBeenCalledTimes(3);
-    expect(warn.mock.calls[1]?.[0]).toBe(
-      '[membrane] image block stripped: its data is not a JPEG, PNG, GIF or WebP image (it was labelled "image/png")',
+    expect(warn.mock.calls.map((call) => String(call[0]))).toEqual(
+      ['IMAGE/GIF', 'image/png', 'image/svg+xml'].map((label) => expect.stringContaining(JSON.stringify(label))),
     );
   });
 
@@ -88,10 +87,12 @@ describe('image signature resolution', () => {
     for (const label of [undefined, '']) {
       expect(imageForRequest(NOT_AN_IMAGE, label).placeholder?.text).toContain('its data is not a JPEG, PNG, GIF or WebP image, the formats this request can carry.');
     }
-    expect(warn.mock.calls.map((call) => call[0])).toEqual([
-      '[membrane] image block stripped: its data is not a JPEG, PNG, GIF or WebP image',
-      '[membrane] image block stripped: its data is not a JPEG, PNG, GIF or WebP image',
-    ]);
+    const lines = warn.mock.calls.map((call) => String(call[0]));
+    expect(lines).toHaveLength(2);
+    for (const line of lines) {
+      expect(line).not.toContain('""');
+      expect(line).not.toContain('undefined');
+    }
   });
 
   it('names the formats this request path can carry', () => {

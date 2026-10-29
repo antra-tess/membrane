@@ -39,11 +39,14 @@ describe('AnthropicXmlFormatter', () => {
         assistantParticipant: 'Claude',
       });
 
-      expect(result.messages.length).toBeGreaterThan(0);
       const lastMsg = result.messages[result.messages.length - 1];
       expect(lastMsg?.role).toBe('assistant');
       expect(typeof lastMsg?.content).toBe('string');
-      expect(lastMsg?.content).toContain('Claude:');
+      expect(String(lastMsg?.content).trimEnd().endsWith('Claude:')).toBe(true);
+      const transcript = result.messages.map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n');
+      const at = ['User: Hello', 'Claude: Hi there!', 'User: How are you?'].map((line) => transcript.indexOf(line));
+      expect(at.every((index) => index >= 0)).toBe(true);
+      expect([...at].sort((x, y) => x - y)).toEqual(at);
     });
 
     it('generates stop sequences from participants', () => {
@@ -948,8 +951,11 @@ describe('CompletionsFormatter', () => {
       const formatter = new CompletionsFormatter();
       const parser = formatter.createStreamParser();
 
-      expect(parser).toBeDefined();
+      parser.processChunk('<thinking>zz held');
       expect(parser.isInsideBlock()).toBe(false);
+      parser.processChunk('</thinking> zz after');
+      expect(parser.isInsideBlock()).toBe(false);
+      expect(parser.getAccumulated()).toBe('<thinking>zz held</thinking> zz after');
     });
 
     it('parser accumulates content', () => {

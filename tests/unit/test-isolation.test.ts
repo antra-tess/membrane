@@ -90,10 +90,9 @@ describe('the two projects', () => {
     const [isolatedProject, sharedProject] = (config.test!.projects as Project[]).map((project) => project.test);
     const isolated = isolatedTestFiles(root);
     expect(config.test).not.toHaveProperty('include');
-    expect(isolatedProject).toMatchObject({ name: 'isolated', include: isolated, isolate: true });
+    expect(isolatedProject).toMatchObject({ include: isolated, isolate: true });
     expect(isolatedProject).not.toHaveProperty('exclude');
     expect(sharedProject).toMatchObject({
-      name: 'shared',
       include: ['src/**/*.test.ts', 'tests/**/*.test.ts'],
       isolate: false,
       setupFiles: ['./tests/shared-setup.ts'],

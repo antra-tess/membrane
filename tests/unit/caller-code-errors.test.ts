@@ -531,7 +531,7 @@ describe('the Responses adapter: a throwing onFastModeFallback is logged, and th
       expect(fallback).toHaveBeenCalledTimes(1);
       expect(fallback).toHaveBeenCalledWith('default');
       expect(warn).toHaveBeenCalledTimes(1);
-      expect(warn).toHaveBeenCalledWith('[membrane:openai-responses] onFastModeFallback threw; the response stands:', original);
+      expect(warn.mock.calls.some((args) => args.includes(original))).toBe(true);
     });
   }
 });

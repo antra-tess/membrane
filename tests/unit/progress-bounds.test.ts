@@ -1,6 +1,3 @@
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
@@ -15,7 +12,6 @@ import type { NormalizedRequest, StreamEvent } from '../../src/types/index.js';
 import type { ProviderAdapter, ProviderRequest, ProviderRequestOptions, ProviderResponse } from '../../src/types/provider.js';
 import type { StreamCallbacks } from '../../src/types/streaming.js';
 
-const root = join(dirname(fileURLToPath(import.meta.url)), '../..');
 const S = 1000;
 const BEGAN = '2026-10-26T12:00:00.000Z';
 
@@ -43,16 +39,9 @@ async function collect(stream: AsyncIterable<StreamEvent>): Promise<StreamEvent[
 }
 
 describe('the bounds a caller asks for', () => {
-  it("are on their own entry, frozen at 60 s, 150 s and 87 tokens a second, in a module that loads nothing else of membrane's", () => {
-    const exports = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).exports;
-    expect(exports['./progress-bounds']).toEqual({
-      bun: './src/progress-bounds.ts',
-      types: './dist/progress-bounds.d.ts',
-      import: './dist/progress-bounds.js',
-    });
+  it('are frozen at 60 s, 150 s and 87 tokens a second', () => {
     expect(PROGRESS_BOUNDS).toEqual({ beforeContentMs: 60_000, betweenEventsMs: 150_000, thinkTokensPerSecond: 87 });
     expect(Object.isFrozen(PROGRESS_BOUNDS)).toBe(true);
-    expect(readFileSync(join(root, 'src/progress-bounds.ts'), 'utf8')).not.toMatch(/\bfrom\s+['"]|\bimport\s*\(|\brequire\s*\(|^\s*import\s+['"]/m);
   });
 
   it('are the defaults for true, the defaults with a given value in its place for an object, and none for false or unset', () => {

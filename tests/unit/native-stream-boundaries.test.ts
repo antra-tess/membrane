@@ -577,7 +577,7 @@ describe('LocalStopSequences', () => {
     const content = [text('a E'), { type: 'tool_use', id: 't', name: 'x', input: {} }, text('ND b')];
     const result = stops.finish(response(content) as any);
     expect(result.stopReason).toBe('end_turn');
-    expect(result.content).toBe(content);
+    expect(result.content).toEqual(content);
   });
 
   const recording = (stops: string[]) => {

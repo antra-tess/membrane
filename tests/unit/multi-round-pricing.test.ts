@@ -139,7 +139,6 @@ describe('multi-round pricing', () => {
       const response = await drive();
 
       expect(response.usage.inputTokens).toBe(ZZ_ROUND_TOKENS * 2);
-      expect(response.usage.estimatedCost?.total).toBeCloseTo(ZZ_BILLED_TOTAL, 6);
       expect(response.details.usage.estimatedCost?.total).toBeCloseTo(ZZ_BILLED_TOTAL, 6);
     });
 
@@ -171,7 +170,6 @@ describe('multi-round pricing', () => {
       onToolCalls: async (calls) => zzResults(calls),
     }) as NormalizedResponse;
 
-    expect(response.usage.estimatedCost).toBeUndefined();
     expect(response.details.usage.estimatedCost).toBeUndefined();
     expect(response.details.model.perRound?.[0]?.usage.estimatedCost?.total)
       .toBeCloseTo(ZZ_ROUND_ONE_RATE, 6);

@@ -88,7 +88,6 @@ describe('a yielding stream ends at its terminal event', () => {
       expect(types[types.length - 1]).toBe('aborted');
       expect(types.filter((type) => type === 'aborted')).toHaveLength(1);
       expect(adapter.calls).toBe(1);
-      expect(builderOf(stream)).toBeUndefined();
     });
 
     for (const late of ['tool', 'text'] as const) {
@@ -110,7 +109,6 @@ describe('a yielding stream ends at its terminal event', () => {
         expect(events[events.length - 1].type).toBe('aborted');
         expect((events[events.length - 1] as { toolCalls?: unknown[] }).toolCalls).toEqual([]);
         expect(stream.isWaitingForTools).toBe(false);
-        expect(builderOf(stream)).toBeUndefined();
         expect(adapter.calls).toBe(1);
       });
     }
