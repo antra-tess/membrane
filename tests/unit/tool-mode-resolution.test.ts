@@ -61,7 +61,7 @@ async function evidenceFromStream(membrane: Membrane, adapter: MockAdapter, tool
 
 describe('complete() honors request.toolMode', () => {
   it('sends native tool declarations instead of XML instructions for toolMode: native', async () => {
-    const adapter = new MockAdapter();
+    const adapter = new MockAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 });
     const membrane = new Membrane(adapter);
 
     const evidence = await evidenceFromComplete(membrane, adapter, 'native');
@@ -71,7 +71,7 @@ describe('complete() honors request.toolMode', () => {
   });
 
   it('injects XML instructions and declares no native tools for toolMode: xml', async () => {
-    const adapter = new MockAdapter();
+    const adapter = new MockAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 });
     const membrane = new Membrane(adapter, {
       formatter: new AnthropicXmlFormatter({ toolMode: 'native' }),
     });
@@ -94,7 +94,7 @@ describe('stream() and complete() resolve tool mode identically', () => {
   for (const formatterCase of formatterCases) {
     for (const requestMode of requestModes) {
       it(`${formatterCase.label} + request toolMode ${String(requestMode)}`, async () => {
-        const completeAdapter = new MockAdapter();
+        const completeAdapter = new MockAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 });
         const formatterForComplete = formatterCase.makeFormatter();
         const completeMembrane = new Membrane(
           completeAdapter,
@@ -102,7 +102,7 @@ describe('stream() and complete() resolve tool mode identically', () => {
         );
         const completeEvidence = await evidenceFromComplete(completeMembrane, completeAdapter, requestMode);
 
-        const streamAdapter = new MockAdapter();
+        const streamAdapter = new MockAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 });
         const formatterForStream = formatterCase.makeFormatter();
         const streamMembrane = new Membrane(
           streamAdapter,
@@ -118,7 +118,7 @@ describe('stream() and complete() resolve tool mode identically', () => {
 
 describe('per-request formatter override participates in resolution', () => {
   it('complete() with an options.formatter configured native declares native tools', async () => {
-    const adapter = new MockAdapter();
+    const adapter = new MockAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 });
     const membrane = new Membrane(adapter);
 
     await membrane.complete(zzRequest(), {
@@ -131,7 +131,7 @@ describe('per-request formatter override participates in resolution', () => {
   });
 
   it('stream() with an options.formatter configured native declares native tools', async () => {
-    const adapter = new MockAdapter();
+    const adapter = new MockAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 });
     const membrane = new Membrane(adapter);
 
     await membrane.stream(zzRequest(), {
@@ -145,12 +145,12 @@ describe('per-request formatter override participates in resolution', () => {
 
   for (const requestMode of [undefined, 'auto', 'xml', 'native'] as Array<ToolMode | undefined>) {
     it(`override formatter configured native + request toolMode ${String(requestMode)} resolves identically on both paths`, async () => {
-      const completeAdapter = new MockAdapter();
+      const completeAdapter = new MockAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 });
       await new Membrane(completeAdapter).complete(zzRequest(requestMode), {
         formatter: new AnthropicXmlFormatter({ toolMode: 'native' }),
       });
 
-      const streamAdapter = new MockAdapter();
+      const streamAdapter = new MockAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 });
       await new Membrane(streamAdapter).stream(zzRequest(requestMode), {
         formatter: new AnthropicXmlFormatter({ toolMode: 'native' }),
       });
@@ -162,7 +162,7 @@ describe('per-request formatter override participates in resolution', () => {
 
 describe('resolution drives the stream tool loop, not just the wire', () => {
   it('a formatter configured native runs the native loop under an auto request', async () => {
-    const adapter = new MockAdapter();
+    const adapter = new MockAdapter({ completeDelayMs: 0, streamChunkDelayMs: 0 });
     const membrane = new Membrane(adapter, {
       formatter: new AnthropicXmlFormatter({ toolMode: 'native' }),
     });

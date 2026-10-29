@@ -25,6 +25,7 @@ describe('Temperature enforcement for thinking', () => {
     let capturedRequest: any;
     const adapter = new MockAdapter({
       defaultResponse: 'Hello',
+      completeDelayMs: 0, streamChunkDelayMs: 0,
     });
     const membrane = new Membrane(adapter);
 
@@ -48,6 +49,7 @@ describe('Temperature enforcement for thinking', () => {
     let capturedRequest: any;
     const adapter = new MockAdapter({
       defaultResponse: 'Hello',
+      completeDelayMs: 0, streamChunkDelayMs: 0,
     });
     const membrane = new Membrane(adapter);
 
@@ -70,6 +72,7 @@ describe('Temperature enforcement for thinking', () => {
     let capturedRequest: any;
     const adapter = new MockAdapter({
       defaultResponse: 'Hello',
+      completeDelayMs: 0, streamChunkDelayMs: 0,
     });
     const membrane = new Membrane(adapter);
 
@@ -92,7 +95,7 @@ describe('Temperature enforcement for thinking', () => {
 
   it('clamps thinking budget_tokens below max_tokens', async () => {
     let capturedRequest: any;
-    const adapter = new MockAdapter({ defaultResponse: 'Hello' });
+    const adapter = new MockAdapter({ defaultResponse: 'Hello', completeDelayMs: 0, streamChunkDelayMs: 0 });
     const membrane = new Membrane(adapter, { formatter: new NativeFormatter() });
 
     const request = makeRequest({
@@ -112,7 +115,7 @@ describe('Temperature enforcement for thinking', () => {
 
   it('drops thinking entirely when no valid budget fits under max_tokens', async () => {
     let capturedRequest: any;
-    const adapter = new MockAdapter({ defaultResponse: 'Hello' });
+    const adapter = new MockAdapter({ defaultResponse: 'Hello', completeDelayMs: 0, streamChunkDelayMs: 0 });
     const membrane = new Membrane(adapter);
 
     const request = makeRequest({
@@ -134,7 +137,7 @@ describe('Temperature enforcement for thinking', () => {
 
   it('does not clamp adaptive thinking (no budget)', async () => {
     let capturedRequest: any;
-    const adapter = new MockAdapter({ defaultResponse: 'Hello' });
+    const adapter = new MockAdapter({ defaultResponse: 'Hello', completeDelayMs: 0, streamChunkDelayMs: 0 });
     const membrane = new Membrane(adapter, { formatter: new NativeFormatter() });
 
     const request = makeRequest({
@@ -154,7 +157,7 @@ describe('Temperature enforcement for thinking', () => {
 
   it('drops API thinking param for prefill-style builds (XML formatter)', async () => {
     let capturedRequest: any;
-    const adapter = new MockAdapter({ defaultResponse: 'Hello' });
+    const adapter = new MockAdapter({ defaultResponse: 'Hello', completeDelayMs: 0, streamChunkDelayMs: 0 });
     const membrane = new Membrane(adapter);
 
     const request = makeRequest({

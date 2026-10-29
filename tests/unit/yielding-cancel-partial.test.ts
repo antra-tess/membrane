@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { YieldingStreamImpl } from '../../src/yielding-stream.js';
 import { abortError } from '../../src/types/errors.js';
@@ -128,9 +128,15 @@ describe('a cancelled streamYielding() turn reports what it had', () => {
       const cancelledStream = new Membrane(cancelled).streamYielding(requestFor(mode), {});
       const byCancel = partOf(await drive(cancelledStream, cancelled, () => cancelledStream.cancel()));
 
-      const expired = new TwoRoundAdapter(mode);
-      const expiredStream = new Membrane(expired).streamYielding(requestFor(mode), { progressTimeoutMs: 200 });
-      const events = await drive(expiredStream, expired, () => {});
+      vi.useFakeTimers();
+      let events: StreamEvent[];
+      try {
+        const expired = new TwoRoundAdapter(mode);
+        const expiredStream = new Membrane(expired).streamYielding(requestFor(mode), { progressTimeoutMs: 200 });
+        events = await drive(expiredStream, expired, () => { void vi.advanceTimersByTimeAsync(200); });
+      } finally {
+        vi.useRealTimers();
+      }
       expect((events.find((event) => event.type === 'aborted') as { reason: string }).reason).toBe('timeout');
 
       expect(comparable(byCancel)).toEqual(comparable(partOf(events)));

@@ -154,6 +154,19 @@ async function drive(
   return events;
 }
 
+async function onFakeTime<T>(start: () => Promise<T>): Promise<T> {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  try {
+    const settled = start().then((value) => ({ value }), (error: unknown) => ({ error }));
+    await vi.runAllTimersAsync();
+    const outcome = await settled;
+    if ('error' in outcome) throw outcome.error;
+    return outcome.value;
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
 const ofType = <T extends StreamEvent['type']>(events: StreamEvent[], type: T) =>
   events.filter((e): e is Extract<StreamEvent, { type: T }> => e.type === type);
 
@@ -167,7 +180,7 @@ describe('streamYielding() retries a call that failed before it delivered anythi
       { fail: overloaded529 },
       { text: 'zz recovered' },
     ]);
-    const events = await drive(native(adapter).streamYielding(NATIVE_REQUEST));
+    const events = await onFakeTime(() => drive(native(adapter).streamYielding(NATIVE_REQUEST)));
 
     expect(adapter.sends).toBe(3);
     expect(tokensOf(events)).toBe('zz recovered');
@@ -184,7 +197,7 @@ describe('streamYielding() retries a call that failed before it delivered anythi
   it('XML: a 529 is retried the same way', async () => {
     const adapter = new FlakyXmlAdapter(new Map([[1, overloaded529]]));
     adapter.queueResponse('zz recovered');
-    const events = await drive(new Membrane(adapter, SCHEDULES).streamYielding(XML_REQUEST));
+    const events = await onFakeTime(() => drive(new Membrane(adapter, SCHEDULES).streamYielding(XML_REQUEST)));
 
     expect(adapter.sends).toBe(2);
     expect(tokensOf(events)).toBe('zz recovered');
@@ -234,7 +247,7 @@ describe('streamYielding() retries a call that failed before it delivered anythi
       { fail: overloaded529 },
       { text: 'zz round two' },
     ]);
-    const events = await drive(native(adapter).streamYielding(NATIVE_REQUEST));
+    const events = await onFakeTime(() => drive(native(adapter).streamYielding(NATIVE_REQUEST)));
 
     expect(adapter.sends).toBe(3);
     expect(ofType(events, 'tool-calls')).toHaveLength(1);
@@ -247,7 +260,7 @@ describe('streamYielding() retries a call that failed before it delivered anythi
   it('XML: a later round is retried too', async () => {
     const adapter = new FlakyXmlAdapter(new Map([[2, overloaded529]]));
     adapter.queueResponses([XML_TOOL_CALL, 'zz round two']);
-    const events = await drive(new Membrane(adapter, SCHEDULES).streamYielding(XML_REQUEST));
+    const events = await onFakeTime(() => drive(new Membrane(adapter, SCHEDULES).streamYielding(XML_REQUEST)));
 
     expect(adapter.sends).toBe(3);
     expect(ofType(events, 'tool-calls')).toHaveLength(1);
@@ -259,7 +272,7 @@ describe('streamYielding() retries a call that failed before it delivered anythi
 
   it('gives up after the schedule', async () => {
     const adapter = new ScriptedNativeAdapter(Array.from({ length: 10 }, () => ({ fail: overloaded529 })));
-    const events = await drive(native(adapter).streamYielding(NATIVE_REQUEST));
+    const events = await onFakeTime(() => drive(native(adapter).streamYielding(NATIVE_REQUEST)));
 
     expect(adapter.sends).toBe(SCHEDULES.retry.overloaded.maxRetries);
     const [error] = ofType(events, 'error');
@@ -426,10 +439,10 @@ describe('stream() retries a later round the same way', () => {
       { text: 'zz round two' },
     ]);
     const chunks: string[] = [];
-    const result = await native(adapter).stream(NATIVE_REQUEST, {
+    const result = await onFakeTime(() => native(adapter).stream(NATIVE_REQUEST, {
       onChunk: (text, meta) => { if (meta?.type === 'text') chunks.push(text); },
       onToolCalls: async (calls) => calls.map((c) => ({ toolUseId: c.id, content: 'zz ok' })),
-    });
+    }));
 
     expect(adapter.sends).toBe(3);
     expect(chunks.join('')).toBe('zz round onezz round two');
@@ -441,13 +454,13 @@ describe('stream() retries a later round the same way', () => {
 describe('the sends a call gets, on each entry point', () => {
   it('complete(): a 529 gets the overloaded schedule, then its error', async () => {
     const adapter = new ScriptedNativeAdapter(Array.from({ length: 10 }, () => ({ fail: overloaded529 })));
-    await expect(native(adapter).complete(NATIVE_REQUEST)).rejects.toMatchObject({ httpStatus: 529 });
+    await expect(onFakeTime(() => native(adapter).complete(NATIVE_REQUEST))).rejects.toMatchObject({ httpStatus: 529 });
     expect(adapter.sends).toBe(4);
   });
 
   it('stream(): the same', async () => {
     const adapter = new ScriptedNativeAdapter(Array.from({ length: 10 }, () => ({ fail: overloaded529 })));
-    await expect(native(adapter).stream(NATIVE_REQUEST)).rejects.toMatchObject({ httpStatus: 529 });
+    await expect(onFakeTime(() => native(adapter).stream(NATIVE_REQUEST))).rejects.toMatchObject({ httpStatus: 529 });
     expect(adapter.sends).toBe(4);
   });
 
@@ -521,8 +534,8 @@ describe('a refusal re-issue starts the transport budget again', () => {
     ]);
     const onError = vi.fn(() => 'retry' as const);
     const membrane = native(adapter, { ...SCHEDULES, hooks: { onError } });
-    if (entry === 'complete') await membrane.complete(NATIVE_REQUEST, { refusalRetries: 1 });
-    else await drive(membrane.streamYielding(NATIVE_REQUEST, { refusalRetries: 1 }));
+    if (entry === 'complete') await onFakeTime(() => membrane.complete(NATIVE_REQUEST, { refusalRetries: 1 }));
+    else await onFakeTime(() => drive(membrane.streamYielding(NATIVE_REQUEST, { refusalRetries: 1 })));
 
     expect(adapter.sends).toBe(3);
     expect(onError.mock.calls.map((call) => call[1])).toEqual([1]);
@@ -560,7 +573,7 @@ describe('a refusal re-issue starts the transport budget again', () => {
       { fail: overloaded529 },
       { text: 'zz ok' },
     ]);
-    const events = await drive(native(adapter).streamYielding(NATIVE_REQUEST, { refusalRetries: 1 }));
+    const events = await onFakeTime(() => drive(native(adapter).streamYielding(NATIVE_REQUEST, { refusalRetries: 1 })));
 
     expect(adapter.sends).toBe(1 + SCHEDULES.retry.overloaded.maxRetries);
     const [complete] = ofType(events, 'complete');
@@ -574,7 +587,7 @@ describe('a refusal re-issue starts the transport budget again', () => {
       { fail: overloaded529, emitFirst: 'zz partial ' },
       { text: 'zz never' },
     ]);
-    const events = await drive(native(adapter).streamYielding(NATIVE_REQUEST));
+    const events = await onFakeTime(() => drive(native(adapter).streamYielding(NATIVE_REQUEST)));
 
     expect(adapter.sends).toBe(2);
     expect(tokensOf(events)).toBe('zz partial ');
@@ -586,7 +599,7 @@ describe('a refusal re-issue starts the transport budget again', () => {
       { refuse: 'zz refused' },
       ...Array.from({ length: 10 }, () => ({ fail: overloaded529 })),
     ]);
-    await expect(native(adapter).complete(NATIVE_REQUEST, { refusalRetries: 1 })).rejects.toMatchObject({ httpStatus: 529 });
+    await expect(onFakeTime(() => native(adapter).complete(NATIVE_REQUEST, { refusalRetries: 1 }))).rejects.toMatchObject({ httpStatus: 529 });
     expect(adapter.sends).toBe(1 + SCHEDULES.retry.overloaded.maxRetries);
   });
 });
