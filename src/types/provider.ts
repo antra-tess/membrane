@@ -189,14 +189,14 @@ export interface ProviderAdapter {
    * through it is refused. */
   readonly sendsSystemChanges?: boolean;
 
-  /** Whether a cache_control marker on a tool_result block reaches the
-   * provider; left out, it does. OpenRouterAdapter declares false: it sends a
-   * tool result as a `role: 'tool'` message whose content is a string, which
-   * carries no marker. Membrane then floats no marker onto a tool_result
-   * block, and takes no caller's marker to make room for one
+  /** The content block types this adapter sends a cache_control marker on.
+   * Left out, membrane places a floating marker on a block of any type.
+   * OpenRouterAdapter declares `['text']`: its image, audio, tool-use and
+   * tool-result parts carry none. Membrane floats no marker onto a block of
+   * another type, and takes no caller's marker to make room for one
    * (NormalizedRequest.floatingCacheMarker). A decorator should forward this;
-   * one that doesn't is taken to send them. */
-  readonly sendsToolResultCacheMarkers?: boolean;
+   * one that doesn't is taken to send a marker on any block. */
+  readonly sendsCacheMarkersOn?: readonly string[];
 
   /**
    * True when this adapter carries the content of every message in the

@@ -36,31 +36,33 @@ export interface WireCacheSurfaces {
   tools?: unknown;
 }
 
-/** Anthropic's cache prefix runs tools, then system, then messages, so a deeper marker caches a longer prefix. */
-export function collectMarkedBlocks(surfaces: WireCacheSurfaces): Array<Record<string, unknown>> {
-  const marked: Array<Record<string, unknown>> = [];
-  const collectIfMarked = (candidate: unknown) =>
-    walkBlockTree(candidate, 0, (block) => {
-      if (block.cache_control) marked.push(block);
-    });
+/** Every block of the request in the order Anthropic's cache prefix reads them: tools, then system, then messages, each block followed by its nested blocks. */
+export function wireBlocksInOrder(surfaces: WireCacheSurfaces): Array<Record<string, unknown>> {
+  const blocks: Array<Record<string, unknown>> = [];
+  const collect = (candidate: unknown) => walkBlockTree(candidate, 0, (block) => { blocks.push(block); });
 
   if (Array.isArray(surfaces.tools)) {
-    for (const tool of surfaces.tools) collectIfMarked(tool);
+    for (const tool of surfaces.tools) collect(tool);
   }
   if (Array.isArray(surfaces.system)) {
-    for (const block of surfaces.system) collectIfMarked(block);
+    for (const block of surfaces.system) collect(block);
   }
   if (Array.isArray(surfaces.messages)) {
     for (const message of surfaces.messages) {
       const content = (message as { content?: unknown } | null)?.content;
       if (Array.isArray(content)) {
-        for (const block of content) collectIfMarked(block);
+        for (const block of content) collect(block);
       } else {
-        collectIfMarked(content);
+        collect(content);
       }
     }
   }
-  return marked;
+  return blocks;
+}
+
+/** Anthropic's cache prefix runs tools, then system, then messages, so a deeper marker caches a longer prefix. */
+export function collectMarkedBlocks(surfaces: WireCacheSurfaces): Array<Record<string, unknown>> {
+  return wireBlocksInOrder(surfaces).filter((block) => block.cache_control);
 }
 
 export function ownMessageBlocks(messages: unknown, onCopy?: (original: unknown, copy: unknown) => void): unknown {

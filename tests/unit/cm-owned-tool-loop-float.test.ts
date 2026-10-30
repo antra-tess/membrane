@@ -126,7 +126,6 @@ function markerTtls(sent: any): string[] {
   return at;
 }
 
-/** A hook that sets each marker's TTL: the system prompt's first block at `system` when given, and each message marker by its message index. */
 const ttlHook = (system: '5m' | '1h' | undefined, messageTtl: (mi: number) => '5m' | '1h') => ({
   beforeRequest: (_normalized: unknown, provider: any) => {
     const sys = typeof provider.system === 'string' ? [{ type: 'text', text: provider.system }] : provider.system;
@@ -142,6 +141,20 @@ const ttlHook = (system: '5m' | '1h' | undefined, messageTtl: (mi: number) => '5
     };
   },
 });
+
+function ttlOrderHolds(sent: any): boolean {
+  let shortSeen = false;
+  const visit = (b: any): boolean => {
+    if (!b || typeof b !== 'object') return true;
+    if (b.cache_control) {
+      const long = b.cache_control.ttl === '1h';
+      if (long && shortSeen) return false;
+      if (!long) shortSeen = true;
+    }
+    return Array.isArray(b.content) ? b.content.every(visit) : true;
+  };
+  return [...(sent.tools ?? []), ...(Array.isArray(sent.system) ? sent.system : []), ...sent.messages.flatMap((m: any) => (Array.isArray(m.content) ? m.content : []))].every(visit);
+}
 
 const newestMarker = (sent: any) => {
   const content = sent.messages[sent.messages.length - 1].content;
@@ -327,9 +340,11 @@ describe('cm-owned: the tool loop\'s later calls mark their newest message', () 
 
 describe('cm-owned: the float is the caller\'s to ask for', () => {
   for (const [path, drive] of paths) {
-    it(`${path}: left unset, every call carries only the caller's markers`, async () => {
+    it(`${path}: left unset, every call carries only the caller's markers, all four of them when it placed four`, async () => {
       const sent = await run(drive, request(input(2, [0, 1]), { floatingCacheMarker: undefined }));
       for (const call of sent) expect(markers(call)).toEqual(['m0', 'm2']);
+      const four = await run(drive, request(input(4, [0, 1, 2, 3]), { floatingCacheMarker: undefined }));
+      for (const call of four) expect(markers(call)).toEqual(['m0', 'm2', 'm4', 'm6']);
     });
 
     it(`${path}: a config default of true asks for it, and a request's false turns it off again`, async () => {
@@ -362,6 +377,61 @@ describe('the float never puts a longer TTL after a shorter one', () => {
       expect(markerTtls(sent[1])).toEqual(['m0:1h', 'm2:1h', 'm4:1h']);
     });
 
+    it(`${path}: cm-owned: each float takes its TTL from the markers before it, so a 1h marker after the earlier float keeps that float at 1h`, async () => {
+      const hooks = {
+        beforeRequest: (_normalized: unknown, provider: any) => {
+          if (provider.messages.length <= 3) return provider;
+          const last = provider.messages.length - 1;
+          const messages = provider.messages.map((m: any, mi: number) => {
+            if (mi === last - 1) return { ...m, content: m.content.map((b: any) => ({ ...b, cache_control: { type: 'ephemeral', ttl: '1h' } })) };
+            if (mi === last) return { ...m, content: m.content.map((b: any) => ({ ...b, content: [{ type: 'text', text: 'ok', cache_control: { type: 'ephemeral', ttl: '5m' } }] })) };
+            return m;
+          });
+          return { ...provider, messages };
+        },
+      };
+      const sent = await run(drive, request(input(2, [])), { hooks });
+      expect(markerTtls(sent[1])).toEqual(['m2:1h', 'm3:1h', 'm4:1h']);
+      for (const call of sent) expect(ttlOrderHolds(call)).toBe(true);
+    });
+
+    it(`${path}: cm-owned: with a 5m cacheTtl, no float goes where a 1h marker would follow it`, async () => {
+      const hooks = {
+        beforeRequest: (_normalized: unknown, provider: any) => {
+          if (provider.messages.length <= 3) return provider;
+          const last = provider.messages.length - 1;
+          return { ...provider, messages: provider.messages.map((m: any, mi: number) => (mi === last - 1 ? { ...m, content: m.content.map((b: any) => ({ ...b, cache_control: { type: 'ephemeral', ttl: '1h' } })) } : m)) };
+        },
+      };
+      const sent = await run(drive, request(input(2, []), { cacheTtl: '5m' }), { hooks });
+      expect(markerTtls(sent[1])).toEqual(['m3:1h', 'm4:5m']);
+      expect(markerTtls(sent[2])).toEqual(['m5:1h', 'm6:5m']);
+      for (const call of sent) expect(ttlOrderHolds(call)).toBe(true);
+    });
+
+    it(`${path}: cm-owned, all four slots: no caller marker is taken for a newest float that couldn't be placed`, async () => {
+      const hooks = {
+        beforeRequest: (_normalized: unknown, provider: any) => {
+          const last = provider.messages.length - 1;
+          const messages = provider.messages.map((m: any, mi: number) => ({
+            ...m,
+            content: m.content.map((b: any) => {
+              if (b.cache_control) return { ...b, cache_control: { type: 'ephemeral', ttl: '1h' } };
+              if (mi === last && provider.messages.length > 7 && b.type === 'tool_result') {
+                return { ...b, content: [{ type: 'text', text: 'ok', cache_control: { type: 'ephemeral', ttl: '1h' } }] };
+              }
+              return b;
+            }),
+          }));
+          return { ...provider, messages };
+        },
+      };
+      const sent = await run(drive, request(input(4, [0, 1, 2]), { cacheTtl: '5m' }), { hooks });
+      expect(markers(sent[1])).toEqual(['m0', 'm2', 'm4']);
+      expect(markers(sent[2])).toEqual(['m0', 'm2', 'm4']);
+      for (const call of sent) expect(ttlOrderHolds(call)).toBe(true);
+    });
+
     it(`${path}: membrane-system: behind a message block that carries its own marker with no ttl, the floats go at 5m`, async () => {
       const messages = input(2, []);
       messages[0] = { ...messages[0]!, content: [{ type: 'text', text: 'message 0', cache_control: { type: 'ephemeral' } }] };
@@ -379,7 +449,7 @@ describe('an adapter that sends no marker on a tool result (OpenRouter)', () => 
   const real = new OpenRouterAdapter({ apiKey: 'test' });
   const openRouterRun = async (drive: Drive, req: NormalizedRequest) => {
     const { adapter, requests } = scriptedAdapter();
-    Object.assign(adapter, { sendsToolResultCacheMarkers: (real as any).sendsToolResultCacheMarkers });
+    Object.assign(adapter, { sendsCacheMarkersOn: real.sendsCacheMarkersOn });
     const receipts: CacheWireReceipt[] = [];
     const ended = await drive(new Membrane(adapter, {} as any), { ...req, onCacheWireReceipt: (receipt: CacheWireReceipt) => { receipts.push(receipt); } } as NormalizedRequest);
     expect(ended.outcome).toBe('ended end_turn');
@@ -393,6 +463,15 @@ describe('an adapter that sends no marker on a tool result (OpenRouter)', () => 
       for (const call of requests) expect(markers(call)).toEqual(['m0', 'm2', 'm4', 'm6']);
       expect(sentByOpenRouter).toEqual([4, 4, 4]);
       expect(receipts.map((receipt) => receipt.markers.length)).toEqual([4, 4, 4]);
+    });
+
+    it(`${path}: with free slots, a message before the calling turn that ends in an image gets no float either`, async () => {
+      const messages = input(2, [0]);
+      messages[2] = { ...messages[2]!, content: [text('message 1'), { type: 'image', source: { type: 'base64', mediaType: 'image/png', data: 'iVBORw0KGgo=' } } as any] };
+      const { requests, receipts, sentByOpenRouter } = await openRouterRun(drive, request(messages));
+      for (const call of requests) expect(markers(call)).toEqual(['m0']);
+      expect(sentByOpenRouter).toEqual([1, 1, 1]);
+      expect(receipts.map((receipt) => receipt.markers.length)).toEqual([1, 1, 1]);
     });
 
     it(`${path}: with free slots, the tool-results message gets no float, while the message before the calling turn still gets one it can carry`, async () => {

@@ -48,6 +48,7 @@ import {
   clampCacheMarkers,
   ownMessageBlocks,
   ownSystemBlocks,
+  wireBlocksInOrder,
   MAX_CACHE_BREAKPOINTS,
 } from './utils/cache-marker-budget.js';
 import {
@@ -269,11 +270,28 @@ function holdsToolUse(content: unknown): boolean {
   return Array.isArray(content) && content.some((block) => (block as { type?: unknown } | null)?.type === 'tool_use');
 }
 
+/**
+ * The marker a float on `target` carries, or undefined where none fits: a
+ * longer TTL may not follow a shorter one, and a marker with no ttl is 5m.
+ */
+function floatControlAt(
+  request: { messages: unknown; system?: unknown; tools?: unknown },
+  target: Record<string, unknown>,
+  cacheControl: { type: 'ephemeral'; ttl?: '5m' | '1h' },
+): { type: 'ephemeral'; ttl?: '5m' | '1h' } | undefined {
+  const blocks = wireBlocksInOrder(request);
+  const at = blocks.indexOf(target);
+  const long = (block: Record<string, unknown>) => (block.cache_control as { ttl?: unknown }).ttl === '1h';
+  const isLong = cacheControl.ttl === '1h' && blocks.slice(0, at).every((block) => !block.cache_control || long(block));
+  if (!isLong && blocks.slice(at + 1).some((block) => block.cache_control && long(block))) return undefined;
+  return isLong || !cacheControl.ttl ? cacheControl : { ...cacheControl, ttl: '5m' };
+}
+
 function placeFloatingMarker(
   request: { messages: Array<{ role?: string; content?: unknown }>; system?: unknown; tools?: unknown },
   cacheControl: { type: 'ephemeral'; ttl?: '5m' | '1h' },
   takeEarliest: boolean,
-  toolResultsCarryMarkers: boolean,
+  markableBlockTypes: readonly string[] | undefined,
 ): number | undefined {
   const messages = request.messages;
   const wireMarkers = countWireCacheMarkers(request);
@@ -284,10 +302,11 @@ function placeFloatingMarker(
     const bpIdx = lastCacheableBlockIndex(content as Array<Record<string, unknown>>);
     if (bpIdx < 0) return undefined;
     const block = content[bpIdx] as Record<string, unknown>;
-    if (!toolResultsCarryMarkers && block.type === 'tool_result') return undefined;
+    if (markableBlockTypes && !markableBlockTypes.includes(String(block.type))) return undefined;
     return block.cache_control ? undefined : block;
   };
-  const newest = unmarkedEnd(messages.length - 1);
+  const newestEnd = unmarkedEnd(messages.length - 1);
+  const newest = newestEnd && floatControlAt(request, newestEnd, cacheControl) ? newestEnd : undefined;
   if (newest && residuum <= 0 && takeEarliest) {
     const earliest = collectMarkedBlocks({ messages })[0];
     if (earliest) {
@@ -296,17 +315,13 @@ function placeFloatingMarker(
     }
   }
   if (residuum <= 0) return newest || !takeEarliest ? wireMarkers : undefined;
-  // A longer TTL may not follow a shorter one (a marker with no ttl is 5m), so
-  // the float goes at 1h only when every marker the request still carries does.
-  const control = cacheControl.ttl !== '1h'
-    || collectMarkedBlocks(request).every((block) => (block.cache_control as { ttl?: unknown }).ttl === '1h')
-    ? cacheControl
-    : { ...cacheControl, ttl: '5m' as const };
   let callingTurn = messages.length - 1;
   while (callingTurn >= 0 && !(messages[callingTurn]?.role === 'assistant' && holdsToolUse(messages[callingTurn]?.content))) callingTurn--;
   while (callingTurn > 0 && messages[callingTurn - 1]?.role === 'assistant') callingTurn--;
   for (const block of [newest, callingTurn > 0 ? unmarkedEnd(callingTurn - 1) : undefined]) {
     if (!block || residuum <= 0) continue;
+    const control = floatControlAt(request, block, cacheControl);
+    if (!control) continue;
     block.cache_control = control;
     residuum--;
   }
@@ -1520,12 +1535,11 @@ export class Membrane {
 
     // Anthropic allows 4 cache_control markers, tools and system included, and
     // looks for a cache entry only so far back from a marker.
-    // Under cm-owned the caller owns its markers, so membrane floats one only when it asks.
     const floatingAsked = request.floatingCacheMarker ?? this.config.defaultFloatingCacheMarker;
     const floatingEnabled = membraneOwned ? floatingAsked ?? true : floatingAsked === true;
     if (toolLoopRebuild && floatingEnabled && floatControl && !prefixRewritten) {
       if (membraneOwned) {
-        const withheldAt = placeFloatingMarker({ messages: mergedMessages, system, tools }, floatControl, false, this.adapter.sendsToolResultCacheMarkers !== false);
+        const withheldAt = placeFloatingMarker({ messages: mergedMessages, system, tools }, floatControl, false, this.adapter.sendsCacheMarkersOn);
         if (withheldAt !== undefined) this.warnFloatBudgetExhausted(withheldAt);
       } else {
         this.floatsAfterHook.set(providerRequest, floatControl);
@@ -2025,7 +2039,7 @@ export class Membrane {
         ...finalRequest,
         messages: ownMessageBlocks(finalRequest.messages, fidelity ? (original, copy) => fidelity.ownCopy(original, copy) : undefined),
       };
-      const withheldAt = placeFloatingMarker(finalRequest, floatAfterHook, true, this.adapter.sendsToolResultCacheMarkers !== false);
+      const withheldAt = placeFloatingMarker(finalRequest, floatAfterHook, true, this.adapter.sendsCacheMarkersOn);
       if (withheldAt !== undefined) this.warnFloatBudgetExhausted(withheldAt);
     }
 
