@@ -429,6 +429,7 @@ describe('the float never puts a longer TTL after a shorter one', () => {
       const sent = await run(drive, request(input(4, [0, 1, 2]), { cacheTtl: '5m' }), { hooks });
       expect(markers(sent[1])).toEqual(['m0', 'm2', 'm4']);
       expect(markers(sent[2])).toEqual(['m0', 'm2', 'm4']);
+      for (const call of sent.slice(1)) expect(JSON.stringify(call).match(/"cache_control"/g)).toHaveLength(4);
       for (const call of sent) expect(ttlOrderHolds(call)).toBe(true);
     });
 

@@ -250,7 +250,8 @@ export interface NormalizedRequest {
    * turn's opening, so that marker's prefix lies inside the newest marker's. It never takes a system
    * or tools marker, which may serve a prefix other requests share, so a
    * request whose 4 markers all sit there gets no float. With two or more
-   * slots free, the message before the round's calling turn is marked too;
+   * slots free, the message before the round's calling turn is marked too,
+   * when its block can carry a marker and the TTL order allows one there;
    * with one, a round long enough to pass the provider's backward cache search
    * writes again what it could have read. Under either policy no float is
    * placed on a call whose normalization repair rewrote the prefix, or on a
