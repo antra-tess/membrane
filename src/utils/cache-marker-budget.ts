@@ -36,31 +36,42 @@ export interface WireCacheSurfaces {
   tools?: unknown;
 }
 
-/** Anthropic's cache prefix runs tools, then system, then messages, so a deeper marker caches a longer prefix. */
-export function collectMarkedBlocks(surfaces: WireCacheSurfaces): Array<Record<string, unknown>> {
-  const marked: Array<Record<string, unknown>> = [];
-  const collectIfMarked = (candidate: unknown) =>
-    walkBlockTree(candidate, 0, (block) => {
-      if (block.cache_control) marked.push(block);
-    });
+/** Every block of the request in the order Anthropic's cache prefix reads them: tools, then system, then messages, each block followed by its nested blocks. */
+export function wireBlocksInOrder(surfaces: WireCacheSurfaces): Array<Record<string, unknown>> {
+  const blocks: Array<Record<string, unknown>> = [];
+  const collect = (candidate: unknown) => walkBlockTree(candidate, 0, (block) => { blocks.push(block); });
 
   if (Array.isArray(surfaces.tools)) {
-    for (const tool of surfaces.tools) collectIfMarked(tool);
+    for (const tool of surfaces.tools) collect(tool);
   }
   if (Array.isArray(surfaces.system)) {
-    for (const block of surfaces.system) collectIfMarked(block);
+    for (const block of surfaces.system) collect(block);
   }
   if (Array.isArray(surfaces.messages)) {
     for (const message of surfaces.messages) {
       const content = (message as { content?: unknown } | null)?.content;
       if (Array.isArray(content)) {
-        for (const block of content) collectIfMarked(block);
+        for (const block of content) collect(block);
       } else {
-        collectIfMarked(content);
+        collect(content);
       }
     }
   }
-  return marked;
+  return blocks;
+}
+
+/** Anthropic's cache prefix runs tools, then system, then messages, so a deeper marker caches a longer prefix. */
+export function collectMarkedBlocks(surfaces: WireCacheSurfaces): Array<Record<string, unknown>> {
+  return wireBlocksInOrder(surfaces).filter((block) => block.cache_control);
+}
+
+export function ownMessageBlocks(messages: unknown, onCopy?: (original: unknown, copy: unknown) => void): unknown {
+  if (!Array.isArray(messages)) return messages;
+  return messages.map((message) => {
+    const content = (message as { content?: unknown } | null)?.content;
+    if (!Array.isArray(content)) return message;
+    return { ...(message as Record<string, unknown>), content: content.map((block) => copyBlockTree(block, 0, onCopy)) };
+  });
 }
 
 export function ownSystemBlocks(system: unknown): unknown {
@@ -69,11 +80,16 @@ export function ownSystemBlocks(system: unknown): unknown {
   return system.map((block) => copyBlockTree(block, 0));
 }
 
-function copyBlockTree(candidate: unknown, depth: number): unknown {
+function copyBlockTree(
+  candidate: unknown,
+  depth: number,
+  onCopy?: (original: unknown, copy: unknown) => void
+): unknown {
   if (!candidate || typeof candidate !== 'object') return candidate;
   const copy = { ...(candidate as Record<string, unknown>) };
+  onCopy?.(candidate, copy);
   const nested = nestedContentBlocks(copy, depth);
-  if (nested) copy.content = nested.map((child) => copyBlockTree(child, depth + 1));
+  if (nested) copy.content = nested.map((child) => copyBlockTree(child, depth + 1, onCopy));
   return copy;
 }
 

@@ -189,6 +189,15 @@ export interface ProviderAdapter {
    * through it is refused. */
   readonly sendsSystemChanges?: boolean;
 
+  /** The content block types this adapter sends a cache_control marker on.
+   * Left out, membrane places a floating marker on a block of any type.
+   * OpenRouterAdapter declares `['text']`: its image, audio, tool-use and
+   * tool-result parts carry none. Membrane floats no marker onto a block of
+   * another type, and takes no caller's marker to make room for one
+   * (NormalizedRequest.floatingCacheMarker). A decorator should forward this;
+   * one that doesn't is taken to send a marker on any block. */
+  readonly sendsCacheMarkersOn?: readonly string[];
+
   /**
    * True when this adapter carries the content of every message in the
    * ProviderRequest it receives into its API call (format conversion

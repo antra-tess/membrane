@@ -220,7 +220,11 @@ export interface NormalizedRequest {
   /** Marker ownership policy. `cm-owned` disables every formatter-generated
    * system/context-prefix marker, so a request carries only the markers its
    * caller placed, such as its message breakpoints and a marker a
-   * `beforeRequest` hook adds. */
+   * `beforeRequest` hook adds, unless `floatingCacheMarker` is true (on the
+   * request, or through the config's `defaultFloatingCacheMarker`): then the
+   * native tool loop's later requests add the floating marker, after that
+   * hook, taking one of the caller's message markers when all four slots are
+   * held (see `floatingCacheMarker`). */
   cacheMarkers?: 'membrane-system' | 'cm-owned';
 
   /**
@@ -234,14 +238,36 @@ export interface NormalizedRequest {
    * Float a trailing cache_control marker onto the newest message when the
    * native tool loop rebuilds the request between tool-execution rounds, so
    * the growing tool-round suffix caches incrementally: each round writes its
-   * delta and cache-reads everything before it. Placed only from the request's
+   * delta and cache-reads everything before it. Under the default
+   * `cacheMarkers: 'membrane-system'` it is placed only from the request's
    * residual breakpoint budget: the marker is withheld when upstream markers
    * already occupy all 4 Anthropic cache_control slots, so upstream breakpoints
-   * are never displaced or stripped. With two or more slots free, the message
-   * before the round's calling turn is marked too; with one, a round that
-   * appends more blocks than Anthropic's ~20-block backward cache search covers
-   * writes again what it could have read.
-   * Defaults to true (when promptCaching is enabled). Set false for context
+   * are never displaced or stripped. Under `cacheMarkers: 'cm-owned'` it is
+   * placed only when this is true (or, left unset, the config's
+   * `defaultFloatingCacheMarker` is), and then after the `beforeRequest` hook,
+   * once the caller's markers have passed the check a first request's markers
+   * get, and when they occupy all 4 slots it takes the earliest message
+   * marker's slot: within one tool loop membrane changes no message content
+   * before the turn's opening, so that marker's content lies inside the
+   * newest marker's prefix, though its block no longer carries
+   * `cache_control` on the wire. It never takes a system or tools marker,
+   * which may serve a prefix other requests share, so a request whose 4
+   * markers all sit there gets no float. With two or more
+   * slots free, the message before the round's calling turn is marked too,
+   * when its block can carry a marker and the TTL order allows one there;
+   * with one, a round long enough to pass the provider's backward cache search
+   * writes again what it could have read. Under either policy no float is
+   * placed on a call whose normalization repair rewrote the prefix, or on a
+   * block of a type the adapter sends no marker on (`sendsCacheMarkersOn`).
+   * A longer TTL may not follow a shorter one (a marker with no `ttl` counts
+   * as 5m), so each float goes at 1h only when `cacheTtl` is 1h and every
+   * marker before it is 1h, otherwise at 5m, and none is placed where a 1h
+   * marker after it would then follow a 5m one. That reads the markers the
+   * request carries when the float is placed: under `cm-owned` after the
+   * `beforeRequest` hook; under `membrane-system` before it, where the hook
+   * is handed the float and owns the order of what it returns.
+   * Defaults to true under `membrane-system` (when promptCaching is enabled),
+   * and to false under `cm-owned`. Set false for context
    * strategies whose request prefix churns between rounds, where a trailing
    * marker would be pure cache-write cost.
    */
