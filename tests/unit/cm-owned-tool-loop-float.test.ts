@@ -483,6 +483,12 @@ describe('an adapter that sends no marker on a tool result (OpenRouter)', () => 
       expect(sentByOpenRouter).toEqual([1, 2, 1]);
       expect(receipts.map((receipt) => receipt.markers.length)).toEqual([1, 2, 1]);
     });
+
+    it(`${path}: membrane-system, free slots: the float goes only where OpenRouter sends a marker, so each call's receipt counts what OpenRouter's body sends`, async () => {
+      const { requests, receipts, sentByOpenRouter } = await openRouterRun(drive, request(input(2, [0]), { cacheMarkers: 'membrane-system' }));
+      expect(markers(requests[1])).toContain('m2');
+      expect(receipts.map((receipt) => receipt.markers.length)).toEqual(sentByOpenRouter);
+    });
   }
 });
 
