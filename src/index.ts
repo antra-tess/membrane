@@ -26,6 +26,8 @@ export type {
   KeepaliveSend,
 } from './cache-keepalive.js';
 
+export { getDefaultModelLimits, type ModelLimits } from './registry/model-limits.js';
+
 export {
   computeCacheWireReceipt,
   type CacheWireReceipt,
