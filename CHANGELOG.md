@@ -12,6 +12,109 @@ Releases up to and including 0.5.75 predate this file; for their contents see
 
 ## Unreleased
 
+## 0.9.0 — 2026-10-30
+
+### Breaking
+
+- **Code that calls an adapter's own `complete()` or `stream()`:** if the
+  call's `signal` has fired by the time sending the request or reading its
+  response fails, every adapter that makes requests rejects with a
+  `MembraneError` of type `abort`, not retryable, "Request was aborted". Its
+  `rawError` holds what the adapter caught, an `Error` as its serialized
+  fields and anything else as it is: for `AnthropicAdapter`, what its SDK
+  threw, or a credential failure that ended the request first. Where the
+  adapter caught a reason that is already a `MembraneError` of type `abort`,
+  as every such adapter but `AnthropicAdapter`, whose SDK rejects with an
+  error of its own, does when that reason ended the request, it passes that
+  error on, as before. A runtime's `fetch` can instead reject a body read
+  begun after the signal fired with an `AbortError` of its own (Node
+  22.12.0's does). The adapter then builds a new `abort` with that error as
+  its `rawError`, where it gave the same `abort` with none before. Before,
+  every such adapter but `AnthropicAdapter` typed the abort as it would a
+  failure of the request, by the reason's code, name or words: a reason
+  coded `ECONNRESET`, or wrapping one as its `cause`, was `network` and
+  retryable; a `TimeoutError`, which `AbortSignal.timeout()` gives, was
+  `timeout` and retryable; a reason that was itself a `MembraneError` kept
+  its own type; a string, a plain object or an `Error` whose words name no
+  failure was `unknown`. `AnthropicAdapter` already gave `abort`, with no
+  `rawError`. **Migration:** read `abort` for your own cancellation, as
+  `Membrane` already gives, and don't retry it. **Unchanged:** the `type`,
+  `retryable` and `message` of a call through `Membrane`'s `complete()`, and
+  the aborted response, reason `user`, that `stream()` and
+  `streamYielding()` give for the caller's own signal. Apart from a reason
+  that is already such an abort, the error `complete()` throws now carries
+  as its `rawError` what the adapter caught, such as the caller's reason or
+  what the Anthropic SDK threw, where it carried the adapter's own error or
+  nothing. A deadline of the call's own (`timeoutMs`, `progressTimeoutMs`,
+  progress bounds, and `AnthropicAdapter.stream()`'s idle and first-event
+  watchdogs) stays a `timeout`, unless the caller's signal has also fired by
+  the time the error is handled; then it's an `abort`, as through
+  `Membrane`. agent-framework 0.27.0, connectome-host at `b98d9765` and
+  context-manager at `f7cd5b67` cope: they reach adapters through
+  `Membrane`, and connectome-host's logging adapters, which call the adapter
+  beneath them themselves, are the adapters `Membrane` is given, and log
+  what that adapter throws before passing it on.
+
+### Added
+
+- `getDefaultModelLimits(modelId)` gives the window and maximum output (`maxContextTokens`, `maxOutputTokens`) that Anthropic's API enforces for a Claude model from 4.5 on, found by its exact id or that id with a snapshot date (`-YYYYMMDD`), and `undefined` for any other id. A bare Claude id gets its row whatever provider it is sent to, and other providers' limits for the same id can differ.
+
+### Changed
+
+- A request that can't reach its host says so in its error's `message`: the
+  host it tried (the adapter's base URL's host and port, never its path,
+  query or userinfo), what happened in plain words, and the transport code,
+  with each address it was met at that isn't the host's. For example, "The
+  request to api.anthropic.com failed: the connection was refused
+  (ECONNREFUSED at 0.0.0.0:443)." It read "Connection error." through the
+  Anthropic adapter, "fetch failed" through the others on Node, and the
+  runtime's own text on Bun. It holds for every adapter's `network` and
+  `timeout` errors whose causes carry a code, on Node and Bun, and each
+  attempt Node makes at a name with several addresses is read. A code without
+  plain words follows the error's own text, as in "fetch failed (EPROTO)".
+  Unchanged: the text of a failure whose causes carry no code, of a credential
+  resolver's own failure, and of a certificate failure typed `unknown`
+  (through the fetch-based adapters on Bun); and `type`, `retryable` and
+  `rawError`. `networkError()` takes the host's URL as an optional fourth
+  argument.
+- A `network` or `timeout` failure is never read as an overload by its
+  message (`classifyFailure`, `isOverloadedError`), so a host or port that
+  reads 529 doesn't move a connection failure onto the overloaded retry
+  schedule. A status-less `network` or `timeout` failure whose own text held
+  `529` or `overloaded_error` was read as an overload before, and now takes
+  the retryable schedule.
+
+### Fixed
+
+- The Anthropic adapter no longer keeps anything of a finished request alive
+  through the caller's `AbortSignal` (#212). SDK 0.52 adds an `abort`
+  listener to the signal each request is handed and never removes it. With
+  an API key and no `timeoutMs`, the adapter handed it the caller's own
+  signal, so a caller reusing one signal gained a listener, and a request's
+  controller, per `complete()`. With a `credentials` resolver it handed it a
+  signal from `AbortSignal.any()`, which, holding that listener, can outlive
+  the request: on every runtime measured while a reused caller signal lives,
+  and on Node 22.12 even after the caller's signal is gone. Each request
+  given a signal now hands the SDK one of its own, which follows the caller's
+  and lets go of it when the request settles.
+
+- The Anthropic adapter honours `timeoutMs` as a deadline on each `stream()`
+  and `complete()` request, through `createCombinedSignal` as the other
+  provider adapters do (#97). It used to be inert there: the SDK's own timeout
+  clears once response headers arrive, so a stream that kept sending deltas,
+  or a response whose body never finished, had no bound. The deadline
+  classifies as the same `TimeoutAbortError` the other adapters' `timeoutMs`
+  gives (type `timeout`, not retryable), distinct from the idle watchdog's
+  retryable stall timeout.
+
+- `stream()` ran a tool round's `onToolCalls` after the caller's signal had
+  fired, in both its XML and native tool loops: a signal that fired while
+  `onPreToolContent` ran, or anywhere after the round's text came in and before
+  its tools ran, didn't stop them. Such a round now runs none of its tools, and
+  the turn ends as the caller's abort already ends it: the aborted response,
+  reason `user`, whose `toolCalls` and `toolResults` list only the rounds that
+  ran.
+
 ## 0.8.0 — 2026-10-26
 
 ### Added
