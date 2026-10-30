@@ -189,6 +189,15 @@ export interface ProviderAdapter {
    * through it is refused. */
   readonly sendsSystemChanges?: boolean;
 
+  /** Whether a cache_control marker on a tool_result block reaches the
+   * provider; left out, it does. OpenRouterAdapter declares false: it sends a
+   * tool result as a `role: 'tool'` message whose content is a string, which
+   * carries no marker. Membrane then floats no marker onto a tool_result
+   * block, and takes no caller's marker to make room for one
+   * (NormalizedRequest.floatingCacheMarker). A decorator should forward this;
+   * one that doesn't is taken to send them. */
+  readonly sendsToolResultCacheMarkers?: boolean;
+
   /**
    * True when this adapter carries the content of every message in the
    * ProviderRequest it receives into its API call (format conversion

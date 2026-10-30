@@ -273,6 +273,7 @@ function placeFloatingMarker(
   request: { messages: Array<{ role?: string; content?: unknown }>; system?: unknown; tools?: unknown },
   cacheControl: { type: 'ephemeral'; ttl?: '5m' | '1h' },
   takeEarliest: boolean,
+  toolResultsCarryMarkers: boolean,
 ): number | undefined {
   const messages = request.messages;
   const wireMarkers = countWireCacheMarkers(request);
@@ -283,6 +284,7 @@ function placeFloatingMarker(
     const bpIdx = lastCacheableBlockIndex(content as Array<Record<string, unknown>>);
     if (bpIdx < 0) return undefined;
     const block = content[bpIdx] as Record<string, unknown>;
+    if (!toolResultsCarryMarkers && block.type === 'tool_result') return undefined;
     return block.cache_control ? undefined : block;
   };
   const newest = unmarkedEnd(messages.length - 1);
@@ -294,12 +296,18 @@ function placeFloatingMarker(
     }
   }
   if (residuum <= 0) return newest || !takeEarliest ? wireMarkers : undefined;
+  // A longer TTL may not follow a shorter one (a marker with no ttl is 5m), so
+  // the float goes at 1h only when every marker the request still carries does.
+  const control = cacheControl.ttl !== '1h'
+    || collectMarkedBlocks(request).every((block) => (block.cache_control as { ttl?: unknown }).ttl === '1h')
+    ? cacheControl
+    : { ...cacheControl, ttl: '5m' as const };
   let callingTurn = messages.length - 1;
   while (callingTurn >= 0 && !(messages[callingTurn]?.role === 'assistant' && holdsToolUse(messages[callingTurn]?.content))) callingTurn--;
   while (callingTurn > 0 && messages[callingTurn - 1]?.role === 'assistant') callingTurn--;
   for (const block of [newest, callingTurn > 0 ? unmarkedEnd(callingTurn - 1) : undefined]) {
     if (!block || residuum <= 0) continue;
-    block.cache_control = cacheControl;
+    block.cache_control = control;
     residuum--;
   }
   return undefined;
@@ -1512,11 +1520,12 @@ export class Membrane {
 
     // Anthropic allows 4 cache_control markers, tools and system included, and
     // looks for a cache entry only so far back from a marker.
-    const floatingEnabled =
-      request.floatingCacheMarker ?? this.config.defaultFloatingCacheMarker ?? true;
+    // Under cm-owned the caller owns its markers, so membrane floats one only when it asks.
+    const floatingAsked = request.floatingCacheMarker ?? this.config.defaultFloatingCacheMarker;
+    const floatingEnabled = membraneOwned ? floatingAsked ?? true : floatingAsked === true;
     if (toolLoopRebuild && floatingEnabled && floatControl && !prefixRewritten) {
       if (membraneOwned) {
-        const withheldAt = placeFloatingMarker({ messages: mergedMessages, system, tools }, floatControl, false);
+        const withheldAt = placeFloatingMarker({ messages: mergedMessages, system, tools }, floatControl, false, this.adapter.sendsToolResultCacheMarkers !== false);
         if (withheldAt !== undefined) this.warnFloatBudgetExhausted(withheldAt);
       } else {
         this.floatsAfterHook.set(providerRequest, floatControl);
@@ -2016,7 +2025,7 @@ export class Membrane {
         ...finalRequest,
         messages: ownMessageBlocks(finalRequest.messages, fidelity ? (original, copy) => fidelity.ownCopy(original, copy) : undefined),
       };
-      const withheldAt = placeFloatingMarker(finalRequest, floatAfterHook, true);
+      const withheldAt = placeFloatingMarker(finalRequest, floatAfterHook, true, this.adapter.sendsToolResultCacheMarkers !== false);
       if (withheldAt !== undefined) this.warnFloatBudgetExhausted(withheldAt);
     }
 

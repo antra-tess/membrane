@@ -218,10 +218,11 @@ export interface NormalizedRequest {
   promptCaching?: boolean;
 
   /** Marker ownership policy. `cm-owned` disables every formatter-generated
-   * system/context-prefix marker, so a turn's first request carries only the
-   * markers its caller placed, such as its message breakpoints and a marker a
-   * `beforeRequest` hook adds. The native tool loop's later requests can add
-   * the floating marker (`floatingCacheMarker`), after that hook. */
+   * system/context-prefix marker, so a request carries only the markers its
+   * caller placed, such as its message breakpoints and a marker a
+   * `beforeRequest` hook adds, unless the caller sets `floatingCacheMarker:
+   * true`: then the native tool loop's later requests add the floating
+   * marker, after that hook. */
   cacheMarkers?: 'membrane-system' | 'cm-owned';
 
   /**
@@ -240,9 +241,10 @@ export interface NormalizedRequest {
    * residual breakpoint budget: the marker is withheld when upstream markers
    * already occupy all 4 Anthropic cache_control slots, so upstream breakpoints
    * are never displaced or stripped. Under `cacheMarkers: 'cm-owned'` it is
-   * placed after the `beforeRequest` hook, once the caller's markers have
-   * passed the check a first request's markers get, and when they
-   * occupy all 4 slots it takes the earliest message marker's slot: within one
+   * placed only when this is true, and then after the `beforeRequest` hook,
+   * once the caller's markers have passed the check a first request's markers
+   * get, and when they occupy all 4 slots it takes the earliest message
+   * marker's slot: within one
    * tool loop membrane changes nothing before the turn's opening, so that
    * marker's prefix lies inside the newest marker's. It never takes a system
    * or tools marker, which may serve a prefix other requests share, so a
@@ -250,8 +252,13 @@ export interface NormalizedRequest {
    * slots free, the message before the round's calling turn is marked too;
    * with one, a round long enough to pass the provider's backward cache search
    * writes again what it could have read. Under either policy no float is
-   * placed on a call whose normalization repair rewrote the prefix.
-   * Defaults to true (when promptCaching is enabled). Set false for context
+   * placed on a call whose normalization repair rewrote the prefix, or on a
+   * tool result through an adapter that declares `sendsToolResultCacheMarkers:
+   * false`; and the float goes at 1h only when `cacheTtl` is 1h and every
+   * marker the request still carries is 1h, since a longer TTL may not follow
+   * a shorter one (a marker with no `ttl` counts as 5m).
+   * Defaults to true under `membrane-system` (when promptCaching is enabled),
+   * and to false under `cm-owned`. Set false for context
    * strategies whose request prefix churns between rounds, where a trailing
    * marker would be pure cache-write cost.
    */

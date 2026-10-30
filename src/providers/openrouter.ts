@@ -158,6 +158,8 @@ export class OpenRouterAdapter implements ProviderAdapter {
    * adapter-level value is only the no-cache-tokens fallback.
    */
   readonly usageCacheConvention = 'unknown' as const;
+  /** A tool result goes as a `role: 'tool'` message with string content, which carries no cache_control. */
+  readonly sendsToolResultCacheMarkers = false;
   private apiKey: string;
   private baseURL: string;
   private httpReferer: string;

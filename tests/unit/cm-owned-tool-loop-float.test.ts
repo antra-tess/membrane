@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { computeCacheWireReceipt, type CacheWireReceipt } from '../../src/cache-wire-receipt.js';
+import { OpenRouterAdapter } from '../../src/providers/openrouter.js';
 import type {
   NormalizedMessage,
   NormalizedRequest,
@@ -70,6 +71,7 @@ function request(messages: NormalizedMessage[], overrides: Partial<NormalizedReq
     promptCaching: true,
     cacheTtl: '1h',
     cacheMarkers: 'cm-owned',
+    floatingCacheMarker: true,
     assistantParticipant: 'Claude',
     ...overrides,
   } as NormalizedRequest;
@@ -112,6 +114,34 @@ function markers(sent: any): string[] {
   });
   return at;
 }
+
+function markerTtls(sent: any): string[] {
+  const at: string[] = [];
+  const ttl = (b: any) => b.cache_control.ttl ?? '5m';
+  if (Array.isArray(sent.tools)) sent.tools.forEach((t: any) => { if (t.cache_control) at.push(`tools:${ttl(t)}`); });
+  if (Array.isArray(sent.system)) sent.system.forEach((b: any) => { if (b.cache_control) at.push(`system:${ttl(b)}`); });
+  sent.messages.forEach((m: any, mi: number) => {
+    (Array.isArray(m.content) ? m.content : []).forEach((b: any) => { if (b.cache_control) at.push(`m${mi}:${ttl(b)}`); });
+  });
+  return at;
+}
+
+/** A hook that sets each marker's TTL: the system prompt's first block at `system` when given, and each message marker by its message index. */
+const ttlHook = (system: '5m' | '1h' | undefined, messageTtl: (mi: number) => '5m' | '1h') => ({
+  beforeRequest: (_normalized: unknown, provider: any) => {
+    const sys = typeof provider.system === 'string' ? [{ type: 'text', text: provider.system }] : provider.system;
+    return {
+      ...provider,
+      system: system ? sys.map((b: any, i: number) => (i === 0 ? { ...b, cache_control: { type: 'ephemeral', ttl: system } } : b)) : provider.system,
+      messages: provider.messages.map((m: any, mi: number) => ({
+        ...m,
+        content: Array.isArray(m.content)
+          ? m.content.map((b: any) => (b.cache_control ? { ...b, cache_control: { type: 'ephemeral', ttl: messageTtl(mi) } } : b))
+          : m.content,
+      })),
+    };
+  },
+});
 
 const newestMarker = (sent: any) => {
   const content = sent.messages[sent.messages.length - 1].content;
@@ -276,7 +306,7 @@ describe('cm-owned: the tool loop\'s later calls mark their newest message', () 
     it(`${path}: places no float when the request turns it off, or turns prompt caching off`, async () => {
       const off = await run(drive, request(input(2, [0, 1]), { floatingCacheMarker: false }));
       expect(off.map(markers)).toEqual([['m0', 'm2'], ['m0', 'm2'], ['m0', 'm2']]);
-      const configOff = await run(drive, request(input(2, [0, 1])), { defaultFloatingCacheMarker: false });
+      const configOff = await run(drive, request(input(2, [0, 1]), { floatingCacheMarker: undefined }), { defaultFloatingCacheMarker: false });
       expect(configOff.map(markers)).toEqual([['m0', 'm2'], ['m0', 'm2'], ['m0', 'm2']]);
       const uncached = await run(drive, request(input(2, [0, 1]), { promptCaching: false }));
       expect(uncached.map(markers)).toEqual([[], [], []]);
@@ -291,6 +321,87 @@ describe('cm-owned: the tool loop\'s later calls mark their newest message', () 
       const sent = await run(drive, request(messages));
       expect(markers(sent[1])).toEqual(markers(sent[0]));
       expect(markers(sent[2])).toEqual(markers(sent[0]));
+    });
+  }
+});
+
+describe('cm-owned: the float is the caller\'s to ask for', () => {
+  for (const [path, drive] of paths) {
+    it(`${path}: left unset, every call carries only the caller's markers`, async () => {
+      const sent = await run(drive, request(input(2, [0, 1]), { floatingCacheMarker: undefined }));
+      for (const call of sent) expect(markers(call)).toEqual(['m0', 'm2']);
+    });
+
+    it(`${path}: a config default of true asks for it, and a request's false turns it off again`, async () => {
+      const on = await run(drive, request(input(2, [0, 1]), { floatingCacheMarker: undefined }), { defaultFloatingCacheMarker: true });
+      expect(markers(on[1])).toEqual(['m0', 'm2', 'm4']);
+      const off = await run(drive, request(input(2, [0, 1]), { floatingCacheMarker: false }), { defaultFloatingCacheMarker: true });
+      for (const call of off) expect(markers(call)).toEqual(['m0', 'm2']);
+    });
+  }
+});
+
+describe('the float never puts a longer TTL after a shorter one', () => {
+  for (const [path, drive] of paths) {
+    it(`${path}: cm-owned, free slots: behind a 5m system marker the floats go at 5m, though the request's cacheTtl is 1h`, async () => {
+      const sent = await run(drive, request(input(2, [])), { hooks: ttlHook('5m', () => '1h') });
+      expect(markerTtls(sent[0])).toEqual(['system:5m']);
+      expect(markerTtls(sent[1])).toEqual(['system:5m', 'm2:5m', 'm4:5m']);
+      expect(markerTtls(sent[2])).toEqual(['system:5m', 'm4:5m', 'm6:5m']);
+    });
+
+    it(`${path}: cm-owned, all four slots: taking the 1h marker leaves 5m ones, so the float goes at 5m`, async () => {
+      const sent = await run(drive, request(input(4, [0, 1, 2, 3])), { hooks: ttlHook(undefined, (mi) => (mi === 0 ? '1h' : '5m')) });
+      expect(markerTtls(sent[0])).toEqual(['m0:1h', 'm2:5m', 'm4:5m', 'm6:5m']);
+      expect(markerTtls(sent[1])).toEqual(['m2:5m', 'm4:5m', 'm6:5m', 'm8:5m']);
+      expect(markerTtls(sent[2])).toEqual(['m2:5m', 'm4:5m', 'm6:5m', 'm10:5m']);
+    });
+
+    it(`${path}: cm-owned, every marker at the request's 1h: the float keeps 1h`, async () => {
+      const sent = await run(drive, request(input(2, [0, 1])));
+      expect(markerTtls(sent[1])).toEqual(['m0:1h', 'm2:1h', 'm4:1h']);
+    });
+
+    it(`${path}: membrane-system: behind a message block that carries its own marker with no ttl, the floats go at 5m`, async () => {
+      const messages = input(2, []);
+      messages[0] = { ...messages[0]!, content: [{ type: 'text', text: 'message 0', cache_control: { type: 'ephemeral' } }] };
+      const sent = await run(drive, request(messages, { cacheMarkers: 'membrane-system' }));
+      for (const call of sent.slice(1)) {
+        const floats = markerTtls(call).filter((m) => /^m[1-9]/.test(m));
+        expect(floats.length).toBeGreaterThan(0);
+        for (const m of floats) expect(m).toMatch(/:5m$/);
+      }
+    });
+  }
+});
+
+describe('an adapter that sends no marker on a tool result (OpenRouter)', () => {
+  const real = new OpenRouterAdapter({ apiKey: 'test' });
+  const openRouterRun = async (drive: Drive, req: NormalizedRequest) => {
+    const { adapter, requests } = scriptedAdapter();
+    Object.assign(adapter, { sendsToolResultCacheMarkers: (real as any).sendsToolResultCacheMarkers });
+    const receipts: CacheWireReceipt[] = [];
+    const ended = await drive(new Membrane(adapter, {} as any), { ...req, onCacheWireReceipt: (receipt: CacheWireReceipt) => { receipts.push(receipt); } } as NormalizedRequest);
+    expect(ended.outcome).toBe('ended end_turn');
+    const sentByOpenRouter = requests.map((call) => (JSON.stringify((real as any).buildRequest(call)).match(/"cache_control"/g) ?? []).length);
+    return { requests, receipts, sentByOpenRouter };
+  };
+
+  for (const [path, drive] of paths) {
+    it(`${path}: with all four slots held, a later call takes nothing, and OpenRouter's body sends the caller's four markers, as the receipt says`, async () => {
+      const { requests, receipts, sentByOpenRouter } = await openRouterRun(drive, request(input(4, [0, 1, 2, 3])));
+      for (const call of requests) expect(markers(call)).toEqual(['m0', 'm2', 'm4', 'm6']);
+      expect(sentByOpenRouter).toEqual([4, 4, 4]);
+      expect(receipts.map((receipt) => receipt.markers.length)).toEqual([4, 4, 4]);
+    });
+
+    it(`${path}: with free slots, the tool-results message gets no float, while the message before the calling turn still gets one it can carry`, async () => {
+      const { requests, receipts, sentByOpenRouter } = await openRouterRun(drive, request(input(2, [0])));
+      expect(markers(requests[0])).toEqual(['m0']);
+      expect(markers(requests[1])).toEqual(['m0', 'm2']);
+      expect(markers(requests[2])).toEqual(['m0']);
+      expect(sentByOpenRouter).toEqual([1, 2, 1]);
+      expect(receipts.map((receipt) => receipt.markers.length)).toEqual([1, 2, 1]);
     });
   }
 });
