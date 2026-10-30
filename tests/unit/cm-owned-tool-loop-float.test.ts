@@ -484,6 +484,19 @@ describe('an adapter that sends no marker on a tool result (OpenRouter)', () => 
       expect(receipts.map((receipt) => receipt.markers.length)).toEqual([1, 2, 1]);
     });
 
+    it(`${path}: with all four slots held, the tool-results message's missing float gives no withheld warning`, async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      await openRouterRun(drive, request(input(4, [0, 1, 2, 3])));
+      expect(warn.mock.calls.filter((args) => String(args[0]).includes('withheld'))).toEqual([]);
+    });
+
+    it(`${path}: membrane-system, one free slot: it goes to the message before the calling turn, which ends in text, where OpenRouter sends it`, async () => {
+      const { requests, receipts, sentByOpenRouter } = await openRouterRun(drive, request(input(4, [0, 1, 2]), { cacheMarkers: 'membrane-system' }));
+      expect(markers(requests[1])).toEqual(['m0', 'm2', 'm4', 'm6']);
+      expect(sentByOpenRouter).toEqual([3, 4, 3]);
+      expect(receipts.map((receipt) => receipt.markers.length)).toEqual([3, 4, 3]);
+    });
+
     it(`${path}: membrane-system, free slots: the float goes only where OpenRouter sends a marker, so each call's receipt counts what OpenRouter's body sends`, async () => {
       const { requests, receipts, sentByOpenRouter } = await openRouterRun(drive, request(input(2, [0]), { cacheMarkers: 'membrane-system' }));
       expect(markers(requests[1])).toContain('m2');
