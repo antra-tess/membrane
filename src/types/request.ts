@@ -223,7 +223,8 @@ export interface NormalizedRequest {
    * `beforeRequest` hook adds, unless `floatingCacheMarker` is true (on the
    * request, or through the config's `defaultFloatingCacheMarker`): then the
    * native tool loop's later requests add the floating marker, after that
-   * hook. */
+   * hook, taking one of the caller's message markers when all four slots are
+   * held (see `floatingCacheMarker`). */
   cacheMarkers?: 'membrane-system' | 'cm-owned';
 
   /**
@@ -246,10 +247,12 @@ export interface NormalizedRequest {
    * `defaultFloatingCacheMarker` is), and then after the `beforeRequest` hook,
    * once the caller's markers have passed the check a first request's markers
    * get, and when they occupy all 4 slots it takes the earliest message
-   * marker's slot: within one tool loop membrane changes nothing before the
-   * turn's opening, so that marker's prefix lies inside the newest marker's. It never takes a system
-   * or tools marker, which may serve a prefix other requests share, so a
-   * request whose 4 markers all sit there gets no float. With two or more
+   * marker's slot: within one tool loop membrane changes no message content
+   * before the turn's opening, so that marker's content lies inside the
+   * newest marker's prefix, though its block no longer carries
+   * `cache_control` on the wire. It never takes a system or tools marker,
+   * which may serve a prefix other requests share, so a request whose 4
+   * markers all sit there gets no float. With two or more
    * slots free, the message before the round's calling turn is marked too,
    * when its block can carry a marker and the TTL order allows one there;
    * with one, a round long enough to pass the provider's backward cache search
