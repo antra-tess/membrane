@@ -622,7 +622,12 @@ export class NativeFormatter implements PrefillFormatter {
         throw unsupportedError('Native tool names collide after colon escaping: "' + name + '". Choose distinct wire names.');
       }
       names.add(name);
-      return { name, description: tool.description, input_schema: tool.inputSchema };
+      return {
+        name,
+        description: tool.description,
+        input_schema: tool.inputSchema,
+        ...(tool.eagerInputStreaming === undefined ? {} : { eager_input_streaming: tool.eagerInputStreaming }),
+      };
     });
   }
 }

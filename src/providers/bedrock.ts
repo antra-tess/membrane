@@ -450,7 +450,7 @@ export class BedrockAdapter implements ProviderAdapter {
     }
 
     if (request.tools && request.tools.length > 0) {
-      params.tools = (request.tools as Array<Record<string, any>>).map(t => stripCacheTtl(t));
+      params.tools = (request.tools as Array<Record<string, any>>).map(({ eager_input_streaming: _eager, ...t }) => stripCacheTtl(t));
     }
 
     if ((request as any).thinking) {

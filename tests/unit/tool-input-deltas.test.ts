@@ -5,6 +5,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
+import { BedrockAdapter } from '../../src/providers/bedrock.js';
 import { Membrane } from '../../src/membrane.js';
 import { NativeFormatter } from '../../src/formatters/native.js';
 import type { NormalizedRequest, StreamEvent, ToolCall, ToolResult, YieldingStreamOptions } from '../../src/types/index.js';
@@ -27,13 +28,15 @@ function fakeAnthropicStream(events: unknown[]) {
   };
 }
 
-function scriptedAnthropic(rounds: unknown[][]) {
+function scriptedAnthropic(rounds: unknown[][], sent: any[] = [], headers: unknown[] = []) {
   const adapter = new AnthropicAdapter({ apiKey: 'zz-key', cacheKeepalive: { enabled: false } });
   let call = 0;
   (adapter as any).client = {
     withOptions() { return this; },
     messages: {
-      stream: async () => {
+      stream: async (params: unknown, options?: { headers?: unknown }) => {
+        sent.push(params);
+        headers.push(options?.headers ?? null);
         const round = rounds[call++];
         if (!round) throw new Error(`unscripted provider call ${call}`);
         return fakeAnthropicStream(round);
@@ -83,8 +86,15 @@ function request(stopSequences?: string[], toolName = 'channel_publish'): Normal
 
 const answer = (calls: ToolCall[]): ToolResult[] => calls.map((c) => ({ toolUseId: c.id, content: 'ok', isError: false }));
 
-async function run(options: YieldingStreamOptions, stopSequences?: string[], script: unknown[][] = rounds(), toolName?: string) {
-  const stream = new Membrane(scriptedAnthropic(script), { formatter: new NativeFormatter() })
+async function run(
+  options: YieldingStreamOptions,
+  stopSequences?: string[],
+  script: unknown[][] = rounds(),
+  toolName?: string,
+  sent: unknown[] = [],
+  headers: unknown[] = [],
+) {
+  const stream = new Membrane(scriptedAnthropic(script, sent, headers), { formatter: new NativeFormatter() })
     .streamYielding(request(stopSequences, toolName), options);
   const events: StreamEvent[] = [];
   for await (const event of stream as AsyncIterable<StreamEvent>) {
@@ -103,6 +113,44 @@ const toolCallsEvents = (events: StreamEvent[]) =>
 const completed = (events: StreamEvent[]) =>
   events.find((e): e is Extract<StreamEvent, { type: 'complete' }> => e.type === 'complete')!;
 const PUBLISHED = { channelId: 'bosun:meeting:1', content: 'Hello there.\nYes' };
+
+describe('ToolDefinition.eagerInputStreaming', () => {
+  it("is sent as the tool's eager_input_streaming by the Anthropic adapter, and other tools are sent as before", async () => {
+    const sent: any[] = [];
+    const req = request();
+    req.tools = [
+      { ...req.tools![0], eagerInputStreaming: true },
+      { name: 'zz_other', description: 'zz', inputSchema: { type: 'object' } },
+      { name: 'zz_buffered', description: 'zz', inputSchema: { type: 'object' }, eagerInputStreaming: false },
+    ];
+    const stream = new Membrane(scriptedAnthropic(rounds(), sent), { formatter: new NativeFormatter() }).streamYielding(req, {});
+    for await (const event of stream as AsyncIterable<StreamEvent>) {
+      if (event.type === 'tool-calls') stream.provideToolResults(answer(event.calls));
+      else if (event.type === 'complete') break;
+      else if (event.type === 'error' || event.type === 'aborted') throw new Error(`stream ended with ${event.type}`);
+    }
+    expect(sent[0].tools.map((tool: any) => [tool.name, tool.eager_input_streaming])).toEqual([
+      ['channel_publish', true],
+      ['zz_other', undefined],
+      ['zz_buffered', false],
+    ]);
+    expect(Object.keys(sent[0].tools[1])).toEqual(['name', 'description', 'input_schema']);
+  });
+
+  it('is left out of the Bedrock request', () => {
+    const built = (new BedrockAdapter({ accessKeyId: 'zz-key', secretAccessKey: 'zz-secret', region: 'us-west-2' }) as any).buildRequest(
+      {
+        model: MODEL,
+        messages: [{ role: 'user', content: 'zz go' }],
+        maxTokens: 64,
+        tools: [{ name: 'channel_publish', description: 'zz', input_schema: { type: 'object' }, eager_input_streaming: true }],
+      },
+      undefined,
+      () => {},
+    );
+    expect(built.tools).toEqual([{ name: 'channel_publish', description: 'zz', input_schema: { type: 'object' } }]);
+  });
+});
 
 describe('emitToolInputDeltas', () => {
   it('streams each argument fragment, in order, with the call id and name, before the tool-calls event', async () => {
@@ -139,6 +187,17 @@ describe('emitToolInputDeltas', () => {
     }
     expect(seen).toEqual(FRAGMENTS);
   }, 2_000);
+
+  it('changes no request: the requests and their headers are the same with it off and on', async () => {
+    for (const stops of [undefined, ['ZZSTOP']]) {
+      const [offSent, offHeaders, onSent, onHeaders]: unknown[][] = [[], [], [], []];
+      await run({}, stops, rounds(), undefined, offSent, offHeaders);
+      await run({ emitToolInputDeltas: true }, stops, rounds(), undefined, onSent, onHeaders);
+      expect(offSent).toHaveLength(2);
+      expect(JSON.stringify(onSent)).toBe(JSON.stringify(offSent));
+      expect(JSON.stringify(onHeaders)).toBe(JSON.stringify(offHeaders));
+    }
+  });
 
   it('is off by default', async () => {
     const events = await run({});

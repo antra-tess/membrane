@@ -476,10 +476,9 @@ export interface YieldingStreamOptions {
    * content (not valid JSON on its own). Needs emitTokens. Native tool mode
    * with the Anthropic adapter only.
    *
-   * Anthropic sends a call's fragments together near its end unless the
-   * request carries the `fine-grained-tool-streaming-2025-05-14` beta, as it
-   * does when the AnthropicAdapter's `defaultHeaders` give it in
-   * `anthropic-beta`.
+   * Fragments arrive as the model writes them for a tool whose definition
+   * sets `eagerInputStreaming: true`; that field's doc says when else they
+   * do. Otherwise the API sends each parameter's value once it's complete.
    *
    * Fragments arrive before the call is final, and the 'tool-calls' event is
    * what runs: a call cut off by max_tokens streams fragments and never
