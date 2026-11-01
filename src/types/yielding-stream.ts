@@ -8,7 +8,9 @@ import type { ProgressBounds } from '../progress-bounds.js';
 /**
  * Token/chunk event - raw text as it arrives from the LLM, and in XML tool
  * mode each tool result's content as it joins the continuation
- * (`meta.type: 'tool_result'`).
+ * (`meta.type: 'tool_result'`). With `emitToolInputDeltas`, a native tool
+ * call's argument JSON fragments as well (`meta.type: 'tool_call'`,
+ * `meta.toolCallPart: 'input'`, `meta.visible: false`).
  */
 export interface TokensEvent {
   type: 'tokens';
@@ -472,8 +474,17 @@ export interface YieldingStreamOptions {
    * 'tokens' events with `meta.type: 'tool_call'`, `meta.toolCallPart:
    * 'input'`, the block's `toolId` and `toolName`, and the raw fragment as
    * content (not valid JSON on its own). Needs emitTokens. Native tool mode
-   * with an adapter that streams tool arguments (Anthropic) only; the
-   * finished call in the 'tool-calls' event stays authoritative.
+   * with the Anthropic adapter only.
+   *
+   * Anthropic sends a call's fragments together near its end unless the
+   * request carries the `fine-grained-tool-streaming-2025-05-14` beta, as it
+   * does when the AnthropicAdapter's `defaultHeaders` give it in
+   * `anthropic-beta`.
+   *
+   * Fragments arrive before the call is final, and the 'tool-calls' event is
+   * what runs: a call cut off by max_tokens streams fragments and never
+   * reaches it, and an attempt refused and retried (`refusalRetries`) is
+   * followed by a 'retrying' event before the next attempt's fragments.
    * Default: false
    */
   emitToolInputDeltas?: boolean;

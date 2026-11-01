@@ -18,6 +18,7 @@ function fakeAnthropicStream(events: unknown[]) {
       let i = 0;
       return {
         async next() {
+          while (i < events.length && (events[i] as { gate?: Promise<void> }).gate) await (events[i++] as { gate: Promise<void> }).gate;
           if (i < events.length) return { value: events[i++], done: false };
           return { value: undefined, done: true };
         },
@@ -70,21 +71,21 @@ function rounds(): unknown[][] {
   ];
 }
 
-function request(stopSequences?: string[]): NormalizedRequest {
+function request(stopSequences?: string[], toolName = 'channel_publish'): NormalizedRequest {
   return {
     messages: [{ participant: 'User', content: [{ type: 'text', text: 'zz go' }] }],
     config: { model: MODEL, maxTokens: 64 },
     ...(stopSequences ? { stopSequences } : {}),
     toolMode: 'native',
-    tools: [{ name: 'channel_publish', description: 'zz', inputSchema: { type: 'object', properties: { channelId: { type: 'string' }, content: { type: 'string' } } } }],
+    tools: [{ name: toolName, description: 'zz', inputSchema: { type: 'object', properties: { channelId: { type: 'string' }, content: { type: 'string' } } } }],
   };
 }
 
 const answer = (calls: ToolCall[]): ToolResult[] => calls.map((c) => ({ toolUseId: c.id, content: 'ok', isError: false }));
 
-async function run(options: YieldingStreamOptions, stopSequences?: string[], script: unknown[][] = rounds()) {
+async function run(options: YieldingStreamOptions, stopSequences?: string[], script: unknown[][] = rounds(), toolName?: string) {
   const stream = new Membrane(scriptedAnthropic(script), { formatter: new NativeFormatter() })
-    .streamYielding(request(stopSequences), options);
+    .streamYielding(request(stopSequences, toolName), options);
   const events: StreamEvent[] = [];
   for await (const event of stream as AsyncIterable<StreamEvent>) {
     events.push(event);
@@ -97,6 +98,11 @@ async function run(options: YieldingStreamOptions, stopSequences?: string[], scr
 
 const toolTokens = (events: StreamEvent[]) =>
   events.filter((e): e is Extract<StreamEvent, { type: 'tokens' }> => e.type === 'tokens' && e.meta.type === 'tool_call');
+const toolCallsEvents = (events: StreamEvent[]) =>
+  events.filter((e): e is Extract<StreamEvent, { type: 'tool-calls' }> => e.type === 'tool-calls');
+const completed = (events: StreamEvent[]) =>
+  events.find((e): e is Extract<StreamEvent, { type: 'complete' }> => e.type === 'complete')!;
+const PUBLISHED = { channelId: 'bosun:meeting:1', content: 'Hello there.\nYes' };
 
 describe('emitToolInputDeltas', () => {
   it('streams each argument fragment, in order, with the call id and name, before the tool-calls event', async () => {
@@ -109,17 +115,41 @@ describe('emitToolInputDeltas', () => {
     const lastDelta = events.lastIndexOf(tokens[tokens.length - 1]);
     const toolCalls = events.findIndex((e) => e.type === 'tool-calls');
     expect(lastDelta).toBeLessThan(toolCalls);
-    expect((events[toolCalls] as any).calls[0].input).toEqual({ channelId: 'bosun:meeting:1', content: 'Hello there.\nYes' });
+    expect((events[toolCalls] as any).calls[0].input).toEqual(PUBLISHED);
     // Visible text is unchanged.
     expect(events.filter((e) => e.type === 'tokens' && e.meta.type === 'text').map((e: any) => e.content).join('')).toBe('zz prezz done');
   });
 
+  it('streams each fragment while its block is still open', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const tool = toolBlock(1, 'toolu_zz_1', 'channel_publish', FRAGMENTS);
+    const script = rounds();
+    script[0] = [messageStart('msg_zz_1'), ...textBlock(0, 'zz pre'), ...tool.slice(0, -1), { gate }, tool[tool.length - 1], end('tool_use')];
+    const stream = new Membrane(scriptedAnthropic(script), { formatter: new NativeFormatter() })
+      .streamYielding(request(), { emitToolInputDeltas: true });
+    const seen: string[] = [];
+    for await (const event of stream as AsyncIterable<StreamEvent>) {
+      if (event.type === 'tokens' && event.meta.type === 'tool_call') {
+        seen.push(event.content);
+        if (seen.length === FRAGMENTS.length) release();
+      } else if (event.type === 'tool-calls') stream.provideToolResults(answer(event.calls));
+      else if (event.type === 'complete') break;
+      else if (event.type === 'error' || event.type === 'aborted') throw new Error(`stream ended with ${event.type}`);
+    }
+    expect(seen).toEqual(FRAGMENTS);
+  }, 2_000);
+
   it('is off by default', async () => {
-    expect(toolTokens(await run({}))).toEqual([]);
+    const events = await run({});
+    expect(toolTokens(events)).toEqual([]);
+    expect(toolCallsEvents(events).map((e) => e.calls[0].input)).toEqual([PUBLISHED]);
   });
 
   it('needs emitTokens', async () => {
-    expect(toolTokens(await run({ emitToolInputDeltas: true, emitTokens: false }))).toEqual([]);
+    const events = await run({ emitToolInputDeltas: true, emitTokens: false });
+    expect(toolTokens(events)).toEqual([]);
+    expect(toolCallsEvents(events).map((e) => e.calls[0].input)).toEqual([PUBLISHED]);
   });
 
   it('streams through local stop-sequence handling, which holds block starts', async () => {
@@ -127,6 +157,59 @@ describe('emitToolInputDeltas', () => {
     const tokens = toolTokens(events);
     expect(tokens.map((t) => t.content)).toEqual(FRAGMENTS);
     expect(tokens[0].meta).toMatchObject({ toolId: 'toolu_zz_1', toolName: 'channel_publish' });
+  });
+
+  it('streams none of a tool call that a local stop in the text before it cuts off', async () => {
+    const script = [[messageStart('msg_zz_1'), ...textBlock(0, 'zz pre ZZSTOP after'), ...toolBlock(1, 'toolu_zz_1', 'channel_publish', FRAGMENTS), end('tool_use')]];
+    const events = await run({ emitToolInputDeltas: true }, ['ZZSTOP'], script);
+    expect(events.filter((e) => e.type === 'tokens').map((e: any) => e.content).join('')).toBe('zz pre ');
+    expect(toolCallsEvents(events)).toEqual([]);
+    expect(completed(events).response.stopReason).toBe('stop_sequence');
+  });
+
+  it('matches no stop inside the arguments: the fragments and the call arrive whole', async () => {
+    const fragments = ['{"channelId": "bosun:meeting:1", "content": "say ZZ', 'STOP now"}'];
+    const script = rounds();
+    script[0] = [messageStart('msg_zz_1'), ...textBlock(0, 'zz pre'), ...toolBlock(1, 'toolu_zz_1', 'channel_publish', fragments), end('tool_use')];
+    const events = await run({ emitToolInputDeltas: true }, ['ZZSTOP'], script);
+    expect(toolTokens(events).map((t) => t.content)).toEqual(fragments);
+    expect(toolCallsEvents(events).map((e) => e.calls[0].input)).toEqual([{ channelId: 'bosun:meeting:1', content: 'say ZZSTOP now' }]);
+  });
+
+  it('streams the fragments of a call that max_tokens cuts off, and that call never reaches tool-calls', async () => {
+    const script = [[
+      messageStart('msg_zz_1'),
+      ...textBlock(0, 'zz pre'),
+      ...toolBlock(1, 'toolu_zz_1', 'channel_publish', FRAGMENTS.slice(0, 2)).slice(0, -1),
+      end('max_tokens'),
+    ]];
+    const events = await run({ emitToolInputDeltas: true }, undefined, script);
+    expect(toolTokens(events).map((t) => t.content)).toEqual(FRAGMENTS.slice(0, 2));
+    expect(toolCallsEvents(events)).toEqual([]);
+    expect(completed(events).response.stopReason).toBe('max_tokens');
+  });
+
+  it("streams a refused attempt's fragments, then retrying, then the next attempt's under its own id", async () => {
+    const script = [
+      [messageStart('msg_zz_1'), ...toolBlock(0, 'toolu_zz_a', 'channel_publish', ['{"content": "Fir', 'st"}']), end('refusal')],
+      [messageStart('msg_zz_2'), ...toolBlock(0, 'toolu_zz_b', 'channel_publish', ['{"content": "Sec', 'ond"}']), end('tool_use')],
+      [messageStart('msg_zz_3'), ...textBlock(0, 'zz done'), end('end_turn')],
+    ];
+    const events = await run({ emitToolInputDeltas: true, refusalRetries: 1 }, undefined, script);
+    const seen = events.flatMap((e) =>
+      e.type === 'retrying' ? ['retrying'] : e.type === 'tokens' && e.meta.type === 'tool_call' ? [`${e.meta.toolId}:${e.content}`] : []);
+    expect(seen).toEqual(['toolu_zz_a:{"content": "Fir', 'toolu_zz_a:st"}', 'retrying', 'toolu_zz_b:{"content": "Sec', 'toolu_zz_b:ond"}']);
+    expect(toolCallsEvents(events).map((e) => e.calls.map((c) => c.id))).toEqual([['toolu_zz_b']]);
+  });
+
+  it("names the caller's tool, not the name it was sent under", async () => {
+    const script = rounds();
+    script[0] = [messageStart('msg_zz_1'), ...toolBlock(0, 'toolu_zz_1', 'channel__publish', FRAGMENTS), end('tool_use')];
+    const events = await run({ emitToolInputDeltas: true }, undefined, script, 'channel:publish');
+    const tokens = toolTokens(events);
+    expect(tokens.map((t) => t.content)).toEqual(FRAGMENTS);
+    expect(tokens.every((t) => t.meta.toolName === 'channel:publish')).toBe(true);
+    expect(toolCallsEvents(events)[0].calls[0].name).toBe('channel:publish');
   });
 
   it("leaves a server tool's streamed input out: only the caller's own tool calls stream", async () => {
