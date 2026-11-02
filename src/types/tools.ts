@@ -45,12 +45,13 @@ export interface ToolDefinition {
    * its fragments and its finished call can be partial or invalid JSON, and
    * input the SDK's stream parser can't recover fails the turn. For a tool an
    * agent speaks through, that failure lands on its main way of speaking.
-   * Membrane sends the field on every native-mode request whose `tools` carry
-   * the tool, streamed or not (a tool added mid-conversation through
-   * `defineTools` is sent without it); Anthropic documents it only for
-   * streamed requests. It's part of the tool's definition, so setting or
-   * changing it rewrites the prompt cache from the tools onward: set it per
-   * agent and keep it. `emitToolInputDeltas` passes the fragments on.
+   * The Anthropic adapter sends the field on every native-mode request whose
+   * `tools` carry the tool, streamed or not; a tool added mid-conversation
+   * through `defineTools` can't set it, and is refused if it does. Anthropic
+   * documents it only for streamed requests. It's part of the tool's
+   * definition, so setting or changing it rewrites the prompt cache from the
+   * tools onward: set it per agent and keep it. `emitToolInputDeltas` passes
+   * the fragments on.
    */
   eagerInputStreaming?: boolean;
 }

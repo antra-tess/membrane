@@ -731,7 +731,9 @@ export class AnthropicAdapter implements ProviderAdapter {
         } else if (event.type === 'content_block_delta') {
           if (
             blockOrderBroken || openBlockIndex < 0 || event.index !== openBlockIndex ||
-            (isToolCallBlock(contentBlocks[openBlockIndex]) && !isToolCallArgumentsDelta(event.delta))
+            (isToolCallBlock(contentBlocks[openBlockIndex])
+              ? !isToolCallArgumentsDelta(event.delta)
+              : (event.delta as { type?: unknown }).type === 'input_json_delta')
           ) {
             breakBlockOrder(event);
           } else if (event.delta.type === 'text_delta') {

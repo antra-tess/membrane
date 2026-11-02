@@ -478,6 +478,12 @@ export class NativeFormatter implements PrefillFormatter {
         blocks.push({ type: 'tool_removal', tool: { type: 'tool_reference', name: wire } });
       }
       for (const tool of change.defineTools ?? []) {
+        if (tool.eagerInputStreaming !== undefined) {
+          throw unsupportedError(
+            'A tool defined in a system change can\'t set eagerInputStreaming: a tool_definition carries only its name, ' +
+            'description and input schema. Leave it out of "' + tool.name + '".',
+          );
+        }
         const name = claim(tool.name);
         wireNames.set(name, tool.name);
         blocks.push({

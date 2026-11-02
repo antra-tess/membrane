@@ -1,7 +1,7 @@
 /**
  * emitToolInputDeltas: a native tool call's argument JSON streams as 'tokens'
- * events (meta.type 'tool_call', toolCallPart 'input') while the model writes
- * it, for consumers that act on a call before it completes (speech).
+ * events (meta.type 'tool_call', toolCallPart 'input') as the API sends it,
+ * for consumers that act on a call before it completes (speech).
  */
 import { describe, it, expect } from 'vitest';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
@@ -269,6 +269,31 @@ describe('emitToolInputDeltas', () => {
     expect(tokens.map((t) => t.content)).toEqual(FRAGMENTS);
     expect(tokens.every((t) => t.meta.toolName === 'channel:publish')).toBe(true);
     expect(toolCallsEvents(events)[0].calls[0].name).toBe('channel:publish');
+  });
+
+  it('reports no fragment that arrives inside a text block: such a delta breaks block order', async () => {
+    const seen: Array<[number, string]> = [];
+    const chunks: string[] = [];
+    const res: any = await scriptedAnthropic([[
+      messageStart('msg_zz_1'),
+      { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'zz pre' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"content": "zz"}' } },
+      { type: 'content_block_stop', index: 0 },
+      end('end_turn'),
+    ]]).stream(
+      { model: MODEL, maxTokens: 64, messages: [{ role: 'user', content: [{ type: 'text', text: 'zz go' }] }] } as any,
+      {
+        onChunk: (chunk: string) => { chunks.push(chunk); },
+        onToolInputDelta: (index: number, fragment: string) => { seen.push([index, fragment]); },
+      } as any,
+    );
+    expect(seen).toEqual([]);
+    expect(chunks).toEqual(['zz pre']);
+    expect(res.raw.provider_events.unhandled).toEqual([
+      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"content": "zz"}' } },
+      { type: 'content_block_stop', index: 0 },
+    ]);
   });
 
   it("leaves a server tool's streamed input out: only the caller's own tool calls stream", async () => {
