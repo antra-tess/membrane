@@ -247,7 +247,9 @@ export interface NormalizedRequest {
    * `defaultFloatingCacheMarker` is), and then after the `beforeRequest` hook,
    * once the caller's markers have passed the check a first request's markers
    * get, and when they occupy all 4 slots it takes the earliest message
-   * marker's slot: within one tool loop membrane changes no message content
+   * marker's slot, through an adapter that declares `sendsCacheMarkersOn`
+   * (through one that doesn't, it takes none, and the float is withheld with
+   * a warning): within one tool loop membrane changes no message content
    * before the turn's opening, so that marker's content lies inside the
    * newest marker's prefix, though its block no longer carries
    * `cache_control` on the wire. It never takes a system or tools marker,

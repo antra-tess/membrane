@@ -2,6 +2,8 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { computeCacheWireReceipt, type CacheWireReceipt } from '../../src/cache-wire-receipt.js';
 import { OpenRouterAdapter } from '../../src/providers/openrouter.js';
+import { AnthropicAdapter } from '../../src/providers/anthropic.js';
+import { BedrockAdapter } from '../../src/providers/bedrock.js';
 import type {
   NormalizedMessage,
   NormalizedRequest,
@@ -33,7 +35,10 @@ function input(userMessages: number, marked: number[]): NormalizedMessage[] {
   return messages;
 }
 
-function scriptedAdapter(options: { alter?: { call: number; block: (request: any) => unknown } } = {}): { adapter: ProviderAdapter; requests: any[] } {
+function scriptedAdapter(options: {
+  alter?: { call: number; block: (request: any) => unknown };
+  sendsCacheMarkersOn?: ProviderAdapter['sendsCacheMarkersOn'];
+} = {}): { adapter: ProviderAdapter; requests: any[] } {
   const requests: any[] = [];
   const respond = (n: number, request: ProviderRequest): ProviderResponse => ({
     content: n < 2
@@ -47,6 +52,7 @@ function scriptedAdapter(options: { alter?: { call: number; block: (request: any
   } as ProviderResponse);
   const adapter = {
     name: 'anthropic',
+    sendsCacheMarkersOn: 'sendsCacheMarkersOn' in options ? options.sendsCacheMarkersOn : true,
     reportsContentAlterations: options.alter !== undefined,
     supportsModel: () => true,
     async complete(request: ProviderRequest) { requests.push(request); return respond(requests.length - 1, request); },
@@ -533,6 +539,74 @@ describe('cm-owned: fidelity on a floated call', () => {
     expect(sent[1].messages.at(-1).content[0].content[0]).toMatchObject({ type: 'text', text: 'ok' });
     expect(rounds[1]!.fidelity).toBe('established');
   });
+});
+
+describe('cm-owned: an adapter that doesn\'t say which blocks it sends a marker on, such as a decorator that doesn\'t forward it', () => {
+  const runThrough = async (drive: Drive, req: NormalizedRequest, sendsCacheMarkersOn: ProviderAdapter['sendsCacheMarkersOn']) => {
+    const { outcome, requests } = await attempt(drive, req, {}, { sendsCacheMarkersOn });
+    expect(outcome).toBe('ended end_turn');
+    return requests;
+  };
+
+  for (const [path, drive] of paths) {
+    it(`${path}: with all four slots held by the caller, a later call takes no caller marker, so each call sends the caller's four`, async () => {
+      const sent = await runThrough(drive, request(input(4, [0, 1, 2, 3])), undefined);
+      expect(sent.map(markers)).toEqual([
+        ['m0', 'm2', 'm4', 'm6'],
+        ['m0', 'm2', 'm4', 'm6'],
+        ['m0', 'm2', 'm4', 'm6'],
+      ]);
+    });
+
+    it(`${path}: with all four slots held by the caller, membrane warns that the float was withheld`, async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      await runThrough(drive, request(input(4, [0, 1, 2, 3])), undefined);
+      expect(warn.mock.calls.some((args) => String(args[0]).includes('floating cache marker withheld'))).toBe(true);
+    });
+
+    it(`${path}: gives no withheld warning when a hook has already marked the newest message`, async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const hooks = {
+        beforeRequest: (_normalized: unknown, provider: any) => {
+          if (provider.messages.length <= 7) return provider;
+          const last = provider.messages.length - 1;
+          return {
+            ...provider,
+            messages: provider.messages.map((m: any, mi: number) => (mi === last
+              ? { ...m, content: m.content.map((b: any, bi: number) => (bi === m.content.length - 1 ? { ...b, cache_control: { type: 'ephemeral', ttl: '1h' } } : b)) }
+              : m)),
+          };
+        },
+      };
+      const { outcome, requests } = await attempt(drive, request(input(4, [0, 1, 2])), { hooks }, { sendsCacheMarkersOn: undefined });
+      expect(outcome).toBe('ended end_turn');
+      expect(markers(requests[1])).toEqual(['m0', 'm2', 'm4', 'm8']);
+      expect(warn.mock.calls.filter((args) => String(args[0]).includes('withheld'))).toEqual([]);
+    });
+
+    it(`${path}: with free slots, the floats go where they go through an adapter that sends a marker on any block`, async () => {
+      const undeclared = await runThrough(drive, request(input(2, [0])), undefined);
+      const any = await runThrough(drive, request(input(2, [0])), true);
+      expect(undeclared.map(markers)).toEqual(any.map(markers));
+      expect(markers(undeclared[1]).length).toBeGreaterThan(markers(undeclared[0]).length);
+    });
+  }
+});
+
+describe('cm-owned: Anthropic\'s and Bedrock\'s adapters send a marker on any block membrane marks', () => {
+  const adapters: Array<[string, () => ProviderAdapter]> = [
+    ['AnthropicAdapter', () => new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } })],
+    ['BedrockAdapter', () => new BedrockAdapter({ accessKeyId: 'test-key', secretAccessKey: 'test-secret', region: 'us-west-2' })],
+  ];
+  for (const [name, make] of adapters) {
+    for (const [path, drive] of paths) {
+      it(`${name}, ${path}: with all four slots held by the caller, a later call takes the earliest message marker's slot`, async () => {
+        const { outcome, requests } = await attempt(drive, request(input(4, [0, 1, 2, 3])), {}, { sendsCacheMarkersOn: make().sendsCacheMarkersOn });
+        expect(outcome).toBe('ended end_turn');
+        expect(markers(requests[1])).toEqual(['m2', 'm4', 'm6', 'm8']);
+      });
+    }
+  }
 });
 
 describe('membrane-system keeps its promise', () => {

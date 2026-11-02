@@ -290,9 +290,11 @@ function floatControlAt(
 function placeFloatingMarker(
   request: { messages: Array<{ role?: string; content?: unknown }>; system?: unknown; tools?: unknown },
   cacheControl: { type: 'ephemeral'; ttl?: '5m' | '1h' },
-  takeEarliest: boolean,
-  markableBlockTypes: readonly string[] | undefined,
+  mayTake: boolean,
+  sendsCacheMarkersOn: ProviderAdapter['sendsCacheMarkersOn'],
 ): number | undefined {
+  const takeEarliest = mayTake && sendsCacheMarkersOn !== undefined;
+  const markableBlockTypes = sendsCacheMarkersOn === true ? undefined : sendsCacheMarkersOn;
   const messages = request.messages;
   const wireMarkers = countWireCacheMarkers(request);
   let residuum = MAX_CACHE_BREAKPOINTS - wireMarkers;
@@ -314,7 +316,7 @@ function placeFloatingMarker(
       residuum++;
     }
   }
-  if (residuum <= 0) return newest || !takeEarliest ? wireMarkers : undefined;
+  if (residuum <= 0) return newest || !mayTake ? wireMarkers : undefined;
   let callingTurn = messages.length - 1;
   while (callingTurn >= 0 && !(messages[callingTurn]?.role === 'assistant' && holdsToolUse(messages[callingTurn]?.content))) callingTurn--;
   while (callingTurn > 0 && messages[callingTurn - 1]?.role === 'assistant') callingTurn--;

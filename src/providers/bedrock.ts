@@ -295,6 +295,8 @@ export class BedrockAdapter implements ProviderAdapter {
    * the Anthropic API's convention; not measured against Bedrock directly.
    */
   readonly usageCacheConvention = 'cache-excluded' as const;
+  /** Builds blocks as AnthropicAdapter does (anthropicWireMessages): every top-level block it sends keeps its cache_control, without its ttl. */
+  readonly sendsCacheMarkersOn = true;
 
   private accessKeyId: string;
   private secretAccessKey: string;
