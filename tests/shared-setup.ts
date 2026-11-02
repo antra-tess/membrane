@@ -3,7 +3,7 @@ import { changedState, processState } from './isolation.js';
 
 const before = processState(vi.isFakeTimers());
 
-afterAll((suite) => {
+afterAll(({}, suite) => {
   const changed = changedState(before, processState(vi.isFakeTimers()));
   if (changed.length > 0) {
     throw new Error(
