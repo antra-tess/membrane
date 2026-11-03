@@ -731,9 +731,7 @@ export class AnthropicAdapter implements ProviderAdapter {
         } else if (event.type === 'content_block_delta') {
           if (
             blockOrderBroken || openBlockIndex < 0 || event.index !== openBlockIndex ||
-            (isToolCallBlock(contentBlocks[openBlockIndex])
-              ? !isToolCallArgumentsDelta(event.delta)
-              : (event.delta as { type?: unknown }).type === 'input_json_delta')
+            (isToolCallBlock(contentBlocks[openBlockIndex]) && !isToolCallArgumentsDelta(event.delta))
           ) {
             breakBlockOrder(event);
           } else if (event.delta.type === 'text_delta') {
@@ -759,7 +757,9 @@ export class AnthropicAdapter implements ProviderAdapter {
           } else if ((event.delta as { type: string }).type === 'input_json_delta') {
             const partialJson = (event.delta as { partial_json: string }).partial_json;
             currentBlockInputJson += partialJson;
-            if (partialJson) callbacks.onToolInputDelta?.(currentBlockIndex, partialJson);
+            if (partialJson && isToolCallBlock(contentBlocks[currentBlockIndex])) {
+              callbacks.onToolInputDelta?.(currentBlockIndex, partialJson);
+            }
           } else {
             noteUnhandled(event);
           }

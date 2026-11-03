@@ -478,12 +478,6 @@ export class NativeFormatter implements PrefillFormatter {
         blocks.push({ type: 'tool_removal', tool: { type: 'tool_reference', name: wire } });
       }
       for (const tool of change.defineTools ?? []) {
-        if (tool.eagerInputStreaming !== undefined) {
-          throw unsupportedError(
-            'A tool defined in a system change can\'t set eagerInputStreaming: a tool_definition carries only its name, ' +
-            'description and input schema. Leave it out of "' + tool.name + '".',
-          );
-        }
         const name = claim(tool.name);
         wireNames.set(name, tool.name);
         blocks.push({
@@ -628,12 +622,7 @@ export class NativeFormatter implements PrefillFormatter {
         throw unsupportedError('Native tool names collide after colon escaping: "' + name + '". Choose distinct wire names.');
       }
       names.add(name);
-      return {
-        name,
-        description: tool.description,
-        input_schema: tool.inputSchema,
-        ...(tool.eagerInputStreaming === undefined ? {} : { eager_input_streaming: tool.eagerInputStreaming }),
-      };
+      return { name, description: tool.description, input_schema: tool.inputSchema };
     });
   }
 }

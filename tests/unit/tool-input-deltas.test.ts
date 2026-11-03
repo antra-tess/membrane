@@ -5,7 +5,6 @@
  */
 import { describe, it, expect } from 'vitest';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
-import { BedrockAdapter } from '../../src/providers/bedrock.js';
 import { Membrane } from '../../src/membrane.js';
 import { NativeFormatter } from '../../src/formatters/native.js';
 import type { NormalizedRequest, StreamEvent, ToolCall, ToolResult, YieldingStreamOptions } from '../../src/types/index.js';
@@ -113,44 +112,6 @@ const toolCallsEvents = (events: StreamEvent[]) =>
 const completed = (events: StreamEvent[]) =>
   events.find((e): e is Extract<StreamEvent, { type: 'complete' }> => e.type === 'complete')!;
 const PUBLISHED = { channelId: 'bosun:meeting:1', content: 'Hello there.\nYes' };
-
-describe('ToolDefinition.eagerInputStreaming', () => {
-  it("is sent as the tool's eager_input_streaming by the Anthropic adapter, and other tools are sent as before", async () => {
-    const sent: any[] = [];
-    const req = request();
-    req.tools = [
-      { ...req.tools![0], eagerInputStreaming: true },
-      { name: 'zz_other', description: 'zz', inputSchema: { type: 'object' } },
-      { name: 'zz_buffered', description: 'zz', inputSchema: { type: 'object' }, eagerInputStreaming: false },
-    ];
-    const stream = new Membrane(scriptedAnthropic(rounds(), sent), { formatter: new NativeFormatter() }).streamYielding(req, {});
-    for await (const event of stream as AsyncIterable<StreamEvent>) {
-      if (event.type === 'tool-calls') stream.provideToolResults(answer(event.calls));
-      else if (event.type === 'complete') break;
-      else if (event.type === 'error' || event.type === 'aborted') throw new Error(`stream ended with ${event.type}`);
-    }
-    expect(sent[0].tools.map((tool: any) => [tool.name, tool.eager_input_streaming])).toEqual([
-      ['channel_publish', true],
-      ['zz_other', undefined],
-      ['zz_buffered', false],
-    ]);
-    expect(Object.keys(sent[0].tools[1])).toEqual(['name', 'description', 'input_schema']);
-  });
-
-  it('is left out of the Bedrock request', () => {
-    const built = (new BedrockAdapter({ accessKeyId: 'zz-key', secretAccessKey: 'zz-secret', region: 'us-west-2' }) as any).buildRequest(
-      {
-        model: MODEL,
-        messages: [{ role: 'user', content: 'zz go' }],
-        maxTokens: 64,
-        tools: [{ name: 'channel_publish', description: 'zz', input_schema: { type: 'object' }, eager_input_streaming: true }],
-      },
-      undefined,
-      () => {},
-    );
-    expect(built.tools).toEqual([{ name: 'channel_publish', description: 'zz', input_schema: { type: 'object' } }]);
-  });
-});
 
 describe('emitToolInputDeltas', () => {
   it('streams each argument fragment, in order, with the call id and name, before the tool-calls event', async () => {
@@ -271,7 +232,7 @@ describe('emitToolInputDeltas', () => {
     expect(toolCallsEvents(events)[0].calls[0].name).toBe('channel:publish');
   });
 
-  it('reports no fragment that arrives inside a text block: such a delta breaks block order', async () => {
+  it('reports no fragment that arrives inside a text block, and the stream goes on', async () => {
     const seen: Array<[number, string]> = [];
     const chunks: string[] = [];
     const res: any = await scriptedAnthropic([[
@@ -290,10 +251,51 @@ describe('emitToolInputDeltas', () => {
     );
     expect(seen).toEqual([]);
     expect(chunks).toEqual(['zz pre']);
-    expect(res.raw.provider_events.unhandled).toEqual([
-      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"content": "zz"}' } },
+    expect(res.stopReason).toBe('end_turn');
+    expect(res.content).toEqual([{ type: 'text', text: 'zz pre' }]);
+  });
+
+  it("keeps a turn's tool calls when a block of a type membrane doesn't know carries an argument delta, and reports none of it", async () => {
+    const unknownBlock = [
+      { type: 'content_block_start', index: 0, content_block: { type: 'zz_future_tool_use', id: 'zz_1' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"zz": 1}' } },
       { type: 'content_block_stop', index: 0 },
-    ]);
+    ];
+    const script = () => [
+      [messageStart('msg_zz_1'), ...unknownBlock, ...toolBlock(1, 'toolu_zz_1', 'channel_publish', FRAGMENTS), end('tool_use')],
+      [messageStart('msg_zz_2'), ...textBlock(0, 'zz done'), end('end_turn')],
+    ];
+    for (const options of [{}, { emitToolInputDeltas: true }]) {
+      const events = await run(options, undefined, script());
+      const calls = toolCallsEvents(events);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].calls.map((c) => [c.id, c.input])).toEqual([['toolu_zz_1', PUBLISHED]]);
+      expect(toolTokens(events).map((t) => t.content)).toEqual(options.emitToolInputDeltas ? FRAGMENTS : []);
+    }
+  });
+
+  it('reports each non-empty fragment of a tool_use, server_tool_use or mcp_tool_use block to onToolInputDelta, and none of a block of an unknown type', async () => {
+    const seen: Array<[number, string]> = [];
+    const block = (index: number, content_block: unknown, fragments: string[]) => [
+      { type: 'content_block_start', index, content_block },
+      ...fragments.map((partial_json) => ({ type: 'content_block_delta', index, delta: { type: 'input_json_delta', partial_json } })),
+      { type: 'content_block_stop', index },
+    ];
+    await scriptedAnthropic([[
+      messageStart('msg_zz_1'),
+      ...block(0, { type: 'zz_future_tool_use', id: 'zz_1' }, ['{"zz": 1}']),
+      ...block(1, { type: 'server_tool_use', id: 'srvtoolu_zz_1', name: 'web_search', input: {} }, ['{"query": "zz"}']),
+      ...block(2, { type: 'mcp_tool_use', id: 'mcptoolu_zz_1', name: 'zz_lookup', server_name: 'zz', input: {} }, ['{"id": 1}']),
+      ...block(3, { type: 'tool_use', id: 'toolu_zz_1', name: 'channel_publish', input: {} }, ['', ...FRAGMENTS]),
+      end('tool_use'),
+    ]]).stream(
+      { model: MODEL, maxTokens: 64, messages: [{ role: 'user', content: [{ type: 'text', text: 'zz go' }] }] } as any,
+      {
+        onChunk: () => {},
+        onToolInputDelta: (index: number, fragment: string) => { seen.push([index, fragment]); },
+      } as any,
+    );
+    expect(seen).toEqual([[1, '{"query": "zz"}'], [2, '{"id": 1}'], ...FRAGMENTS.map((fragment) => [3, fragment])]);
   });
 
   it("leaves a server tool's streamed input out: only the caller's own tool calls stream", async () => {

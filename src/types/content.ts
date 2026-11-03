@@ -230,8 +230,7 @@ export interface RedactedThinkingContent {
  * NativeFormatter sends each such message, through AnthropicAdapter, as a
  * mid-conversation `role: 'system'` message: each of `removeTools` as a
  * `tool_removal` naming the tool, then each of `defineTools` as a
- * `tool_addition` carrying its name, description and input schema, then each of
- * `addSystem` that
+ * `tool_addition` carrying its full definition, then each of `addSystem` that
  * isn't only whitespace as a text block (one that is is left out and the
  * message reported altered): that order within each block, and the blocks in the message's
  * order, so a removal in a later block withdraws a tool an earlier one
@@ -245,9 +244,8 @@ export interface RedactedThinkingContent {
  * refuses a request that carries one before sending. Both refusals, and the
  * API's own refusal on a model without mid-conversation system messages, are
  * MembraneErrors with `systemChangeRefused: true`. Through NativeFormatter and
- * AnthropicAdapter, a malformed change, mixed with other blocks, defining a
- * tool whose wire name another holds, or defining one that sets
- * `eagerInputStreaming`, is refused as unsupported, without the
+ * AnthropicAdapter, a malformed change, mixed with other blocks or defining a
+ * tool whose wire name another holds, is refused as unsupported, without the
  * flag. Through anything else the refusal for the formatter or adapter comes
  * first, with it, unless the formatter can't carry the request's tools at all
  * (`tools` as the request's changes leave them, definitions added and
@@ -258,7 +256,7 @@ export interface SystemChangeContent {
   type: 'system_change';
   /** Tools withdrawn from here on, by name. */
   removeTools?: string[];
-  /** Tools offered from here on, each by its definition, which can't set `eagerInputStreaming`: a new tool, or a redefinition of one by its name. */
+  /** Tools offered from here on, each by its full definition: a new tool, or a redefinition of one by its name. */
   defineTools?: ToolDefinition[];
   /** System text added from here on, one text block each; only whitespace is left out. */
   addSystem?: string[];

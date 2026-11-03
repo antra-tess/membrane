@@ -90,14 +90,6 @@ describe('NativeFormatter: a message of system changes', () => {
       .toThrow(/holds a system_change block beside other blocks/);
   });
 
-  it('refuses a definition that sets eagerInputStreaming, true or false: a tool_definition does not carry it', () => {
-    for (const eagerInputStreaming of [true, false]) {
-      expect(() => build([user('hello'), changes(change({ defineTools: [{ ...tool('get_weather'), eagerInputStreaming }] }))]))
-        .toThrow(/eagerInputStreaming/);
-    }
-    expect(roles(build([user('hello'), changes(change({ defineTools: [tool('get_weather')] }))]))).toEqual(['user', 'system']);
-  });
-
   it('refuses a definition whose wire name is another tool\'s, and takes a redefinition by the same name', () => {
     expect(() => build([user('hello'), changes(change({ defineTools: [tool('get:time')] }))], { tools: [tool('get__time')] }))
       .toThrow(/collide after colon escaping/);

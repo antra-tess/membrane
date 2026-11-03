@@ -34,26 +34,6 @@ export interface ToolDefinition {
     definitions?: Record<string, ToolParameter>;
     $defs?: Record<string, ToolParameter>;
   };
-  /**
-   * Whether the API streams this tool's input as the model writes it: the
-   * Anthropic adapter sends it as `eager_input_streaming`, and no other
-   * adapter sends it. False or unset, the API buffers and validates each
-   * parameter's value and sends it once complete; an unset tool also streams
-   * as written if the request carries Anthropic's legacy
-   * `fine-grained-tool-streaming-2025-05-14` beta header, and false keeps it
-   * buffered even then. True, the API doesn't validate this tool's input, so
-   * its fragments and its finished call can be partial or invalid JSON, and
-   * input the SDK's stream parser can't recover fails the turn. For a tool an
-   * agent speaks through, that failure lands on its main way of speaking.
-   * The Anthropic adapter sends the field on every native-mode request whose
-   * `tools` carry the tool, streamed or not; a tool added mid-conversation
-   * through `defineTools` can't set it, and is refused if it does. Anthropic
-   * documents it only for streamed requests. It's part of the tool's
-   * definition, so setting or changing it rewrites the prompt cache from the
-   * tools onward: set it per agent and keep it. `emitToolInputDeltas` passes
-   * the fragments on.
-   */
-  eagerInputStreaming?: boolean;
 }
 
 export interface ToolCall {

@@ -549,10 +549,10 @@ export interface StreamCallbacks {
   onThinkingSignature?: (index: number, signature: string) => void;
   /**
    * A tool call's argument JSON as it streams (Anthropic `input_json_delta`):
-   * each fragment, in order, by the position of the block it belongs to, a
-   * tool_use block or a server tool's (server_tool_use, mcp_tool_use), whose
-   * input streams the same way. Fragments are raw and need not be valid JSON
-   * on their own; the block's finished payload (onContentBlock) stays
+   * each non-empty fragment, in order, by the position of the block it belongs
+   * to, a tool_use block or a server tool's (server_tool_use, mcp_tool_use),
+   * whose input streams the same way. Fragments are raw and need not be valid
+   * JSON on their own; the block's finished payload (onContentBlock) stays
    * authoritative. Only the Anthropic adapter calls it: the Bedrock and
    * OpenAI-family adapters also receive argument fragments, and don't.
    */

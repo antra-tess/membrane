@@ -473,12 +473,13 @@ export interface YieldingStreamOptions {
    * Whether to emit a native tool call's argument JSON as it streams:
    * 'tokens' events with `meta.type: 'tool_call'`, `meta.toolCallPart:
    * 'input'`, the block's `toolId` and `toolName`, and the raw fragment as
-   * content (not valid JSON on its own). Needs emitTokens. Native tool mode
-   * with the Anthropic adapter only.
+   * content (it need not be valid JSON on its own). Needs emitTokens. Native
+   * tool mode with the Anthropic adapter only.
    *
-   * Fragments arrive as the model writes them for a tool whose definition
-   * sets `eagerInputStreaming: true`; that field's doc says when else they
-   * do. Otherwise the API sends each parameter's value once it's complete.
+   * Unless the caller's own headers (the AnthropicAdapter's `defaultHeaders`
+   * or `dynamicHeaders`) send Anthropic's legacy
+   * `fine-grained-tool-streaming-2025-05-14` beta, the API buffers and
+   * validates each parameter's value and sends it once it's complete.
    *
    * Fragments arrive before the call is final, and the 'tool-calls' event is
    * what runs: a call cut off by max_tokens streams fragments and never
