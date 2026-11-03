@@ -285,7 +285,12 @@ describe('cm-owned: the tool loop\'s later calls mark their newest message', () 
       };
       const sent = await run(drive, request(input(1, [])), { hooks });
       for (const call of sent) expect(markers(call)).toEqual(['system', 'system', 'system', 'system']);
-      expect(warn.mock.calls.filter((args) => String(args[0]).includes('withheld')).length).toBeGreaterThan(0);
+      const withheld = warn.mock.calls.map((args) => String(args[0])).filter((line) => line.includes('withheld'));
+      expect(withheld.length).toBeGreaterThan(0);
+      for (const line of withheld) {
+        expect(line).toContain('(4 in the request)');
+        expect(line).not.toContain('sendsCacheMarkersOn');
+      }
     });
 
     it(`${path}: places the float on copies, leaving the message objects a hook returned unchanged`, async () => {
@@ -454,11 +459,11 @@ describe('the float never puts a longer TTL after a shorter one', () => {
 
 describe('an adapter that sends no marker on a tool result (OpenRouter)', () => {
   const real = new OpenRouterAdapter({ apiKey: 'test' });
-  const openRouterRun = async (drive: Drive, req: NormalizedRequest) => {
+  const openRouterRun = async (drive: Drive, req: NormalizedRequest, config: Record<string, unknown> = {}) => {
     const { adapter, requests } = scriptedAdapter();
     Object.assign(adapter, { sendsCacheMarkersOn: real.sendsCacheMarkersOn });
     const receipts: CacheWireReceipt[] = [];
-    const ended = await drive(new Membrane(adapter, {} as any), { ...req, onCacheWireReceipt: (receipt: CacheWireReceipt) => { receipts.push(receipt); } } as NormalizedRequest);
+    const ended = await drive(new Membrane(adapter, config as any), { ...req, onCacheWireReceipt: (receipt: CacheWireReceipt) => { receipts.push(receipt); } } as NormalizedRequest);
     expect(ended.outcome).toBe('ended end_turn');
     const sentByOpenRouter = requests.map((call) => (JSON.stringify((real as any).buildRequest(call)).match(/"cache_control"/g) ?? []).length);
     return { requests, receipts, sentByOpenRouter };
@@ -488,6 +493,26 @@ describe('an adapter that sends no marker on a tool result (OpenRouter)', () => 
       expect(markers(requests[2])).toEqual(['m0']);
       expect(sentByOpenRouter).toEqual([1, 2, 1]);
       expect(receipts.map((receipt) => receipt.markers.length)).toEqual([1, 2, 1]);
+    });
+
+    it(`${path}: with all four slots held and the newest message ending in text, a later call takes the earliest message marker's slot, and OpenRouter's body sends four markers`, async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const hooks = {
+        beforeRequest: (_normalized: unknown, provider: any) => {
+          if (provider.messages.length <= 7) return provider;
+          const last = provider.messages.length - 1;
+          return { ...provider, messages: provider.messages.map((m: any, mi: number) => (mi === last ? { ...m, content: [...m.content, text('note')] } : m)) };
+        },
+      };
+      const { requests, receipts, sentByOpenRouter } = await openRouterRun(drive, request(input(4, [0, 1, 2, 3])), { hooks });
+      expect(requests.map(markers)).toEqual([
+        ['m0', 'm2', 'm4', 'm6'],
+        ['m2', 'm4', 'm6', 'm8'],
+        ['m2', 'm4', 'm6', 'm10'],
+      ]);
+      expect(sentByOpenRouter).toEqual([4, 4, 4]);
+      expect(receipts.map((receipt) => receipt.markers.length)).toEqual([4, 4, 4]);
+      expect(warn.mock.calls.filter((args) => String(args[0]).includes('withheld'))).toEqual([]);
     });
 
     it(`${path}: with all four slots held, the tool-results message's missing float gives no withheld warning`, async () => {
@@ -558,10 +583,27 @@ describe('cm-owned: an adapter that doesn\'t say which blocks it sends a marker 
       ]);
     });
 
-    it(`${path}: with all four slots held by the caller, membrane warns that the float was withheld`, async () => {
+    it(`${path}: with all four slots held by the caller, membrane warns that the float was withheld, naming the missing declaration`, async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       await runThrough(drive, request(input(4, [0, 1, 2, 3])), undefined);
-      expect(warn.mock.calls.some((args) => String(args[0]).includes('floating cache marker withheld'))).toBe(true);
+      const withheld = warn.mock.calls.map((args) => String(args[0])).filter((line) => line.includes('floating cache marker withheld'));
+      expect(withheld.length).toBeGreaterThan(0);
+      for (const line of withheld) expect(line).toContain("the adapter doesn't declare sendsCacheMarkersOn");
+    });
+
+    it(`${path}: with all four markers on the system prompt, the withheld warning doesn't name the declaration, since no message marker is there for a declaration to let membrane take`, async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const hooks = {
+        beforeRequest: (_normalized: unknown, provider: any) => ({
+          ...provider,
+          system: [0, 1, 2, 3].map((i) => ({ type: 'text', text: `part ${i}`, cache_control: { type: 'ephemeral', ttl: '1h' } })),
+        }),
+      };
+      const { outcome } = await attempt(drive, request(input(1, [])), { hooks }, { sendsCacheMarkersOn: undefined });
+      expect(outcome).toBe('ended end_turn');
+      const withheld = warn.mock.calls.map((args) => String(args[0])).filter((line) => line.includes('withheld'));
+      expect(withheld.length).toBeGreaterThan(0);
+      for (const line of withheld) expect(line).not.toContain('sendsCacheMarkersOn');
     });
 
     it(`${path}: gives no withheld warning when a hook has already marked the newest message`, async () => {
@@ -594,16 +636,18 @@ describe('cm-owned: an adapter that doesn\'t say which blocks it sends a marker 
 });
 
 describe('cm-owned: Anthropic\'s and Bedrock\'s adapters send a marker on any block membrane marks', () => {
-  const adapters: Array<[string, () => ProviderAdapter]> = [
-    ['AnthropicAdapter', () => new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } })],
-    ['BedrockAdapter', () => new BedrockAdapter({ accessKeyId: 'test-key', secretAccessKey: 'test-secret', region: 'us-west-2' })],
+  const adapters: Array<[string, () => ProviderAdapter, (real: any, call: unknown) => unknown]> = [
+    ['AnthropicAdapter', () => new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } }), (real, call) => real.buildRequest(call)],
+    ['BedrockAdapter', () => new BedrockAdapter({ accessKeyId: 'test-key', secretAccessKey: 'test-secret', region: 'us-west-2' }), (real, call) => real.buildRequest(call, 'anthropic.claude-sonnet-5')],
   ];
-  for (const [name, make] of adapters) {
+  for (const [name, make, body] of adapters) {
     for (const [path, drive] of paths) {
-      it(`${name}, ${path}: with all four slots held by the caller, a later call takes the earliest message marker's slot`, async () => {
-        const { outcome, requests } = await attempt(drive, request(input(4, [0, 1, 2, 3])), {}, { sendsCacheMarkersOn: make().sendsCacheMarkersOn });
+      it(`${name}, ${path}: with all four slots held by the caller, a later call takes the earliest message marker's slot, and the adapter's body carries the same markers`, async () => {
+        const real = make();
+        const { outcome, requests } = await attempt(drive, request(input(4, [0, 1, 2, 3])), {}, { sendsCacheMarkersOn: real.sendsCacheMarkersOn });
         expect(outcome).toBe('ended end_turn');
         expect(markers(requests[1])).toEqual(['m2', 'm4', 'm6', 'm8']);
+        expect(markers(body(real, requests[1]))).toEqual(['m2', 'm4', 'm6', 'm8']);
       });
     }
   }

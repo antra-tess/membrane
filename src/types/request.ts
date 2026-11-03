@@ -224,7 +224,9 @@ export interface NormalizedRequest {
    * request, or through the config's `defaultFloatingCacheMarker`): then the
    * native tool loop's later requests add the floating marker, after that
    * hook, taking one of the caller's message markers when all four slots are
-   * held (see `floatingCacheMarker`). */
+   * held, through an adapter that declares `sendsCacheMarkersOn`; through one
+   * that doesn't, nothing is taken and the float is withheld with a warning
+   * (see `floatingCacheMarker`). */
   cacheMarkers?: 'membrane-system' | 'cm-owned';
 
   /**

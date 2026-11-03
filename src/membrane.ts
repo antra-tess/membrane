@@ -287,12 +287,19 @@ function floatControlAt(
   return isLong || !cacheControl.ttl ? cacheControl : { ...cacheControl, ttl: '5m' };
 }
 
+/**
+ * A float withheld for want of a slot: the markers the request carries, and
+ * whether the adapter's missing `sendsCacheMarkersOn` is what kept a caller's
+ * message marker from being taken to make room.
+ */
+type FloatWithheld = { markers: number; undeclared: boolean };
+
 function placeFloatingMarker(
   request: { messages: Array<{ role?: string; content?: unknown }>; system?: unknown; tools?: unknown },
   cacheControl: { type: 'ephemeral'; ttl?: '5m' | '1h' },
   mayTake: boolean,
   sendsCacheMarkersOn: ProviderAdapter['sendsCacheMarkersOn'],
-): number | undefined {
+): FloatWithheld | undefined {
   const takeEarliest = mayTake && sendsCacheMarkersOn !== undefined;
   const markableBlockTypes = sendsCacheMarkersOn === true ? undefined : sendsCacheMarkersOn;
   const messages = request.messages;
@@ -316,7 +323,11 @@ function placeFloatingMarker(
       residuum++;
     }
   }
-  if (residuum <= 0) return newest || !mayTake ? wireMarkers : undefined;
+  if (residuum <= 0) {
+    if (!newest && mayTake) return undefined;
+    const undeclared = mayTake && sendsCacheMarkersOn === undefined && collectMarkedBlocks({ messages }).length > 0;
+    return { markers: wireMarkers, undeclared };
+  }
   let callingTurn = messages.length - 1;
   while (callingTurn >= 0 && !(messages[callingTurn]?.role === 'assistant' && holdsToolUse(messages[callingTurn]?.content))) callingTurn--;
   while (callingTurn > 0 && messages[callingTurn - 1]?.role === 'assistant') callingTurn--;
@@ -1492,7 +1503,7 @@ export class Membrane {
   private floatBudgetWarnState = { lastWarnedAtMs: 0, suppressedSinceWarn: 0 };
   private static readonly FLOAT_BUDGET_WARN_INTERVAL_MS = 60_000;
 
-  private warnFloatBudgetExhausted(wireMarkers: number): void {
+  private warnFloatBudgetExhausted(withheld: FloatWithheld): void {
     const now = Date.now();
     const state = this.floatBudgetWarnState;
     const elapsed = now - state.lastWarnedAtMs;
@@ -1505,8 +1516,12 @@ export class Membrane {
     state.suppressedSinceWarn = 0;
     console.warn(
       `[membrane] floating cache marker withheld: upstream markers already ` +
-      `occupy all ${MAX_CACHE_BREAKPOINTS} cache_control slots (${wireMarkers} on the wire). ` +
-      `Tool-round suffixes will not cache incrementally.` +
+      `occupy all ${MAX_CACHE_BREAKPOINTS} cache_control slots (${withheld.markers} in the request)` +
+      (withheld.undeclared
+        ? `; the adapter doesn't declare sendsCacheMarkersOn, so no caller marker was taken ` +
+          `to make room (a decorator should forward it)`
+        : '') +
+      `. Tool-round suffixes will not cache incrementally.` +
       (suppressed > 0 ? ` (${suppressed} further occurrences suppressed since the last warning.)` : '')
     );
   }
@@ -1541,8 +1556,8 @@ export class Membrane {
     const floatingEnabled = membraneOwned ? floatingAsked ?? true : floatingAsked === true;
     if (toolLoopRebuild && floatingEnabled && floatControl && !prefixRewritten) {
       if (membraneOwned) {
-        const withheldAt = placeFloatingMarker({ messages: mergedMessages, system, tools }, floatControl, false, this.adapter.sendsCacheMarkersOn);
-        if (withheldAt !== undefined) this.warnFloatBudgetExhausted(withheldAt);
+        const withheld = placeFloatingMarker({ messages: mergedMessages, system, tools }, floatControl, false, this.adapter.sendsCacheMarkersOn);
+        if (withheld) this.warnFloatBudgetExhausted(withheld);
       } else {
         this.floatsAfterHook.set(providerRequest, floatControl);
       }
@@ -2041,8 +2056,8 @@ export class Membrane {
         ...finalRequest,
         messages: ownMessageBlocks(finalRequest.messages, fidelity ? (original, copy) => fidelity.ownCopy(original, copy) : undefined),
       };
-      const withheldAt = placeFloatingMarker(finalRequest, floatAfterHook, true, this.adapter.sendsCacheMarkersOn);
-      if (withheldAt !== undefined) this.warnFloatBudgetExhausted(withheldAt);
+      const withheld = placeFloatingMarker(finalRequest, floatAfterHook, true, this.adapter.sendsCacheMarkersOn);
+      if (withheld) this.warnFloatBudgetExhausted(withheld);
     }
 
     const markerCount = normalizedRequest.cacheMarkers === 'cm-owned'
