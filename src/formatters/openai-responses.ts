@@ -71,7 +71,7 @@ type NativeItem = { type?: string; id?: string; [key: string]: unknown };
 type ConvertedOutput = { item: NativeItem; block: ToolResultContent; onAltered: (() => void) | undefined };
 
 function orphanResultMessage(block: ToolResultContent): NativeItem {
-  const label = `orphan tool_result for ${block.toolUseId}${block.isError ? ', an error' : ''}`;
+  const label = `orphan tool_result for ${block.toolUseId ?? '<missing>'}${block.isError === true ? ', an error' : ''}`;
   const content = toolResultContentForRequest(block.content);
   const text = `[${label}]: ${renderResultContent({ content } as unknown as ProviderBlock)}`;
   return { type: 'message', role: 'user', content: [{ type: 'input_text', text }] };
@@ -158,7 +158,8 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
 
     const called = new Set<unknown>();
     for (const item of items) {
-      if (typeof item.call_id === 'string' && !item.type?.endsWith('_output')) called.add(item.call_id);
+      if (!item || typeof item !== 'object') continue;
+      if (typeof item.call_id === 'string' && !(typeof item.type === 'string' && item.type.endsWith('_output'))) called.add(item.call_id);
     }
     for (const { item, block, onAltered } of outputs) {
       if (called.has(item.call_id)) continue;

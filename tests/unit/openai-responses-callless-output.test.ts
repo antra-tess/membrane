@@ -67,6 +67,32 @@ describe('Responses: a tool result whose call no input item carries', () => {
     }
   });
 
+  it('labels a result with no id, or an error flag that isn\'t true, as the native formatter labels it', () => {
+    const cases = [
+      { type: 'tool_result', content: 'payload' },
+      { type: 'tool_result', toolUseId: 'call_9', content: 'payload', isError: 1 },
+      { type: 'tool_result', toolUseId: 'call_9', content: 'payload', isError: true },
+    ];
+    for (const block of cases) {
+      const messages = [{ participant: 'User', content: [block] }];
+      const responses = build(messages).items[0].content[0].text as string;
+      const native = new NativeFormatter().buildMessages(messages as any, options as any).messages as any[];
+      const nativeText = native.flatMap((m) => m.content).find((b: any) => b.type === 'text' && b.text.startsWith('[orphan tool_result for')).text;
+      expect(responses).toBe(nativeText);
+    }
+  });
+
+  it('goes out as user text from the assistant participant\'s message too', () => {
+    const { items, altered } = build([
+      { participant: 'Agent', content: [{ type: 'text', text: 'Reading.' }, result('call_9')] },
+    ]);
+    expect(items).toEqual([
+      { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Reading.' }] },
+      user('[orphan tool_result for call_9]: notes: the meeting is at noon.'),
+    ]);
+    expect(altered).toEqual([0]);
+  });
+
   it('is sent as before when its call is anywhere in the input, before or after it', () => {
     const { items, altered } = build([
       { participant: 'User', content: [result('call_1')] },
@@ -113,5 +139,14 @@ describe('Responses: a tool result whose call no input item carries', () => {
       { participant: 'User', content: [result('call_9')] },
     ]);
     expect(items).toEqual([onBlock, inMessage, user('[orphan tool_result for call_9]: notes: the meeting is at noon.')]);
+  });
+
+  it('passes a native item that isn\'t an object, or whose type isn\'t a string, through as before', () => {
+    const odd = [null, { type: 42, call_id: 'call_1' }];
+    const { items } = build([
+      { participant: 'Agent', content: [], metadata: { openaiResponsesItems: odd } },
+      { participant: 'User', content: [result('call_9')] },
+    ]);
+    expect(items).toEqual([null, { type: 42, call_id: 'call_1' }, user('[orphan tool_result for call_9]: notes: the meeting is at noon.')]);
   });
 });
