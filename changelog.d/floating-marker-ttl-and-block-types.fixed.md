@@ -18,4 +18,7 @@
   OpenRouter, with one free slot, that slot can now go to the message before
   the round's calling turn, when it ends in unmarked text and the TTL order
   allows a float there, where it is sent, instead of the newest round's tool
-  result, where it wasn't.
+  result, where it wasn't. A float now passes over whitespace-only text and
+  media with no source, which the Anthropic and Bedrock builders drop, to the
+  block before it, and a message with no block they send gets none; before, it
+  was placed on the dropped block and not sent.

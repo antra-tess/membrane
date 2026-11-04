@@ -583,12 +583,12 @@ describe('cm-owned: an adapter that doesn\'t say which blocks it sends a marker 
       ]);
     });
 
-    it(`${path}: with all four slots held by the caller, membrane warns that the float was withheld, naming the missing declaration`, async () => {
+    it(`${path}: with all four slots held by the caller, membrane warns once in the minute that the float was withheld, naming the missing declaration`, async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       await runThrough(drive, request(input(4, [0, 1, 2, 3])), undefined);
       const withheld = warn.mock.calls.map((args) => String(args[0])).filter((line) => line.includes('floating cache marker withheld'));
-      expect(withheld.length).toBeGreaterThan(0);
-      for (const line of withheld) expect(line).toContain("the adapter doesn't declare sendsCacheMarkersOn");
+      expect(withheld).toHaveLength(1);
+      expect(withheld[0]).toContain("the adapter doesn't declare sendsCacheMarkersOn");
     });
 
     it(`${path}: with all four markers on the system prompt, the withheld warning doesn't name the declaration, since no message marker is there for a declaration to let membrane take`, async () => {
@@ -680,6 +680,18 @@ describe('cm-owned: the float goes only on a block the wire sends', () => {
       });
     }
 
+    it(`${path}: with all four slots held and an image in MCP's form ending the newest message, the float goes on that image, which Anthropic's body sends with it`, async () => {
+      const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+      const hooks = onLaterCalls((content) => [...content, { type: 'image', data: png, mimeType: 'image/png' }]);
+      const { outcome, requests } = await attempt(drive, request(input(4, [0, 1, 2, 3])), { hooks }, { sendsCacheMarkersOn: real.sendsCacheMarkersOn });
+      expect(outcome).toBe('ended end_turn');
+      const newest = requests[1].messages[8].content;
+      expect(newest.map((b: any) => b.cache_control !== undefined)).toEqual([false, true]);
+      const body = (real as any).buildRequest(requests[1]);
+      expect(markers(body)).toEqual(['m2', 'm4', 'm6', 'm8']);
+      expect(body.messages[8].content.at(-1)).toMatchObject({ type: 'image', source: { data: png }, cache_control: { type: 'ephemeral' } });
+    });
+
     it(`${path}: with all four slots held and no block of the newest message sent on the wire, a later call takes nothing`, async () => {
       const hooks = onLaterCalls(() => [{ type: 'text', text: '  ' }]);
       const { outcome, requests } = await attempt(drive, request(input(4, [0, 1, 2, 3])), { hooks }, { sendsCacheMarkersOn: real.sendsCacheMarkersOn });
@@ -696,6 +708,23 @@ describe('cm-owned: the float goes only on a block the wire sends', () => {
       expect(requests[1].messages[0].content.cache_control).toBeUndefined();
       expect(held.cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
     });
+  }
+});
+
+describe('either policy: the float on the message before the calling turn passes over a block the wire drops', () => {
+  const real = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
+  for (const [path, drive] of paths) {
+    for (const policy of ['cm-owned', 'membrane-system'] as const) {
+      it(`${path}, ${policy}: with free slots and the turn's opening message ending in whitespace-only text, its float goes on the text before it, which Anthropic's body sends with it`, async () => {
+        const messages = input(2, []);
+        messages[2] = { ...messages[2]!, content: [text('message 1'), text('  ')] };
+        const { outcome, requests } = await attempt(drive, request(messages, { cacheMarkers: policy }), {}, { sendsCacheMarkersOn: real.sendsCacheMarkersOn });
+        expect(outcome).toBe('ended end_turn');
+        expect(requests[1].messages[2].content.map((b: any) => b.cache_control !== undefined)).toEqual([true, false]);
+        const body = (real as any).buildRequest(requests[1]);
+        expect(body.messages[2].content).toEqual([expect.objectContaining({ type: 'text', text: 'User: message 1', cache_control: expect.objectContaining({ type: 'ephemeral' }) })]);
+      });
+    }
   }
 });
 
