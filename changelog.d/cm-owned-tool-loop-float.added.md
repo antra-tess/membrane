@@ -28,9 +28,9 @@
   float is placed, each later call then pays to write the part of its request
   it can't read: its newest round, once the turn's opening is cached. A later
   read of that write needs a marker at the same TTL whose backward search
-  reaches it, within that TTL and with the prefix up to there unchanged: the
-  turn's next call can reach it across one round of tool calls, since on the
-  Claude API the backward search checks 20 positions and counts a run of
+  reaches it, within that TTL and with the prefix up to there unchanged: on
+  the Claude API, the turn's next call can reach it across one round of tool
+  calls, since the backward search checks 20 positions and counts a run of
   `tool_use` blocks, or of `tool_result` blocks, as one
   (https://platform.claude.com/docs/en/build-with-claude/prompt-caching), and
   the next turn's first call from a marker the caller places at that turn's
