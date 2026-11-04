@@ -479,12 +479,14 @@ export interface YieldingStreamOptions {
    * Unless the request turns on Anthropic's fine-grained tool streaming,
    * which membrane doesn't do on its own (a caller's headers or
    * `providerParams` can), the API buffers and validates each parameter's
-   * value and sends it once it's complete.
+   * value and sends it once it's complete. With it on, the API sends input
+   * unvalidated, and when the Anthropic SDK can't parse a call's streamed
+   * input, the stream ends with an 'error' event and no 'tool-calls'.
    *
-   * Fragments arrive before the call is final, and the 'tool-calls' event is
-   * what runs: a call cut off by max_tokens streams fragments and never
-   * reaches it, and an attempt refused and retried (`refusalRetries`) is
-   * followed by a 'retrying' event before the next attempt's fragments.
+   * Fragments arrive before the call is final, and they stand only if a
+   * later 'tool-calls' event carries a call whose `id` is their `toolId`: a
+   * 'complete', 'retrying', 'error' or 'aborted' event first means no such
+   * call comes.
    * Default: false
    */
   emitToolInputDeltas?: boolean;
