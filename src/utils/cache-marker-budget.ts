@@ -69,8 +69,11 @@ export function ownMessageBlocks(messages: unknown, onCopy?: (original: unknown,
   if (!Array.isArray(messages)) return messages;
   return messages.map((message) => {
     const content = (message as { content?: unknown } | null)?.content;
-    if (!Array.isArray(content)) return message;
-    return { ...(message as Record<string, unknown>), content: content.map((block) => copyBlockTree(block, 0, onCopy)) };
+    if (Array.isArray(content)) {
+      return { ...(message as Record<string, unknown>), content: content.map((block) => copyBlockTree(block, 0, onCopy)) };
+    }
+    if (content === null || typeof content !== 'object') return message;
+    return { ...(message as Record<string, unknown>), content: copyBlockTree(content, 0, onCopy) };
   });
 }
 

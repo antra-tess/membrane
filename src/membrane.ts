@@ -35,6 +35,7 @@ import type {
   ErrorInfo,
 } from './types/index.js';
 import { lastCacheableBlockIndex } from './formatters/native.js';
+import { sentOnTheWire } from './utils/anthropic-wire-blocks.js';
 import {
   sameThinkingText,
   findSpanningProviderRun,
@@ -308,9 +309,11 @@ function placeFloatingMarker(
   const unmarkedEnd = (mi: number): Record<string, unknown> | undefined => {
     const content = messages[mi]?.content;
     if (!Array.isArray(content) || content.length === 0) return undefined;
-    const bpIdx = lastCacheableBlockIndex(content as Array<Record<string, unknown>>);
-    if (bpIdx < 0) return undefined;
-    const block = content[bpIdx] as Record<string, unknown>;
+    const blocks = content as Array<Record<string, unknown>>;
+    let at = blocks.length;
+    do at = lastCacheableBlockIndex(blocks.slice(0, at)); while (at >= 0 && !sentOnTheWire(blocks[at]));
+    if (at < 0) return undefined;
+    const block = blocks[at]!;
     if (markableBlockTypes && !markableBlockTypes.includes(String(block.type))) return undefined;
     return block.cache_control ? undefined : block;
   };
@@ -1500,12 +1503,15 @@ export class Membrane {
   }
 
   private readonly floatsAfterHook = new WeakMap<object, { type: 'ephemeral'; ttl?: '5m' | '1h' }>();
-  private floatBudgetWarnState = { lastWarnedAtMs: 0, suppressedSinceWarn: 0 };
+  private floatBudgetWarnStates = {
+    declared: { lastWarnedAtMs: 0, suppressedSinceWarn: 0 },
+    undeclared: { lastWarnedAtMs: 0, suppressedSinceWarn: 0 },
+  };
   private static readonly FLOAT_BUDGET_WARN_INTERVAL_MS = 60_000;
 
   private warnFloatBudgetExhausted(withheld: FloatWithheld): void {
     const now = Date.now();
-    const state = this.floatBudgetWarnState;
+    const state = this.floatBudgetWarnStates[withheld.undeclared ? 'undeclared' : 'declared'];
     const elapsed = now - state.lastWarnedAtMs;
     if (state.lastWarnedAtMs !== 0 && elapsed < Membrane.FLOAT_BUDGET_WARN_INTERVAL_MS) {
       state.suppressedSinceWarn++;

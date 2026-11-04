@@ -5,7 +5,7 @@
  * them refused (antra-tess/membrane#161).
  */
 
-import { stripEmptyTextBlocks } from './empty-text.js';
+import { hasNonEmptyText, stripEmptyTextBlocks } from './empty-text.js';
 import { imageForRequest, urlImageForRequest } from './image-media.js';
 import { convertMcpMedia, isSourcelessMedia } from './mcp-media.js';
 import { isUnsignedThinking } from './thinking-carriers.js';
@@ -136,6 +136,12 @@ function toolResultContent(content: readonly unknown[], result: { is_error?: unk
 function withoutEmptyError(content: unknown, result: { is_error?: unknown }): unknown {
   if (result.is_error !== true || (content !== undefined && content !== null && content !== '')) return content;
   return [{ type: 'text', text: EMPTY_ERROR_NOTE }];
+}
+
+export function sentOnTheWire(block: unknown): boolean {
+  const [converted] = convertMcpMedia([block]);
+  if (!isRecord(converted) || hasNoWireForm(converted)) return false;
+  return converted.type !== 'text' || hasNonEmptyText(converted.text);
 }
 
 export function anthropicToolResultContent(content: unknown, result: { is_error?: unknown } = {}): unknown {

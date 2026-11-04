@@ -633,6 +633,70 @@ describe('cm-owned: an adapter that doesn\'t say which blocks it sends a marker 
       expect(markers(undeclared[1]).length).toBeGreaterThan(markers(undeclared[0]).length);
     });
   }
+
+  it('one Membrane: a generic withheld warning in the last minute doesn\'t hide one that names the missing declaration', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { adapter, requests } = scriptedAdapter({ sendsCacheMarkersOn: undefined });
+    let onSystem = true;
+    const hooks = {
+      beforeRequest: (_normalized: unknown, provider: any) => (onSystem
+        ? { ...provider, system: [0, 1, 2, 3].map((i) => ({ type: 'text', text: `part ${i}`, cache_control: { type: 'ephemeral', ttl: '1h' } })) }
+        : provider),
+    };
+    const membrane = new Membrane(adapter, { hooks } as any);
+    expect((await paths[0]![1](membrane, request(input(1, [])))).outcome).toBe('ended end_turn');
+    onSystem = false;
+    requests.length = 0;
+    expect((await paths[0]![1](membrane, request(input(4, [0, 1, 2, 3])))).outcome).toBe('ended end_turn');
+    const withheld = warn.mock.calls.map((args) => String(args[0])).filter((line) => line.includes('withheld'));
+    expect(withheld.some((line) => !line.includes('sendsCacheMarkersOn'))).toBe(true);
+    expect(withheld.some((line) => line.includes("the adapter doesn't declare sendsCacheMarkersOn"))).toBe(true);
+  });
+});
+
+describe('cm-owned: the float goes only on a block the wire sends', () => {
+  const real = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
+  const onLaterCalls = (change: (content: any[]) => any[]) => ({
+    beforeRequest: (_normalized: unknown, provider: any) => {
+      if (provider.messages.length <= 7) return provider;
+      const last = provider.messages.length - 1;
+      return { ...provider, messages: provider.messages.map((m: any, mi: number) => (mi === last ? { ...m, content: change(m.content) } : m)) };
+    },
+  });
+  for (const [path, drive] of paths) {
+    for (const [what, dropped] of [
+      ['whitespace-only text', { type: 'text', text: '  \n' }],
+      ['an image with no source', { type: 'image' }],
+    ] as const) {
+      it(`${path}: with all four slots held and ${what} ending the newest message, the float passes over it to the tool result, and Anthropic's body sends four markers`, async () => {
+        const hooks = onLaterCalls((content) => [...content, { ...dropped }]);
+        const { outcome, requests } = await attempt(drive, request(input(4, [0, 1, 2, 3])), { hooks }, { sendsCacheMarkersOn: real.sendsCacheMarkersOn });
+        expect(outcome).toBe('ended end_turn');
+        const newest = requests[1].messages[8].content;
+        expect(newest[0].type).toBe('tool_result');
+        expect(newest[0].cache_control).toBeDefined();
+        expect(newest.at(-1).cache_control).toBeUndefined();
+        expect(markers((real as any).buildRequest(requests[1]))).toEqual(['m2', 'm4', 'm6', 'm8']);
+      });
+    }
+
+    it(`${path}: with all four slots held and no block of the newest message sent on the wire, a later call takes nothing`, async () => {
+      const hooks = onLaterCalls(() => [{ type: 'text', text: '  ' }]);
+      const { outcome, requests } = await attempt(drive, request(input(4, [0, 1, 2, 3])), { hooks }, { sendsCacheMarkersOn: real.sendsCacheMarkersOn });
+      expect(outcome).toBe('ended end_turn');
+      expect(markers(requests[1])).toEqual(['m0', 'm2', 'm4', 'm6']);
+    });
+
+    it(`${path}: a message whose content is one marked object is copied before the take, leaving the hook's object as it was`, async () => {
+      const held = deepFreeze({ type: 'text', text: 'message 0', cache_control: { type: 'ephemeral', ttl: '1h' } });
+      const hooks = { beforeRequest: (_normalized: unknown, provider: any) => ({ ...provider, messages: provider.messages.map((m: any, mi: number) => (mi === 0 ? { ...m, content: held } : m)) }) };
+      const { outcome, requests } = await attempt(drive, request(input(4, [0, 1, 2, 3])), { hooks });
+      expect(outcome).toBe('ended end_turn');
+      expect(markers(requests[1])).toEqual(['m2', 'm4', 'm6', 'm8']);
+      expect(requests[1].messages[0].content.cache_control).toBeUndefined();
+      expect(held.cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+    });
+  }
 });
 
 describe('cm-owned: Anthropic\'s and Bedrock\'s adapters send a marker on any block membrane marks', () => {
