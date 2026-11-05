@@ -339,6 +339,8 @@ export class AnthropicAdapter implements ProviderAdapter {
 
   /** `input_tokens` never counts the cached span. */
   readonly usageCacheConvention = 'cache-excluded' as const;
+  /** Every top-level block it sends keeps its cache_control, a type anthropicWireMessages doesn't list included; a thinking block, which membrane never marks, carries none. */
+  readonly sendsCacheMarkersOn = true;
   private client: Anthropic;
   private readonly credentials?: CredentialResolver;
   private defaultMaxTokens: number;
