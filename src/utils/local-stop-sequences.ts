@@ -54,6 +54,19 @@ export class LocalStopSequences {
       onThinkingSignature: (index, signature) => {
         this.waiting.push({ kind: 'signature', index, signature, at: this.held.length });
       },
+      // Tool arguments aren't visible text, so no stop is matched in them: as a
+      // chunk outside text does, a fragment first releases what is held (the
+      // tool block's start among it). After a stop the response is cut, and its
+      // later blocks don't stand.
+      ...(inner.onToolInputDelta
+        ? {
+            onToolInputDelta: (index: number, partialJson: string) => this.delivering(() => {
+              if (this.stopped) return;
+              this.releaseTo(this.held.length, () => true);
+              inner.onToolInputDelta!(index, partialJson);
+            }),
+          }
+        : {}),
     };
   }
 

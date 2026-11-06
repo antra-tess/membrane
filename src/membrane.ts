@@ -167,6 +167,17 @@ class NativeBlockTracker {
     if (entry && entry.final === undefined) entry.signature = signature;
   }
 
+  /** The id and (restored) name a still-open tool_use block started with. */
+  openToolCall(index: number): { toolId?: string; toolName?: string } | undefined {
+    if (this.started.get(index) !== 'tool_call' || this.completed.has(index)) return undefined;
+    const start = this.receivedByIndex.get(index)?.start as { id?: unknown; name?: unknown } | undefined;
+    const name = typeof start?.name === 'string' ? start.name : undefined;
+    return {
+      ...(typeof start?.id === 'string' ? { toolId: start.id } : {}),
+      ...(name !== undefined ? { toolName: this.restoreName ? this.restoreName(name) : name } : {}),
+    };
+  }
+
   onChunk(chunk: string): void {
     const open = this.started.has(this.blockIndex) && !this.completed.has(this.blockIndex)
       ? this.receivedByIndex.get(this.blockIndex)
@@ -2121,6 +2132,9 @@ export class Membrane {
         ...(sent.onThinkingSignature
           ? { onThinkingSignature: (index: number, signature: string) => { delivered = true; sent.onThinkingSignature!(index, signature); } }
           : {}),
+        ...(sent.onToolInputDelta
+          ? { onToolInputDelta: (index: number, partialJson: string) => { delivered = true; sent.onToolInputDelta!(index, partialJson); } }
+          : {}),
       };
       let attemptResult: ProviderResponse | undefined;
       let failure: { error: unknown } | undefined;
@@ -3424,6 +3438,7 @@ export class Membrane {
       emitTokens = true,
       emitBlocks = true,
       emitUsage = true,
+      emitToolInputDeltas = false,
     } = options;
     const maxToolDepth =
       maxToolDepthOpt === undefined || maxToolDepthOpt === -1
@@ -3514,6 +3529,23 @@ export class Membrane {
               if (stream.isCancelled) return;
               tracker.onThinkingSignature(index, signature);
             },
+            ...(emitTokens && emitToolInputDeltas
+              ? {
+                  onToolInputDelta: (index: number, partialJson: string) => {
+                    if (stream.isCancelled) return;
+                    const call = tracker.openToolCall(index);
+                    if (!call) return;
+                    const meta: ChunkMeta = {
+                      type: 'tool_call',
+                      visible: false,
+                      blockIndex: index,
+                      toolCallPart: 'input',
+                      ...call,
+                    };
+                    stream.emit({ type: 'tokens', content: partialJson, meta });
+                  },
+                }
+              : {}),
           },
           {
             signal: stream.signal,

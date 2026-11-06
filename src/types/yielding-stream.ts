@@ -8,7 +8,9 @@ import type { ProgressBounds } from '../progress-bounds.js';
 /**
  * Token/chunk event - raw text as it arrives from the LLM, and in XML tool
  * mode each tool result's content as it joins the continuation
- * (`meta.type: 'tool_result'`).
+ * (`meta.type: 'tool_result'`). With `emitToolInputDeltas`, a native tool
+ * call's argument JSON fragments as well (`meta.type: 'tool_call'`,
+ * `meta.toolCallPart: 'input'`, `meta.visible: false`).
  */
 export interface TokensEvent {
   type: 'tokens';
@@ -466,6 +468,28 @@ export interface YieldingStreamOptions {
    * (`UsageEvent.round`). Default: true
    */
   emitUsage?: boolean;
+
+  /**
+   * Whether to emit a native tool call's argument JSON as it streams:
+   * 'tokens' events with `meta.type: 'tool_call'`, `meta.toolCallPart:
+   * 'input'`, the block's `toolId` and `toolName`, and the raw fragment as
+   * content (it need not be valid JSON on its own). Needs emitTokens. Native
+   * tool mode with the Anthropic adapter only.
+   *
+   * Unless the request turns on Anthropic's fine-grained tool streaming,
+   * which membrane doesn't do on its own (a caller's headers or
+   * `providerParams` can), the API buffers and validates each parameter's
+   * value and sends it once it's complete. With it on, the API sends input
+   * unvalidated, and when the Anthropic SDK can't parse a call's streamed
+   * input, the stream ends with an 'error' event and no 'tool-calls'.
+   *
+   * Fragments arrive before the call is final, and they stand only if a
+   * later 'tool-calls' event carries a call whose `id` is their `toolId`: a
+   * 'complete', 'retrying', 'error' or 'aborted' event first means no such
+   * call comes.
+   * Default: false
+   */
+  emitToolInputDeltas?: boolean;
 }
 
 export function isTokensEvent(event: StreamEvent): event is TokensEvent {
