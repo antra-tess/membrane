@@ -21,7 +21,7 @@ import {
 import { errorFromThrown } from '../types/errors.js';
 import { isRawItemCarrier } from '../utils/fidelity.js';
 import { convertMcpMedia } from '../utils/mcp-media.js';
-import { toolUseInputFromText, textOnlyToolResultContent, openAIImagePart, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved, streamedToolCalls, isEventObject, callerAbort } from './utils.js';
+import { toolUseInputFromText, textOnlyToolResultContent, toolResultWireContent, openAIImagePart, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved, streamedToolCalls, isEventObject, callerAbort } from './utils.js';
 
 /** Content block for messages through OpenRouter */
 type OpenRouterContentBlock =
@@ -69,6 +69,28 @@ interface OpenRouterMessage {
   tool_call_id?: string;
   /** Image-generation responses can carry images beside content. */
   images?: Array<{ image_url: { url: string } }>;
+  /** Reasoning-model trace (OpenRouter delivers this in a separate channel
+   *  from `content`, as `reasoning` or `reasoning_content` depending on the
+   *  backend). Captured into a thinking block on parse; re-sent on prior
+   *  assistant turns to preserve chain-of-thought, mirroring the
+   *  openai-compatible adapter. */
+  reasoning?: string;
+  /** Same trace under the DeepSeek spelling; alias of `reasoning`. */
+  reasoning_content?: string;
+}
+
+/**
+ * The reasoning trace of a message or stream delta, under either spelling.
+ * `reasoning` wins unless it is blank while `reasoning_content` has substance.
+ * Whitespace is not trimmed away: a lone ' ' or '\n' stream delta is part of
+ * the trace. (Ported from openai-compatible.ts so both adapters read the two
+ * spellings identically.)
+ */
+function reasoningOf(m: { reasoning?: unknown; reasoning_content?: unknown } | undefined): string | undefined {
+  const reasoning = typeof m?.reasoning === 'string' ? m.reasoning : undefined;
+  const alias = typeof m?.reasoning_content === 'string' ? m.reasoning_content : undefined;
+  if (reasoning && (reasoning.trim() || !alias?.trim())) return reasoning;
+  return alias ?? reasoning;
 }
 
 interface OpenRouterToolCall {
@@ -234,6 +256,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
       let finishReason: string | undefined;
       let sawTerminalEvent = false;
       const toolCalls = streamedToolCalls();
+      let reasoning = '';
       let streamUsage: OpenRouterResponse['usage'] | undefined;
       // The model the provider served, echoed on every SSE chunk.
       let servedModel: string | undefined;
@@ -285,6 +308,15 @@ export class OpenRouterAdapter implements ProviderAdapter {
           }
         }
 
+        // Reasoning-model trace arrives on its own channel (not `content`),
+        // as `reasoning` or `reasoning_content` depending on the backend.
+        // Without this, models that draft replies in the reasoning stream
+        // (e.g. GLM-5.3-flash) lose the draft entirely.
+        const reasoningDelta = reasoningOf(delta);
+        if (reasoningDelta !== undefined) {
+          reasoning += reasoningDelta;
+        }
+
         // Some providers send tool-call deltas without an index (antra-tess/membrane#159).
         if (Array.isArray(delta?.tool_calls)) {
           for (const tc of delta.tool_calls) toolCalls.add(tc);
@@ -334,6 +366,8 @@ export class OpenRouterAdapter implements ProviderAdapter {
           ? contentParts
           : contentParts.filter(part => part.type === 'text').map(part => part.text).join('') || null,
       };
+
+      if (reasoning) message.reasoning = reasoning;
 
       // A provider's tool-call index can skip a slot.
       const placedToolCalls = toolCalls.calls();
@@ -452,6 +486,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
         const toolResults: OpenRouterMessage[] = [];
         let hasImages = false;
         let hasAudio = false;
+        let reasoningText = '';
 
         for (const block of msg.content) {
           if (block.type === 'text') {
@@ -501,6 +536,14 @@ export class OpenRouterAdapter implements ProviderAdapter {
                 );
               }
             }
+          } else if (block.type === 'thinking') {
+            // Round-trip the reasoning trace back to the provider (OpenRouter
+            // accepts `reasoning` on a prior assistant turn), mirroring how the
+            // Anthropic adapter re-feeds signed thinking blocks and how the
+            // openai-compatible adapter preserves chain-of-thought.
+            if (typeof block.thinking === 'string') {
+              reasoningText += (reasoningText ? '\n' : '') + block.thinking;
+            }
           } else if (block.type === 'tool_use') {
             toolCalls.push({
               id: block.id,
@@ -511,10 +554,16 @@ export class OpenRouterAdapter implements ProviderAdapter {
               },
             });
           } else if (block.type === 'tool_result') {
+            // Collect ALL tool results - each becomes a separate message.
+            // Array content carrying inline images is emitted as native
+            // image_url parts (OpenRouter honors image parts in role:'tool'
+            // messages for multimodal models); unusable image sources
+            // degrade to the text-only placeholder; image-free content
+            // keeps the legacy stringified form.
             toolResults.push({
               role: 'tool' as const,
               tool_call_id: block.tool_use_id || block.toolUseId,
-              content: textOnlyToolResultContent(block.content),
+              content: toolResultWireContent(block.content),
             });
           }
         }
@@ -545,6 +594,10 @@ export class OpenRouterAdapter implements ProviderAdapter {
           role: msg.role,
           content: useArray ? contentBlocks : (textParts.length > 0 ? textParts.join('\n') : null),
         };
+
+        if (reasoningText) {
+          result.reasoning = reasoningText;
+        }
 
         if (toolCalls.length > 0) {
           result.tool_calls = toolCalls;
@@ -656,7 +709,15 @@ export class OpenRouterAdapter implements ProviderAdapter {
   }
 
   private messageToContent(message: OpenRouterMessage | undefined): ContentBlock[] {
-    return message ? fromOpenRouterMessage(message) : [];
+    if (!message) return [];
+    const blocks = fromOpenRouterMessage(message);
+    // Reasoning trace first (mirrors Anthropic thinking-block ordering and
+    // the openai-compatible adapter).
+    const reasoning = reasoningOf(message);
+    if (typeof reasoning === 'string' && reasoning.trim()) {
+      blocks.unshift({ type: 'thinking', thinking: reasoning } as ContentBlock);
+    }
+    return blocks;
   }
 
   private mapFinishReason(reason: string | undefined): string {
@@ -696,11 +757,16 @@ export function toOpenRouterMessages(
     const textParts: string[] = [];
     const toolCalls: OpenRouterToolCall[] = [];
     const toolResults: { id: string; content: string }[] = [];
+    let reasoningText = '';
     
     for (const block of msg.content) {
       if (block.type === 'text') {
         if (isRawItemCarrier(block)) continue;
         textParts.push(block.text);
+      } else if (block.type === 'thinking') {
+        if (typeof (block as { thinking?: unknown }).thinking === 'string') {
+          reasoningText += (reasoningText ? '\n' : '') + (block as { thinking: string }).thinking;
+        }
       } else if (block.type === 'tool_use') {
         toolCalls.push({
           id: block.id,
@@ -723,6 +789,9 @@ export function toOpenRouterMessages(
         role: msg.role as 'user' | 'assistant',
         content: textParts.join('\n') || null,
       };
+      if (reasoningText) {
+        message.reasoning = reasoningText;
+      }
       if (toolCalls.length > 0) {
         message.tool_calls = toolCalls;
       }

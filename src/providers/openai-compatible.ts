@@ -19,7 +19,7 @@ import {
 } from '../types/index.js';
 import { errorFromThrown } from '../types/errors.js';
 import { isRawItemCarrier } from '../utils/fidelity.js';
-import { toolUseInputFromText, textOnlyToolResultContent, openAIImagePart, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved, streamedToolCalls, isEventObject, callerAbort } from './utils.js';
+import { toolUseInputFromText, textOnlyToolResultContent, toolResultWireContent, type ToolResultWirePart, openAIImagePart, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved, streamedToolCalls, isEventObject, callerAbort } from './utils.js';
 import { requiresCompletionTokens, noTemperatureSupport, noStopSupport } from './openai.js';
 import { convertMcpMedia } from '../utils/mcp-media.js';
 
@@ -411,7 +411,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
             toolResults.push({
               role: 'tool' as const,
               tool_call_id: block.tool_use_id || block.toolUseId,
-              content: textOnlyToolResultContent(block.content),
+              content: toolResultWireContent(block.content),
             });
           }
         }
@@ -610,7 +610,7 @@ export function toOpenAIMessages(
   for (const msg of messages) {
     const textParts: string[] = [];
     const toolCalls: OpenAIToolCall[] = [];
-    const toolResults: { id: string; content: string }[] = [];
+    const toolResults: { id: string; content: string | ToolResultWirePart[] }[] = [];
     let reasoningText = '';
 
     for (const block of msg.content) {
@@ -633,7 +633,7 @@ export function toOpenAIMessages(
       } else if (block.type === 'tool_result') {
         toolResults.push({
           id: block.toolUseId,
-          content: textOnlyToolResultContent(block.content),
+          content: toolResultWireContent(block.content),
         });
       }
     }
