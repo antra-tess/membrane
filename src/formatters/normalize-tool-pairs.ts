@@ -865,7 +865,7 @@ function withCanonicalResultId(block: ProviderBlock): ProviderBlock {
   return rest as ProviderBlock;
 }
 
-function renderResultContent(block: ProviderBlock): string {
+export function renderResultContent(block: ProviderBlock): string {
   const content = (block as { content?: unknown }).content;
   if (typeof content === 'string') return content;
   if (content === null || content === undefined) return '';
