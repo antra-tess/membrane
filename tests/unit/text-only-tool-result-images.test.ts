@@ -88,7 +88,6 @@ const geminiResponse = () => new Response(JSON.stringify({
 
 const adapters: Array<[string, () => ProviderAdapter, string, () => Response]> = [
   ['OpenAI', () => new OpenAIAdapter({ apiKey: 'test-key' }), 'gpt-4o', chatCompletion],
-  ['OpenAI-compatible', () => new OpenAICompatibleAdapter({ apiKey: 'test-key', baseURL: 'http://localhost:9999/v1' }), 'local-model', chatCompletion],
   ['Gemini', () => new GeminiAdapter({ apiKey: 'test-key' }), 'gemini-2.5-flash', geminiResponse],
 ];
 
@@ -156,17 +155,64 @@ describe('OpenRouter adapter: tool-result images are shown natively', () => {
   });
 });
 
+describe('OpenAI-compatible adapter: tool-result images are shown natively', () => {
+  async function sentBody(resultContent: ContentBlock[]): Promise<string> {
+    const fetchMock = vi.fn().mockImplementation(async () => chatCompletion());
+    vi.stubGlobal('fetch', fetchMock);
+    await new Membrane(new OpenAICompatibleAdapter({ apiKey: 'test-key', baseURL: 'http://localhost:9999/v1' }), { formatter: new NativeFormatter() }).complete({
+      messages: history(resultContent),
+      assistantParticipant: 'Claude',
+      config: { model: 'local-model', maxTokens: 32 },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    return fetchMock.mock.calls[0]![1].body as string;
+  }
+
+  it('sends tool-result images as image_url parts, not placeholder text', async () => {
+    const body = await sentBody([{ type: 'text', text: 'Screenshot taken' }, imageBlock()]);
+    expect(body).toContain('"type":"image_url"');
+    expect(body).toContain(PAYLOAD_PROBE); // inside the image_url data URL
+    const parsed = JSON.parse(body);
+    const toolMsg = parsed.messages.find((m: { role?: string }) => m.role === 'tool');
+    expect(Array.isArray(toolMsg.content)).toBe(true);
+    const textPart = toolMsg.content.find((p: { type?: string }) => p.type === 'text');
+    expect(textPart.text).not.toContain(PAYLOAD_PROBE);
+    expect(textPart.text).toContain('Screenshot taken');
+  });
+
+  it('keeps text-only tool results exactly as JSON.stringify produced them', async () => {
+    const resultContent: ContentBlock[] = [{ type: 'text', text: 'line one' }, { type: 'text', text: 'line two' }];
+    const body = await sentBody(resultContent);
+    const parsed = JSON.parse(body);
+    const toolMsg = parsed.messages.find((m: { role?: string }) => m.role === 'tool');
+    expect(toolMsg.content).toBe(JSON.stringify(resultContent));
+  });
+});
+
 describe('exported ChatCompletions converters', () => {
-  it.each([
-    ['toOpenRouterMessages', toOpenRouterMessages],
-    ['toOpenAIMessages', toOpenAIMessages],
-  ] as const)('%s replaces tool-result images with the placeholder', (_name, convert) => {
-    const out = convert([{ role: 'user', content: [
+  // Legacy export: the class path shows tool-result images natively; the
+  // exported converter keeps the text-only placeholder for cache stability.
+  it('toOpenRouterMessages replaces tool-result images with the placeholder', () => {
+    const out = toOpenRouterMessages([{ role: 'user', content: [
       { type: 'tool_result', toolUseId: 'shot_1', content: [{ type: 'text', text: 'Screenshot' }, imageBlock()] },
     ] as ContentBlock[] }]);
     const serialized = JSON.stringify(out);
     expect(serialized).not.toContain(PAYLOAD_PROBE);
     expect(serialized).toContain('tool results reach this model as text only');
     expect(serialized).toContain('Screenshot');
+  });
+
+  it('toOpenAIMessages sends tool-result images as image_url parts', () => {
+    const out = toOpenAIMessages([{ role: 'user', content: [
+      { type: 'tool_result', toolUseId: 'shot_1', content: [{ type: 'text', text: 'Screenshot' }, imageBlock()] },
+    ] as ContentBlock[] }]);
+    const toolMsg = out.find((m: { role?: string }) => m.role === 'tool');
+    expect(Array.isArray(toolMsg.content)).toBe(true);
+    const serialized = JSON.stringify(out);
+    expect(serialized).toContain('"type":"image_url"');
+    expect(serialized).toContain(PAYLOAD_PROBE); // inside the data URL
+    const textPart = (toolMsg.content as Array<{ type?: string; text?: string }>).find(p => p.type === 'text');
+    expect(textPart!.text).toContain('Screenshot');
+    expect(textPart!.text).not.toContain(PAYLOAD_PROBE);
   });
 });
