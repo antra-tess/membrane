@@ -284,6 +284,11 @@ export const TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER =
   '[system: an image in this tool result was NOT shown to you — tool results ' +
   'reach this model as text only. You are not seeing this image.]';
 
+/** How tool-result images are sent to the endpoint (review finding 1). */
+export type ToolResultImageMode =
+  | 'native'     // emit image_url parts (default; endpoints we verified honor them)
+  | 'text-only'; // force the placeholder: text-only models, string-only servers
+
 function carriesInlineImageData(block: unknown): boolean {
   if (!block || typeof block !== 'object') return false;
   const b = block as { type?: unknown; data?: unknown; source?: unknown };

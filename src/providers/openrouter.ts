@@ -21,7 +21,7 @@ import {
 import { errorFromThrown } from '../types/errors.js';
 import { isRawItemCarrier } from '../utils/fidelity.js';
 import { convertMcpMedia } from '../utils/mcp-media.js';
-import { toolUseInputFromText, textOnlyToolResultContent, toolResultWireContent, openAIImagePart, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved, streamedToolCalls, isEventObject, callerAbort } from './utils.js';
+import { toolUseInputFromText, textOnlyToolResultContent, toolResultWireContent, type ToolResultWirePart, type ToolResultImageMode, openAIImagePart, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved, streamedToolCalls, isEventObject, callerAbort } from './utils.js';
 
 /** Content block for messages through OpenRouter */
 type OpenRouterContentBlock =
@@ -132,9 +132,17 @@ interface OpenRouterResponse {
   };
 }
 
+export type { ToolResultImageMode } from './utils.js';
+
 export interface OpenRouterAdapterConfig {
   /** API key (defaults to OPENROUTER_API_KEY env var) */
   apiKey?: string;
+
+  /** How tool-result images are delivered. Default 'native'. Set
+   *  'text-only' for text-only models or endpoints that reject image parts
+   *  in role:'tool' messages — the result becomes the placeholder, exactly
+   *  as before this change. */
+  toolResultImages?: ToolResultImageMode;
   
   /** Base URL (default: https://openrouter.ai/api/v1) */
   baseURL?: string;
@@ -187,6 +195,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
   private httpReferer: string;
   private xTitle: string;
   private defaultMaxTokens: number;
+  private toolResultImages: ToolResultImageMode;
 
   constructor(config: OpenRouterAdapterConfig = {}) {
     this.apiKey = config.apiKey ?? process.env.OPENROUTER_API_KEY ?? '';
@@ -194,6 +203,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
     this.httpReferer = config.httpReferer ?? 'https://membrane.local';
     this.xTitle = config.xTitle ?? 'Membrane';
     this.defaultMaxTokens = config.defaultMaxTokens ?? 4096;
+    this.toolResultImages = config.toolResultImages ?? 'native';
     
     if (!this.apiKey) {
       throw new Error('OpenRouter API key not provided');
@@ -563,7 +573,9 @@ export class OpenRouterAdapter implements ProviderAdapter {
             toolResults.push({
               role: 'tool' as const,
               tool_call_id: block.tool_use_id || block.toolUseId,
-              content: toolResultWireContent(block.content),
+              content: this.toolResultImages === 'text-only'
+                ? textOnlyToolResultContent(block.content)
+                : toolResultWireContent(block.content),
             });
           }
         }
@@ -752,14 +764,15 @@ export class OpenRouterAdapter implements ProviderAdapter {
  * Convert normalized content blocks to OpenRouter format
  */
 export function toOpenRouterMessages(
-  messages: { role: string; content: ContentBlock[] }[]
+  messages: { role: string; content: ContentBlock[] }[],
+  toolResultImages: ToolResultImageMode = 'native',
 ): OpenRouterMessage[] {
   const result: OpenRouterMessage[] = [];
   
   for (const msg of messages) {
     const textParts: string[] = [];
     const toolCalls: OpenRouterToolCall[] = [];
-    const toolResults: { id: string; content: string }[] = [];
+    const toolResults: { id: string; content: string | ToolResultWirePart[] }[] = [];
     let reasoningText = '';
     
     for (const block of msg.content) {
@@ -782,7 +795,9 @@ export function toOpenRouterMessages(
       } else if (block.type === 'tool_result') {
         toolResults.push({
           id: block.toolUseId,
-          content: textOnlyToolResultContent(block.content),
+          content: toolResultImages === 'text-only'
+            ? textOnlyToolResultContent(block.content)
+            : toolResultWireContent(block.content),
         });
       }
     }
@@ -844,6 +859,12 @@ function imageFromUrl(url: string): ContentBlock {
 export function fromOpenRouterMessage(message: OpenRouterMessage): ContentBlock[] {
   const result: ContentBlock[] = [];
   const readImageUrl = createImageUrlReader();
+
+  // Reasoning leads the turn, matching the adapter's own conversion (finding 14).
+  const reasoning = reasoningOf(message);
+  if (typeof reasoning === 'string' && reasoning.trim()) {
+    result.push({ type: 'thinking', thinking: reasoning } as ContentBlock);
+  }
   
   if (message.content) {
     if (typeof message.content === 'string') {
