@@ -361,14 +361,27 @@ export function toolResultWireContent(content: unknown): string | ToolResultWire
       const b = block as {
         type?: unknown;
         data?: unknown;
+        mimeType?: unknown;
         source?: { type?: unknown; data?: unknown; media_type?: unknown; mediaType?: unknown; url?: unknown };
       };
       let url: string | null = null;
+      // Validate before emitting: empty payloads and non-image data URLs get
+      // the placeholder, not an image part a provider may reject wholesale.
+      const validDataUrl = (u: string): boolean => {
+        if (u.startsWith('data:image/')) return true;
+        if (u.startsWith('data:')) return false;
+        return true; // http(s) and other remote URLs are passed through as-is
+      };
+      const asImagePart = (u: string) =>
+        validDataUrl(u) && !u.endsWith(';base64,')
+          ? { type: 'image_url', image_url: { url: u } }
+          : { type: 'text', text: TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER };
       if (b.type === 'generated_image' && typeof b.data === 'string') {
-        url = `data:image/png;base64,${b.data}`;
+        // mimeType may name the actual encoding; honor it over the PNG default.
+        url = `data:${typeof b.mimeType === 'string' && b.mimeType ? b.mimeType : 'image/png'};base64,${b.data}`;
       } else if (b.type === 'image' && typeof b.data === 'string') {
-        // MCP-shaped image content: data on the block itself.
-        url = `data:image/png;base64,${b.data}`;
+        // MCP-shaped image content: data on the block itself; mimeType when present.
+        url = `data:${typeof b.mimeType === 'string' && b.mimeType ? b.mimeType : 'image/png'};base64,${b.data}`;
       } else if (b.type === 'image' && b.source && typeof b.source === 'object') {
         if (b.source.type === 'base64' && typeof b.source.data === 'string') {
           const mediaType =
@@ -380,11 +393,7 @@ export function toolResultWireContent(content: unknown): string | ToolResultWire
           url = b.source.url;
         }
       }
-      parts.push(
-        url
-          ? { type: 'image_url', image_url: { url } }
-          : { type: 'text', text: TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER },
-      );
+      parts.push(url ? asImagePart(url) : { type: 'text', text: TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER });
     } else if (
       block &&
       typeof block === 'object' &&

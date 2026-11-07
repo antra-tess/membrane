@@ -74,4 +74,24 @@ describe('toolResultWireContent', () => {
     const out = toolResultWireContent([{ type: 'image', source: { type: 'base64', data: 'iVBORw0KGgo=' } }]);
     expect(out).toEqual([{ type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' } }]);
   });
+
+  it('honors mimeType on MCP-shaped images (JPEG not forced to PNG)', () => {
+    const out = toolResultWireContent([{ type: 'image', data: '/9j/4AAQ', mimeType: 'image/jpeg' }]);
+    expect(out).toEqual([{ type: 'image_url', image_url: { url: 'data:image/jpeg;base64,/9j/4AAQ' } }]);
+  });
+
+  it('honors mimeType on generated_image blocks (JPEG not forced to PNG)', () => {
+    const out = toolResultWireContent([{ type: 'generated_image', data: '/9j/4AAQ', mimeType: 'image/jpeg' }]);
+    expect(out).toEqual([{ type: 'image_url', image_url: { url: 'data:image/jpeg;base64,/9j/4AAQ' } }]);
+  });
+
+  it('sends an empty base64 payload as the placeholder, not an empty image part', () => {
+    const out = toolResultWireContent([{ type: 'image', source: { type: 'base64', data: '', mediaType: 'image/png' } }]);
+    expect(out).toEqual([{ type: 'text', text: expect.stringContaining('NOT shown to you') }]);
+  });
+
+  it('sends a non-image data URL as the placeholder', () => {
+    const out = toolResultWireContent([{ type: 'image', source: { type: 'url', url: 'data:text/html;base64,PGh0bWw+' } }]);
+    expect(out).toEqual([{ type: 'text', text: expect.stringContaining('NOT shown to you') }]);
+  });
 });
