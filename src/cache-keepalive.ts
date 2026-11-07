@@ -373,7 +373,10 @@ export class CacheKeepalive {
     const reason = ineligibleReason(wire);
     const key = lineageKey(wire);
     if (reason) {
-      if (this.lineages.delete(key)) this.emit({ type: 'skipped', key, reason });
+      if (this.lineages.delete(key)) {
+        this.emit({ type: 'skipped', key, reason });
+        this.persist();
+      }
       return;
     }
 
@@ -394,6 +397,7 @@ export class CacheKeepalive {
       this.lineages.delete(oldest);
     }
 
+    this.persist();
     this.ensureTimer();
   }
 
