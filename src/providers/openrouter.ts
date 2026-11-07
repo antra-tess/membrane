@@ -585,7 +585,10 @@ export class OpenRouterAdapter implements ProviderAdapter {
           return toolResults;
         }
 
-        if (textParts.length === 0 && contentBlocks.length === 0 && toolCalls.length === 0) {
+        if (textParts.length === 0 && contentBlocks.length === 0 && toolCalls.length === 0 && !reasoningText) {
+          // A thinking-only assistant turn must round-trip: its reasoning is
+          // its content, and dropping it loses the model's trace of its own
+          // turn (review finding 6).
           return [];
         }
 
@@ -784,7 +787,7 @@ export function toOpenRouterMessages(
       }
     }
     
-    if (textParts.length > 0 || toolCalls.length > 0) {
+    if (textParts.length > 0 || toolCalls.length > 0 || reasoningText) {
       const message: OpenRouterMessage = {
         role: msg.role as 'user' | 'assistant',
         content: textParts.join('\n') || null,

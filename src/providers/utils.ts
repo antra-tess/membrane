@@ -372,7 +372,7 @@ export function toolResultWireContent(content: unknown): string | ToolResultWire
         if (u.startsWith('data:')) return false;
         return true; // http(s) and other remote URLs are passed through as-is
       };
-      const asImagePart = (u: string) =>
+      const asImagePart = (u: string): ToolResultWirePart =>
         validDataUrl(u) && !u.endsWith(';base64,')
           ? { type: 'image_url', image_url: { url: u } }
           : { type: 'text', text: TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER };

@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { toolResultWireContent } from '../../src/providers/utils.js';
+import { OpenRouterAdapter, toOpenRouterMessages } from '../../src/providers/openrouter.js';
 
 const png = { type: 'base64' as const, mediaType: 'image/png', data: 'iVBORw0KGgo=' };
 const webp = { type: 'base64' as const, mediaType: 'image/webp', data: 'UklGRg==' };
@@ -93,5 +94,30 @@ describe('toolResultWireContent', () => {
   it('sends a non-image data URL as the placeholder', () => {
     const out = toolResultWireContent([{ type: 'image', source: { type: 'url', url: 'data:text/html;base64,PGh0bWw+' } }]);
     expect(out).toEqual([{ type: 'text', text: expect.stringContaining('NOT shown to you') }]);
+  });
+});
+
+describe('reasoning round-trip', () => {
+  it('preserves a thinking-only assistant turn in the canonical converter', () => {
+    const adapter = new OpenRouterAdapter({ apiKey: 'test-key' });
+    const out = adapter['convertMessages']([
+      { role: 'user', content: [{ type: 'text', text: 'What do you see?' }] },
+      { role: 'assistant', content: [{ type: 'thinking', thinking: 'The user sent a screenshot earlier.' }] },
+      { role: 'user', content: [{ type: 'text', text: 'Well?' }] },
+    ]);
+    const assistant = out.filter((m: { role?: string }) => m.role === 'assistant');
+    expect(assistant).toHaveLength(1);
+    expect(assistant[0].reasoning).toBe('The user sent a screenshot earlier.');
+  });
+
+  it('preserves a thinking-only assistant turn in the legacy converter', () => {
+    const out = toOpenRouterMessages([
+      { role: 'user', content: [{ type: 'text', text: 'What do you see?' }] },
+      { role: 'assistant', content: [{ type: 'thinking', thinking: 'The user sent a screenshot earlier.' }] } as never,
+      { role: 'user', content: [{ type: 'text', text: 'Well?' }] },
+    ]);
+    const assistant = out.filter((m: { role?: string }) => m.role === 'assistant');
+    expect(assistant).toHaveLength(1);
+    expect(assistant[0].reasoning).toBe('The user sent a screenshot earlier.');
   });
 });
