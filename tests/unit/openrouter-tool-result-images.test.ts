@@ -39,7 +39,7 @@ describe('toolResultWireContent', () => {
     expect(out).toEqual([
       {
         type: 'text',
-        text: '[system: an image in this tool result was NOT shown to you — tool results reach this model as text only. You are not seeing this image.]',
+        text: '[system: this image was NOT shown to you — the image source could not be delivered to this model. You are not seeing this image.]',
       },
     ]);
   });

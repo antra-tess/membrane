@@ -109,7 +109,7 @@ describe.each(adapters)('%s adapter: Membrane.complete with tool-result image hi
     const body = await sentBody([{ type: 'text', text: 'Screenshot taken' }, imageBlock()]);
     expect(body).not.toContain(PAYLOAD_PROBE);
     expect(body).toContain('Screenshot taken');
-    expect(body).toContain('tool results reach this model as text only');
+    expect(body).toContain('this image was NOT shown to you');
     expect(body.length).toBeLessThan(5_000);
   });
 

@@ -281,8 +281,8 @@ export function toolUseInputFromValue(value: unknown): ToolUseInput {
 
 /** Constant text, so a history that holds it serializes to the same bytes on every request (the prompt cache reads bytes). */
 export const TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER =
-  '[system: an image in this tool result was NOT shown to you — tool results ' +
-  'reach this model as text only. You are not seeing this image.]';
+  '[system: this image was NOT shown to you — the image source could not be ' +
+  'delivered to this model. You are not seeing this image.]';
 
 /** How tool-result images are sent to the endpoint (review finding 1). */
 export type ToolResultImageMode =
@@ -407,7 +407,10 @@ export function toolResultWireContent(content: unknown): string | ToolResultWire
     ) {
       parts.push({ type: 'text', text: (block as { text: string }).text });
     } else {
-      parts.push({ type: 'text', text: JSON.stringify(block) });
+      // JSON.stringify(undefined) is undefined, not a string — an undefined
+      // array entry would produce a text part with no text field (finding 16).
+      const serialized = JSON.stringify(block) ?? 'null';
+      parts.push({ type: 'text', text: serialized });
     }
   }
   return parts;
