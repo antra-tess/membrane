@@ -7,6 +7,9 @@ import {
   type KeepaliveEvent,
 } from './cache-keepalive.js';
 import { countWireCacheMarkers } from './utils/cache-marker-budget.js';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 function wire(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -403,5 +406,155 @@ describe('CacheKeepalive', () => {
     ka.record(wire(), undefined, 'stream');
     await vi.advanceTimersByTimeAsync(6 * 60 * 60_000);
     expect(send).not.toHaveBeenCalled();
+  });
+});
+
+describe('CacheKeepalive statePath (across restarts)', () => {
+  let dir: string;
+  let statePath: string;
+  beforeEach(() => {
+    vi.useFakeTimers();
+    dir = mkdtempSync(join(tmpdir(), 'keepalive-'));
+    statePath = join(dir, 'cache-keepalive.json');
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const make = (send: ReturnType<typeof vi.fn>, cfg = {}) => {
+    const events: KeepaliveEvent[] = [];
+    const ka = new CacheKeepalive(send as never, {
+      refreshAfterMs: 45 * 60_000,
+      checkIntervalMs: 5 * 60_000,
+      maxIdleMs: 24 * 60 * 60_000,
+      statePath,
+      onEvent: (e) => events.push(e),
+      ...cfg,
+    });
+    return { ka, events };
+  };
+
+  it('a new process takes up the lineage and replays the recorded bytes, with no new real request', async () => {
+    const first = make(vi.fn().mockResolvedValue(hit));
+    const original = wire();
+    first.ka.record(original, { 'anthropic-beta': 'x' }, 'stream');
+    // The old process dies without stop(): nothing but the file carries over.
+
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    const send = vi.fn().mockResolvedValue(hit);
+    const { ka, events } = make(send);
+    expect(events.some((e) => e.type === 'restored')).toBe(true);
+    expect(ka.getStatus().length).toBe(1);
+
+    // Without the file the new process would have nothing to refresh, and the
+    // entry would expire an hour after the last real request.
+    await vi.advanceTimersByTimeAsync(40 * 60_000);
+    expect(send).toHaveBeenCalledTimes(1);
+    const [payload, headers] = send.mock.calls[0] as [Record<string, unknown>, Record<string, string>];
+    const expected: Record<string, unknown> = { ...original, max_tokens: 0 };
+    delete expected.stream;
+    expect(JSON.stringify(payload)).toBe(JSON.stringify(expected));
+    expect(headers).toEqual({ 'anthropic-beta': 'x' });
+    expect(events.some((e) => e.type === 'refreshed')).toBe(true);
+    first.ka.stop();
+    ka.stop();
+  });
+
+  it('refreshes at once when the restart lands late in the entry\'s hour', async () => {
+    const first = make(vi.fn().mockResolvedValue(hit));
+    first.ka.record(wire(), undefined, 'stream');
+    first.ka.stop(); // the process goes down
+    await vi.advanceTimersByTimeAsync(57 * 60_000);
+    const send = vi.fn().mockResolvedValue(hit);
+    const { ka } = make(send);
+    // One checkIntervalMs (5m) later would be past the hour: the replay
+    // would pay a write.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(send).toHaveBeenCalledTimes(1);
+    ka.stop();
+  });
+
+  it('does not restore a lineage whose entry expired while the process was down', async () => {
+    const first = make(vi.fn().mockResolvedValue(hit));
+    first.ka.record(wire(), undefined, 'stream');
+    first.ka.stop(); // the process goes down
+    await vi.advanceTimersByTimeAsync(61 * 60_000);
+    const send = vi.fn().mockResolvedValue(hit);
+    const { ka, events } = make(send);
+    expect(ka.getStatus().length).toBe(0);
+    expect(events).toContainEqual(expect.objectContaining({ type: 'skipped', reason: 'cache-expired-while-stopped' }));
+    await vi.advanceTimersByTimeAsync(6 * 60 * 60_000);
+    expect(send).not.toHaveBeenCalled();
+    ka.stop();
+  });
+
+  it('does not restore past maxIdleMs since the last real request', async () => {
+    const first = make(vi.fn().mockResolvedValue(hit), { maxIdleMs: 2 * 60 * 60_000 });
+    first.ka.record(wire(), undefined, 'stream');
+    // Kept warm by refreshes, so the entry is fresh, but the agent has been idle too long.
+    await vi.advanceTimersByTimeAsync(2 * 60 * 60_000 - 60_000);
+    first.ka.stop();
+    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    const send = vi.fn().mockResolvedValue(hit);
+    const { ka, events } = make(send, { maxIdleMs: 2 * 60 * 60_000 });
+    expect(ka.getStatus().length).toBe(0);
+    expect(events.some((e) => e.type === 'expired')).toBe(true);
+    ka.stop();
+  });
+
+  it('keeps the refresh baseline current in the file, so a restart after a refresh waits for the next one', async () => {
+    const first = make(vi.fn().mockResolvedValue(hit));
+    first.ka.record(wire(), undefined, 'stream');
+    await vi.advanceTimersByTimeAsync(50 * 60_000); // one refresh at ~45-50m
+    first.ka.stop();
+    await vi.advanceTimersByTimeAsync(20 * 60_000); // 70m after the real request
+    const send = vi.fn().mockResolvedValue(hit);
+    const { ka } = make(send);
+    // Restored (the refresh kept the entry alive), not yet due again.
+    expect(ka.getStatus().length).toBe(1);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(send).not.toHaveBeenCalled();
+    ka.stop();
+  });
+
+  it('stop() leaves the file for the next process', () => {
+    const { ka } = make(vi.fn().mockResolvedValue(hit));
+    ka.record(wire(), undefined, 'stream');
+    ka.stop();
+    const saved = JSON.parse(readFileSync(statePath, 'utf8'));
+    expect(saved.version).toBe(1);
+    expect(saved.lineages.length).toBe(1);
+  });
+
+  it('saves only anthropic-* headers, and the file is private', () => {
+    const { ka } = make(vi.fn().mockResolvedValue(hit));
+    ka.record(wire(), { 'anthropic-beta': 'x', authorization: 'Bearer secret', 'x-api-key': 'sk-ant-secret' }, 'stream');
+    const text = readFileSync(statePath, 'utf8');
+    expect(text).not.toContain('secret');
+    expect(JSON.parse(text).lineages[0].headers).toEqual({ 'anthropic-beta': 'x' });
+    if (process.platform !== 'win32') expect(statSync(statePath).mode & 0o777).toBe(0o600);
+    ka.stop();
+  });
+
+  it('starts empty and says so when the file is unreadable', () => {
+    writeFileSync(statePath, '{not json');
+    const send = vi.fn().mockResolvedValue(hit);
+    const { ka, events } = make(send);
+    expect(ka.getStatus().length).toBe(0);
+    expect(events.some((e) => e.type === 'persist-error' && e.op === 'load')).toBe(true);
+    // Still works in memory, and the next change replaces the bad file.
+    ka.record(wire(), undefined, 'stream');
+    expect(JSON.parse(readFileSync(statePath, 'utf8')).lineages.length).toBe(1);
+    ka.stop();
+  });
+
+  it('writes no file without statePath, and none when disabled', () => {
+    const plain = new CacheKeepalive(vi.fn() as never, {});
+    plain.record(wire(), undefined, 'stream');
+    plain.stop();
+    const off = new CacheKeepalive(vi.fn() as never, { enabled: false, statePath });
+    off.record(wire(), undefined, 'stream');
+    expect(existsSync(statePath)).toBe(false);
   });
 });
