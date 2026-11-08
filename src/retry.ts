@@ -58,6 +58,8 @@ export type RetryDecision =
 /** A status-shaped 529, or Anthropic's overloaded error type, in a message. */
 const OVERLOADED_PATTERN = /\b529\b|overloaded_error/i;
 
+const OMISSION_MARKER = / …\[\d+ of \d+ characters omitted\]… /;
+
 /**
  * The Anthropic SDK's own client (0.52's `retryRequest`) waits out a stated
  * wait only when it's under a minute.
@@ -72,7 +74,7 @@ const STATED_WAIT_CEILING_MS = 60_000;
 function isOverloadedFailure(facts: Pick<FailureFacts, 'httpStatus' | 'message' | 'type'>): boolean {
   if (facts.httpStatus !== undefined) return facts.httpStatus === 529;
   if (facts.type === 'network' || facts.type === 'timeout') return false;
-  return OVERLOADED_PATTERN.test(facts.message ?? '');
+  return OVERLOADED_PATTERN.test((facts.message ?? '').replace(OMISSION_MARKER, ' '));
 }
 
 /**

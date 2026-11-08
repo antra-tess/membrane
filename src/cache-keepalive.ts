@@ -15,6 +15,7 @@
 // `{type:'disabled'}` does. A prefix under the model's minimum cacheable
 // length is processed and not cached.
 
+import { boundErrorText } from './types/errors.js';
 import { collectMarkedBlocks } from './utils/cache-marker-budget.js';
 import { createHash } from 'node:crypto';
 
@@ -332,7 +333,7 @@ export class CacheKeepalive {
       lin.refreshBaselineAt = startedAt;
       this.emit({ type: 'refreshed', key, lane: lin.lane, readTokens: read, idleMs });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = boundErrorText(err instanceof Error ? err.message : String(err));
       if (payload) {
         this.reportCall({
           key, lane: lin.lane, startedAt, durationMs: Date.now() - startedAt,

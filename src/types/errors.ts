@@ -1,4 +1,46 @@
+import { createHash } from 'node:crypto';
 import { classifyFailure } from '../retry.js';
+
+const MAX_ERROR_MESSAGE_CHARS = 2_000;
+const MAX_RAW_ERROR_JSON_BYTES = 16 * 1024;
+const RAW_ERROR_SUMMARY_HEAD_CHARS = 2_048;
+
+const isLowSurrogate = (text: string, index: number): boolean => {
+  const code = text.charCodeAt(index);
+  return code >= 0xdc00 && code <= 0xdfff;
+};
+
+export function boundErrorText(text: string, max: number = MAX_ERROR_MESSAGE_CHARS): string {
+  if (text.length <= max) return text;
+  const markerLength = ` …[${text.length} of ${text.length} characters omitted]… `.length;
+  const budget = Math.max(0, max - markerLength);
+  const tailLength = Math.floor(budget / 4);
+  let headEnd = budget - tailLength;
+  if (headEnd > 0 && isLowSurrogate(text, headEnd)) headEnd -= 1;
+  let tailStart = text.length - tailLength;
+  if (tailStart < text.length && isLowSurrogate(text, tailStart)) tailStart += 1;
+  return `${text.slice(0, headEnd)} …[${tailStart - headEnd} of ${text.length} characters omitted]… ${text.slice(tailStart)}`;
+}
+
+function boundRawError(value: unknown): unknown {
+  if (value === undefined || value === null) return value;
+  let json: string | undefined;
+  try {
+    json = JSON.stringify(value);
+  } catch {
+    return value;
+  }
+  if (json === undefined || Buffer.byteLength(json, 'utf8') <= MAX_RAW_ERROR_JSON_BYTES) return value;
+  const text = typeof value === 'string' ? value : json;
+  let headEnd = Math.min(RAW_ERROR_SUMMARY_HEAD_CHARS, text.length);
+  if (headEnd > 0 && headEnd < text.length && isLowSurrogate(text, headEnd)) headEnd -= 1;
+  return {
+    truncated: true,
+    ...(typeof value === 'string' ? { bytes: Buffer.byteLength(value, 'utf8') } : { jsonBytes: Buffer.byteLength(json, 'utf8') }),
+    sha256: createHash('sha256').update(text).digest('hex'),
+    head: text.slice(0, headEnd),
+  };
+}
 
 /** Serialize an error for storage in rawError field. */
 export function serializeError(error: unknown): unknown {
@@ -93,14 +135,14 @@ export class MembraneError extends Error {
   readonly systemChangeRefused?: boolean;
 
   constructor(info: ErrorInfo) {
-    super(info.message);
+    super(boundErrorText(info.message));
     this.name = 'MembraneError';
     this.type = info.type;
     this.retryable = info.retryable;
     this.retryAfterMs = info.retryAfterMs;
     this.httpStatus = info.httpStatus;
     this.providerErrorCode = info.providerErrorCode;
-    this.rawError = serializeError(info.rawError);
+    this.rawError = boundRawError(serializeError(info.rawError));
     this.rawRequest = info.rawRequest;
     if (info.systemChangeRefused) this.systemChangeRefused = true;
   }
@@ -681,7 +723,7 @@ export function errorFromProviderStatus(params: {
       : classifyMessage(fields.upstreamMessage ? `${message}\n${fields.upstreamMessage}` : message, evidence);
   const retryAfterMs = params.retryAfterMs ?? fields.retryAfterMs
     ?? (classification.retryable && (classification.type === 'rate_limit' || classification.type === 'server')
-      ? retryAfterFromProse(detail) : undefined);
+      && ownText !== undefined ? retryAfterFromProse(ownText) : undefined);
 
   return new MembraneError({
     type: classification.type,
@@ -993,7 +1035,7 @@ export function classifyError(error: unknown): ErrorInfo {
     if (error.name === 'AbortError') {
       return {
         type: 'abort',
-        message: error.message,
+        message: boundErrorText(error.message),
         retryable: false,
         rawError: serializedError,
       };
@@ -1001,14 +1043,14 @@ export function classifyError(error: unknown): ErrorInfo {
     // A runtime's own timeout (Bun's fetch deadline) is named, whatever its
     // message says; a caller's AbortSignal.timeout() rejects the same way.
     if (causeChain(error).some((link) => (link as { name?: unknown }).name === 'TimeoutError')) {
-      return { type: 'timeout', message: error.message, retryable: true, rawError: serializedError };
+      return { type: 'timeout', message: boundErrorText(error.message), retryable: true, rawError: serializedError };
     }
 
     const classification = classifySocketCode(error) ?? classifyMessage(error.message);
     if (classification.type !== 'unknown') {
       return {
         type: classification.type,
-        message: error.message,
+        message: boundErrorText(error.message),
         retryable: classification.retryable,
         httpStatus: classification.httpStatus,
         rawError: serializedError,
@@ -1018,7 +1060,7 @@ export function classifyError(error: unknown): ErrorInfo {
 
   return {
     type: 'unknown',
-    message: error instanceof Error ? error.message : String(error),
+    message: boundErrorText(error instanceof Error ? error.message : String(error)),
     retryable: false,
     rawError: serializedError,
   };
