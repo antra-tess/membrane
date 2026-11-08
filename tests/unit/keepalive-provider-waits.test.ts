@@ -110,6 +110,29 @@ describe('the keepalive and a provider\'s stated wait', () => {
     expect(holds().map((h) => h.until)).toEqual([1_350, 1_850, 2_550, 3_650]);
   });
 
+  it('two models refused together, each slow to come back, each carry their run on', async () => {
+    const { ka, pokes, holds } = setup(() => new Promise((_resolve, reject) => { setTimeout(() => reject(new Refusal(true)), 230); }));
+    ka.record(wire('model-a', 'one'), undefined, 'stream');
+    ka.record(wire('model-b', 'one'), undefined, 'stream');
+    await vi.advanceTimersByTimeAsync(3_400);
+    const of = (model: string) => ({
+      pokes: pokes.filter((p) => p.lineage.startsWith(`${model}/`)).map((p) => p.at),
+      holds: holds().filter((h) => h.model === model).map((h) => h.until),
+    });
+    expect(of('model-a')).toEqual({ pokes: [1_000, 1_500, 2_100, 2_800], holds: [1_330, 1_930, 2_730, 3_830] });
+    expect(of('model-b')).toEqual({ pokes: [1_230, 1_800, 2_400, 3_100], holds: [1_560, 2_230, 3_030, 4_130] });
+  });
+
+  it('a hold set while the first check after the last hold\'s end is still running carries the run on', async () => {
+    const { ka, pokes, holds } = setup(() => new Promise((_resolve, reject) => { setTimeout(() => reject(new Refusal(true)), 230); }));
+    ka.record(wire('model-a', 'one'), undefined, 'stream');
+    await vi.advanceTimersByTimeAsync(1_500);
+    ka.holdModel('model-a', 1_000, 'foreground');
+    await vi.advanceTimersByTimeAsync(1_300);
+    expect(pokes.map((p) => p.at)).toEqual([1_000, 1_400, 2_500]);
+    expect(holds().map((h) => h.until)).toEqual([1_330, 2_500, 3_130]);
+  });
+
   it('a hold from a foreground wait carries the run on, so the next refusal doubles the backoff', async () => {
     const { ka, pokes, holds } = setup(() => new Refusal(true));
     ka.record(wire('model-a', 'one'), undefined, 'stream');

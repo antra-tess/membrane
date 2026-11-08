@@ -12,13 +12,14 @@
     for the later of its stated wait and a backoff of `checkIntervalMs`
     doubling with each such refusal in a run, never more than
     `refreshAfterMs`, and its lineage keeps its age, so it's poked again once
-    the hold passes. An accepted poke ends the run, and so does a gap of more
-    than two check intervals between the end of the model's last hold,
-    whatever set it, and the start of its next refused poke, or its next hold.
-    Before, three refused pokes in a row, such as one overload with three
-    lineages due, stopped the keepalive for the adapter's life. A failure that
-    isn't retryable still counts, and a wait it states still holds the model.
-    A retryable refusal whose hold comes to 0, as with no stated wait and a
+    the hold passes. An accepted poke ends the run. A refusal carries it on
+    only when its poke came from the first check to begin at or after the end
+    of the model's last hold, whatever set it, and a hold set once a check
+    that began at or after that end has finished starts a new run. Before,
+    three refused pokes in a row, such as one overload with three lineages
+    due, stopped the keepalive for the adapter's life. A failure that isn't
+    retryable still counts, and a wait it states still holds the model. A
+    retryable refusal whose hold comes to 0, as with no stated wait and a
     `checkIntervalMs` or `refreshAfterMs` of 0, counts too.
   - The SDK no longer retries a refused poke itself. It sent the poke up to
     twice more within about 1.5 s when no wait was stated, and also when the

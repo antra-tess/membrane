@@ -226,6 +226,8 @@ export class CacheKeepalive {
   private runs = new Map<string, number>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false;
+  private tickAt = -Infinity;
+  private previousTickAt = -Infinity;
   private consecutiveErrors = 0;
   private stopped = false;
   private readonly cfg: Required<Omit<CacheKeepaliveConfig, 'onEvent' | 'onCall'>> &
@@ -249,9 +251,8 @@ export class CacheKeepalive {
   holdModel(model: string, retryAfterMs: number | undefined, reason: string): void {
     const wait = statedWait(retryAfterMs);
     if (this.stopped || wait === 0) return;
-    const now = Date.now();
-    if (now > (this.holds.get(model) ?? 0) + 2 * this.cfg.checkIntervalMs) this.runs.delete(model);
-    const until = now + wait;
+    if ((this.ticking ? this.previousTickAt : this.tickAt) >= (this.holds.get(model) ?? 0)) this.runs.delete(model);
+    const until = Date.now() + wait;
     if ((this.holds.get(model) ?? 0) >= until) return;
     this.holds.set(model, until);
     this.emit({ type: 'held', model, until, reason });
@@ -310,6 +311,8 @@ export class CacheKeepalive {
     this.ticking = true;
     try {
       const now = Date.now();
+      this.previousTickAt = this.tickAt;
+      this.tickAt = now;
       for (const [key, lin] of [...this.lineages]) {
         if (this.stopped) break;
         if (this.lineages.get(key) !== lin) continue;
@@ -386,7 +389,7 @@ export class CacheKeepalive {
       let paced = false;
       if (classified?.retryable === true) {
         const previous = this.runs.get(model);
-        const run = previous !== undefined && startedAt <= (this.holds.get(model) ?? 0) + 2 * this.cfg.checkIntervalMs ? previous + 1 : 1;
+        const run = previous !== undefined && this.previousTickAt < (this.holds.get(model) ?? 0) ? previous + 1 : 1;
         const backoffMs = Math.min(this.cfg.refreshAfterMs, this.cfg.checkIntervalMs * 2 ** (run - 1));
         const holdMs = Math.max(statedWait(classified.retryAfterMs), backoffMs);
         paced = holdMs > 0;
