@@ -51,6 +51,13 @@ describe('Responses: a tool result whose call no input item carries', () => {
     expect(items[1]).toEqual(user('[orphan tool_result for call_8]: first-person view\n[Image: image/png, ~0KB, not shown to you]'));
   });
 
+  it('labels a result whose id isn\'t a string <missing>, as the native formatter does', () => {
+    const { items } = build([
+      { participant: 'User', content: [{ ...result('call_9'), toolUseId: 123 }] },
+    ]);
+    expect(items).toEqual([user('[orphan tool_result for <missing>]: notes: the meeting is at noon.')]);
+  });
+
   it('renders each kind of image as the native formatter renders it in an orphan', () => {
     const kinds = [
       { type: 'image', source: { type: 'url', url: 'data:image/png;base64,iVBORw0KGgo=' } },
@@ -139,6 +146,15 @@ describe('Responses: a tool result whose call no input item carries', () => {
       { participant: 'User', content: [result('call_9')] },
     ]);
     expect(items).toEqual([onBlock, inMessage, user('[orphan tool_result for call_9]: notes: the meeting is at noon.')]);
+  });
+
+  it('leaves a native output of any _output type as it is, and pairs nothing with it', () => {
+    const custom = { type: 'custom_tool_call_output', call_id: 'call_9', output: 'carried' };
+    const { items } = build([
+      { participant: 'User', content: [], metadata: { openaiResponsesItems: [custom] } },
+      { participant: 'User', content: [result('call_9')] },
+    ]);
+    expect(items).toEqual([custom, user('[orphan tool_result for call_9]: notes: the meeting is at noon.')]);
   });
 
   it('passes a native item that isn\'t an object, or whose type isn\'t a string, through as before', () => {

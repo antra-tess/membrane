@@ -71,7 +71,7 @@ type NativeItem = { type?: string; id?: string; [key: string]: unknown };
 type ConvertedOutput = { item: NativeItem; block: ToolResultContent; onAltered: (() => void) | undefined };
 
 function orphanResultMessage(block: ToolResultContent): NativeItem {
-  const label = `orphan tool_result for ${block.toolUseId ?? '<missing>'}${block.isError === true ? ', an error' : ''}`;
+  const label = `orphan tool_result for ${typeof block.toolUseId === 'string' ? block.toolUseId : '<missing>'}${block.isError === true ? ', an error' : ''}`;
   const content = toolResultContentForRequest(block.content);
   const text = `[${label}]: ${renderResultContent({ content } as unknown as ProviderBlock)}`;
   return { type: 'message', role: 'user', content: [{ type: 'input_text', text }] };
