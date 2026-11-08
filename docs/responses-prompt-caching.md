@@ -2,7 +2,7 @@
 
 OpenAI Responses API and Codex subscription callers can opt in per request.
 Callers must select `OpenAIResponsesFormatter` to preserve marked message
-boundaries, either when constructing Membrane or per call:
+boundaries reliably, either when constructing Membrane or per call:
 
 ```ts
 import { Membrane, OpenAIResponsesFormatter } from '@animalabs/membrane';
@@ -20,7 +20,8 @@ await membrane.complete({
 ```
 
 Set `responsesPromptCache` on the request itself, **not** in
-`providerParams` or `extra`. The generic/default formatter path delegates to
+`providerParams` or `extra`. The option has no effect on other adapters.
+The generic/default formatter path delegates to
 `NativeFormatter`, which merges same-role messages. When the option is on,
 it refuses marked histories whose boundaries would be merged or lost rather
 than silently writing after changing content; selecting
@@ -33,11 +34,16 @@ is added; an agent recipe can choose the option for each request.
 
 ## Marks and item boundaries
 
-`OpenAIResponsesFormatter` preserves message-level `cacheBreakpoint: true`
-(and ephemeral block `cache_control`), including on imported native items.
-This is independent of Anthropic's `promptCaching`, `cacheMarkers`, and
-`cacheTtl`. Use this formatter to retain normalized message boundaries in
-both transport modes.
+Only caller message-level `cacheBreakpoint: true` flags are Responses marks,
+including on messages holding imported native items. Block `cache_control`
+is **not** a Responses mark: it may have been synthesized by Membrane for
+Anthropic. Responses writes and TTL are independent of Anthropic's
+`promptCaching`, `cacheMarkers`, and `cacheTtl`. Existing Anthropic marker
+validation still applies before the adapter (e.g. five imported block
+`cache_control` markers with `cacheMarkers: 'cm-owned'` are refused). Use
+`cacheBreakpoint` rather than importing Anthropic marks. Use
+`OpenAIResponsesFormatter` to retain normalized message boundaries in both
+transport modes.
 
 Provenance travels on the items as reserved internal request-local data,
 not in an identity-keyed registry. `beforeRequest` hooks may copy messages
@@ -46,14 +52,22 @@ JSON round-trips without losing marks. The carrier is removed before wire
 serialization and excluded from routing hashes, even if a hook disables or
 deletes `responsesPromptCache`. Hooks that deliberately
 rebuild items without copying their metadata must preserve their marks.
+Enable the option on the normalized request **before formatting**, not for
+the first time in `beforeRequest`: that provider-request hook runs after
+formatting, when original message boundaries may already be lost. A late
+enable can set TTL but cannot recover discarded normalized-message marks.
+Disabling an initially enabled option in the hook is supported.
 
 The subscription adapter also accepts generic messages. On the opt-in path,
 `NativeFormatter` tracks marked message ends independently of Anthropic
 caching. Its Anthropic normalizer reflows tool histories and merges same-role
 messages: when that would put a marked end inside a merged envelope, move it
 past later content, or lose it, the request **rejects with `invalid_request`
-before fetch** and directs the caller to `OpenAIResponsesFormatter`. For
-example, marked User “stable” followed by unmarked User “volatile” is refused,
+before fetch**. Move the mark to a preserved message boundary, disable
+explicit caching, or use `OpenAIResponsesFormatter` for histories it supports.
+Switching formatters does not make unsupported content such as system changes
+supported by Responses. For example, marked User “stable” followed by
+unmarked User “volatile” is refused,
 not written after “volatile”. This conservative refusal avoids guessing where
 to split a repaired generic history. Off-mode normalization remains unchanged.
 System and tool-definition cache markers are not explicit input-item writes.
@@ -65,7 +79,7 @@ tool/reasoning item, the write falls back to the **latest eligible item at or
 before that boundary**, never to later unmarked content. A marked assistant
 `[text, tool_use]` therefore writes on its text item, before the call, result,
 and volatile continuation. If no eligible item exists, the mark is skipped
-and a non-wire `console.debug` diagnostic reports
+and a non-wire `console.warn` diagnostic on **stderr** reports
 `[membrane:responses-prompt-cache] skipped marks: N` (an empty marked expansion
 reports one skipped mark at formatting time). Multiple marks targeting one
 item are deduplicated. The latest three eligible targets are retained; the

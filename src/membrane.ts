@@ -1898,7 +1898,7 @@ export class Membrane {
       thinking: request.config.thinking,
       systemPrompt: request.system,
       promptCaching: request.promptCaching ?? this.config.defaultPromptCaching ?? true,
-      responsesPromptCaching: request.responsesPromptCache?.enabled === true,
+      responsesPromptCaching: this.adapter.name === 'openai-responses-api' && request.responsesPromptCache?.enabled === true,
       cacheMarkers: request.cacheMarkers ?? 'membrane-system',
       cacheTtl: request.cacheTtl,
       additionalStopSequences,
@@ -1922,7 +1922,8 @@ export class Membrane {
 
     const providerRequest = {
       ...this.getBaseProviderParams(request.config),
-      ...(request.responsesPromptCache !== undefined ? { responsesPromptCache: request.responsesPromptCache } : {}),
+      ...(this.adapter.name === 'openai-responses-api' && request.responsesPromptCache !== undefined
+        ? { responsesPromptCache: request.responsesPromptCache } : {}),
       messages: buildResult.messages,
       system: ownSystemBlocks(buildResult.systemContent),
       stopSequences: buildResult.stopSequences,

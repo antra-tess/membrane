@@ -466,10 +466,6 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
       responsesRequest.include = this.mergeEncryptedReasoningInclude(include);
     }
 
-    if (Array.isArray(responsesRequest.tools)) {
-      responsesRequest.tools = this.convertTools(responsesRequest.tools, responsesRequest);
-    }
-
     // An input_image whose data: URL holds no image would be refused on every
     // request, so it goes as the placeholder in either mode.
     responsesRequest.input = this.subscription
@@ -502,6 +498,11 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
     // A hook may disable caching after formatting has already added carriers.
     // Private provenance must never reach the wire, regardless of the option.
     responsesRequest.input = responsesRequest.input.map(withoutResponsesCacheCarrier);
+    // Validation errors expose rawRequest too, so validate only after cleanup.
+    if (Array.isArray(responsesRequest.tools)) {
+      responsesRequest.tools = this.convertTools(responsesRequest.tools, responsesRequest);
+    }
+
     return responsesRequest;
   }
 

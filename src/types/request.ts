@@ -239,12 +239,13 @@ export interface NormalizedRequest {
   /**
    * Opt-in explicit prompt-cache writes for OpenAI Responses (API and Codex
    * subscription). Off by default, independent of Anthropic promptCaching,
-   * cacheMarkers and cacheTtl. Marks come from message.cacheBreakpoint or an
-   * ephemeral cache_control on a message content block. Keeps the latest three
-   * eligible writes, reserving the implicit tail's fourth slot. Only message
-   * items receive writes; tool/reasoning tails fall back to the latest eligible
-   * item at or before the marked boundary. Skips without a target log a debug
-   * count. Set this on the request, not in providerParams/extra. Select
+   * cacheMarkers and cacheTtl (existing Anthropic marker validation still applies).
+   * Only caller message.cacheBreakpoint flags count; block cache_control does not.
+   * Keeps the latest three eligible writes, reserving the implicit tail's fourth
+   * slot. Only message items receive writes; tool/reasoning tails fall back to the latest eligible
+   * item at or before the marked boundary. Skips without a target log a count
+   * on stderr. Set this before formatting, not in providerParams/extra or
+   * for the first time in beforeRequest. Has no effect on other adapters. Select
    * OpenAIResponsesFormatter via new Membrane(adapter, { formatter }) or per
    * call to preserve marked boundaries. The generic/default formatter path
    * merges same-role messages; NativeFormatter refuses marked boundaries

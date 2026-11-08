@@ -11,9 +11,9 @@ const object = (value: unknown): value is JsonObject =>
 const cacheMark = '__membraneResponsesCacheMark';
 
 export function hasResponsesCacheMark(source: unknown): boolean {
-  return object(source) && (source[cacheMark] === true || source.cacheBreakpoint === true ||
-    (Array.isArray(source.content) && source.content.some(block =>
-      object(block) && object(block.cache_control) && block.cache_control.type === 'ephemeral')));
+  // Only the caller's message-level flag counts. cache_control can have been
+  // synthesized by Membrane's Anthropic formatting, so it is not provenance.
+  return object(source) && (source[cacheMark] === true || source.cacheBreakpoint === true);
 }
 
 export function rememberResponsesCacheMark(source: unknown, items: unknown[], start = 0): void {
@@ -27,7 +27,7 @@ export function rememberResponsesCacheMark(source: unknown, items: unknown[], st
 }
 
 /** Drop only the private carrier for routing and intermediate expansion items.
- * Caller cacheBreakpoint/cache_control stay intact until final wire cleanup. */
+ * Caller metadata stays intact until final wire cleanup. */
 export function withoutResponsesCacheCarrier<T>(item: T): T {
   if (!object(item) || !(cacheMark in item)) return item;
   const { [cacheMark]: internal, ...head } = item;
@@ -36,7 +36,7 @@ export function withoutResponsesCacheCarrier<T>(item: T): T {
 }
 
 function reportSkippedMarks(count: number): void {
-  if (count > 0) console.debug(`[membrane:responses-prompt-cache] skipped marks: ${count}`);
+  if (count > 0) console.warn(`[membrane:responses-prompt-cache] skipped marks: ${count}`);
 }
 
 /** Operator-reported wire extensions, not live-verified. Reserve one of four

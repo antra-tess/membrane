@@ -238,7 +238,10 @@ export class NativeFormatter implements PrefillFormatter {
           );
         }
         const content = this.convertSystemChanges(changes, wireNames, () => options.fidelity?.alter(i));
-        if (content.length === 0) continue;
+        if (content.length === 0) {
+          if (options.responsesPromptCaching) rememberResponsesCacheMark(message, []);
+          continue;
+        }
         ownBlocks(options.fidelity, content, i);
         for (const block of content) origin.set(block, i);
         if (hasCacheMarker && hasCacheMarker(message, i) && cacheControl && previousContent) {
@@ -280,6 +283,7 @@ export class NativeFormatter implements PrefillFormatter {
       }
 
       if (content.length === 0) {
+        if (options.responsesPromptCaching) rememberResponsesCacheMark(message, []);
         continue;
       }
       ownBlocks(options.fidelity, content, i);
@@ -337,7 +341,7 @@ export class NativeFormatter implements PrefillFormatter {
           const boundary = responsesBoundaries.get(block as object);
           if (boundary === undefined) return;
           if (index !== content.length - 1 || latestOrigin > boundary) {
-            throw invalidRequestError('NativeFormatter cannot preserve this Responses cache boundary after normalization/merging. Use OpenAIResponsesFormatter.');
+            throw invalidRequestError('NativeFormatter cannot preserve this Responses cache boundary after normalization/merging. Move the mark to a preserved message boundary or disable responsesPromptCache. OpenAIResponsesFormatter can preserve boundaries in histories it supports.');
           }
           const single: unknown[] = [message];
           rememberResponsesCacheMark({ cacheBreakpoint: true }, single);
@@ -346,7 +350,7 @@ export class NativeFormatter implements PrefillFormatter {
         });
       }
       if (responsesBoundaries.size > 0) {
-        throw invalidRequestError('NativeFormatter lost a Responses cache boundary during normalization. Use OpenAIResponsesFormatter.');
+        throw invalidRequestError('NativeFormatter lost a Responses cache boundary during normalization. Move the mark to a preserved message boundary or disable responsesPromptCache. OpenAIResponsesFormatter can preserve boundaries in histories it supports.');
       }
     }
 

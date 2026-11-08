@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OpenAIResponsesAPIAdapter } from '../../src/providers/openai-responses-api.js';
 import { Membrane } from '../../src/membrane.js';
@@ -7,22 +9,25 @@ import type { ProviderRequest } from '../../src/types/index.js';
 
 const explicit = { mode: 'explicit' };
 const ephemeral = { type: 'ephemeral' };
+// Captured by executing main's adapter, not reconstructed from this implementation.
+const mainOff = JSON.parse(readFileSync(new URL('../fixtures/responses-cache-off-main.json', import.meta.url), 'utf8'));
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
-function setup(mode: 'api' | 'subscription') {
+function setup(mode: 'api' | 'subscription', method: 'complete' | 'stream' = 'complete') {
   const fetchMock = vi.fn().mockImplementation(async () => {
     const response = { status: 'completed', output: [] };
-    return new Response(mode === 'api' ? JSON.stringify(response)
+    const sse = mode === 'subscription' || method === 'stream';
+    return new Response(!sse ? JSON.stringify(response)
       : `data: ${JSON.stringify({ type: 'response.completed', response })}\n\n`,
-    { headers: { 'Content-Type': mode === 'api' ? 'application/json' : 'text/event-stream' } });
+    { headers: { 'Content-Type': !sse ? 'application/json' : 'text/event-stream' } });
   });
   vi.stubGlobal('fetch', fetchMock);
   const adapter = new OpenAIResponsesAPIAdapter({
     mode, apiKey: 'test', credentials: { token: 'test' }, sessionId: 'stable',
   });
   const send = async (messages: unknown[], cache?: unknown, extra?: Record<string, unknown>) => {
-    await adapter.complete({ model: 'gpt-5.6', maxTokens: 100, messages,
-      responsesPromptCache: cache, extra } as ProviderRequest);
+    await adapter[method]({ model: 'gpt-5.6', maxTokens: 100, messages,
+      responsesPromptCache: cache, extra } as ProviderRequest, { onChunk: () => {} });
     return JSON.parse(String(fetchMock.mock.calls.at(-1)![1].body));
   };
   return { adapter, fetchMock, send };
@@ -32,16 +37,12 @@ for (const mode of ['api', 'subscription'] as const) {
   for (const method of ['complete', 'stream'] as const) {
     for (const disable of ['false', 'delete'] as const) {
       it(`${mode} ${method} cleans carriers and preserves routing when a hook turns caching off via ${disable}`, async () => {
-        const { adapter, fetchMock } = setup(mode);
-        if (method === 'stream') {
-          fetchMock.mockImplementation(async () => new Response(
-            `data: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed', output: [] } })}\n\n`,
-            { headers: { 'Content-Type': 'text/event-stream' } },
-          ));
-        }
+        const { adapter, fetchMock } = setup(mode, method);
+        let disableHook = false;
         const membrane = new Membrane(adapter, {
           formatter: new OpenAIResponsesFormatter(),
           hooks: { beforeRequest: (_, r) => {
+            if (!disableHook) return r;
             const result = { ...r };
             if (disable === 'delete') delete result.responsesPromptCache;
             else result.responsesPromptCache = { enabled: false };
@@ -59,6 +60,11 @@ for (const mode of ['api', 'subscription'] as const) {
         await membrane[method](request);
         const baseline = fetchMock.mock.calls.at(-1)![1];
         await membrane[method]({ ...request, responsesPromptCache: { enabled: true, ttl: '12h' } });
+        const enabled = JSON.parse(String(fetchMock.mock.calls.at(-1)![1].body));
+        expect(enabled.input.map((item: any) => item.prompt_cache_breakpoint)).toEqual([explicit, undefined]);
+        expect(enabled.prompt_cache_options).toEqual({ ttl: '12h' });
+        disableHook = true;
+        await membrane[method]({ ...request, responsesPromptCache: { enabled: true, ttl: '12h' } });
         const hooked = fetchMock.mock.calls.at(-1)![1];
         expect(String(hooked.body)).not.toContain('__membraneResponsesCacheMark');
         expect(JSON.parse(String(hooked.body)).prompt_cache_key)
@@ -72,40 +78,35 @@ for (const mode of ['api', 'subscription'] as const) {
   }
 
   describe(`${mode} explicit Responses caching`, () => {
-    for (const mark of ['cacheBreakpoint', 'cache_control', 'both'] as const) {
-      for (const count of [1, 3, 5]) {
-        it(`keeps latest 3 of ${count} marks via ${mark}`, async () => {
-          const { send } = setup(mode);
-          const messages = Array.from({ length: count }, (_, i) => ({
-            type: 'message', role: 'user',
-            ...(mark !== 'cache_control' ? { cacheBreakpoint: true } : {}),
-            content: [{ type: 'input_text', text: String(i),
-              ...(mark !== 'cacheBreakpoint' ? { cache_control: ephemeral } : {}) }],
-          }));
-          const original = JSON.stringify(messages);
-          const body = await send(messages, { enabled: true });
-          expect(body.input.map((item: any) => item.prompt_cache_breakpoint))
-            .toEqual(messages.map((_, i) => i >= Math.max(0, count - 3) ? explicit : undefined));
-          expect(body.prompt_cache_options).toBeUndefined();
-          expect(JSON.stringify(body.input)).not.toMatch(/cacheBreakpoint|cache_control|__membrane/);
-          expect(JSON.stringify(messages)).toBe(original);
-        });
-      }
+    for (const count of [1, 3, 5]) {
+      it(`keeps latest 3 of ${count} caller cacheBreakpoint marks`, async () => {
+        const { send } = setup(mode);
+        const messages = Array.from({ length: count }, (_, i) => ({
+          type: 'message', role: 'user', cacheBreakpoint: true,
+          content: [{ type: 'input_text', text: String(i), cache_control: ephemeral }],
+        }));
+        const original = JSON.stringify(messages);
+        const body = await send(messages, { enabled: true });
+        expect(body.input.map((item: any) => item.prompt_cache_breakpoint))
+          .toEqual(messages.map((_, i) => i >= Math.max(0, count - 3) ? explicit : undefined));
+        expect(body.prompt_cache_options).toBeUndefined();
+        expect(JSON.stringify(body.input)).not.toMatch(/cacheBreakpoint|cache_control|__membrane/);
+        expect(JSON.stringify(messages)).toBe(original);
+      });
     }
 
-    it('off and omitted are byte-identical to the pre-feature request, even with invalid TTL', async () => {
-      const { send, fetchMock } = setup(mode);
-      const messages = [{ type: 'message', role: 'user', cacheBreakpoint: true,
-        content: [{ type: 'input_text', text: 'stable', cache_control: ephemeral }] }];
-      const before = await send(messages);
-      const beforeBytes = fetchMock.mock.calls.at(-1)![1].body;
-      const expected: any = { model: 'gpt-5.6', input: messages, store: false,
-        include: ['reasoning.encrypted_content'], ...(mode === 'api' ? { max_output_tokens: 100 } : {}) };
-      if (mode === 'subscription') { expected.prompt_cache_key = before.prompt_cache_key; expected.stream = true; }
-      expect(beforeBytes).toBe(JSON.stringify(expected));
-      await send(messages, { enabled: false, ttl: 'garbage' });
-      expect(fetchMock.mock.calls.at(-1)![1].body).toBe(beforeBytes);
-    });
+    for (const method of ['complete', 'stream'] as const) {
+      it(`${method} off and omitted match actual main bytes, while on writes`, async () => {
+        const { send, fetchMock } = setup(mode, method);
+        const messages = [{ type: 'message', role: 'user', cacheBreakpoint: true,
+          content: [{ type: 'input_text', text: 'stable', cache_control: ephemeral }] }];
+        await send(messages);
+        expect(fetchMock.mock.calls.at(-1)![1].body).toBe(mainOff.bodies[`${mode}-${method}`]);
+        await send(messages, { enabled: false, ttl: 'garbage' });
+        expect(fetchMock.mock.calls.at(-1)![1].body).toBe(mainOff.bodies[`${mode}-${method}`]);
+        expect((await send(messages, { enabled: true })).input[0].prompt_cache_breakpoint).toEqual(explicit);
+      });
+    }
 
     for (const ttl of ['12h', '5m', '30s', '2d']) {
       it(`sends validated TTL ${ttl}`, async () => {
@@ -113,12 +114,14 @@ for (const mode of ['api', 'subscription'] as const) {
         expect((await send([], { enabled: true, ttl })).prompt_cache_options).toEqual({ ttl });
       });
     }
-    for (const ttl of ['', '0h', '-1h', '1.5h', '12H', '12h\n', 12, null]) {
-      it(`rejects invalid TTL ${JSON.stringify(ttl)} before fetch`, async () => {
-        const { send, fetchMock } = setup(mode);
-        await expect(send([], { enabled: true, ttl })).rejects.toMatchObject({ type: 'invalid_request' });
-        expect(fetchMock).not.toHaveBeenCalled();
-      });
+    for (const method of ['complete', 'stream'] as const) {
+      for (const ttl of ['', '0h', '-1h', '1.5h', '12H', '12h\n', 12, null]) {
+        it(`${method} rejects invalid TTL ${JSON.stringify(ttl)} before fetch`, async () => {
+          const { send, fetchMock } = setup(mode, method);
+          await expect(send([], { enabled: true, ttl })).rejects.toMatchObject({ type: 'invalid_request' });
+          expect(fetchMock).not.toHaveBeenCalled();
+        });
+      }
     }
 
     it('does not alter cache routing keys or session headers', async () => {
@@ -127,13 +130,16 @@ for (const mode of ['api', 'subscription'] as const) {
       const off = await send(messages);
       const headers = new Headers(fetchMock.mock.calls.at(-1)![1].headers);
       const on = await send(messages, { enabled: true, ttl: '12h' });
+      expect(on.input[0].prompt_cache_breakpoint).toEqual(explicit);
+      expect(on.prompt_cache_options).toEqual({ ttl: '12h' });
       expect(on.prompt_cache_key).toBe(off.prompt_cache_key);
       expect(new Headers(fetchMock.mock.calls.at(-1)![1].headers).get('session_id')).toBe(headers.get('session_id'));
       expect((await send(messages, { enabled: true }, { prompt_cache_key: 'override' })).prompt_cache_key).toBe('override');
     });
 
     it('diagnoses marks with no eligible prefix item', async () => {
-      const debug = vi.spyOn(console, 'debug').mockImplementation(() => {});
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const stdout = vi.spyOn(console, 'debug').mockImplementation(() => {});
       const { send } = setup(mode);
       const messages = [
         { type: 'function_call', call_id: 'c', name: 'read', arguments: '{}', cacheBreakpoint: true },
@@ -143,7 +149,8 @@ for (const mode of ['api', 'subscription'] as const) {
       const body = await send(messages, { enabled: true });
       expect(body.input.every((item: any) => !item.prompt_cache_breakpoint)).toBe(true);
       expect(JSON.stringify(body)).not.toContain('cacheBreakpoint');
-      expect(debug).toHaveBeenCalledWith('[membrane:responses-prompt-cache] skipped marks: 3');
+      expect(warn).toHaveBeenCalledWith('[membrane:responses-prompt-cache] skipped marks: 3');
+      expect(stdout).not.toHaveBeenCalled();
     });
 
     it('carries NormalizedMessage marks through the native Responses formatter, on only', async () => {
@@ -183,7 +190,7 @@ it('subscription marks only the last item expanded from a generic message', asyn
     .toEqual([undefined, undefined, undefined, undefined, explicit]);
 });
 
-it('subscription recognizes a native formatter block marker', async () => {
+it('subscription recognizes a native formatter caller cacheBreakpoint', async () => {
   const { adapter, fetchMock } = setup('subscription');
   const membrane = new Membrane(adapter, { formatter: new NativeFormatter() });
   await membrane.complete({ messages: [{ participant: 'User', cacheBreakpoint: true,
@@ -240,6 +247,7 @@ for (const mode of ['api', 'subscription'] as const) {
 }
 
 it('carries marks on imported native Responses items without mutating them', async () => {
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
   const { adapter, fetchMock } = setup('api');
   const membrane = new Membrane(adapter, { formatter: new OpenAIResponsesFormatter() });
   const raw = { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'stable' }] };
@@ -252,26 +260,29 @@ it('carries marks on imported native Responses items without mutating them', asy
   expect(body.input).toHaveLength(1);
   expect(body.input[0].prompt_cache_breakpoint).toEqual(explicit);
   expect(JSON.stringify(raw)).toBe(original);
+  expect(warn).toHaveBeenCalledExactlyOnceWith('[membrane:responses-prompt-cache] skipped marks: 1');
 });
 
 for (const mode of ['api', 'subscription'] as const) {
   it(`${mode} keeps a marked prefix before an unmarked tail`, async () => {
     const { send } = setup(mode);
     const body = await send([
-      { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'stable', cache_control: ephemeral }] },
+      { type: 'message', role: 'user', cacheBreakpoint: true, content: [{ type: 'input_text', text: 'stable', cache_control: ephemeral }] },
       { type: 'message', role: 'user', content: 'changing' },
     ], { enabled: true });
     expect(body.input.map((item: any) => item.prompt_cache_breakpoint)).toEqual([explicit, undefined]);
   });
 }
 
-it('subscription expands a block-only marked message onto its last item', async () => {
+it('subscription ignores block cache_control and expands caller cacheBreakpoint onto its last item', async () => {
   const { send } = setup('subscription');
-  const body = await send([{ role: 'assistant', content: [
+  const messages = [{ role: 'assistant', content: [
     { type: 'text', text: 'before', cache_control: ephemeral },
     { type: 'redacted_thinking', data: 'opaque' },
     { type: 'text', text: 'after' },
-  ] }], { enabled: true });
+  ] }];
+  expect((await send(messages, { enabled: true })).input.every((item: any) => !item.prompt_cache_breakpoint)).toBe(true);
+  const body = await send(messages.map(message => ({ ...message, cacheBreakpoint: true })), { enabled: true });
   expect(body.input.map((item: any) => item.prompt_cache_breakpoint)).toEqual([undefined, undefined, explicit]);
 });
 
@@ -337,7 +348,7 @@ for (const promptCaching of [false, true]) {
       { participant: 'User', content: [{ type: 'text' as const, text: 'volatile' }] },
     ], promptCaching, config: { model: 'gpt-5.6', maxTokens: 100 } };
     await expect(membrane.complete({ ...request, responsesPromptCache: { enabled: true } }))
-      .rejects.toMatchObject({ type: 'invalid_request', message: expect.stringContaining('OpenAIResponsesFormatter') });
+      .rejects.toMatchObject({ type: 'invalid_request', message: expect.stringContaining('Move the mark to a preserved message boundary or disable responsesPromptCache') });
     expect(fetchMock).not.toHaveBeenCalled();
     await membrane.complete({ ...request, responsesPromptCache: { enabled: false } });
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -390,3 +401,80 @@ for (const formatter of [OpenAIResponsesFormatter, NativeFormatter]) {
     expect(JSON.stringify(on)).not.toContain('__membrane');
   });
 }
+
+for (const mode of ['api', 'subscription'] as const) {
+  it(`${mode} never interprets a synthetic contextPrefix Anthropic marker as a caller mark`, async () => {
+    const { adapter, fetchMock } = setup(mode);
+    const membrane = new Membrane(adapter, { formatter: new NativeFormatter() });
+    for (const marked of [false, true]) {
+      await membrane.complete({ contextPrefix: 'synthetic prefix',
+        messages: [{ participant: 'User', cacheBreakpoint: marked, content: [{ type: 'text', text: 'caller' }] }],
+        config: { model: 'gpt-5.6', maxTokens: 100 }, responsesPromptCache: { enabled: true } });
+      const body = JSON.parse(String(fetchMock.mock.calls.at(-1)![1].body));
+      expect(body.input.map((item: any) => item.prompt_cache_breakpoint)).toEqual(body.input.map((_: unknown, i: number) => marked && i === body.input.length - 1 ? explicit : undefined));
+    }
+  });
+
+  it(`${mode} invalid tool errors contain no private cache carrier`, async () => {
+    const { adapter, fetchMock } = setup(mode);
+    const membrane = new Membrane(adapter, { formatter: new OpenAIResponsesFormatter(),
+      hooks: { beforeRequest: (_, r) => ({ ...r, tools: [{ type: 'function', name: 'read', strict: 'true' }] }) } });
+    let error: any;
+    try {
+      await membrane.complete({ messages: [{ participant: 'User', cacheBreakpoint: true,
+        content: [{ type: 'text', text: 'stable' }] }], config: { model: 'gpt-5.6', maxTokens: 100 },
+      responsesPromptCache: { enabled: true } });
+    } catch (caught) { error = caught; }
+    expect(error).toMatchObject({ type: 'invalid_request', rawRequest: { input: [
+      expect.objectContaining({ prompt_cache_breakpoint: explicit }),
+    ] } });
+    expect(JSON.stringify(error.rawRequest)).not.toContain('__membrane');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+}
+
+for (const content of [[], [{ type: 'text' as const, text: '' }], [{ type: 'system_change' as const, addSystem: [''] }]]) {
+  it(`NativeFormatter reports an empty marked expansion: ${JSON.stringify(content)}`, () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    new NativeFormatter().buildMessages([{ participant: 'User', cacheBreakpoint: true, content }], {
+      assistantParticipant: 'Claude', participantMode: 'multiuser', responsesPromptCaching: true,
+    });
+    expect(warn).toHaveBeenCalledExactlyOnceWith('[membrane:responses-prompt-cache] skipped marks: 1');
+  });
+}
+
+for (const tail of [false, true]) {
+  it(`Anthropic ignores the Responses option entirely (same-role tail ${tail})`, async () => {
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify({
+      id: 'm', type: 'message', role: 'assistant', model: 'claude-test',
+      content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 },
+    }), { headers: { 'Content-Type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const membrane = new Membrane(new AnthropicAdapter({ apiKey: 'test', cacheKeepalive: { enabled: false } }), {
+      formatter: new NativeFormatter(),
+    });
+    const request = { messages: [
+      { participant: 'User', cacheBreakpoint: true, content: [{ type: 'text' as const, text: 'stable' }] },
+      ...(tail ? [{ participant: 'User', content: [{ type: 'text' as const, text: 'volatile' }] }] : []),
+    ], config: { model: 'claude-test', maxTokens: 100 } };
+    await membrane.complete(request);
+    const off = fetchMock.mock.calls.at(-1)![1].body;
+    await membrane.complete({ ...request, responsesPromptCache: { enabled: true, ttl: 'invalid' } });
+    const on = fetchMock.mock.calls.at(-1)![1].body;
+    expect(on).toBe(off);
+    expect(String(on)).not.toContain('__membrane');
+  });
+}
+
+it('NativeFormatter boundary refusal gives usable advice for a displaced system change', () => {
+  const formatter = new NativeFormatter();
+  const messages = [
+    { participant: 'User', cacheBreakpoint: true, content: [{ type: 'system_change' as const, addSystem: ['policy'] }] },
+    { participant: 'User', content: [{ type: 'text' as const, text: 'later' }] },
+  ];
+  const options = { assistantParticipant: 'Claude', participantMode: 'multiuser' as const };
+  expect(() => formatter.buildMessages(messages, { ...options, responsesPromptCaching: true }))
+    .toThrow('Move the mark to a preserved message boundary or disable responsesPromptCache');
+  // Unlike switching to Responses (which cannot render system_change), this remedy works.
+  expect(() => formatter.buildMessages(messages, { ...options, responsesPromptCaching: false })).not.toThrow();
+});
