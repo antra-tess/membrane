@@ -290,6 +290,9 @@ export interface ProviderRequest {
    */
   thinking?: { type?: string; [key: string]: unknown };
 
+  /** OpenAI Responses explicit cache writes/TTL; see NormalizedRequest.responsesPromptCache. */
+  responsesPromptCache?: import('./request.js').NormalizedRequest['responsesPromptCache'];
+
   /** Additional provider-specific params */
   extra?: Record<string, unknown>;
 }

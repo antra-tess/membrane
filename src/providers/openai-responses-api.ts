@@ -1,3 +1,4 @@
+import { applyResponsesPromptCache, responsesPromptCacheOptions, withoutResponsesCacheCarrier } from './responses-prompt-cache.js';
 import { unreportedUsage } from '../utils/usage.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { nativeInputForRequest, normalizeResponsesInput } from './responses-input.js';
@@ -412,12 +413,14 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
   private subscriptionInput(
     messages: ProviderRequest['messages'],
     onContentAltered?: (block?: unknown) => void,
+    trackCacheBreakpoints = false,
   ): ReturnType<typeof normalizeResponsesInput> {
     const converted = convertMcpMedia(messages as unknown[]) as ProviderRequest['messages'];
     const handedIn = blockHandedIn(messages as unknown[], converted as unknown[]);
     return normalizeResponsesInput(
       converted,
       onContentAltered && ((block?: unknown) => onContentAltered(handedIn(block))),
+      trackCacheBreakpoints,
     );
   }
 
@@ -426,6 +429,8 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
       throw new Error('OpenAI Responses API input must be a provider-native input-item array');
     }
 
+    const explicitCache = request.responsesPromptCache?.enabled === true;
+    const cacheOptions = explicitCache ? responsesPromptCacheOptions(request.responsesPromptCache?.ttl) : undefined;
     const responsesRequest: OpenAIResponsesAPIRequest = {
       model: request.model,
       input: request.messages as OpenAIResponsesInputItem[],
@@ -468,8 +473,8 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
     // An input_image whose data: URL holds no image would be refused on every
     // request, so it goes as the placeholder in either mode.
     responsesRequest.input = this.subscription
-      ? this.subscriptionInput(request.messages, onContentAltered)
-      : nativeInputForRequest(request.messages, onContentAltered);
+      ? this.subscriptionInput(request.messages, onContentAltered, explicitCache)
+      : nativeInputForRequest(request.messages, onContentAltered, explicitCache);
     responsesRequest.store = false;
     responsesRequest.include = this.mergeEncryptedReasoningInclude(responsesRequest.include);
     if (this.subscription) {
@@ -479,14 +484,24 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
       if (this.fastMode) responsesRequest.service_tier = 'priority';
       else delete responsesRequest.service_tier;
       if (typeof responsesRequest.prompt_cache_key !== 'string' || !responsesRequest.prompt_cache_key) {
+        const inputHead = responsesRequest.input[0] ?? null;
+        const routingHead = withoutResponsesCacheCarrier(inputHead);
         const head = createHash('sha256')
           .update(this.sessionId)
-          .update(JSON.stringify([responsesRequest.instructions ?? '', responsesRequest.input[0] ?? null]))
+          .update(JSON.stringify([responsesRequest.instructions ?? '', routingHead]))
           .digest('hex')
           .slice(0, 12);
         responsesRequest.prompt_cache_key = `${this.sessionId}:${head}`;
       }
     }
+    // Routing uses the same serialized head as before, without the opt-in wire
+    // annotations or metadata cleanup influencing prompt_cache_key/session_id.
+    if (explicitCache) {
+      applyResponsesPromptCache(responsesRequest, cacheOptions);
+    }
+    // A hook may disable caching after formatting has already added carriers.
+    // Private provenance must never reach the wire, regardless of the option.
+    responsesRequest.input = responsesRequest.input.map(withoutResponsesCacheCarrier);
     return responsesRequest;
   }
 

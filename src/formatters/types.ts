@@ -68,6 +68,10 @@ export interface BuildOptions {
   /** Enable prompt caching (Anthropic-specific) */
   promptCaching?: boolean;
 
+  /** Preserve caller cache-breakpoint provenance for the Responses adapter. */
+  responsesPromptCaching?: boolean;
+
+
   /** See NormalizedRequest.cacheMarkers. */
   cacheMarkers?: 'membrane-system' | 'cm-owned';
 

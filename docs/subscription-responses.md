@@ -55,6 +55,9 @@ guard. Decorators must forward `requiresNativeResponsesInput` and
 terminal-event validation, nested SSE error classification, and multiline SSE
 parsing. Nonempty terminal output takes precedence over accumulated stream items.
 
+Both modes support opt-in [explicit prompt-cache writes and TTL](responses-prompt-caching.md)
+via `request.responsesPromptCache`, without changing cache-key/session routing.
+
 Both modes declare cache-inclusive provider usage. Direct adapter callers see
 OpenAI's inclusive `inputTokens`; Membrane converts that to disjoint fresh and
 cached buckets exactly once. Applications migrating from CH's old direct adapter
