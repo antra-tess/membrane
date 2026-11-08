@@ -221,7 +221,7 @@ function statedWait(retryAfterMs: unknown): number {
 export class CacheKeepalive {
   private lineages = new Map<string, Lineage>();
   private holds = new Map<string, number>();
-  private refusals = new Map<string, { run: number; heldUntil: number }>();
+  private runs = new Map<string, number>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false;
   private consecutiveErrors = 0;
@@ -229,9 +229,9 @@ export class CacheKeepalive {
   private readonly cfg: Required<Omit<CacheKeepaliveConfig, 'onEvent' | 'onCall'>> &
     Pick<CacheKeepaliveConfig, 'onEvent' | 'onCall'>;
 
-  /** `classify` reads a failed poke's error as the adapter classifies it. Without it, a
-   *  failed poke holds nothing and counts toward `maxConsecutiveErrors`. An option given
-   *  as `undefined` takes its default, as one left out does. */
+  /** `classify` reads a failed poke's error as the adapter classifies it. Without it, or
+   *  when it throws, a failed poke holds nothing and counts toward `maxConsecutiveErrors`.
+   *  An option given as `undefined` takes its default, as one left out does. */
   constructor(
     private readonly send: KeepaliveSend,
     config: CacheKeepaliveConfig = {},
@@ -344,7 +344,7 @@ export class CacheKeepalive {
         request: payload, outcome: 'success', response: { ...res },
       });
       this.consecutiveErrors = 0;
-      this.refusals.delete(String(lin.wire.model ?? ''));
+      this.runs.delete(String(lin.wire.model ?? ''));
 
       const read = res.usage?.cache_read_input_tokens ?? 0;
       const wrote = res.usage?.cache_creation_input_tokens ?? 0;
@@ -378,15 +378,14 @@ export class CacheKeepalive {
         });
       }
       const model = String(lin.wire.model ?? '');
-      const classified = this.classify?.(err);
+      const classified = this.classified(err);
       const paced = classified?.retryable === true;
       if (paced) {
-        const refusedAt = Date.now();
-        const previous = this.refusals.get(model);
-        const run = previous && refusedAt <= previous.heldUntil + 2 * this.cfg.checkIntervalMs ? previous.run + 1 : 1;
+        const previous = this.runs.get(model);
+        const run = previous !== undefined && Date.now() <= (this.holds.get(model) ?? 0) + 2 * this.cfg.checkIntervalMs ? previous + 1 : 1;
         const backoffMs = Math.min(this.cfg.refreshAfterMs, this.cfg.checkIntervalMs * 2 ** (run - 1));
         this.holdModel(model, Math.max(statedWait(classified.retryAfterMs), backoffMs), message);
-        this.refusals.set(model, { run, heldUntil: this.holds.get(model) ?? refusedAt });
+        this.runs.set(model, run);
       } else {
         this.holdModel(model, classified?.retryAfterMs, message);
         this.consecutiveErrors += 1;
@@ -401,6 +400,14 @@ export class CacheKeepalive {
           reason: `${this.consecutiveErrors} consecutive keepalive failures; last: ${message}`,
         });
       }
+    }
+  }
+
+  private classified(error: unknown): KeepaliveFailureClassification | undefined {
+    try {
+      return this.classify?.(error);
+    } catch {
+      return undefined;
     }
   }
 

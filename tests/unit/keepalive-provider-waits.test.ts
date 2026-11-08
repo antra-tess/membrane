@@ -102,6 +102,27 @@ describe('the keepalive and a provider\'s stated wait', () => {
     expect(holds().map((h) => h.until)).toEqual([1_100, 2_200]);
   });
 
+  it('a hold from a foreground wait carries the run on, so the next refusal doubles the backoff', async () => {
+    const { ka, pokes, holds } = setup(() => new Refusal(true));
+    ka.record(wire('model-a', 'one'), undefined, 'stream');
+    await vi.advanceTimersByTimeAsync(1_050);
+    ka.holdModel('model-a', 4_950, 'foreground');
+    await vi.advanceTimersByTimeAsync(4_950);
+    expect(pokes.map((p) => p.at)).toEqual([1_000, 6_000]);
+    expect(holds().map((h) => h.until)).toEqual([1_100, 6_000, 6_200]);
+  });
+
+  it('a classifier that throws leaves the failure counted, as with none', async () => {
+    const events: KeepaliveEvent[] = [];
+    const ka = new CacheKeepalive(async () => { throw new Refusal(true); }, { ...timing, onEvent: (e) => { events.push(e); } }, () => {
+      throw new Error('classifier broke');
+    });
+    keepalives.push(ka);
+    ka.record(wire('model-a', 'one'), undefined, 'stream');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(events).toEqual([{ type: 'error', key: expect.any(String), error: 'overloaded', consecutive: 1 }]);
+  });
+
   it('a retryable refusal neither counts toward maxConsecutiveErrors nor resets the count, and other failures still stop the keepalive', async () => {
     let n = 0;
     const { ka, pokes, events } = setup(() => (++n === 2 ? new Refusal(true) : new Refusal(false)));
@@ -136,7 +157,7 @@ describe('the keepalive and a provider\'s stated wait', () => {
   it('an option given as undefined takes its default', async () => {
     const send = vi.fn(async () => accepted);
     const ka = new CacheKeepalive(send, {
-      enabled: undefined, refreshAfterMs: undefined, checkIntervalMs: undefined, maxIdleMs: undefined,
+      enabled: undefined, refreshAfterMs: undefined, checkIntervalMs: undefined,
     });
     keepalives.push(ka);
     ka.record(wire('model-a', 'one'), undefined, 'stream');

@@ -13,7 +13,8 @@
     such refusal in a run, from `checkIntervalMs` up to `refreshAfterMs`, and
     its lineage keeps its age, so it's poked again once the hold passes. An
     accepted poke ends the run, and so does a refusal that comes more than
-    two check intervals after the end of the run's last hold. Before, three
+    two check intervals after the end of the model's last hold, whatever
+    set it. Before, three
     refused pokes in a row, such as one overload with three lineages due,
     stopped the keepalive for the adapter's life. A failure that isn't
     retryable still counts, and a wait it states still holds the model.
