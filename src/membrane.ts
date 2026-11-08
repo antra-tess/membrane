@@ -1898,6 +1898,10 @@ export class Membrane {
       thinking: request.config.thinking,
       systemPrompt: request.system,
       promptCaching: request.promptCaching ?? this.config.defaultPromptCaching ?? true,
+      responsesPromptCaching: this.adapter.name === 'openai-responses-api'
+        // Older decorators forward the native-input capability, not the cache flag.
+        && (this.adapter.supportsResponsesPromptCaching ?? this.adapter.requiresNativeResponsesInput) === true
+        && request.responsesPromptCache?.enabled === true,
       cacheMarkers: request.cacheMarkers ?? 'membrane-system',
       cacheTtl: request.cacheTtl,
       additionalStopSequences,
@@ -1921,6 +1925,8 @@ export class Membrane {
 
     const providerRequest = {
       ...this.getBaseProviderParams(request.config),
+      ...(this.adapter.name === 'openai-responses-api' && request.responsesPromptCache !== undefined
+        ? { responsesPromptCache: request.responsesPromptCache } : {}),
       messages: buildResult.messages,
       system: ownSystemBlocks(buildResult.systemContent),
       stopSequences: buildResult.stopSequences,

@@ -1,3 +1,4 @@
+import { applyResponsesPromptCache, responsesPromptCacheOptions, withoutResponsesCacheCarrier } from './responses-prompt-cache.js';
 import { unreportedUsage } from '../utils/usage.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { nativeInputForRequest, normalizeResponsesInput } from './responses-input.js';
@@ -106,7 +107,8 @@ export interface OpenAIResponsesAPIAdapterConfig {
   /** Resolve a bearer token and associated headers for each request/401 retry.
    * Overrides apiKey; acquiring and persisting credentials belongs to the caller. */
   credentials?: CredentialResolver;
-  /** ChatGPT subscription transport requires credentials and always uses SSE. */
+  /** ChatGPT subscription transport requires credentials and always uses SSE.
+   * Also disables explicit prompt-cache fields, including through custom baseURLs. */
   mode?: 'api' | 'subscription';
   /** Request priority service in subscription mode (default: false). */
   fastMode?: boolean;
@@ -190,6 +192,8 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
   private readonly credentials?: CredentialResolver;
   private readonly subscription: boolean;
   readonly requiresNativeResponsesInput: boolean;
+  readonly supportsResponsesPromptCaching: boolean;
+  private warnedSubscriptionPromptCache = false;
   private fastMode: boolean;
   private readonly onFastModeFallback?: (serviceTier: string) => void;
   private warnedFastFallback = false;
@@ -203,6 +207,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
   constructor(config: OpenAIResponsesAPIAdapterConfig = {}) {
     this.subscription = config.mode === 'subscription';
     this.requiresNativeResponsesInput = !this.subscription;
+    this.supportsResponsesPromptCaching = !this.subscription;
     this.credentials = config.credentials;
     if (this.subscription && !this.credentials) {
       throw new Error('Subscription mode requires a credential resolver');
@@ -412,12 +417,14 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
   private subscriptionInput(
     messages: ProviderRequest['messages'],
     onContentAltered?: (block?: unknown) => void,
+    trackCacheBreakpoints = false,
   ): ReturnType<typeof normalizeResponsesInput> {
     const converted = convertMcpMedia(messages as unknown[]) as ProviderRequest['messages'];
     const handedIn = blockHandedIn(messages as unknown[], converted as unknown[]);
     return normalizeResponsesInput(
       converted,
       onContentAltered && ((block?: unknown) => onContentAltered(handedIn(block))),
+      trackCacheBreakpoints,
     );
   }
 
@@ -426,6 +433,16 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
       throw new Error('OpenAI Responses API input must be a provider-native input-item array');
     }
 
+    const cacheRequested = request.responsesPromptCache?.enabled === true;
+    // Mode owns both URL defaults and input normalization; a proxy URL cannot
+    // tell us which backend it serves. Never infer support from baseURL.
+    const explicitCache = cacheRequested && !this.subscription;
+    if (cacheRequested && this.subscription && !this.warnedSubscriptionPromptCache) {
+      this.warnedSubscriptionPromptCache = true;
+      // Warn, don't throw: this optional optimization must not break inference.
+      console.warn('[membrane:responses-prompt-cache] ignored subscription options: 1');
+    }
+    const cacheOptions = explicitCache ? responsesPromptCacheOptions(request.responsesPromptCache?.ttl) : undefined;
     const responsesRequest: OpenAIResponsesAPIRequest = {
       model: request.model,
       input: request.messages as OpenAIResponsesInputItem[],
@@ -461,32 +478,56 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
       responsesRequest.include = this.mergeEncryptedReasoningInclude(include);
     }
 
-    if (Array.isArray(responsesRequest.tools)) {
-      responsesRequest.tools = this.convertTools(responsesRequest.tools, responsesRequest);
-    }
-
     // An input_image whose data: URL holds no image would be refused on every
     // request, so it goes as the placeholder in either mode.
     responsesRequest.input = this.subscription
-      ? this.subscriptionInput(request.messages, onContentAltered)
-      : nativeInputForRequest(request.messages, onContentAltered);
+      ? this.subscriptionInput(request.messages, onContentAltered, explicitCache)
+      : nativeInputForRequest(request.messages, onContentAltered, explicitCache);
     responsesRequest.store = false;
     responsesRequest.include = this.mergeEncryptedReasoningInclude(responsesRequest.include);
     if (this.subscription) {
+      // Also block raw passthrough fields: this backend rejects all three.
+      // Apply regardless of the option so on/off bytes and routing agree.
+      for (const key of ['prompt_cache_options', 'prompt_cache_breakpoint', 'prompt_cache_retention']) {
+        delete responsesRequest[key];
+      }
+      responsesRequest.input = responsesRequest.input.map(item => {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+        const { prompt_cache_options, prompt_cache_breakpoint, prompt_cache_retention, ...clean } = item;
+        void prompt_cache_options;
+        void prompt_cache_breakpoint;
+        void prompt_cache_retention;
+        return clean;
+      });
       for (const key of ['temperature', 'top_p', 'top_k', 'max_output_tokens', 'max_tokens', 'max_completion_tokens']) {
         delete responsesRequest[key];
       }
       if (this.fastMode) responsesRequest.service_tier = 'priority';
       else delete responsesRequest.service_tier;
       if (typeof responsesRequest.prompt_cache_key !== 'string' || !responsesRequest.prompt_cache_key) {
+        const inputHead = responsesRequest.input[0] ?? null;
+        const routingHead = withoutResponsesCacheCarrier(inputHead);
         const head = createHash('sha256')
           .update(this.sessionId)
-          .update(JSON.stringify([responsesRequest.instructions ?? '', responsesRequest.input[0] ?? null]))
+          .update(JSON.stringify([responsesRequest.instructions ?? '', routingHead]))
           .digest('hex')
           .slice(0, 12);
         responsesRequest.prompt_cache_key = `${this.sessionId}:${head}`;
       }
     }
+    // Routing uses the same serialized head as before, without the opt-in wire
+    // annotations or metadata cleanup influencing prompt_cache_key/session_id.
+    if (explicitCache) {
+      applyResponsesPromptCache(responsesRequest, cacheOptions);
+    }
+    // A hook may disable caching after formatting has already added carriers.
+    // Private provenance must never reach the wire, regardless of the option.
+    responsesRequest.input = responsesRequest.input.map(withoutResponsesCacheCarrier);
+    // Validation errors expose rawRequest too, so validate only after cleanup.
+    if (Array.isArray(responsesRequest.tools)) {
+      responsesRequest.tools = this.convertTools(responsesRequest.tools, responsesRequest);
+    }
+
     return responsesRequest;
   }
 

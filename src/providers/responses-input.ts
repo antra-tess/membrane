@@ -1,3 +1,4 @@
+import { rememberResponsesCacheMark, withoutResponsesCacheCarrier } from './responses-prompt-cache.js';
 import type { ProviderRequest } from '../types/index.js';
 import { imageForRequest, urlImageForRequest } from '../utils/image-media.js';
 import { carriesAnthropicServerBlock } from '../utils/anthropic-server-blocks.js';
@@ -15,22 +16,26 @@ function isNormalizedPart(block: unknown): boolean {
 export function normalizeResponsesInput(
   messages: ProviderRequest['messages'],
   onDropped?: (block?: unknown) => void,
+  trackCacheBreakpoints = false,
 ): OpenAIResponsesInputItem[] {
   const output: unknown[] = [];
 
   for (const rawMessage of messages as unknown[]) {
+    const start = output.length;
     if (!isObject(rawMessage)) {
       output.push(rawMessage);
       continue;
     }
     if (rawMessage.type !== 'message' && rawMessage.role === undefined) {
       output.push(normalizeStandaloneItem(rawMessage, onDropped));
+      if (trackCacheBreakpoints) rememberResponsesCacheMark(rawMessage, output, start);
       continue;
     }
 
     if (Array.isArray(rawMessage.content) && !rawMessage.content.some(isNormalizedPart)) {
       const content = nativeParts(rawMessage.content, onDropped);
       output.push(content === rawMessage.content ? rawMessage : { ...rawMessage, content });
+      if (trackCacheBreakpoints) rememberResponsesCacheMark(rawMessage, output, start);
       continue;
     }
     const role = typeof rawMessage.role === 'string' ? rawMessage.role : 'user';
@@ -44,7 +49,7 @@ export function normalizeResponsesInput(
       if (parts.length === 0) return;
       output.push({
         type: 'message',
-        ...rawMessage,
+        ...(trackCacheBreakpoints ? withoutResponsesCacheCarrier(rawMessage) : rawMessage),
         role,
         content: parts,
       });
@@ -84,6 +89,7 @@ export function normalizeResponsesInput(
       }
     }
     flush();
+    if (trackCacheBreakpoints) rememberResponsesCacheMark(rawMessage, output, start);
   }
 
   return output as OpenAIResponsesInputItem[];
@@ -205,6 +211,7 @@ function nativePart(part: JsonObject): JsonObject {
 export function nativeInputForRequest(
   items: ProviderRequest['messages'],
   onAltered?: (block?: unknown) => void,
+  trackCacheBreakpoints = false,
 ): OpenAIResponsesInputItem[] {
   let changed = false;
   const out = (items as unknown[]).map((item) => {
@@ -217,6 +224,14 @@ export function nativeInputForRequest(
     changed = true;
     return { ...item, [key]: parts };
   });
+  if (trackCacheBreakpoints) {
+    items.forEach((source, index) => {
+      const single = [out[index]];
+      rememberResponsesCacheMark(source, single);
+      if (single[0] !== out[index]) changed = true;
+      out[index] = single[0];
+    });
+  }
   return (changed ? out : items) as OpenAIResponsesInputItem[];
 }
 

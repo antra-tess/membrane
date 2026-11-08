@@ -1,0 +1,9 @@
+{
+  "main": "74c345c2e3465e6cc2742a1e5af5621e93f81491",
+  "bodies": {
+    "api-complete": "{\"model\":\"gpt-5.6\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"cacheBreakpoint\":true,\"content\":[{\"type\":\"input_text\",\"text\":\"stable\",\"cache_control\":{\"type\":\"ephemeral\"}}]}],\"store\":false,\"include\":[\"reasoning.encrypted_content\"],\"max_output_tokens\":100}",
+    "api-stream": "{\"model\":\"gpt-5.6\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"cacheBreakpoint\":true,\"content\":[{\"type\":\"input_text\",\"text\":\"stable\",\"cache_control\":{\"type\":\"ephemeral\"}}]}],\"store\":false,\"include\":[\"reasoning.encrypted_content\"],\"max_output_tokens\":100,\"stream\":true}",
+    "subscription-complete": "{\"model\":\"gpt-5.6\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"cacheBreakpoint\":true,\"content\":[{\"type\":\"input_text\",\"text\":\"stable\",\"cache_control\":{\"type\":\"ephemeral\"}}]}],\"store\":false,\"include\":[\"reasoning.encrypted_content\"],\"prompt_cache_key\":\"stable:f413875631f4\",\"stream\":true}",
+    "subscription-stream": "{\"model\":\"gpt-5.6\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"cacheBreakpoint\":true,\"content\":[{\"type\":\"input_text\",\"text\":\"stable\",\"cache_control\":{\"type\":\"ephemeral\"}}]}],\"store\":false,\"include\":[\"reasoning.encrypted_content\"],\"prompt_cache_key\":\"stable:f413875631f4\",\"stream\":true}"
+  }
+}

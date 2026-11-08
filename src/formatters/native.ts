@@ -1,6 +1,7 @@
+import { hasResponsesCacheMark, rememberResponsesCacheMark } from '../providers/responses-prompt-cache.js';
 import { followNormalizedBlocks, isRawItemCarrier, ownBlocks, type FidelityNotes } from '../utils/fidelity.js';
 import { sanitizeToolName } from '../utils/tool-names.js';
-import { systemChangeRefusedError, unsupportedError } from '../types/errors.js';
+import { systemChangeRefusedError, unsupportedError, invalidRequestError } from '../types/errors.js';
 import { isSystemChangeContent } from '../types/content.js';
 import { hasNonEmptyText } from '../utils/empty-text.js';
 import { isUnsignedThinking } from '../utils/thinking-carriers.js';
@@ -201,6 +202,10 @@ export class NativeFormatter implements PrefillFormatter {
     const providerMessages: ProviderTurnMessage[] = [];
     const systemChanges: BuiltSystemChange[] = [];
     const origin = new WeakMap<object, number>();
+    // The Anthropic normalizer reflows/merges envelopes. This generic path
+    // cannot safely reconstruct a boundary inside the resulting envelope.
+    // Refuse such opt-in histories rather than caching volatile suffixes.
+    const responsesBoundaries = new Map<object, number>();
     let previousContent: Array<Record<string, unknown>> | undefined;
     const wireNames = new Map<string, string>();
     for (const tool of tools ?? []) wireNames.set(sanitizeToolName(tool.name), tool.name);
@@ -233,12 +238,19 @@ export class NativeFormatter implements PrefillFormatter {
           );
         }
         const content = this.convertSystemChanges(changes, wireNames, () => options.fidelity?.alter(i));
-        if (content.length === 0) continue;
+        if (content.length === 0) {
+          if (options.responsesPromptCaching) rememberResponsesCacheMark(message, []);
+          continue;
+        }
         ownBlocks(options.fidelity, content, i);
+        for (const block of content) origin.set(block, i);
         if (hasCacheMarker && hasCacheMarker(message, i) && cacheControl && previousContent) {
           markLastCacheable(previousContent, cacheControl);
         }
         if (message.cacheBreakpoint && cacheControl) markLastCacheable(content, cacheControl);
+        if (options.responsesPromptCaching && hasResponsesCacheMark(message)) {
+          responsesBoundaries.set(content[content.length - 1]!, i);
+        }
         systemChanges.push({ content, at: i });
         continue;
       }
@@ -271,6 +283,7 @@ export class NativeFormatter implements PrefillFormatter {
       }
 
       if (content.length === 0) {
+        if (options.responsesPromptCaching) rememberResponsesCacheMark(message, []);
         continue;
       }
       ownBlocks(options.fidelity, content, i);
@@ -280,6 +293,9 @@ export class NativeFormatter implements PrefillFormatter {
         markLastCacheable(previousContent, cacheControl);
       }
 
+      if (options.responsesPromptCaching && hasResponsesCacheMark(message)) {
+        responsesBoundaries.set(content[content.length - 1] as object, i);
+      }
       providerMessages.push({ role, content });
       previousContent = content as Array<Record<string, unknown>>;
 
@@ -294,7 +310,17 @@ export class NativeFormatter implements PrefillFormatter {
     const normalized = normalizeToolPairs(providerMessages, {
       pendingToolCallIds: options.pendingToolCallIds,
       onEvent: options.onNormalize,
-      ...followNormalizedBlocks(options.fidelity),
+      onBlockRewritten: (original, replacement) => {
+        followNormalizedBlocks(options.fidelity).onBlockRewritten?.(original, replacement);
+        if (!options.responsesPromptCaching) return;
+        const index = origin.get(original);
+        if (index !== undefined) origin.set(replacement, index);
+        const boundary = responsesBoundaries.get(original);
+        if (boundary !== undefined) {
+          responsesBoundaries.delete(original);
+          responsesBoundaries.set(replacement, boundary);
+        }
+      },
       leadingUserText: options.prefillUserMessage,
     });
 
@@ -303,6 +329,30 @@ export class NativeFormatter implements PrefillFormatter {
     const builtMessages: ProviderMessage[] = systemChanges.length > 0
       ? NativeFormatter.placeSystemChanges(mergedMessages, systemChanges, origin)
       : mergedMessages;
+
+    if (responsesBoundaries.size > 0) {
+      let latestOrigin = -1;
+      for (let i = 0; i < builtMessages.length; i++) {
+        const message = builtMessages[i]!;
+        if (!Array.isArray(message.content)) continue;
+        const content = message.content;
+        content.forEach((block, index) => {
+          latestOrigin = Math.max(latestOrigin, origin.get(block as object) ?? -1);
+          const boundary = responsesBoundaries.get(block as object);
+          if (boundary === undefined) return;
+          if (index !== content.length - 1 || latestOrigin > boundary) {
+            throw invalidRequestError('NativeFormatter cannot preserve this Responses cache boundary after normalization/merging. Move the mark to a preserved message boundary or disable responsesPromptCache. OpenAIResponsesFormatter can preserve boundaries in histories it supports.');
+          }
+          const single: unknown[] = [message];
+          rememberResponsesCacheMark({ cacheBreakpoint: true }, single);
+          builtMessages[i] = single[0] as ProviderMessage;
+          responsesBoundaries.delete(block as object);
+        });
+      }
+      if (responsesBoundaries.size > 0) {
+        throw invalidRequestError('NativeFormatter lost a Responses cache boundary during normalization. Move the mark to a preserved message boundary or disable responsesPromptCache. OpenAIResponsesFormatter can preserve boundaries in histories it supports.');
+      }
+    }
 
     // A message breakpoint caches a prefix from the front of the request, tools
     // and system included, so a system marker beside one only spends one of

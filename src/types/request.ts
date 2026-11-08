@@ -237,6 +237,30 @@ export interface NormalizedRequest {
   cacheTtl?: '5m' | '1h';
 
   /**
+   * Opt-in explicit prompt-cache writes for the OpenAI Responses API backend
+   * only; this API path has not been validated against the live API. Ignored
+   * (including TTL validation) on the ChatGPT subscription backend because it
+   * rejects these fields: unchanged request bytes, no carrier, one count-only
+   * stderr warning per adapter. Backend mode, not baseURL, decides support.
+   * Off by default, independent of Anthropic promptCaching,
+   * cacheMarkers and cacheTtl (existing Anthropic marker validation still applies).
+   * Only caller message.cacheBreakpoint flags count; block cache_control does not.
+   * Keeps the latest three eligible writes, reserving the implicit tail's fourth
+   * slot. Only message items receive writes; tool/reasoning tails fall back to the latest eligible
+   * item at or before the marked boundary. Skips without a target log a count
+   * on stderr. Set this before formatting, not in providerParams/extra or
+   * for the first time in beforeRequest. Has no effect on other adapters. Select
+   * OpenAIResponsesFormatter via new Membrane(adapter, { formatter }) or per
+   * call to preserve marked boundaries. The generic/default formatter path
+   * merges same-role messages; NativeFormatter refuses marked boundaries
+   * lost to merging/normalization when this option is enabled.
+   * ttl is optional: positive integer + s/m/h/d (e.g. "12h"); invalid values
+   * reject before sending when enabled. When disabled it is ignored. These
+   * operator-reported wire extensions have not been verified against a live API.
+   */
+  responsesPromptCache?: { enabled: boolean; ttl?: string };
+
+  /**
    * Float a trailing cache_control marker onto the newest message when the
    * native tool loop rebuilds the request between tool-execution rounds, so
    * the growing tool-round suffix caches incrementally: each round writes its

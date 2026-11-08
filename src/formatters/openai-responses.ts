@@ -1,3 +1,4 @@
+import { rememberResponsesCacheMark } from '../providers/responses-prompt-cache.js';
 import type {
   ContentBlock,
   NormalizedMessage,
@@ -101,11 +102,13 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
 
     for (let index = 0; index < messages.length; index++) {
       const message = messages[index]!;
+      const start = items.length;
       const onAltered = options.fidelity ? () => options.fidelity!.alter(index) : undefined;
       const nativeItems = message.metadata?.[OPENAI_RESPONSES_ITEMS_METADATA_KEY];
       if (Array.isArray(nativeItems)) {
         items.push(...nativeItems as NativeItem[]);
         hasImportedItems = true;
+        if (options.responsesPromptCaching) rememberResponsesCacheMark(message, items, start);
         continue;
       }
 
@@ -140,6 +143,7 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
         }
       }
       flushPending();
+      if (options.responsesPromptCaching) rememberResponsesCacheMark(message, items, start);
     }
 
     // `instructions` is a request field apart from the input items, so sending

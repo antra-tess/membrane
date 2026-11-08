@@ -51,9 +51,23 @@ images, tool calls/results, and encrypted reasoning blocks. API mode retains its
 existing verbatim native-input contract. Subscription mode honors per-request formatter overrides, retaining names in
 multi-participant maintenance calls. API mode keeps its native-input formatter
 guard. Decorators must forward `requiresNativeResponsesInput` and
-`usageCacheConvention` so these contracts survive wrapping. Both modes share output reconstruction,
+`usageCacheConvention` so these contracts survive wrapping. For formatter cache
+processing, `supportsResponsesPromptCaching` takes precedence; when absent,
+only `requiresNativeResponsesInput === true` enables it. Existing API-mode
+decorators forwarding that older capability retain explicit writes and TTL;
+subscription decorators forwarding `false` suppress cache processing without
+needing the new member. With neither declaration, formatter cache processing is
+disabled. Forward the new member when overriding the legacy capability.
+Both modes share output reconstruction,
 terminal-event validation, nested SSE error classification, and multiline SSE
 parsing. Nonempty terminal output takes precedence over accumulated stream items.
+
+Only API mode offers opt-in [explicit prompt-cache writes and TTL](responses-prompt-caching.md)
+via `request.responsesPromptCache`; that API path has not been validated against
+the live API. The option is ignored on the ChatGPT subscription backend because
+it rejects these fields: no fields or carriers, unchanged request bytes and
+cache-key/session routing, and one count-only stderr warning per adapter.
+The configured `mode`, not `baseURL`, controls this even through custom proxies.
 
 Both modes declare cache-inclusive provider usage. Direct adapter callers see
 OpenAI's inclusive `inputTokens`; Membrane converts that to disjoint fresh and
