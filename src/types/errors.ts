@@ -22,6 +22,25 @@ export function boundErrorText(text: string): string {
   return `${text.slice(0, headEnd)} …[${tailStart - headEnd} of ${text.length} characters omitted]… ${text.slice(tailStart)}`;
 }
 
+const REQUEST_ID_KEYS = ['requestID', 'request_id', '_request_id'] as const;
+
+function requestIdFields(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== 'object') return {};
+  const source = value as Record<string, unknown>;
+  const kept: Record<string, unknown> = {};
+  for (const key of REQUEST_ID_KEYS) {
+    if (typeof source[key] === 'string' && source[key] !== '') kept[key] = source[key];
+  }
+  const headers = source.headers;
+  let header: unknown;
+  if (headers !== null && typeof headers === 'object') {
+    const get = (headers as { get?: unknown }).get;
+    header = typeof get === 'function' ? get.call(headers, 'request-id') : (headers as Record<string, unknown>)['request-id'];
+  }
+  if (typeof header === 'string' && header !== '') kept.headers = { 'request-id': header };
+  return kept;
+}
+
 function boundRawError(value: unknown): unknown {
   if (value === undefined || value === null) return value;
   let json: string | undefined;
@@ -39,6 +58,7 @@ function boundRawError(value: unknown): unknown {
     ...(typeof value === 'string' ? { bytes: Buffer.byteLength(value, 'utf8') } : { jsonBytes: Buffer.byteLength(json, 'utf8') }),
     sha256: createHash('sha256').update(text).digest('hex'),
     head: text.slice(0, headEnd),
+    ...requestIdFields(value),
   };
 }
 
@@ -102,7 +122,9 @@ export interface ErrorInfo {
 
   /**
    * Raw error object, as serialized. Past 16 KiB of JSON (UTF-8) it's a
-   * summary in its place: `{ truncated: true, bytes | jsonBytes, sha256, head }`.
+   * summary in its place: `{ truncated: true, bytes | jsonBytes, sha256, head }`,
+   * with any `requestID`, `request_id`, `_request_id` and `headers['request-id']`
+   * the object held kept under the same keys.
    */
   rawError: unknown;
 

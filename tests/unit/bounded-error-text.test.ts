@@ -105,6 +105,22 @@ describe("a MembraneError's rawError", () => {
     });
   });
 
+  it("keeps the request id an SDK error held, under its own keys, and no other field of the original", () => {
+    const withHeaders = (headers: unknown) => Object.assign(new Error(`400 ${echo(40_000)}`), {
+      status: 400,
+      headers,
+      requestID: 'req_zz_sdk',
+      request_id: 'req_zz_snake',
+      _request_id: 'req_zz_private',
+      error: { type: 'error', error: { type: 'invalid_request_error', message: echo(40_000) } },
+    });
+    const ids = { requestID: 'req_zz_sdk', request_id: 'req_zz_snake', _request_id: 'req_zz_private', headers: { 'request-id': 'req_zz_header' } };
+    for (const headers of [new Headers({ 'request-id': 'req_zz_header' }), { 'request-id': 'req_zz_header' }]) {
+      const { rawError } = new MembraneError({ type: 'invalid_request', message: 'x', retryable: false, rawError: withHeaders(headers) });
+      expect(rawError).toEqual({ truncated: true, jsonBytes: expect.any(Number), sha256: expect.any(String), head: expect.any(String), ...ids });
+    }
+  });
+
   it('is kept as given within the bound', () => {
     const body = { error: { message: 'small' } };
     expect(new MembraneError({ type: 'server', message: 'x', retryable: true, rawError: body }).rawError).toBe(body);
