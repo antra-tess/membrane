@@ -168,6 +168,8 @@ describe('a wait stated in prose', () => {
       const request: ProviderRequest = { model: 'claude-sonnet-4-5', messages: [{ role: 'user', content: 'zz hello' }], maxTokens: 64 };
       const error = await adapter.stream(request, { onChunk: () => {} }).then(() => undefined, (e: unknown) => e);
       expect(error).toBeInstanceOf(MembraneError);
+      expect((error as MembraneError).providerErrorCode).toBe('rate_limit_error');
+      expect((error as MembraneError).httpStatus).toBe(429);
       expect((error as MembraneError).retryAfterMs).toBeUndefined();
     } finally {
       vi.unstubAllGlobals();
@@ -197,7 +199,7 @@ describe("the cache keepalive's own error text", () => {
     const error = events.find((event) => event.type === 'error') as { error: string } | undefined;
     const disabled = events.find((event) => event.type === 'disabled') as { reason: string } | undefined;
     expect(error?.error.length).toBeLessThanOrEqual(2_000);
-    expect(disabled?.reason.length).toBeLessThanOrEqual(2_100);
+    expect(disabled?.reason).toBe(`1 consecutive keepalive failures; last: ${error?.error}`);
     expect(calls[0]?.error).toBe(thrown);
     ka.stop();
   });
