@@ -102,6 +102,14 @@ describe('the keepalive and a provider\'s stated wait', () => {
     expect(holds().map((h) => h.until)).toEqual([1_100, 2_200]);
   });
 
+  it('a refusal that is slow to come back carries its run on, so the backoff still doubles', async () => {
+    const { ka, pokes, holds } = setup(() => new Promise((_resolve, reject) => { setTimeout(() => reject(new Refusal(true)), 250); }));
+    ka.record(wire('model-a', 'one'), undefined, 'stream');
+    await vi.advanceTimersByTimeAsync(2_900);
+    expect(pokes.map((p) => p.at)).toEqual([1_000, 1_400, 1_900, 2_600]);
+    expect(holds().map((h) => h.until)).toEqual([1_350, 1_850, 2_550, 3_650]);
+  });
+
   it('a hold from a foreground wait carries the run on, so the next refusal doubles the backoff', async () => {
     const { ka, pokes, holds } = setup(() => new Refusal(true));
     ka.record(wire('model-a', 'one'), undefined, 'stream');

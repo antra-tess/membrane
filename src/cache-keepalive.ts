@@ -386,7 +386,7 @@ export class CacheKeepalive {
       let paced = false;
       if (classified?.retryable === true) {
         const previous = this.runs.get(model);
-        const run = previous !== undefined && Date.now() <= (this.holds.get(model) ?? 0) + 2 * this.cfg.checkIntervalMs ? previous + 1 : 1;
+        const run = previous !== undefined && startedAt <= (this.holds.get(model) ?? 0) + 2 * this.cfg.checkIntervalMs ? previous + 1 : 1;
         const backoffMs = Math.min(this.cfg.refreshAfterMs, this.cfg.checkIntervalMs * 2 ** (run - 1));
         const holdMs = Math.max(statedWait(classified.retryAfterMs), backoffMs);
         paced = holdMs > 0;
