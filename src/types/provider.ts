@@ -169,6 +169,12 @@ export interface ProviderAdapter {
    * maintenance messages). Wrappers must forward this capability. */
   readonly requiresNativeResponsesInput?: boolean;
 
+  /** Whether Responses formatter cache processing is supported. False on the
+   * ChatGPT subscription backend. When absent, only requiresNativeResponsesInput
+   * === true enables it (legacy API decorators); otherwise it stays disabled.
+   * Wrappers should forward explicit overrides of that legacy capability. */
+  readonly supportsResponsesPromptCaching?: boolean;
+
   /** Whether Membrane sends an assistant turn's Anthropic server-tool blocks
    * (web search and the like) back through this adapter. Only AnthropicAdapter
    * declares it: a live check had the Anthropic API accept web search's two
@@ -290,7 +296,7 @@ export interface ProviderRequest {
    */
   thinking?: { type?: string; [key: string]: unknown };
 
-  /** OpenAI Responses explicit cache writes/TTL; see NormalizedRequest.responsesPromptCache. */
+  /** API-backend-only OpenAI Responses explicit cache writes/TTL; see NormalizedRequest.responsesPromptCache. */
   responsesPromptCache?: import('./request.js').NormalizedRequest['responsesPromptCache'];
 
   /** Additional provider-specific params */

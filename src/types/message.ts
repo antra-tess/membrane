@@ -35,7 +35,7 @@ export interface NormalizedMessage {
   metadata?: MessageMetadata;
 
   /**
-   * Cache breakpoint for Anthropic prompt caching, or OpenAI Responses when
+   * Cache breakpoint for Anthropic prompt caching, or the OpenAI Responses API backend when
    * request.responsesPromptCache.enabled is true (see that option for limits).
    * On Anthropic, content up to and including this message has cache_control applied.
    * Multiple messages can have cacheBreakpoint for multiple cache points.

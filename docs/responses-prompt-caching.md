@@ -1,6 +1,37 @@
 # Responses explicit prompt caching
 
-OpenAI Responses API and Codex subscription callers can opt in per request.
+Only the OpenAI Responses **API backend** supports this opt-in request path;
+**it has not been validated against the live API**. The ChatGPT subscription
+(Codex) backend rejects these fields, so the option is ignored there.
+
+## Backend selection
+
+The adapter's `mode` (`'api'` by default, or `'subscription'`) decides support,
+just as it decides input normalization and the default endpoint. `baseURL`
+does not change the mode: a custom URL/proxy in API mode still writes the
+fields; a proxy in subscription mode never does. Configure the mode for the
+backend behind the proxy; its URL cannot reliably identify that backend.
+
+In subscription mode, enabled and disabled requests have identical wire bytes
+and cache-key/session routing. No explicit-cache carrier is added, TTL is not
+validated, and no explicit-cache field is sent. The adapter also strips raw
+`prompt_cache_options`, `prompt_cache_breakpoint`, and `prompt_cache_retention`
+passthrough fields in subscription mode, whether enabled or not. Once per
+adapter instance, enabling the ignored option emits only this count-only
+`console.warn` diagnostic on **stderr** (nothing on stdout):
+`[membrane:responses-prompt-cache] ignored subscription options: 1`.
+Warn rather than throw because an unsupported optional optimization must not
+break inference.
+
+Before formatting, Membrane uses `supportsResponsesPromptCaching` when declared;
+otherwise only `requiresNativeResponsesInput === true` enables cache processing.
+This preserves API-mode writes through existing decorators forwarding the older
+capability, while subscription decorators need not forward the new member to
+suppress marks, refusals and formatter warnings. With neither declaration,
+formatter marks are disabled; the adapter still owns TTL and wire-field handling.
+Decorators should forward the new member if it overrides the older capability.
+
+The behavior below applies to **API mode only**.
 Callers must select `OpenAIResponsesFormatter` to preserve marked message
 boundaries reliably, either when constructing Membrane or per call:
 
@@ -42,8 +73,7 @@ Anthropic. Responses writes and TTL are independent of Anthropic's
 validation still applies before the adapter (e.g. five imported block
 `cache_control` markers with `cacheMarkers: 'cm-owned'` are refused). Use
 `cacheBreakpoint` rather than importing Anthropic marks. Use
-`OpenAIResponsesFormatter` to retain normalized message boundaries in both
-transport modes.
+`OpenAIResponsesFormatter` to retain normalized message boundaries in API mode.
 
 Provenance travels on the items as reserved internal request-local data,
 not in an identity-keyed registry. `beforeRequest` hooks may copy messages
@@ -58,7 +88,7 @@ formatting, when original message boundaries may already be lost. A late
 enable can set TTL but cannot recover discarded normalized-message marks.
 Disabling an initially enabled option in the hook is supported.
 
-The subscription adapter also accepts generic messages. On the opt-in path,
+On the API opt-in path,
 `NativeFormatter` tracks marked message ends independently of Anthropic
 caching. Its Anthropic normalizer reflows tool histories and merges same-role
 messages: when that would put a marked end inside a merged envelope, move it
@@ -102,8 +132,13 @@ ignored when disabled; when omitted, no options field is generated. No server
 maximum is assumed offline. Anthropic's `cacheTtl: '5m' | '1h'` is not widened.
 When enabled this option owns the explicit-write budget and TTL field, replacing
 raw input breakpoint fields and `extra.prompt_cache_options`; when disabled,
-existing passthrough is untouched. `prompt_cache_key` and `session_id` routing
+existing API passthrough is untouched. `prompt_cache_key` and `session_id` routing
 still use the original serialized head, before adding these annotations.
 
-Verification uses mocked API and subscription HTTP requests. No cache-hit rate,
-server TTL limits, or acceptance on tool/reasoning items was tested live.
+Verification here uses mocked API and subscription HTTP requests only.
+The API path, cache-hit rate, server TTL limits, and tool/reasoning acceptance
+have **not** been validated against the live API. Separately, the operator's
+live subscription probe on `gpt-6-astra` and `gpt-6.1-sol` reported HTTP 400:
+`prompt_cache_options` and item `prompt_cache_breakpoint` were “not supported
+on this model”; `prompt_cache_retention` was an “Unsupported parameter”.
+No subscription support is inferred for other models.

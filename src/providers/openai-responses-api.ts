@@ -107,7 +107,8 @@ export interface OpenAIResponsesAPIAdapterConfig {
   /** Resolve a bearer token and associated headers for each request/401 retry.
    * Overrides apiKey; acquiring and persisting credentials belongs to the caller. */
   credentials?: CredentialResolver;
-  /** ChatGPT subscription transport requires credentials and always uses SSE. */
+  /** ChatGPT subscription transport requires credentials and always uses SSE.
+   * Also disables explicit prompt-cache fields, including through custom baseURLs. */
   mode?: 'api' | 'subscription';
   /** Request priority service in subscription mode (default: false). */
   fastMode?: boolean;
@@ -191,6 +192,8 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
   private readonly credentials?: CredentialResolver;
   private readonly subscription: boolean;
   readonly requiresNativeResponsesInput: boolean;
+  readonly supportsResponsesPromptCaching: boolean;
+  private warnedSubscriptionPromptCache = false;
   private fastMode: boolean;
   private readonly onFastModeFallback?: (serviceTier: string) => void;
   private warnedFastFallback = false;
@@ -204,6 +207,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
   constructor(config: OpenAIResponsesAPIAdapterConfig = {}) {
     this.subscription = config.mode === 'subscription';
     this.requiresNativeResponsesInput = !this.subscription;
+    this.supportsResponsesPromptCaching = !this.subscription;
     this.credentials = config.credentials;
     if (this.subscription && !this.credentials) {
       throw new Error('Subscription mode requires a credential resolver');
@@ -429,7 +433,15 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
       throw new Error('OpenAI Responses API input must be a provider-native input-item array');
     }
 
-    const explicitCache = request.responsesPromptCache?.enabled === true;
+    const cacheRequested = request.responsesPromptCache?.enabled === true;
+    // Mode owns both URL defaults and input normalization; a proxy URL cannot
+    // tell us which backend it serves. Never infer support from baseURL.
+    const explicitCache = cacheRequested && !this.subscription;
+    if (cacheRequested && this.subscription && !this.warnedSubscriptionPromptCache) {
+      this.warnedSubscriptionPromptCache = true;
+      // Warn, don't throw: this optional optimization must not break inference.
+      console.warn('[membrane:responses-prompt-cache] ignored subscription options: 1');
+    }
     const cacheOptions = explicitCache ? responsesPromptCacheOptions(request.responsesPromptCache?.ttl) : undefined;
     const responsesRequest: OpenAIResponsesAPIRequest = {
       model: request.model,
@@ -474,6 +486,19 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
     responsesRequest.store = false;
     responsesRequest.include = this.mergeEncryptedReasoningInclude(responsesRequest.include);
     if (this.subscription) {
+      // Also block raw passthrough fields: this backend rejects all three.
+      // Apply regardless of the option so on/off bytes and routing agree.
+      for (const key of ['prompt_cache_options', 'prompt_cache_breakpoint', 'prompt_cache_retention']) {
+        delete responsesRequest[key];
+      }
+      responsesRequest.input = responsesRequest.input.map(item => {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+        const { prompt_cache_options, prompt_cache_breakpoint, prompt_cache_retention, ...clean } = item;
+        void prompt_cache_options;
+        void prompt_cache_breakpoint;
+        void prompt_cache_retention;
+        return clean;
+      });
       for (const key of ['temperature', 'top_p', 'top_k', 'max_output_tokens', 'max_tokens', 'max_completion_tokens']) {
         delete responsesRequest[key];
       }

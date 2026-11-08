@@ -237,8 +237,12 @@ export interface NormalizedRequest {
   cacheTtl?: '5m' | '1h';
 
   /**
-   * Opt-in explicit prompt-cache writes for OpenAI Responses (API and Codex
-   * subscription). Off by default, independent of Anthropic promptCaching,
+   * Opt-in explicit prompt-cache writes for the OpenAI Responses API backend
+   * only; this API path has not been validated against the live API. Ignored
+   * (including TTL validation) on the ChatGPT subscription backend because it
+   * rejects these fields: unchanged request bytes, no carrier, one count-only
+   * stderr warning per adapter. Backend mode, not baseURL, decides support.
+   * Off by default, independent of Anthropic promptCaching,
    * cacheMarkers and cacheTtl (existing Anthropic marker validation still applies).
    * Only caller message.cacheBreakpoint flags count; block cache_control does not.
    * Keeps the latest three eligible writes, reserving the implicit tail's fourth
