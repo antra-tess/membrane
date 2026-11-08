@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CacheKeepalive, lineageKey, type CacheKeepaliveConfig, type KeepaliveCall } from '../../src/cache-keepalive.js';
+import { CacheKeepalive, lineageKey, type CacheKeepaliveConfig, type KeepaliveCall, type KeepaliveEvent } from '../../src/cache-keepalive.js';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 
 const START = Date.parse('2026-10-02T00:00:00Z');
@@ -212,8 +212,9 @@ describe('Anthropic adapter receipt integration', () => {
     expect(metadataToJSON).toHaveBeenCalledTimes(2);
   });
 
-  it('reports one terminal receipt for a poke with an SDK-internal HTTP retry', async () => {
+  it('a poke refused with a rate limit is one attempt, with one error receipt, and holds its model', async () => {
     const calls: KeepaliveCall[] = [];
+    const events: KeepaliveEvent[] = [];
     const requests: any[] = [];
     let httpCalls = 0;
     const terminal = {
@@ -236,6 +237,7 @@ describe('Anthropic adapter receipt integration', () => {
       cacheKeepalive: {
         lanes: ['complete'], refreshAfterMs: 100, checkIntervalMs: 100, maxIdleMs: 1000,
         onCall: call => { calls.push(call); },
+        onEvent: event => { events.push(event); },
       },
     });
     keepalives.push(adapter.cacheKeepalive!);
@@ -246,16 +248,15 @@ describe('Anthropic adapter receipt integration', () => {
     });
     expect(calls).toEqual([]);
     await vi.advanceTimersByTimeAsync(150);
-    expect(httpCalls).toBe(3);
+    expect(httpCalls).toBe(2);
     expect(calls).toHaveLength(1);
-    expect(calls[0]).toMatchObject({
-      outcome: 'success', lane: 'complete', response: terminal,
-      startedAt: START + 100, durationMs: 20,
-    });
+    expect(calls[0]).toMatchObject({ outcome: 'error', lane: 'complete', startedAt: START + 100 });
     const { stream: _stream, ...seed } = requests[0];
     expect(requests[1]).toEqual({ ...seed, max_tokens: 0 });
-    expect(requests[2]).toEqual(requests[1]);
-    expect(calls[0]!.request).toEqual(requests[2]);
+    expect(calls[0]!.request).toEqual(requests[1]);
     expect(calls[0]).not.toHaveProperty('headers');
+    expect(events.filter(e => e.type === 'held')).toEqual([
+      { type: 'held', model: 'claude-sonnet-4-5', until: START + 200, reason: expect.any(String) },
+    ]);
   });
 });

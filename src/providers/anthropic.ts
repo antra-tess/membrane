@@ -387,10 +387,13 @@ export class AnthropicAdapter implements ProviderAdapter {
       : new CacheKeepalive(
           // The already-built wire request goes as it is: a rebuild risks a byte diff,
           // which turns a cache read into a cache write.
+          // Left to retry a refused poke itself, the SDK waits about 0.5 s and then 1 s if the
+          // stated wait is missing or 60 s or more, and the stated wait when it's shorter.
           async (wire, headers) => this.createMessage(
-            wire as unknown as Anthropic.MessageCreateParamsNonStreaming, headers,
+            wire as unknown as Anthropic.MessageCreateParamsNonStreaming, headers, undefined, { maxRetries: 0 },
           ),
           config.cacheKeepalive ?? {},
+          (error) => this.handleError(error),
         );
   }
 
@@ -495,7 +498,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       // timeoutMs here) is a timeout, as on every adapter; the SDK's abort
       // error can't say so.
       if (isDeadlineAbort(callSignal?.reason)) throw deadlineTimeoutError(callSignal!.reason, fullRequest);
-      throw this.handleError(error, fullRequest);
+      throw this.holdKeepaliveFor(fullRequest.model, this.handleError(error, fullRequest));
     } finally {
       cleanup?.();
     }
@@ -922,7 +925,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       // progressBounds, or timeoutMs here) is a timeout with its own message,
       // whatever the SDK wrapped the abort in.
       if (isDeadlineAbort(callSignal?.reason)) throw deadlineTimeoutError(callSignal!.reason, fullRequest);
-      throw this.handleError(session?.failure() ?? error, fullRequest);
+      throw this.holdKeepaliveFor(fullRequest.model, this.handleError(session?.failure() ?? error, fullRequest));
     }
   }
 
@@ -1063,6 +1066,11 @@ export class AnthropicAdapter implements ProviderAdapter {
       rawRequest,
       raw: requestId ? { ...response, request_id: requestId } : response,
     };
+  }
+
+  private holdKeepaliveFor(model: string, error: MembraneError): MembraneError {
+    this.cacheKeepalive?.holdModel(model, error.retryAfterMs, error.message);
+    return error;
   }
 
   private handleError(error: unknown, rawRequest?: unknown): MembraneError {

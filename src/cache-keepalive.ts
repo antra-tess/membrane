@@ -67,7 +67,15 @@ export type KeepaliveEvent =
   | { type: 'skipped'; key: string; reason: string }
   | { type: 'error'; key: string; error: string; consecutive: number }
   | { type: 'disabled'; reason: string }
-  | { type: 'expired'; key: string; idleMs: number };
+  | { type: 'expired'; key: string; idleMs: number }
+  /** No lineage of `model` is poked before `until` (epoch ms), set when a hold begins or grows. */
+  | { type: 'held'; model: string; until: number; reason: string };
+
+/** A failed call as the adapter classifies it: the provider's stated wait, and whether the request may be sent again. */
+export interface KeepaliveFailureClassification {
+  retryAfterMs?: number;
+  retryable?: boolean;
+}
 
 export interface CacheKeepaliveConfig {
   /** Master switch. Default true. */
@@ -90,7 +98,10 @@ export interface CacheKeepaliveConfig {
   /** LRU cap on tracked lineages, to bound memory: each holds a full wire
    *  request. Default 4. */
   maxLineages?: number;
-  /** Consecutive send failures before the whole keepalive disables itself. Default 3. */
+  /** Consecutive failed pokes before the whole keepalive disables itself. A poke refused
+   *  as retryable doesn't count, and doesn't reset the count: it holds the poke's model
+   *  instead, for the later of its stated wait and a backoff that doubles with each such
+   *  refusal in a run, from `checkIntervalMs` up to `refreshAfterMs`. Default 3. */
   maxConsecutiveErrors?: number;
   /**
    * The number of pokes of a lineage in a row coming back without a cache read
@@ -203,8 +214,14 @@ export function lineageKey(wire: Record<string, unknown>): string {
   return h.digest('hex').slice(0, 16);
 }
 
+function statedWait(retryAfterMs: unknown): number {
+  return typeof retryAfterMs === 'number' && Number.isFinite(retryAfterMs) && retryAfterMs > 0 ? retryAfterMs : 0;
+}
+
 export class CacheKeepalive {
   private lineages = new Map<string, Lineage>();
+  private holds = new Map<string, number>();
+  private refusals = new Map<string, { run: number; heldUntil: number }>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false;
   private consecutiveErrors = 0;
@@ -212,9 +229,28 @@ export class CacheKeepalive {
   private readonly cfg: Required<Omit<CacheKeepaliveConfig, 'onEvent' | 'onCall'>> &
     Pick<CacheKeepaliveConfig, 'onEvent' | 'onCall'>;
 
-  constructor(private readonly send: KeepaliveSend, config: CacheKeepaliveConfig = {}) {
-    this.cfg = { ...DEFAULTS, ...config };
+  /** `classify` reads a failed poke's error as the adapter classifies it. Without it, a
+   *  failed poke holds nothing and counts toward `maxConsecutiveErrors`. An option given
+   *  as `undefined` takes its default, as one left out does. */
+  constructor(
+    private readonly send: KeepaliveSend,
+    config: CacheKeepaliveConfig = {},
+    private readonly classify?: (error: unknown) => KeepaliveFailureClassification | undefined,
+  ) {
+    const given = Object.fromEntries(Object.entries(config).filter(([, value]) => value !== undefined));
+    this.cfg = { ...DEFAULTS, ...given } as typeof this.cfg;
     if (!this.cfg.enabled) this.stopped = true;
+  }
+
+  /** Poke no lineage of `model` until `retryAfterMs` from now has passed. A later, shorter
+   *  wait never shortens a hold, and a wait that isn't a finite positive number holds nothing. */
+  holdModel(model: string, retryAfterMs: number | undefined, reason: string): void {
+    const wait = statedWait(retryAfterMs);
+    if (this.stopped || wait === 0) return;
+    const until = Date.now() + wait;
+    if ((this.holds.get(model) ?? 0) >= until) return;
+    this.holds.set(model, until);
+    this.emit({ type: 'held', model, until, reason });
   }
 
   /** Record a real request the provider is known to have begun answering, so
@@ -279,6 +315,7 @@ export class CacheKeepalive {
           continue;
         }
         if (now - lin.refreshBaselineAt < this.cfg.refreshAfterMs) continue;
+        if ((this.holds.get(String(lin.wire.model ?? '')) ?? 0) > now) continue;
         await this.refresh(key, lin);
       }
     } finally {
@@ -307,6 +344,7 @@ export class CacheKeepalive {
         request: payload, outcome: 'success', response: { ...res },
       });
       this.consecutiveErrors = 0;
+      this.refusals.delete(String(lin.wire.model ?? ''));
 
       const read = res.usage?.cache_read_input_tokens ?? 0;
       const wrote = res.usage?.cache_creation_input_tokens ?? 0;
@@ -339,12 +377,24 @@ export class CacheKeepalive {
           request: payload, outcome: 'error', error: err,
         });
       }
-      this.consecutiveErrors += 1;
+      const model = String(lin.wire.model ?? '');
+      const classified = this.classify?.(err);
+      const paced = classified?.retryable === true;
+      if (paced) {
+        const refusedAt = Date.now();
+        const previous = this.refusals.get(model);
+        const run = previous && refusedAt <= previous.heldUntil + 2 * this.cfg.checkIntervalMs ? previous.run + 1 : 1;
+        const backoffMs = Math.min(this.cfg.refreshAfterMs, this.cfg.checkIntervalMs * 2 ** (run - 1));
+        this.holdModel(model, Math.max(statedWait(classified.retryAfterMs), backoffMs), message);
+        this.refusals.set(model, { run, heldUntil: this.holds.get(model) ?? refusedAt });
+      } else {
+        this.holdModel(model, classified?.retryAfterMs, message);
+        this.consecutiveErrors += 1;
+        lin.refreshBaselineAt = Date.now();
+      }
       this.emit({ type: 'error', key, error: message, consecutive: this.consecutiveErrors });
 
-      lin.refreshBaselineAt = Date.now();
-
-      if (this.consecutiveErrors >= this.cfg.maxConsecutiveErrors) {
+      if (!paced && this.consecutiveErrors >= this.cfg.maxConsecutiveErrors) {
         this.stop();
         this.emit({
           type: 'disabled',
