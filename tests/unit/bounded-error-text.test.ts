@@ -53,7 +53,7 @@ describe("a MembraneError's message", () => {
     expect(isOverloadedError(error.toErrorInfo())).toBe(false);
   });
 
-  it("bounds a provider's body that echoes the request, and still classifies it by the whole body", () => {
+  it("bounds a provider's message that echoes the request", () => {
     const body = { error: { type: 'invalid_request_error', message: `Bad request; you sent ${echo(1_700_000)}` } };
     const error = errorFromProviderStatus({ provider: 'OpenAI', status: 400, body });
     expect(error.message.length).toBeLessThanOrEqual(2_000);
@@ -102,7 +102,8 @@ describe("a MembraneError's rawError", () => {
 
 describe('classifyError', () => {
   it("bounds the message it returns for a thrown value, and classifies by the whole text", () => {
-    const info = classifyError(new Error(`upstream said: ${'w'.repeat(10_000)} 429 too many requests`));
+    const info = classifyError(new Error(`${'w'.repeat(5_000)} 429 too many requests ${'w'.repeat(5_000)}`));
+    expect(info.message).not.toContain('429');
     expect(info.message.length).toBeLessThanOrEqual(2_000);
     expect(info.type).toBe('rate_limit');
   });
