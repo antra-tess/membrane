@@ -101,7 +101,9 @@ export interface CacheKeepaliveConfig {
   /** Consecutive failed pokes before the whole keepalive disables itself. A poke refused
    *  as retryable doesn't count, and doesn't reset the count: it holds the poke's model
    *  instead, for the later of its stated wait and a backoff of `checkIntervalMs` doubling
-   *  with each such refusal in a run, never more than `refreshAfterMs`. Default 3. */
+   *  with each such refusal in a run, never more than `refreshAfterMs`. One whose hold comes
+   *  to 0, as with no stated wait and a `checkIntervalMs` or `refreshAfterMs` of 0, counts
+   *  as any failure does. Default 3. */
   maxConsecutiveErrors?: number;
   /**
    * The number of pokes of a lineage in a row coming back without a cache read
@@ -381,14 +383,19 @@ export class CacheKeepalive {
       }
       const model = String(lin.wire.model ?? '');
       const classified = this.classified(err);
-      const paced = classified?.retryable === true;
-      if (paced) {
+      let paced = false;
+      if (classified?.retryable === true) {
         const previous = this.runs.get(model);
         const run = previous !== undefined && Date.now() <= (this.holds.get(model) ?? 0) + 2 * this.cfg.checkIntervalMs ? previous + 1 : 1;
         const backoffMs = Math.min(this.cfg.refreshAfterMs, this.cfg.checkIntervalMs * 2 ** (run - 1));
-        this.holdModel(model, Math.max(statedWait(classified.retryAfterMs), backoffMs), message);
-        this.runs.set(model, run);
-      } else {
+        const holdMs = Math.max(statedWait(classified.retryAfterMs), backoffMs);
+        paced = holdMs > 0;
+        if (paced) {
+          this.holdModel(model, holdMs, message);
+          this.runs.set(model, run);
+        }
+      }
+      if (!paced) {
         this.holdModel(model, classified?.retryAfterMs, message);
         this.consecutiveErrors += 1;
         lin.refreshBaselineAt = Date.now();

@@ -17,7 +17,9 @@
     whatever set it, and its next refusal or hold. Before, three refused pokes
     in a row, such as one overload with three lineages due, stopped the
     keepalive for the adapter's life. A failure that isn't retryable still
-    counts, and a wait it states still holds the model.
+    counts, and a wait it states still holds the model. A retryable refusal
+    whose hold comes to 0, as with no stated wait and a `checkIntervalMs` or
+    `refreshAfterMs` of 0, counts too.
   - The SDK no longer retries a refused poke itself. It sent the poke up to
     twice more within about 1.5 s when no wait was stated, and also when the
     stated wait was 60 s or more, which put those resends inside the wait.

@@ -145,6 +145,16 @@ describe('the keepalive and a provider\'s stated wait', () => {
     expect(events.filter((e) => e.type === 'disabled')).toHaveLength(1);
   });
 
+  it('a retryable refusal whose hold comes to 0 counts, so the keepalive still stops', async () => {
+    const { ka, pokes, events, holds } = setup(() => new Refusal(true), { refreshAfterMs: 0 });
+    ka.record(wire('model-a', 'one'), undefined, 'stream');
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(holds()).toEqual([]);
+    expect(pokes).toHaveLength(3);
+    expect(events.flatMap((e) => e.type === 'error' ? [e.consecutive] : [])).toEqual([1, 2, 3]);
+    expect(events.at(-1)?.type).toBe('disabled');
+  });
+
   it('a hold is announced when it begins or grows, and a later, shorter wait doesn\'t shorten it', async () => {
     const { ka, pokes, holds } = setup(() => accepted);
     ka.record(wire('model-a', 'one'), undefined, 'stream');
