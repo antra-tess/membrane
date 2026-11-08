@@ -10,7 +10,10 @@
 import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CacheKeepalive, type KeepaliveEvent } from '../../src/cache-keepalive.js';
+import { BedrockAdapter } from '../../src/providers/bedrock.js';
 import { MembraneError, classifyError, errorFromProviderStatus, isOverloadedError } from '../../src/types/errors.js';
+import type { ProviderRequest } from '../../src/types/provider.js';
+import { chunkFrame, streamBody } from '../helpers/bedrock-event-stream.js';
 
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 const echo = (chars: number) => JSON.stringify({ model: 'zz-model', messages: [{ role: 'user', content: 'z'.repeat(chars) }] });
@@ -33,12 +36,14 @@ describe("a MembraneError's message", () => {
     expect(new MembraneError({ type: 'server', message: text, retryable: true }).message).toBe(text);
   });
 
-  it('never holds half of a surrogate pair where it cuts', () => {
-    for (let shift = 0; shift < 4; shift++) {
-      const text = 'a'.repeat(shift) + '😀'.repeat(3_000);
-      const { message } = new MembraneError({ type: 'unknown', message: text, retryable: false });
-      expect(message.length).toBeLessThanOrEqual(2_000);
-      expect(message).not.toMatch(LONE_SURROGATE);
+  it('never holds half of a surrogate pair where it cuts, at the head or the tail', () => {
+    for (let before = 0; before < 2; before++) {
+      for (let after = 0; after < 2; after++) {
+        const text = 'a'.repeat(before) + '😀'.repeat(3_000) + 'b'.repeat(after);
+        const { message } = new MembraneError({ type: 'unknown', message: text, retryable: false });
+        expect(message.length).toBeLessThanOrEqual(2_000);
+        expect(message).not.toMatch(LONE_SURROGATE);
+      }
     }
   });
 
@@ -47,6 +52,18 @@ describe("a MembraneError's message", () => {
     for (let length = 2_001; length < 4_000 && !text; length++) {
       const bounded = new MembraneError({ type: 'server', message: 'v'.repeat(length), retryable: true }).message;
       if (/\[529 of /.test(bounded)) text = 'v'.repeat(length);
+    }
+    expect(text).not.toBe('');
+    const error = new MembraneError({ type: 'server', message: text, retryable: true });
+    expect(isOverloadedError(error.toErrorInfo())).toBe(false);
+  });
+
+  it('is no overload for the counts of any marker it holds, as when a bounded message is bounded again', () => {
+    const earlier = ' …[10 of 2010 characters omitted]… ';
+    let text = '';
+    for (let length = 2_001; length < 4_000 && !text; length++) {
+      const bounded = new MembraneError({ type: 'server', message: earlier + 'v'.repeat(length), retryable: true }).message;
+      if (bounded.includes(earlier) && /\[529 of /.test(bounded)) text = earlier + 'v'.repeat(length);
     }
     expect(text).not.toBe('');
     const error = new MembraneError({ type: 'server', message: text, retryable: true });
@@ -73,7 +90,7 @@ describe("a MembraneError's rawError", () => {
       sha256: createHash('sha256').update(json).digest('hex'),
       head: expect.any(String),
     });
-    expect(json.startsWith((error.rawError as { head: string }).head)).toBe(true);
+    expect((error.rawError as { head: string }).head).toBe(json.slice(0, 2_048));
     expect(JSON.stringify(error.rawError).length).toBeLessThan(16 * 1024);
   });
 
@@ -84,6 +101,7 @@ describe("a MembraneError's rawError", () => {
       truncated: true,
       bytes: Buffer.byteLength(raw, 'utf8'),
       sha256: createHash('sha256').update(raw).digest('hex'),
+      head: raw.slice(0, 2_048),
     });
   });
 
@@ -135,6 +153,25 @@ describe('a wait stated in prose', () => {
     const body = { error: { message: 'Rate limited.' }, request: { content: 'retry after 30 seconds.' } };
     const error = errorFromProviderStatus({ provider: 'Anthropic', status: 429, body, message: `429 ${JSON.stringify(body)}` });
     expect(error.retryAfterMs).toBeUndefined();
+  });
+
+  it("is read from the caller's message when the body is null, as when there's none", () => {
+    const error = errorFromProviderStatus({ provider: 'OpenAI', status: 429, body: null, message: 'Please retry after 80 seconds.' });
+    expect(error.retryAfterMs).toBe(80_000);
+  });
+
+  it("isn't read from membrane's rendering of a Bedrock stream error event that carries no message", async () => {
+    const event = { type: 'error', error: { type: 'rate_limit_error' }, request: { content: 'please retry after 80 seconds.' } };
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, body: streamBody([chunkFrame(event)]) })));
+    try {
+      const adapter = new BedrockAdapter({ accessKeyId: 'zz-key', secretAccessKey: 'zz-secret', region: 'us-east-1' });
+      const request: ProviderRequest = { model: 'claude-sonnet-4-5', messages: [{ role: 'user', content: 'zz hello' }], maxTokens: 64 };
+      const error = await adapter.stream(request, { onChunk: () => {} }).then(() => undefined, (e: unknown) => e);
+      expect(error).toBeInstanceOf(MembraneError);
+      expect((error as MembraneError).retryAfterMs).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

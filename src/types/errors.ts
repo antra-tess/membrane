@@ -10,10 +10,10 @@ const isLowSurrogate = (text: string, index: number): boolean => {
   return code >= 0xdc00 && code <= 0xdfff;
 };
 
-export function boundErrorText(text: string, max: number = MAX_ERROR_MESSAGE_CHARS): string {
-  if (text.length <= max) return text;
+export function boundErrorText(text: string): string {
+  if (text.length <= MAX_ERROR_MESSAGE_CHARS) return text;
   const markerLength = ` …[${text.length} of ${text.length} characters omitted]… `.length;
-  const budget = Math.max(0, max - markerLength);
+  const budget = MAX_ERROR_MESSAGE_CHARS - markerLength;
   const tailLength = Math.floor(budget / 4);
   let headEnd = budget - tailLength;
   if (headEnd > 0 && isLowSurrogate(text, headEnd)) headEnd -= 1;
@@ -100,7 +100,10 @@ export interface ErrorInfo {
   /** Provider-specific error code */
   providerErrorCode?: string;
 
-  /** Raw error object */
+  /**
+   * Raw error object, as serialized. Past 16 KiB of JSON (UTF-8) it's a
+   * summary in its place: `{ truncated: true, bytes | jsonBytes, sha256, head }`.
+   */
   rawError: unknown;
 
   /** Raw request that caused the error (for logging) */
@@ -116,6 +119,7 @@ export class MembraneError extends Error {
   readonly retryAfterMs?: number;
   readonly httpStatus?: number;
   readonly providerErrorCode?: string;
+  /** See {@link ErrorInfo.rawError}. */
   readonly rawError?: unknown;
   readonly rawRequest?: unknown;
   /**
@@ -714,7 +718,7 @@ export function errorFromProviderStatus(params: {
   // With a body, the caller's message is a rendering of it (the Anthropic
   // SDK's "400 {...}"), and a body with no message field can echo the
   // request, so only the body's message fields are read.
-  const ownText = fields.message ?? (params.body === undefined ? params.message : undefined);
+  const ownText = fields.message ?? (params.body == null ? params.message : undefined);
   const evidence = [ownText, fields.upstreamMessage].filter((text): text is string => !!text).join('\n');
 
   const classification =

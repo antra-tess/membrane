@@ -58,7 +58,7 @@ export type RetryDecision =
 /** A status-shaped 529, or Anthropic's overloaded error type, in a message. */
 const OVERLOADED_PATTERN = /\b529\b|overloaded_error/i;
 
-const OMISSION_MARKER = / …\[\d+ of \d+ characters omitted\]… /;
+const OMISSION_MARKER = / …\[\d+ of \d+ characters omitted\]… /g;
 
 /**
  * The Anthropic SDK's own client (0.52's `retryRequest`) waits out a stated
