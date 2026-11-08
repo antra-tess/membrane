@@ -106,6 +106,13 @@ describe('classifyError', () => {
     expect(info.message.length).toBeLessThanOrEqual(2_000);
     expect(info.type).toBe('rate_limit');
   });
+
+  it("returns a thrown error's echoed body as a summary in its rawError", () => {
+    const thrown = Object.assign(new Error('400 Bad request'), { status: 400, error: { echo: 'e'.repeat(40_000) } });
+    const info = classifyError(thrown);
+    expect(info.rawError).toMatchObject({ truncated: true, sha256: expect.stringMatching(/^[0-9a-f]{64}$/) });
+    expect(JSON.stringify(info.rawError).length).toBeLessThan(16 * 1024);
+  });
 });
 
 describe('a wait stated in prose', () => {

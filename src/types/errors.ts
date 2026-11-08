@@ -1029,7 +1029,7 @@ export function classifyError(error: unknown): ErrorInfo {
     return error.toErrorInfo();
   }
 
-  const serializedError = serializeError(error);
+  const serializedError = boundRawError(serializeError(error));
 
   if (error instanceof Error) {
     if (error.name === 'AbortError') {
