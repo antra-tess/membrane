@@ -5,4 +5,6 @@
   `KeepaliveEvent`, or a `Record` keyed by its `type`, which TypeScript now
   reports as missing a case or a key. **Migration:** add a case for
   `'held'`, or a default. **Unchanged:** `onEvent`'s signature, and every
-  other event's shape.
+  other event's shape. No release of agent-framework, context-manager or
+  connectome-host switches over `KeepaliveEvent`, so every release of each
+  copes.

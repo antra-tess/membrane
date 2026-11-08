@@ -112,6 +112,18 @@ describe('the keepalive and a provider\'s stated wait', () => {
     expect(holds().map((h) => h.until)).toEqual([1_100, 6_000, 6_200]);
   });
 
+  it('a hold set long after a run of refusals ended doesn\'t carry that run on', async () => {
+    const { ka, pokes, holds } = setup(() => new Refusal(true));
+    ka.record(wire('model-a', 'one'), undefined, 'stream');
+    await vi.advanceTimersByTimeAsync(1_050);
+    ka.record(wire('model-a', 'one'), undefined, 'stream');
+    await vi.advanceTimersByTimeAsync(950);
+    ka.holdModel('model-a', 1_000, 'foreground');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(pokes.map((p) => p.at)).toEqual([1_000, 3_000]);
+    expect(holds().map((h) => h.until)).toEqual([1_100, 3_000, 3_100]);
+  });
+
   it('a classifier that throws leaves the failure counted, as with none', async () => {
     const events: KeepaliveEvent[] = [];
     const ka = new CacheKeepalive(async () => { throw new Refusal(true); }, { ...timing, onEvent: (e) => { events.push(e); } }, () => {
@@ -155,16 +167,18 @@ describe('the keepalive and a provider\'s stated wait', () => {
   });
 
   it('an option given as undefined takes its default', async () => {
-    const send = vi.fn(async () => accepted);
+    const send = vi.fn(async () => { throw new Refusal(true); });
+    const events: KeepaliveEvent[] = [];
     const ka = new CacheKeepalive(send, {
-      enabled: undefined, refreshAfterMs: undefined, checkIntervalMs: undefined,
-    });
+      enabled: undefined, refreshAfterMs: undefined, checkIntervalMs: undefined, onEvent: (e) => { events.push(e); },
+    }, classify);
     keepalives.push(ka);
     ka.record(wire('model-a', 'one'), undefined, 'stream');
     await vi.advanceTimersByTimeAsync(45 * 60_000 - 1);
     expect(send).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     expect(send).toHaveBeenCalledTimes(1);
+    expect(events.flatMap((e) => e.type === 'held' ? [e.until - START] : [])).toEqual([50 * 60_000]);
   });
 });
 

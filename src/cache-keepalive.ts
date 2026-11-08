@@ -100,8 +100,8 @@ export interface CacheKeepaliveConfig {
   maxLineages?: number;
   /** Consecutive failed pokes before the whole keepalive disables itself. A poke refused
    *  as retryable doesn't count, and doesn't reset the count: it holds the poke's model
-   *  instead, for the later of its stated wait and a backoff that doubles with each such
-   *  refusal in a run, from `checkIntervalMs` up to `refreshAfterMs`. Default 3. */
+   *  instead, for the later of its stated wait and a backoff of `checkIntervalMs` doubling
+   *  with each such refusal in a run, never more than `refreshAfterMs`. Default 3. */
   maxConsecutiveErrors?: number;
   /**
    * The number of pokes of a lineage in a row coming back without a cache read
@@ -247,7 +247,9 @@ export class CacheKeepalive {
   holdModel(model: string, retryAfterMs: number | undefined, reason: string): void {
     const wait = statedWait(retryAfterMs);
     if (this.stopped || wait === 0) return;
-    const until = Date.now() + wait;
+    const now = Date.now();
+    if (now > (this.holds.get(model) ?? 0) + 2 * this.cfg.checkIntervalMs) this.runs.delete(model);
+    const until = now + wait;
     if ((this.holds.get(model) ?? 0) >= until) return;
     this.holds.set(model, until);
     this.emit({ type: 'held', model, until, reason });
