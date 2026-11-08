@@ -177,6 +177,14 @@ describe('a wait stated in prose', () => {
   });
 });
 
+describe('a null body', () => {
+  it("counts as none in classifying the error, so the caller's message is read", () => {
+    const message = 'prompt is too long: 250000 tokens > 200000 maximum';
+    expect(errorFromProviderStatus({ provider: 'Anthropic', status: 400, message }).type).toBe('context_length');
+    expect(errorFromProviderStatus({ provider: 'Anthropic', status: 400, body: null, message }).type).toBe('context_length');
+  });
+});
+
 describe("the cache keepalive's own error text", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
