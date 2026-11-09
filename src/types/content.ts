@@ -246,18 +246,24 @@ export interface RedactedThinkingContent {
  * A block carrying `effort` carries nothing else, and its message holds
  * nothing else. NativeFormatter sends it, through AnthropicAdapter, as a
  * `role: 'system'` message with empty content and `output_config: { effort }`,
- * under the beta `mid-conversation-output-config-2026-07-01`, and the API
- * applies the effort from the next user turn on. Unlike a change of tools or
- * system text, it goes exactly at its place: before the first turn holding a
- * block of a later message, or at the end. The API took one before a user
- * turn and between a tool call and its result. Its `cacheBreakpoint`, having
- * no block of its own to hold, goes on the last block before it.
+ * under the beta `mid-conversation-output-config-2026-07-01`. Placed directly
+ * after a user turn with new input, it sets the effort for the reply to that
+ * turn; anywhere else, it takes effect from the next user turn with new
+ * input, and a turn of only tool results isn't new input (Anthropic's effort
+ * documentation, "Change effort mid-conversation"). Unlike a change of tools
+ * or system text, it goes exactly at its place: before the first turn holding
+ * a block of a later message, or at the end after a user turn. At the end
+ * after an assistant turn it would end the request on that turn, which the
+ * API reads as a prefill, so the request is refused before sending. Its
+ * `cacheBreakpoint`, having no block of its own to hold, goes on the last
+ * block before it.
  *
  * Through any other formatter or adapter, Membrane refuses a request that
- * carries a change before sending. That refusal, the one for a change of tools
- * or system text with no point, and the API's own refusal on a model without
- * mid-conversation system messages or without per-turn effort, are
- * MembraneErrors with `systemChangeRefused: true`. Through NativeFormatter and
+ * carries a change before sending. That refusal, the two for a change with no
+ * place, and the API's own refusal on a model without mid-conversation system
+ * messages or without per-turn effort, or of an effort change under a thinking
+ * setting that fixes the effort, are MembraneErrors with
+ * `systemChangeRefused: true`. Through NativeFormatter and
  * AnthropicAdapter, a malformed change, mixed with other blocks, carrying
  * `effort` beside another change, or defining a tool whose wire name another
  * holds, is refused as unsupported, without the flag. Through anything else
@@ -275,7 +281,7 @@ export interface SystemChangeContent {
   defineTools?: ToolDefinition[];
   /** System text added from here on, one text block each; only whitespace is left out. */
   addSystem?: string[];
-  /** The effort (`output_config.effort`) from the next user turn on, in a block carrying nothing else. */
+  /** The effort (`output_config.effort`) from here on, as the API applies it (above), in a block carrying nothing else. */
   effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 }
 

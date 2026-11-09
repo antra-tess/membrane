@@ -80,7 +80,8 @@ export class MembraneError extends Error {
    * True when the request was refused for the system change it carried (a
    * `system_change` block, SystemChangeContent): by the API, on a model
    * without mid-conversation system messages, tool changes or per-turn effort,
-   * or by membrane before sending, when the formatter or adapter can't send one
+   * or, for an effort change, on a thinking setting that fixes the effort; or
+   * by membrane before sending, when the formatter or adapter can't send one
    * or no point in the conversation takes it. The same request with the change
    * applied to `tools` and `system` instead, or an effort change to the
    * request's top-level `output_config.effort`, would not meet this refusal.

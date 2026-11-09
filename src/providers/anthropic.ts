@@ -163,12 +163,14 @@ export function sendsToolChanges(params: { messages?: unknown }): boolean {
 }
 
 /** The API's wordings, in a 400, for a model that takes no mid-conversation
- *  system message, no tool change in one, or no per-turn effort. */
+ *  system message, no tool change in one, no per-turn effort, or no change of
+ *  effort under the request's thinking setting. */
 const SYSTEM_CHANGE_REFUSALS = [
   "role 'system' is not supported on this model",
   'tool_addition/tool_removal requires a model that supports mid-conversation system content',
   'tool_addition/tool_removal is not supported on this model',
   'output_config.effort requires a model that supports per-turn effort',
+  'effort cannot change when thinking is disabled on this model',
 ];
 
 export function isSystemChangeRefusal(body: unknown): boolean {

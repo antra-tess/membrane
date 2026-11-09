@@ -428,7 +428,8 @@ export class NativeFormatter implements PrefillFormatter {
    * end after a user turn, never after an assistant turn. It accepts
    * consecutive messages of one role. An effort-only one goes exactly at its
    * place: before the first message holding a block of a later message, or at
-   * the end.
+   * the end after a user turn. At the end after an assistant turn it would end
+   * the request on that turn, which the API reads as a prefill.
    */
   private static placeSystemChanges(
     messages: ProviderTurnMessage[],
@@ -483,8 +484,15 @@ export class NativeFormatter implements PrefillFormatter {
       placed.push(message);
     });
     const after = efforts.slice(nextEffort);
+    const endsOnUser = turns[turns.length - 1]?.role === 'user';
+    if (after.length > 0 && !endsOnUser) {
+      throw systemChangeRefusedError(
+        `NativeFormatter: message ${after[0]!.at}, an effort change, would end the request with no user turn after the last assistant turn, ` +
+        'which the API reads as a prefill. End the request with a user turn, or set the effort at the request\'s top level instead.'
+      );
+    }
     if (next < others.length) {
-      if (turns[turns.length - 1]?.role !== 'user') {
+      if (!endsOnUser) {
         throw systemChangeRefusedError(
           `NativeFormatter: message ${others[next]!.at}, a system change, has no place the API takes one at or after it: ` +
           'a system message goes after a user turn, and before an assistant turn or at the end. ' +

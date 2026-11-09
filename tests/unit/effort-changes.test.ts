@@ -2,11 +2,17 @@
  * A change of `output_config.effort` at the top of a request rewrites the whole cached prefix.
  *
  * In the Anthropic API, under the beta `mid-conversation-output-config-2026-07-01`: a `role: 'system'`
- * message with empty content and `output_config: { effort }` sets the effort from the next user turn on.
+ * message with empty content and `output_config: { effort }` changes the effort: for the reply to the user turn
+ * it directly follows, when that turn holds new input, and otherwise from the next user turn with new input
+ * (Anthropic's effort documentation, "Change effort mid-conversation").
  * Claude Opus 5.5 took one before the last user turn, before a tool result, and with no top-level effort;
  * Claude Opus 5 took one before the last user turn. Fable 5, Haiku 4.5 and Sonnet 4.6 refused it with a 400
  * saying "output_config.effort requires a model that supports per-turn effort; this model does not", and
  * without the beta the API refused it as "messages.2.output_config: Extra inputs are not permitted".
+ * Opus 5.5 took one at the end after a user turn, and as the first message. Sonnet 5.5 with
+ * `thinking: between_tools` and Haiku 5.5 with thinking disabled refused one that differs from the level in
+ * effect, saying "effort cannot change when thinking is disabled on this model". Opus 5.5 refused a request
+ * ending with one after an assistant turn as an assistant prefill.
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
@@ -75,9 +81,20 @@ describe('NativeFormatter: an effort-only system change', () => {
     expect(roles(built)).toEqual(['user', 'assistant', 'system', 'user']);
   });
 
-  it('at the end, after an assistant turn, goes at the end rather than being refused', () => {
-    const built = build([user('u0'), reply(text('a1')), effort('xhigh')]);
-    expect(roles(built)).toEqual(['user', 'assistant', 'system']);
+  it('at the end after a user turn, goes at the end', () => {
+    const built = build([user('u0'), reply(text('a1')), user('u2'), effort('xhigh')]);
+    expect(roles(built)).toEqual(['user', 'assistant', 'user', 'system']);
+    expect(built.messages[3]).toEqual(marker('xhigh'));
+  });
+
+  it('at the end after an assistant turn, which would end the request on that turn, is refused before sending, flagged', () => {
+    let thrown: unknown;
+    try {
+      build([user('u0'), reply(text('a1')), effort('xhigh')]);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toMatchObject({ systemChangeRefused: true, retryable: false });
   });
 
   it('keeps its place beside a tool change: each goes where its own rule puts it, and two that land together keep their order', () => {
@@ -160,8 +177,12 @@ describe('AnthropicAdapter and an effort-only system message', () => {
     const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
     const classify = (message: string) =>
       (adapter as any).handleError(new Anthropic.APIError(400, { type: 'error', error: { type: 'invalid_request_error', message } }, undefined, new Headers()), { model: 'm' });
-    const refused = classify('output_config.effort requires a model that supports per-turn effort; this model does not');
-    expect(refused).toMatchObject({ type: 'invalid_request', httpStatus: 400, retryable: false, systemChangeRefused: true });
+    for (const wording of [
+      'output_config.effort requires a model that supports per-turn effort; this model does not',
+      "messages.2: output_config.effort 'low' differs from the 'high' in effect before it; effort cannot change when thinking is disabled on this model. Use effort 'high', or enable thinking.",
+    ]) {
+      expect(classify(wording)).toMatchObject({ type: 'invalid_request', httpStatus: 400, retryable: false, systemChangeRefused: true });
+    }
     expect(classify('This model does not support the effort parameter.').systemChangeRefused).toBeUndefined();
     expect(isSystemChangeRefusal({ error: { message: 'output_config.effort requires a model that supports per-turn effort; this model does not' } })).toBe(true);
   });
