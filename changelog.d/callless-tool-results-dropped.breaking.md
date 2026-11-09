@@ -20,18 +20,23 @@
     `[continuing]`), so no request becomes a prefill and no two assistant
     turns merge. A second result is left out even when it, not the first, was
     the real output behind a placeholder. `AnthropicXmlFormatter` in XML tool
-    mode leaves out a result that answers no call: one whose id names a call
-    pairs with it when the call comes before it and nothing answered it yet,
-    and one whose id names no call pairs by position with a call before it in
-    its own message that no result names, as a generation parsed back from
-    its text holds them. A breakpoint on a message that leaves empty marks
-    what came before it. On every path the round report marks the message a
-    result came from as altered.
+    mode keeps a result only where the model reads it as its call's answer:
+    a results block answers the calls since the last result by position, so
+    the k-th result after them must answer the k-th call. One whose id names
+    a call is kept in that call's place, and one whose id names no call is
+    kept in the place of a call in its own message that no result names, as
+    a generation parsed back from its text holds them. Each cycle that reuses
+    a call id gets its result. A breakpoint on a message that leaves empty
+    marks what came before it. On every path the round report marks the
+    message a result came from as altered.
+  - **Prompt cache:** a stored history that holds such a result sends a
+    different prefix once a host upgrades, so its first request after the
+    upgrade misses the prompt cache from that result on.
   - **Migration:** a hook that matches the old kinds matches the new ones,
     without `recoveredChars`; a switch over `reason` needs a case for
     `'answered'`, and code that reads `fromEnvelope` must allow it absent. A
-    caller whose history pairs every result with its call once sees no
-    difference.
+    caller whose history gives each call one result, after it, in its call's
+    place, sees no difference.
   - **Unchanged:** a result whose call is in the request, wherever the
     normalizer moves it, and the `[pending]` result a call without one gets.
   - **Siblings:** none of agent-framework, connectome-host and

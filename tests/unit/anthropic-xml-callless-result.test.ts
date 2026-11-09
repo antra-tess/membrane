@@ -99,6 +99,22 @@ describe('AnthropicXmlFormatter: a tool result that answers no call', () => {
     expect(JSON.stringify(built.messages)).not.toContain('zz-ghost');
   });
 
+  it('asks the caller\'s cache-marker check about the message as the caller gave it, a result it leaves out included', () => {
+    const marked = (message: NormalizedMessage) => message.content.some((block: any) => block.cache_control);
+    const fidelity = new FidelityNotes();
+    const built = new AnthropicXmlFormatter().buildMessages([
+      { participant: 'User', content: [text('go')] },
+      { participant: 'Agent', content: [text('zz-ok')] },
+      { participant: 'Tool', content: [{ ...result('call_9', 'zz-ghost'), cache_control: { type: 'ephemeral' } } as ContentBlock] },
+      { participant: 'User', content: [text('next')] },
+      { participant: 'Agent', content: [] },
+    ], { assistantParticipant: 'Agent', promptCaching: true, cacheMarkers: 'cm-owned', fidelity, hasCacheMarker: marked } as any);
+    const blocks = built.messages.flatMap((m) => (Array.isArray(m.content) ? m.content : [])).filter((block: any) => block.cache_control);
+    expect(blocks).toHaveLength(1);
+    expect((blocks[0] as any).text).toContain('zz-ok');
+    expect(JSON.stringify(built.messages)).not.toContain('zz-ghost');
+  });
+
   it('leaves a call to the result that names it by id, so a result whose id names no call before it in the message is left out rather than taking that call', () => {
     const { rendered, altered, events } = build([
       { participant: 'User', content: [text('look')] },
@@ -121,5 +137,98 @@ describe('AnthropicXmlFormatter: a tool result that answers no call', () => {
       { kind: 'stray_tool_result_dropped', toolUseId: 'a', reason: 'answered' },
       { kind: 'orphan_tool_result_dropped', toolUseId: 'zz' },
     ]);
+  });
+
+  it('keeps a result only where the model reads it as its own call\'s answer: the k-th result after a calls block answers its k-th call', () => {
+    for (const results of [[result('b', 'zz-b')], [result('b', 'zz-b'), result('a', 'zz-a')]]) {
+      const { rendered, altered, events } = build([
+        { participant: 'User', content: [text('look')] },
+        { participant: 'Agent', content: [call('a'), call('b')] },
+        { participant: 'Tool', content: results },
+        { participant: 'Agent', content: [] },
+      ]);
+      expect(rendered).not.toContain('zz-b');
+      expect(rendered.includes('zz-a')).toBe(results.length === 2);
+      expect(altered).toEqual([2]);
+      expect(events).toEqual([{ kind: 'orphan_tool_result_dropped', toolUseId: 'b' }]);
+    }
+  });
+
+  it('reads calls split by text, with no result between, as one block\'s calls', () => {
+    const { rendered, altered } = build([
+      { participant: 'User', content: [text('look')] },
+      { participant: 'Agent', content: [call('a'), text('and then'), call('b')] },
+      { participant: 'Tool', content: [result('a', 'zz-a'), result('b', 'zz-b')] },
+      { participant: 'Agent', content: [] },
+    ]);
+    expect(rendered).toContain('zz-a');
+    expect(rendered).toContain('zz-b');
+    expect(altered).toEqual([]);
+  });
+
+  it('starts new places at a calls block after results, so a call left unanswered takes no later result', () => {
+    const { rendered, altered } = build([
+      { participant: 'User', content: [text('look')] },
+      { participant: 'Agent', content: [call('a'), call('b')] },
+      { participant: 'Tool', content: [result('a', 'zz-a')] },
+      { participant: 'Agent', content: [call('c')] },
+      { participant: 'Tool', content: [result('c', 'zz-c')] },
+      { participant: 'Agent', content: [] },
+    ]);
+    expect(rendered).toContain('zz-a');
+    expect(rendered).toContain('zz-c');
+    expect(altered).toEqual([]);
+  });
+
+  it('sends a result for each cycle that reuses a call id', () => {
+    const { rendered, altered, events } = build([
+      { participant: 'User', content: [text('look')] },
+      { participant: 'Agent', content: [call('a')] },
+      { participant: 'Tool', content: [result('a', 'zz-first')] },
+      { participant: 'Agent', content: [call('a')] },
+      { participant: 'Tool', content: [result('a', 'zz-second'), result('a', 'zz-third')] },
+      { participant: 'Agent', content: [] },
+    ]);
+    expect(rendered).toContain('zz-first');
+    expect(rendered).toContain('zz-second');
+    expect(rendered).not.toContain('zz-third');
+    expect(altered).toEqual([4]);
+    expect(events).toEqual([{ kind: 'stray_tool_result_dropped', toolUseId: 'a', reason: 'answered' }]);
+  });
+
+  it('lets a result before its call keep that call from no later result in its message', () => {
+    const { rendered, altered } = build([
+      { participant: 'User', content: [text('look')] },
+      { participant: 'Agent', content: [result('a', 'zz-early'), call('a'), result('id_from_the_text', 'zz-parsed')] },
+      { participant: 'Agent', content: [] },
+    ]);
+    expect(rendered).not.toContain('zz-early');
+    expect(rendered).toContain('zz-parsed');
+    expect(altered).toEqual([1]);
+  });
+
+  it('renders a kept result from its own fields when a result dropped in another message shared its raw text', () => {
+    const raw = '<function_results>\n<result tool_use_id="a">zz-kept</result>\n<result tool_use_id="b">zz-dropped</result>\n</function_results>';
+    const { rendered, altered } = build([
+      { participant: 'User', content: [text('look')] },
+      { participant: 'Agent', content: [call('a')] },
+      { participant: 'Tool', content: [result('a', 'zz-kept', raw)] },
+      { participant: 'Tool', content: [result('b', 'zz-dropped', raw)] },
+      { participant: 'Agent', content: [] },
+    ]);
+    expect(rendered).toContain('zz-kept');
+    expect(rendered).not.toContain('zz-dropped');
+    expect(altered).toEqual([2, 3]);
+  });
+
+  it('keeps a final assistant message whose turn a drop left with text alone', () => {
+    const { rendered } = build([
+      { participant: 'User', content: [text('look')] },
+      { participant: 'Agent', content: [text('zz-reading'), result('call_9', 'zz-ghost')] },
+      { participant: 'Agent', content: [text('zz-final')] },
+    ]);
+    expect(rendered).toContain('zz-reading');
+    expect(rendered).toContain('zz-final');
+    expect(rendered).not.toContain('zz-ghost');
   });
 });

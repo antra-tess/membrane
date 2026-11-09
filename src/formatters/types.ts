@@ -147,8 +147,9 @@ export type NormalizeEvent =
   /**
    * A tool_result whose tool_use id appears nowhere in the message list was
    * left out: a result without its call is never sent, as a result or as
-   * text. In XML tool mode, one that answers no call before it. `toolUseId`
-   * is `'<missing>'` for a result with no string id.
+   * text. In XML tool mode, one that doesn't stand in its call's place, where
+   * the model reads that call's answer. `toolUseId` is `'<missing>'` for a
+   * result with no id.
    */
   | { kind: 'orphan_tool_result_dropped'; toolUseId: string }
   /**
@@ -171,8 +172,8 @@ export type NormalizeEvent =
    *                             later copy of it is left out here.
    *   - `'answered'`          → from a builder with no turns as the normalizer
    *                             builds them (the Responses formatter, XML
-   *                             tool mode): an earlier result answered the
-   *                             call this one names.
+   *                             tool mode): earlier results answered every
+   *                             call that carries the id this one names.
    *
    * `fromEnvelope`, the normalizer's envelope the copy was in, is set on the
    * native path only.

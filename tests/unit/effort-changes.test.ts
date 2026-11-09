@@ -154,6 +154,14 @@ describe('NativeFormatter: an effort-only system change', () => {
     expect(after.messages[3]).toEqual({ role: 'user', content: [{ type: 'text', text: '[continuing]' }] });
   });
 
+  it('goes after a turn whose result pairing leaves out and a pending result for an earlier call fills', () => {
+    const orphan: NormalizedMessage = { participant: 'User', content: [result('t9')] };
+    const built = build([user('u0'), reply(call('t1')), orphan, effort('low'), reply(text('a4'))]);
+    expect(roles(built)).toEqual(['user', 'assistant', 'user', 'system', 'assistant']);
+    expect(built.messages[3]).toEqual(marker('low'));
+    expect((built.messages[2]!.content as Array<{ type: string }>).map((block) => block.type)).toEqual(['tool_result']);
+  });
+
   it('after the whole user turn where a cut would part a tool result from its call', () => {
     const built = build([
       user('u0'), reply(call('ta'), call('tb')), { participant: 'User', content: [result('ta')] }, effort('low'),

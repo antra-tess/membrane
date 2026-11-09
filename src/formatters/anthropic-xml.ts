@@ -70,71 +70,92 @@ export interface AnthropicXmlFormatterConfig extends FormatterConfig {
 }
 
 /**
- * The messages without the tool results that answer no call. A result whose
- * id names a call in the request answers it when the call comes before it and
- * no earlier result answered it. One whose id names no call answers the
- * earliest call before it in its own message that no result answered and no
- * result names by id: a generation parsed back from its text gives its calls
- * fresh ids, and keeps its results beside them. A result that answers no call
- * is never sent, as a result or as text: in the transcript the model pairs
- * results with calls by position, so it would read it as another call's
- * result. A kept result that shared a dropped one's `rawXml` renders from its
- * fields, since the raw text holds the dropped result too. `onEvent` hears
- * each drop, and `onDropped` each message that lost a result, and whether
- * nothing of it is left.
+ * The messages without the tool results the model wouldn't read as their own
+ * call's answer. In the transcript a results block answers the calls block
+ * before it by position, ids aside: the k-th result after the calls since the
+ * last result answers the k-th of them. So a result is kept only where it
+ * stands in its call's place. One whose id names a call in the request is
+ * kept when that call's place is the next one to answer. One whose id names
+ * no call is kept when the next place's call is in its own message and no
+ * result names that call: a generation parsed back from its text gives its
+ * calls fresh ids, and keeps its results beside them. A result left out
+ * takes no place. One that isn't kept is never sent, as a result or as text,
+ * since the model would read it as another call's result. A kept result that
+ * shared a left-out one's `rawXml`, in any message, renders from its fields,
+ * since the raw text holds the other result too. `onEvent` hears each result
+ * left out, and `onAltered` each message changed, and whether nothing of it
+ * is left.
  */
 function withoutCalllessResults(
   messages: NormalizedMessage[],
   onEvent: (event: NormalizeEvent) => void,
-  onDropped: (index: number, emptied: boolean) => void,
+  onAltered: (index: number, emptied: boolean) => void,
 ): NormalizedMessage[] {
   const callIds = new Set<string>();
   for (const message of messages) {
     for (const block of message.content) if (block.type === 'tool_use') callIds.add(block.id);
   }
-  // Calls some result names by id: the position fallback leaves them to it.
-  const namedByResult = new Set<string>();
-  for (const message of messages) {
-    for (const block of message.content) {
-      if (block.type === 'tool_result' && typeof block.toolUseId === 'string' && callIds.has(block.toolUseId)) namedByResult.add(block.toolUseId);
+  // The calls each calls block answers, in order, with the message each is in,
+  // and the calls a result in its span names by id.
+  const groups: Array<{ calls: Array<{ id: string; message: number }>; named: Set<string> }> = [];
+  const groupOf = messages.map((message) => message.content.map(() => -1));
+  let resultSince = true;
+  messages.forEach((message, i) => message.content.forEach((block, j) => {
+    if (block.type === 'tool_use') {
+      if (resultSince) groups.push({ calls: [], named: new Set() });
+      resultSince = false;
+      groups[groups.length - 1]!.calls.push({ id: block.id, message: i });
+    } else if (block.type === 'tool_result') {
+      resultSince = true;
+      const group = groups[groups.length - 1];
+      if (!group) return;
+      groupOf[i]![j] = groups.length - 1;
+      if (typeof block.toolUseId === 'string' && group.calls.some((c) => c.id === block.toolUseId)) group.named.add(block.toolUseId);
     }
-  }
-  const before = new Set<string>();
+  }));
+
+  const answeredPlaces = groups.map(() => 0);
   const answered = new Set<string>();
-  return messages.map((message, index) => {
-    const kept: ContentBlock[] = [];
-    const released = new Set<string>();
-    const ownCalls: string[] = [];
-    for (const block of message.content) {
-      if (block.type === 'tool_use') {
-        before.add(block.id);
-        ownCalls.push(block.id);
-      }
-      if (block.type !== 'tool_result') {
-        kept.push(block);
-        continue;
-      }
-      const named = typeof block.toolUseId === 'string' && callIds.has(block.toolUseId) ? block.toolUseId : undefined;
-      const call = named !== undefined
-        ? (before.has(named) && !answered.has(named) ? named : undefined)
-        : ownCalls.find((id) => !answered.has(id) && !namedByResult.has(id));
-      if (call !== undefined) {
-        answered.add(call);
-        kept.push(block);
-        continue;
-      }
-      onEvent(named !== undefined && answered.has(named)
-        ? { kind: 'stray_tool_result_dropped', toolUseId: named, reason: 'answered' }
-        : { kind: 'orphan_tool_result_dropped', toolUseId: typeof block.toolUseId === 'string' ? block.toolUseId : '<missing>' });
-      if (block.rawXml !== undefined) released.add(block.rawXml);
+  const released = new Set<string>();
+  const kept = messages.map((message, i) => message.content.map((block, j) => {
+    if (block.type !== 'tool_result') return true;
+    const g = groupOf[i]![j]!;
+    const group = groups[g];
+    const place = group?.calls[answeredPlaces[g]!];
+    const named = typeof block.toolUseId === 'string' && callIds.has(block.toolUseId) ? block.toolUseId : undefined;
+    const answers = place !== undefined && (named !== undefined
+      ? place.id === named
+      : place.message === i && !group!.named.has(place.id));
+    if (answers) {
+      answeredPlaces[g]!++;
+      answered.add(place!.id);
+      return true;
     }
-    if (kept.length === message.content.length) return message;
-    const content = kept.map((block) => {
-      if (block.type !== 'tool_result' || block.rawXml === undefined || !released.has(block.rawXml)) return block;
+    onEvent(named !== undefined && answered.has(named)
+      ? { kind: 'stray_tool_result_dropped', toolUseId: named, reason: 'answered' }
+      : { kind: 'orphan_tool_result_dropped', toolUseId: typeof block.toolUseId === 'string' ? block.toolUseId : '<missing>' });
+    if (block.rawXml !== undefined) released.add(block.rawXml);
+    return false;
+  }));
+
+  return messages.map((message, index) => {
+    let changed = false;
+    const content: ContentBlock[] = [];
+    message.content.forEach((block, j) => {
+      if (!kept[index]![j]) {
+        changed = true;
+        return;
+      }
+      if (block.type !== 'tool_result' || block.rawXml === undefined || !released.has(block.rawXml)) {
+        content.push(block);
+        return;
+      }
       const { rawXml: _raw, rawXmlImagesAt: _at, ...rendered } = block;
-      return rendered;
+      content.push(rendered);
+      changed = true;
     });
-    onDropped(index, !holdsContent(content));
+    if (!changed) return message;
+    onAltered(index, !holdsContent(content));
     return { ...message, content };
   });
 }
@@ -263,6 +284,11 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
 
     // Messages a dropped result left empty, whose breakpoints still apply.
     const emptiedByDrop = new Set<number>();
+    // A message that held a result keeps the continuation state it had, so a
+    // drop doesn't fold the next assistant message into it, and the caller's
+    // cache-marker check reads the message as the caller gave it.
+    const given = messages;
+    const heldResult = messages.map((message) => message.content.some((c) => c.type === 'tool_result'));
     messages = withoutCalllessResults(messages, (event) => options.onNormalize?.(event), (index, emptied) => {
       options.fidelity?.alter(index);
       if (emptied) emptiedByDrop.add(index);
@@ -355,7 +381,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         }
       }
 
-      const hasToolResult = message.content.some(c => c.type === 'tool_result');
+      const hasToolResult = heldResult[i]!;
 
       if (hasImages && !isEmpty) {
         if (currentConversation.length > 0) {
@@ -411,11 +437,11 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         omitted();
         // A breakpoint on a message a dropped result emptied marks what came before it.
         if (emptiedByDrop.has(i) && currentConversation.length > 0 && promptCaching &&
-          (message.cacheBreakpoint || hasCacheMarker?.(message, i))) markConversation();
+          (message.cacheBreakpoint || hasCacheMarker?.(given[i]!, i))) markConversation();
         continue;
       }
 
-      if (hasCacheMarker && hasCacheMarker(message, i)) {
+      if (hasCacheMarker && hasCacheMarker(given[i]!, i)) {
         if (currentConversation.length > 0 && promptCaching) {
           markConversation();
         } else if (currentConversation.length > 0) {

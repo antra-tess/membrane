@@ -135,6 +135,49 @@ describe('Responses: a tool output whose call no input item carries', () => {
     expect(altered).toEqual([1, 2]);
   });
 
+  it('keeps the first of one native output object carried twice for its call, on blocks or in messages, and reports where the second was', () => {
+    const output = { type: 'function_call_output', call_id: 'call_1', output: 'carried' };
+    for (const messages of [
+      [
+        { participant: 'Agent', content: [call('call_1')] },
+        { participant: 'User', content: [], metadata: { openaiResponsesItems: [output] } },
+        { participant: 'User', content: [], metadata: { openaiResponsesItems: [output] } },
+      ],
+      [
+        { participant: 'Agent', content: [call('call_1')] },
+        { participant: 'User', content: [{ ...result('call_1'), rawItem: output }] },
+        { participant: 'User', content: [{ ...result('call_1'), rawItem: output }] },
+      ],
+    ]) {
+      const { items, altered, events } = build(messages);
+      expect(items).toEqual([called('call_1'), output]);
+      expect(altered).toEqual([2]);
+      expect(events).toEqual([{ kind: 'stray_tool_result_dropped', toolUseId: 'call_1', reason: 'answered' }]);
+    }
+  });
+
+  it('reports each message that carried one call-less native output object', () => {
+    const output = { type: 'function_call_output', call_id: 'call_9', output: 'carried' };
+    const { items, altered } = build([
+      { participant: 'User', content: [{ type: 'text', text: 'Before.' }] },
+      { participant: 'User', content: [], metadata: { openaiResponsesItems: [output] } },
+      { participant: 'User', content: [], metadata: { openaiResponsesItems: [output] } },
+    ]);
+    expect(items).toEqual([user('Before.')]);
+    expect(altered).toEqual([1, 2]);
+  });
+
+  it('sends an output for each call that reuses an id, and leaves out one more than the calls', () => {
+    const { items, events } = build([
+      { participant: 'Agent', content: [call('call_1')] },
+      { participant: 'User', content: [result('call_1', 'first')] },
+      { participant: 'Agent', content: [call('call_1')] },
+      { participant: 'User', content: [result('call_1', 'second'), result('call_1', 'third')] },
+    ]);
+    expect(items.filter((item) => item.type === 'function_call_output').map((item) => item.output)).toEqual(['first', 'second']);
+    expect(events).toEqual([{ kind: 'stray_tool_result_dropped', toolUseId: 'call_1', reason: 'answered' }]);
+  });
+
   it('passes a native item that isn\'t an object, or whose type isn\'t a string, through as before', () => {
     const odd = [null, { type: 42, call_id: 'call_1' }];
     const { items } = build([
@@ -164,6 +207,34 @@ describe('the subscription adapter\'s own conversion of messages in normalized f
     expect((items[2] as any).call_id).toBe('call_1');
     expect(JSON.stringify(items)).not.toContain('zz-');
     expect(heard).toEqual([again, orphan, standalone]);
+  });
+
+  it('keeps the first of one output object handed in twice for its call, and leaves out one more than the calls that reuse an id', () => {
+    const standalone = { type: 'function_call_output', call_id: 'call_1', output: 'zz-standalone' };
+    const heard: unknown[] = [];
+    const items = normalizeResponsesInput([
+      { role: 'assistant', content: [wireCall('call_1')] },
+      standalone,
+      standalone,
+      { role: 'assistant', content: [wireCall('call_2')] },
+      { role: 'user', content: [wireResult('call_2', 'zz-first')] },
+      { role: 'assistant', content: [wireCall('call_2')] },
+      { role: 'user', content: [wireResult('call_2', 'zz-second')] },
+    ] as any, (block) => heard.push(block));
+    expect(items.map((item: any) => item.type)).toEqual(['function_call', 'function_call_output', 'function_call', 'function_call_output', 'function_call', 'function_call_output']);
+    expect(items.filter((item: any) => item.type === 'function_call_output').map((item: any) => item.output)).toEqual(['zz-standalone', 'zz-first', 'zz-second']);
+    expect(heard).toEqual([standalone]);
+  });
+
+  it('leaves out an output that names no call though a call names none either', () => {
+    const nameless = { type: 'tool_result', content: 'zz-nameless' };
+    const heard: unknown[] = [];
+    const items = normalizeResponsesInput([
+      { role: 'assistant', content: [{ type: 'tool_use', name: 'read_file', input: {} }] },
+      { role: 'user', content: [nameless] },
+    ] as any, (block) => heard.push(block));
+    expect(items.map((item: any) => item.type)).toEqual(['function_call']);
+    expect(heard).toEqual([nameless]);
   });
 
   it('keeps an output whose call is anywhere in the input, and sends nothing else differently', () => {

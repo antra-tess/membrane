@@ -16,6 +16,7 @@
 import type { ProviderTurnMessage as LooseProviderMessage } from './types.js';
 import type { NormalizeEvent } from './types.js';
 import { MembraneError } from '../types/errors.js';
+import { hasNonEmptyText } from '../utils/empty-text.js';
 
 /**
  * Block shape used internally and exposed for callers that want to
@@ -65,13 +66,15 @@ export interface NormalizeOptions {
    * Hears each block the normalizer put in an input block's place: a copy of
    * the last cacheable block before a dropped one, taking the dropped block's
    * cache marker, and the leading text a user turn holds once drops have
-   * emptied it, in place of the last block dropped from it. For a caller that
-   * follows its blocks by object identity.
+   * emptied it, or the first pending result that fills it, in place of the
+   * last block dropped from it. For a caller that follows its blocks by
+   * object identity.
    */
   onBlockReplaced?: (original: ProviderBlock, replacement: ProviderBlock) => void;
   /**
    * Text of the synthetic user envelope prepended when the first envelope is
-   * assistant. `[continuing]` when absent, empty or only whitespace.
+   * assistant, and of a user turn that dropped results have emptied.
+   * `[continuing]` when absent, empty or only whitespace.
    */
   leadingUserText?: string;
 }
@@ -156,8 +159,14 @@ export function normalizeToolPairs(
   // A drop that empties a user turn leaves the turn in place, holding the
   // leading case's text: removing it would merge the assistant turns around
   // it, or end the request on the assistant, which the API reads as a prefill.
+  // A turn the drops emptied that pending results then filled stands in the
+  // last dropped block's place through the first of them.
   for (const [envelope, last] of droppedFrom) {
-    if (envelope.role !== 'user' || envelope.content.length > 0) continue;
+    if (envelope.role !== 'user') continue;
+    if (envelope.content.length > 0) {
+      if (envelope.content.every((block) => synthesized.has(block))) options.onBlockReplaced?.(last, envelope.content[0]!);
+      continue;
+    }
     const held: ProviderBlock = { type: 'text', text: leadingText };
     envelope.content.push(held);
     options.onBlockReplaced?.(last, held);
@@ -504,15 +513,15 @@ function cacheMarkerOf(block: ProviderBlock): unknown {
 }
 
 /** Thinking blocks can't carry a cache marker. */
-export function isCacheableBlock(block: Record<string, unknown>): boolean {
-  return block.type !== 'thinking' && block.type !== 'redacted_thinking';
+export function isCacheableBlock(block: Record<string, unknown> | null | undefined): boolean {
+  return block?.type !== 'thinking' && block?.type !== 'redacted_thinking';
 }
 
 /**
- * A dropped block's cache marker goes to the last cacheable block before it,
- * so the request still caches the prefix the marker asked for, unless that
- * block carries a marker already. With nothing cacheable before it, the
- * marker goes too.
+ * A dropped block's cache marker goes to the last cacheable block before it
+ * that the wire keeps, so the request still caches the prefix the marker
+ * asked for, unless that block carries a marker already, on itself or in its
+ * content. With nothing such before it, the marker goes too.
  */
 function moveCacheMarker(
   envelopes: Envelope[],
@@ -525,8 +534,8 @@ function moveCacheMarker(
   for (const blocks of earlier) {
     for (let k = blocks.length - 1; k >= 0; k--) {
       const target = blocks[k]!;
-      if (!isCacheableBlock(target)) continue;
-      if (target.cache_control) return;
+      if (!isCacheableBlock(target) || (target.type === 'text' && !hasNonEmptyText(target.text))) continue;
+      if (cacheMarkerOf(target)) return;
       const copy = { ...target, cache_control: marker };
       blocks[k] = copy;
       onBlockReplaced?.(target, copy);
@@ -943,13 +952,18 @@ function removeFirstMatchingResult(
   return null;
 }
 
+/** The `[pending]` results the normalizer made, which no input block is. */
+const synthesized = new WeakSet<ProviderBlock>();
+
 function syntheticToolResult(toolUseId: string): ProviderBlock {
-  return {
+  const block: ProviderBlock = {
     type: 'tool_result',
     tool_use_id: toolUseId,
     content: '[pending]',
     is_error: false,
   };
+  synthesized.add(block);
+  return block;
 }
 
 function toProviderMessage(env: Envelope): LooseProviderMessage {

@@ -21,33 +21,45 @@ export function isResponsesToolOutput(item: unknown): boolean {
 }
 
 /**
- * The tool outputs in `items` that are never sent: one whose `call_id` no
- * call item carries, of any call type anywhere in the input (`'orphan'`),
- * and one whose call an earlier output answered (`'stray'`). A result
- * without its call is never sent, alone or as text, and the first output
- * for a call, in input order, is the one sent.
+ * The tool outputs in `items` that are never sent, by position: one whose
+ * `call_id` no call item carries, of any call type anywhere in the input,
+ * or that names no call at all (`'orphan'`), and one past as many outputs
+ * for a call id as there are calls that carry it (`'stray'`). A result
+ * without its call is never sent, alone or as text, and the first outputs
+ * for a call, in input order, are the ones sent. An id that is empty, or
+ * not a string, names no call.
  */
-export function unansweredToolOutputs(items: readonly unknown[]): Map<unknown, 'orphan' | 'stray'> {
-  const called = new Set<string>();
+export function unansweredToolOutputs(items: readonly unknown[]): Map<number, 'orphan' | 'stray'> {
+  const calls = new Map<string, number>();
   for (const item of items) {
-    if (isObject(item) && typeof item.call_id === 'string' && !isResponsesToolOutput(item)) called.add(item.call_id);
+    const id = callIdOf(item);
+    if (id !== undefined && !isResponsesToolOutput(item)) calls.set(id, (calls.get(id) ?? 0) + 1);
   }
-  const answered = new Set<string>();
-  const unanswered = new Map<unknown, 'orphan' | 'stray'>();
-  for (const item of items) {
-    if (!isObject(item) || !isResponsesToolOutput(item)) continue;
-    const id = item.call_id;
-    if (typeof id !== 'string' || !called.has(id)) unanswered.set(item, 'orphan');
-    else if (answered.has(id)) unanswered.set(item, 'stray');
-    else answered.add(id);
-  }
+  const answered = new Map<string, number>();
+  const unanswered = new Map<number, 'orphan' | 'stray'>();
+  items.forEach((item, index) => {
+    if (!isResponsesToolOutput(item)) return;
+    const id = callIdOf(item);
+    const count = id === undefined ? 0 : calls.get(id) ?? 0;
+    if (count === 0) {
+      unanswered.set(index, 'orphan');
+      return;
+    }
+    const sent = answered.get(id!) ?? 0;
+    if (sent >= count) unanswered.set(index, 'stray');
+    else answered.set(id!, sent + 1);
+  });
   return unanswered;
+}
+
+function callIdOf(item: unknown): string | undefined {
+  return isObject(item) && typeof item.call_id === 'string' && item.call_id !== '' ? item.call_id : undefined;
 }
 
 /**
  * The input items for messages in normalized form, as the subscription
- * adapter sends them. A tool output that answers no call, or whose call an
- * earlier output answered, is left out (unansweredToolOutputs), and
+ * adapter sends them. A tool output that answers no call, or whose calls
+ * earlier outputs answered, is left out (unansweredToolOutputs), and
  * `onDropped` hears the block or item it came from.
  */
 export function normalizeResponsesInput(
@@ -55,9 +67,9 @@ export function normalizeResponsesInput(
   onDropped?: (block?: unknown) => void,
 ): OpenAIResponsesInputItem[] {
   const output: unknown[] = [];
-  // Where each top-level output item came from: the tool_result block it was
-  // converted from, or the item handed in.
-  const source = new Map<unknown, unknown>();
+  // Where each output item came from, by position: the tool_result block it
+  // was converted from, or the item handed in.
+  const source: unknown[] = [];
 
   for (const rawMessage of messages as unknown[]) {
     if (!isObject(rawMessage)) {
@@ -66,7 +78,7 @@ export function normalizeResponsesInput(
     }
     if (rawMessage.type !== 'message' && rawMessage.role === undefined) {
       const item = normalizeStandaloneItem(rawMessage, onDropped);
-      source.set(item, rawMessage);
+      source[output.length] = rawMessage;
       output.push(item);
       continue;
     }
@@ -117,7 +129,7 @@ export function normalizeResponsesInput(
       } else if (rawBlock.type === 'tool_result') {
         flush();
         const item = normalizeStandaloneItem(rawBlock, onDropped);
-        source.set(item, rawBlock);
+        source[output.length] = rawBlock;
         output.push(item);
       } else if (rawBlock.type === 'redacted_thinking') {
         flush();
@@ -133,9 +145,9 @@ export function normalizeResponsesInput(
 
   const unanswered = unansweredToolOutputs(output);
   if (unanswered.size === 0) return output as OpenAIResponsesInputItem[];
-  return output.filter((item) => {
-    if (!unanswered.has(item)) return true;
-    onDropped?.(source.get(item) ?? item);
+  return output.filter((item, index) => {
+    if (!unanswered.has(index)) return true;
+    onDropped?.(source[index] ?? item);
     return false;
   }) as OpenAIResponsesInputItem[];
 }

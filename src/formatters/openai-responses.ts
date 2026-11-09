@@ -87,8 +87,8 @@ export function responsesRawItemKey(rawItem: { type?: unknown; id?: unknown }): 
  * items in its place, and native items are never rewritten. A tool output,
  * native or converted, whose call no input item carries is left out, and its
  * message reported altered: a result without its call is never sent, alone
- * or as text. So is one whose call an earlier output already answered: the
- * first output for a call is the one sent.
+ * or as text. So is one past as many outputs for a call id as there are
+ * calls that carry it: the first outputs for a call are the ones sent.
  */
 export class OpenAIResponsesFormatter implements PrefillFormatter {
   readonly name = 'openai-responses';
@@ -101,11 +101,14 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
   buildMessages(messages: NormalizedMessage[], options: BuildOptions): BuildResult {
     messages = convertMcpMedia(messages);
     const items: NativeItem[] = [];
-    // The message each item came from, so a left-out output reports its own.
-    const from = new Map<unknown, number>();
+    // The message each item came from, by position, so a left-out output
+    // reports its own.
+    const from: number[] = [];
     const push = (index: number, pushed: readonly NativeItem[]) => {
-      for (const item of pushed) from.set(item, index);
-      items.push(...pushed);
+      for (const item of pushed) {
+        from.push(index);
+        items.push(item);
+      }
     };
     let hasImportedItems = false;
 
@@ -153,15 +156,14 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
     }
 
     const unanswered = unansweredToolOutputs(items);
-    const sent = items.filter((item) => {
-      const drop = unanswered.get(item);
+    const sent = items.filter((item, index) => {
+      const drop = unanswered.get(index);
       if (drop === undefined) return true;
       const id = item.call_id;
       options.onNormalize?.(drop === 'stray'
         ? { kind: 'stray_tool_result_dropped', toolUseId: id as string, reason: 'answered' }
-        : { kind: 'orphan_tool_result_dropped', toolUseId: typeof id === 'string' ? id : '<missing>' });
-      const at = from.get(item);
-      if (at !== undefined) options.fidelity?.alter(at);
+        : { kind: 'orphan_tool_result_dropped', toolUseId: typeof id === 'string' && id !== '' ? id : '<missing>' });
+      options.fidelity?.alter(from[index]!);
       return false;
     });
 

@@ -8,6 +8,7 @@ import {
   type ProviderBlock,
 } from '../../src/formatters/normalize-tool-pairs.js';
 import type { NormalizeEvent } from '../../src/formatters/types.js';
+import { lastCacheableBlockIndex } from '../../src/formatters/native.js';
 
 type ProviderMessage = { role: 'user' | 'assistant'; content: ProviderBlock[] };
 
@@ -368,7 +369,7 @@ describe('normalizeToolPairs', () => {
       expect(resultIds(out.messages[4]!.content)).toEqual(['B']);
 
       expect(events.some((e) => e.kind === 'synthetic_pending_result')).toBe(false);
-      expect(events.some((e) => e.kind === 'orphan_tool_result_textified')).toBe(false);
+      expect(events.some((e) => e.kind === 'orphan_tool_result_dropped')).toBe(false);
 
       const ev = events.find((e) => e.kind === 'leading_user_synthesized') as
         | { originalFirstRole: string }
@@ -754,6 +755,23 @@ describe('normalizeToolPairs', () => {
       expect(taken.messages.flatMap((m) => m.content).filter((b) => b.cache_control)).toEqual([{ type: 'text', text: 'go', cache_control: earlier }]);
       const first = normalize([user({ ...r('ite9'), cache_control: marker }), assistant(t('ok'))]);
       expect(first.messages.flatMap((m) => m.content).some((b) => b.cache_control)).toBe(false);
+    });
+
+    it('hands a marker past whitespace-only text, which the wire drops, to the text before it', () => {
+      const out = normalize([user(t('go'), t('   '), { ...r('ite9'), cache_control: marker }), assistant(t('ok'))]);
+      expect(out.messages.flatMap((m) => m.content).filter((b) => b.cache_control)).toEqual([{ type: 'text', text: 'go', cache_control: marker }]);
+    });
+
+    it('lets the marker go when the block before it carries one inside its content', () => {
+      const earlier = { type: 'ephemeral' };
+      const kept = { ...r('ite1'), content: [{ type: 'text', text: 'payload', cache_control: earlier }] } as ProviderBlock;
+      const out = normalize([user(t('go')), assistant(u('ite1')), user(kept, { ...r('ite1', 'again'), cache_control: marker })]);
+      expect(JSON.stringify(out.messages).match(/cache_control/g)).toHaveLength(1);
+      expect(out.messages.at(-1)!.content).toEqual([kept]);
+    });
+
+    it('reads a missing block as cacheable, as the floating marker did before', () => {
+      expect(lastCacheableBlockIndex([{ type: 'text', text: 'a' }, null as unknown as Record<string, unknown>])).toBe(1);
     });
 
     it('leaves a user turn it empties in place, holding the leading text, so no request becomes a prefill and no two assistant turns merge', () => {
