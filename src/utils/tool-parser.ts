@@ -772,11 +772,6 @@ function collectCandidateSpans(text: string): CandidateSpan[] {
   return spans;
 }
 
-/**
- * Whether the function_calls block that spans `boundary` in `text` was left
- * open inside an invoke before the block it resolves to: what the response's
- * final parse, which starts at the boundary inside that block, can't see.
- */
 export function leftOpenAcross(text: string, boundary: number): boolean {
   return collectLiveToolBlocks(text).some((block) => block.outerStart < boundary && block.end > boundary && block.leftOpenInvoke);
 }

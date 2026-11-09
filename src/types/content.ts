@@ -145,12 +145,16 @@ export interface ToolUseContent {
    * request sends `input` as stored, so round reports don't count a marked
    * call as altered: this field records the replacement.
    * In XML tool mode it is also set on every call of a function_calls block
-   * whose tags break the format (an invoke with no closing tag; a value
-   * holding a parameter's or an invoke's opening tag, or an invoke's closing
-   * tag; a parameter given twice; text inside an invoke outside its parameter
-   * elements; or a stray tag outside every invoke), holding the block's raw
-   * text, with `input` `{}`: none of the block's calls is taken as the
-   * model's.
+   * refused whole, holding the block's raw text, with `input` `{}`: none of
+   * the block's calls is taken as the model's. A block is refused whole when
+   * its tags break the format (an invoke with no closing tag; a value holding
+   * a parameter's or an invoke's opening tag, or an invoke's closing tag; a
+   * parameter given twice; text inside an invoke outside its parameter
+   * elements; or a stray tag outside every invoke, an invoke opener whose
+   * name can't be read included), or when it opens after an earlier
+   * function_calls block holding an invoke was left open. In a stream that
+   * earlier block may be an earlier turn's; `complete()` reads only its own
+   * output, so it refuses only when the earlier block is in that output.
    */
   unparseableInput?: string;
 
