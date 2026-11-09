@@ -12,7 +12,9 @@
  * Opus 5.5 took one at the end after a user turn, and as the first message. Sonnet 5.5 with
  * `thinking: between_tools` and Haiku 5.5 with thinking disabled refused one that differs from the level in
  * effect, saying "effort cannot change when thinking is disabled on this model". Opus 5.5 refused a request
- * ending with one after an assistant turn as an assistant prefill.
+ * ending with one after an assistant turn as an assistant prefill. Opus 5.5 took one whose content was `[]` or
+ * `''`, and refused one whose content was `' '`, `[{ type: 'text', text: '' }]` or `[{ type: 'text', text: ' ' }]`,
+ * saying "system text blocks must contain non-whitespace text".
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
@@ -330,6 +332,32 @@ describe('the empty-text cleanup and an effort-only system message', () => {
     expect(stripEmptyTextMessages(messages)).toEqual(messages);
   });
 
+  const sysWith = (content: unknown) => ({ role: 'system', content, output_config: { effort: 'low' } });
+
+  it('keeps one whose content is only empty text, with that text dropped', () => {
+    const messages = [wireUser('u0'), sysWith([{ type: 'text', text: '' }]), wireUser('u2')];
+    expect(stripEmptyTextMessages(messages)).toEqual([messages[0], sysWith([]), messages[2]]);
+  });
+
+  it('keeps one at the end whose content is only empty text, reading the final role past it', () => {
+    const messages = [wireUser('u0'), sysWith([{ type: 'text', text: '' }])];
+    expect(stripEmptyTextMessages(messages)).toEqual([messages[0], sysWith([])]);
+  });
+
+  it('keeps one whose content is a whitespace text block with the block dropped and reported, as the API refuses whitespace text in it', () => {
+    const dropped: unknown[] = [];
+    const messages = [wireUser('u0'), sysWith([{ type: 'text', text: ' ' }]), wireUser('u2')];
+    expect(stripEmptyTextMessages(messages, (block) => dropped.push(block))).toEqual([messages[0], sysWith([]), messages[2]]);
+    expect(dropped).toEqual([{ type: 'text', text: ' ' }]);
+  });
+
+  it('keeps one whose content is a whitespace string as an empty string, reported altered, as the API refuses whitespace text in it', () => {
+    const dropped: unknown[] = [];
+    const messages = [wireUser('u0'), sysWith(' '), wireUser('u2')];
+    expect(stripEmptyTextMessages(messages, (block) => dropped.push(block))).toEqual([messages[0], sysWith(''), messages[2]]);
+    expect(dropped).toEqual([undefined]);
+  });
+
   it('reads the final role past it, so dropping an empty user turn after it changes nothing', () => {
     const messages = [{ role: 'user', content: [{ type: 'text', text: 'u0' }] }, marker('low'), { role: 'user', content: [{ type: 'text', text: '' }] }];
     expect(stripEmptyTextMessages(messages)).toEqual([messages[0], messages[1]]);
@@ -499,6 +527,11 @@ describe('a streamed request carrying an effort-only system change, and its keep
 describe('refusals around an effort-only system message', () => {
   it('a request ending on an assistant turn and then one is still a prefill', () => {
     const messages = [{ role: 'user', content: 'u0' }, { role: 'assistant', content: 'a1' }, marker('low')];
+    expect(() => assertMessagePrefillSupported('claude-opus-5-5', messages, undefined, 'anthropic', {})).toThrow(/prefill/);
+  });
+
+  it('a request ending on an assistant turn and then an effort message whose content is only empty text is still a prefill', () => {
+    const messages = [{ role: 'user', content: 'u0' }, { role: 'assistant', content: 'a1' }, { role: 'system', content: [{ type: 'text', text: '' }], output_config: { effort: 'low' } }];
     expect(() => assertMessagePrefillSupported('claude-opus-5-5', messages, undefined, 'anthropic', {})).toThrow(/prefill/);
   });
 
