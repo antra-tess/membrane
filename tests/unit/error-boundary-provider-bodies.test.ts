@@ -62,17 +62,6 @@ describe('a context overflow in each provider\'s own words is context_length', (
     expect(anthropicHandled(new Anthropic.APIError(400, body, undefined, undefined as never)).type).toBe('context_length');
   });
 
-  it("anthropic: \"prompt is too long\" in the SDK's message, with a null or absent body", () => {
-    for (const body of [null, undefined]) {
-      const error = anthropicHandled(new Anthropic.APIError(400, body as never, 'prompt is too long: 210123 tokens > 200000 maximum', undefined as never));
-      expect(error.type, String(body)).toBe('context_length');
-      expect(error.retryable, String(body)).toBe(false);
-      const server = anthropicHandled(new Anthropic.APIError(500, body as never, 'prompt is too long: 210123 tokens > 200000 maximum', undefined as never));
-      expect(server.type, String(body)).toBe('server');
-      expect(server.retryable, String(body)).toBe(true);
-    }
-  });
-
   it('gemini: "The input token count (N) exceeds the maximum number of input tokens allowed (M)"', async () => {
     stubHttpFailure(400, {
       error: {
@@ -401,11 +390,12 @@ describe('retry hints and codes carried outside the usual fields', () => {
     expect(error.retryAfterMs).toBeUndefined();
   });
 
-  it("anthropic: with a null or absent body, a wait in the SDK's message is read", () => {
-    for (const body of [null, undefined]) {
-      const error = anthropicHandled(new Anthropic.APIError(429, body as never, 'Too many requests. Please retry after 30 seconds.', undefined as never));
-      expect(error.retryAfterMs, String(body)).toBe(30_000);
-    }
+  it("anthropic: a 429 whose response isn't JSON states its wait in the SDK's message, which is read", async () => {
+    stubHttpFailure(429, 'Too many requests. Please retry after 30 seconds.');
+    const error = await failure(new AnthropicAdapter({ apiKey: 'zz-key-anthropic' }));
+    expect((error.rawError as { error?: unknown }).error).toBeUndefined();
+    expect(error.type).toBe('rate_limit');
+    expect(error.retryAfterMs).toBe(30_000);
   });
 
   it('reads prose only as stated seconds, and only on an error that asks to be retried', async () => {

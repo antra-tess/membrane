@@ -1,1 +1,0 @@
-- A provider error whose body is `null` is read from the caller's message, as one with no body is. A 400 saying "prompt is too long" with a `null` body is now `context_length`, where it was `invalid_request`. A 5xx saying the same stays a retryable `server` failure.
