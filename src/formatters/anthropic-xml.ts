@@ -84,7 +84,9 @@ export interface AnthropicXmlFormatterConfig extends FormatterConfig {
  * call's answer waits until it reads as its own: results the model can't tell
  * apart, of one tool or without a name, go in call order, as a host that
  * stores results as their tools finish needs. One that never reads as its own
- * is never sent, as a result or as text. Results don't move between messages.
+ * is never sent, as a result or as text, and a kept one that names a tool
+ * other than its call's goes out without the name, so it reads back by
+ * place, as it was kept. Results don't move between messages.
  * A kept result renders from its fields when its run was reordered, or when a
  * left-out result in any message shared its `rawXml`, since the raw text
  * holds the old order or the other result. `onEvent` hears each result left
@@ -123,6 +125,9 @@ function withoutCalllessResults(
   const done = groups.map((group) => group.calls.map(() => false));
   const answered = new Set<string>();
   const released = new Set<string>();
+  // Kept results that name a tool other than their call's: they go out
+  // without the name, so they read back by place, as they were kept.
+  const unnamed = new Set<ContentBlock>();
   // Each message's blocks as they go out, by index: a run of results in the
   // order the model reads each as its own call's answer, without the ones left out.
   const orders = messages.map((message, i) => {
@@ -185,7 +190,9 @@ function withoutCalllessResults(
       for (const at of run) {
         const block = content[at] as ToolResultContent;
         if (keptHere.includes(at)) {
-          if (reordered && block.rawXml !== undefined) released.add(block.rawXml);
+          const misnamed = !block.isError && block.toolName !== undefined && block.toolName !== calls[placeOf.get(at)!]!.tool;
+          if (misnamed) unnamed.add(block);
+          if ((reordered || misnamed) && block.rawXml !== undefined) released.add(block.rawXml);
           continue;
         }
         const named = namedOf(at);
@@ -204,7 +211,13 @@ function withoutCalllessResults(
     let changed = order.length !== message.content.length || order.some((at, k) => at !== k);
     const content: ContentBlock[] = order.map((at) => {
       const block = message.content[at]!;
-      if (block.type !== 'tool_result' || block.rawXml === undefined || !released.has(block.rawXml)) return block;
+      if (block.type !== 'tool_result') return block;
+      if (unnamed.has(block)) {
+        const { rawXml: _raw, rawXmlImagesAt: _at, toolName: _name, ...rendered } = block;
+        changed = true;
+        return rendered;
+      }
+      if (block.rawXml === undefined || !released.has(block.rawXml)) return block;
       const { rawXml: _raw, rawXmlImagesAt: _at, ...rendered } = block;
       changed = true;
       return rendered;

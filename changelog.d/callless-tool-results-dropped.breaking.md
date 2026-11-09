@@ -32,7 +32,8 @@
     another call's answer waits until it reads as its own: results the model
     can't tell apart, of one tool or without a name, go out in call order,
     rendered from their fields. A result that never reads as its own is left
-    out. Each cycle that reuses a call id gets its result. A breakpoint on a message that leaves empty
+    out, and a kept result that names a tool other than its call's goes out
+    without the name. Each cycle that reuses a call id gets its result. A breakpoint on a message that leaves empty
     marks what came before it. On every path the round report marks the
     message a result came from as altered.
   - **Prompt cache:** a stored history that holds such a result sends a

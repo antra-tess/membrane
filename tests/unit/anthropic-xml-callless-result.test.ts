@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { AnthropicXmlFormatter } from '../../src/formatters/anthropic-xml.js';
 import { FidelityNotes } from '../../src/utils/fidelity.js';
+import { parseAccumulatedIntoBlocks } from '../../src/utils/tool-parser.js';
 import type { ContentBlock, NormalizedMessage } from '../../src/types/index.js';
 
 const text = (value: string): ContentBlock => ({ type: 'text', text: value });
@@ -228,15 +229,20 @@ describe('AnthropicXmlFormatter: a tool result that answers no call', () => {
     expect(events).toEqual([{ kind: 'orphan_tool_result_dropped', toolUseId: 's' }]);
   });
 
-  it('reads a result that names a tool other than its call\'s by its place', () => {
-    const { rendered, altered } = build([
+  it('sends a result that names a tool other than its call\'s without the name, so it reads back as its own call\'s answer', () => {
+    const { built, altered } = build([
       { participant: 'User', content: [text('look')] },
-      { participant: 'Agent', content: [call('a')] },
-      { participant: 'Tool', content: [namedResult('a', 'search', 'zz-a')] },
+      { participant: 'Agent', content: [call('a'), named('s', 'search')] },
+      { participant: 'Tool', content: [namedResult('a', 'search', 'zz-a'), namedResult('s', 'search', 'zz-s')] },
       { participant: 'Agent', content: [] },
     ]);
-    expect(rendered).toContain('zz-a');
-    expect(altered).toEqual([]);
+    const wire = built.messages
+      .map((m) => (typeof m.content === 'string' ? m.content : (m.content as Array<{ text?: string }>).map((b) => b.text ?? '').join('')))
+      .join('\n');
+    const { toolCalls, toolResults } = parseAccumulatedIntoBlocks(wire);
+    const toolOf = new Map(toolCalls.map((c) => [c.id, c.name]));
+    expect(toolResults.map((r) => [r.content, toolOf.get(r.toolUseId)])).toEqual([['zz-a', 'read_file'], ['zz-s', 'search']]);
+    expect(altered).toEqual([2]);
   });
 
   it('leaves out a second result for a call a result in an earlier message answered', () => {
