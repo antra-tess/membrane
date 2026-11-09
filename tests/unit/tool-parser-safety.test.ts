@@ -72,7 +72,7 @@ describe('F3 · a truncated block spliced with a later round closer', () => {
     const parsed = parseToolCalls(splicedTurn);
 
     expect(parsed?.calls.map((c) => [c.name, c.input])).toEqual([['zz_real_tool', {}]]);
-    expect(parsed?.calls[0]?.unparseableReason).toContain('left open');
+    expect(parsed?.calls[0]?.unparseableReason).toContain('whether that block was cut off or a value held the tag');
     expect(parsed?.calls[0]?.unparseableInput).toBe(realCall);
     expect(parsed?.beforeText).toContain('zz_truncated_tool');
   });
@@ -104,7 +104,7 @@ describe('F3 · a truncated block spliced with a later round closer', () => {
 
     for (const calls of [parseToolCalls(cutBetweenInvokes)!.calls, parseAccumulatedIntoBlocks(cutBetweenInvokes).toolCalls]) {
       expect(calls.map((c) => [c.name, c.input])).toEqual([['zz_real_tool', {}]]);
-      expect(calls[0]?.unparseableReason).toContain('holding an invoke was left open');
+      expect(calls[0]?.unparseableReason).toContain('whether that block was cut off or a value held the tag');
     }
   });
 
@@ -137,7 +137,7 @@ describe('F3 · a truncated block spliced with a later round closer', () => {
     const parsed = parseToolCalls(text);
 
     expect(parsed?.calls.map((c) => c.name)).toEqual(['zz_real_tool']);
-    expect(parsed?.calls[0]?.unparseableReason).toContain('left open');
+    expect(parsed?.calls[0]?.unparseableReason).toContain('whether that block was cut off or a value held the tag');
   });
 });
 

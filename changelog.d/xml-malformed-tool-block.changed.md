@@ -5,16 +5,18 @@
   opening tag or an invoke's closing tag, an invoke or parameter name holding
   `<` or `>`, a parameter given twice, text inside an invoke outside its
   parameter elements, or a stray tag outside every invoke, which is any `<`
-  in the block's text outside its invokes. In `stream()` and the event
-  stream, a block that opens after an earlier `function_calls` block holding
-  an invoke was left open, as a turn max_tokens cut after an invoke opener
-  leaves one, is refused too, once: the resend runs. `complete()` reads only
-  the new output, so it refuses such a block only when the earlier block is
-  in that output. Each named invoke opener in a refused block becomes a call
-  marked `unparseableInput` (the block's raw text) with `input` `{}` and a
-  new `unparseableReason`: a sentence an executor can give the model, which
-  says what broke and quotes none of the call's values. A block with no
-  named invoke gives one such call, named `""`. A well-formed block parses
+  in the block's text outside its invokes. A block whose opening tag comes
+  before an earlier `function_calls` block holding an invoke was closed is
+  refused too, from that tag on, whether a value held the tag or max_tokens
+  cut the earlier block after an invoke opener. In `stream()` and the event
+  stream, the earlier block may be an earlier turn's, which costs one refused
+  round: the resend runs. `complete()` reads only the new output, so it
+  refuses such a block only when the earlier block is in that output. Each
+  named invoke opener in a refused block becomes a call marked
+  `unparseableInput` (the block's raw text) with `input` `{}` and a new
+  `unparseableReason`: a sentence an executor can give the model, which says
+  what broke and quotes none of the call's values. A block with no named
+  invoke gives one such call, named `""`. A well-formed block parses
   as before, and a stored turn replays as before, except two calls stored
   side by side from byte-identical blocks that each held a swallowed invoke,
   which now replay as one block.

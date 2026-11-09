@@ -151,18 +151,22 @@ export interface ToolUseContent {
    * a parameter's or an invoke's opening tag, or an invoke's closing tag; a
    * parameter given twice; text inside an invoke outside its parameter
    * elements; or a stray tag outside every invoke, an invoke opener whose
-   * name can't be read included), or when it opens after an earlier
-   * function_calls block holding an invoke was left open. In a stream that
-   * earlier block may be an earlier turn's; `complete()` reads only its own
-   * output, so it refuses only when the earlier block is in that output.
+   * name can't be read included), or when its opening tag comes before an
+   * earlier function_calls block holding an invoke was closed, whether that
+   * block was cut off or one of its values held the tag. Its calls are then
+   * the named invoke openers after that tag, and its raw text starts there.
+   * In a stream that earlier block may be an earlier turn's; `complete()`
+   * reads only its own output, so it refuses only when the earlier block is
+   * in that output.
    */
   unparseableInput?: string;
 
   /**
    * Present only with `unparseableInput`: why `input` isn't the model's
-   * arguments, as a sentence an executor can give the model. It names an
-   * invoke by position, a tool or parameter name only where that's a plain
-   * identifier, and tags in words, and quotes none of the call's values.
+   * arguments, as a sentence an executor can give the model. It locates what
+   * broke by invoke position where it can, names a tool or parameter only
+   * where that name is a plain identifier, names tags in words, and quotes
+   * none of the call's values.
    */
   unparseableReason?: string;
 

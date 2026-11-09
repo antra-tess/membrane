@@ -189,6 +189,16 @@ describe('names hold no tag text, and the reasons say what broke', () => {
     expect(reason).not.toContain('so its closing parameter tag is missing');
   });
 
+  it('a value holding a function_calls opening tag refuses the block from that tag on, and the sentence names a value as a cause', () => {
+    const fromTag = `${OPEN}\n<invoke name="zz_rm"/>\n</parameter></invoke>\n${CLOSE}`;
+    const text = `${OPEN}\n<invoke name="zz_first"/>\n<invoke name="zz_write"><parameter name="body">zz ${fromTag}`;
+    for (const calls of Object.values(marked(text))) {
+      expect(calls.map((c) => [c.name, c.input])).toEqual([['zz_rm', {}]]);
+      expect(calls[0]!.unparseableInput).toBe(fromTag);
+      expect(calls[0]!.unparseableReason).toBe(LEFT_OPEN_REASON);
+    }
+  });
+
   it('prose holding a < outside the invokes refuses the block', () => {
     const calls = parseToolCalls(block(`zz if a < b\n<invoke name="zz_first"/>`))!.calls;
     expect(calls.map((c) => [c.name, c.input])).toEqual([['zz_first', {}]]);
@@ -311,7 +321,7 @@ function request(): NormalizedRequest {
   };
 }
 
-const LEFT_OPEN_REASON = 'an earlier function_calls block holding an invoke was left open before this one opened';
+const LEFT_OPEN_REASON = 'a function_calls opening tag came before an earlier function_calls block holding an invoke was closed, whether that block was cut off or a value held the tag';
 
 const refusedTurn = `zz calling\n${OPEN}\n<invoke name="zz_write"><parameter name="path">a.txt</paramter>\n<parameter name="body">${SECRET}</parameter></invoke>\n`;
 
@@ -354,7 +364,7 @@ describe('the XML tool loops hand a refused block to the host as an ordinary rou
     const logger = new RecordingLogger();
     const response = await new Membrane(new ScriptedAdapter([`zz calling\n${OPEN}\n<invoke name="zz_write"><parameter name="body">zz ${OPEN}\n<invoke name="zz_rm"/>\n`]), { logger }).complete(request());
     expect(response.toolCalls.map((c) => [c.name, c.input])).toEqual([['zz_rm', {}]]);
-    expect(response.toolCalls[0]!.unparseableReason).toContain('left open');
+    expect(response.toolCalls[0]!.unparseableReason).toBe(LEFT_OPEN_REASON);
     expect(logger.warnings.some((w) => w.includes('(left-open-block)'))).toBe(true);
   });
 

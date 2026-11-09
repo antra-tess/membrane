@@ -336,7 +336,7 @@ function blockDefect(inner: string): { kind: ToolBlockDefectKind; reason: string
 
 const LEFT_OPEN = {
   kind: 'left-open-block',
-  reason: 'an earlier function_calls block holding an invoke was left open before this one opened',
+  reason: 'a function_calls opening tag came before an earlier function_calls block holding an invoke was closed, whether that block was cut off or a value held the tag',
 } as const;
 
 function callsOfBlock(
