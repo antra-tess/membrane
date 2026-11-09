@@ -22,12 +22,13 @@
     the real output behind a placeholder. `AnthropicXmlFormatter` in XML tool
     mode sends each result where the model reads it as its call's answer.
     The transcript carries no ids: a result reads as answering the first
-    call since the last result not yet answered, of the tool its
-    `<tool_name>` names where that is its call's tool, or of any tool where
-    it isn't, as with an error, which goes out without one. Within a
-    message's run of results, one whose id names a call takes that call, and
-    one whose id names no call takes a call in its own message that no
-    result names, as a generation parsed back from its text holds them. The
+    call not yet answered since the last result the request keeps, of the
+    tool its `<tool_name>` names where that is its call's tool, or of any
+    tool where it isn't, as with an error, which goes out without one. Within
+    a message's run of results, one whose id names a call takes that call,
+    and one whose id names no call takes a call in its own message that no
+    later result names, as a generation parsed back from its text holds
+    them. The
     run keeps the host's order, except that a result that would read as
     another call's answer waits until it reads as its own: results the model
     can't tell apart, of one tool or without a name, go out in call order,

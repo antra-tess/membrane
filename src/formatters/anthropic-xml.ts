@@ -72,13 +72,14 @@ export interface AnthropicXmlFormatterConfig extends FormatterConfig {
 /**
  * The messages with each tool result where the model reads it as its own
  * call's answer, and without the ones it can't stand there. The transcript
- * carries no ids: a results block answers the calls since the last result,
- * and a result reads as answering the first of them not yet answered, of the
+ * carries no ids: a results block answers the calls since the last result
+ * the request keeps, since one left out leaves no mark there, and a result
+ * reads as answering the first of them not yet answered, of the
  * tool its `<tool_name>` names where it names its call's tool, or of any tool
  * where it doesn't (an error goes out without one). So within each run of
  * results in a message, a result whose id names a call takes that call, and
  * one whose id names no call takes the first call in its own message that no
- * result names: a generation parsed back from its text gives its calls fresh
+ * later result names: a generation parsed back from its text gives its calls fresh
  * ids, and keeps its results beside them. The run keeps the host's order,
  * which a host can choose, except that a result that would read as another
  * call's answer waits until it reads as its own: results the model can't tell
@@ -102,28 +103,27 @@ function withoutCalllessResults(
   for (const message of messages) {
     for (const block of message.content) if (block.type === 'tool_use') callIds.add(block.id);
   }
-  // The calls each calls block answers, in order, with the message and tool of
-  // each, and the calls a result in its span names by id.
-  const groups: Array<{ calls: Array<{ id: string; message: number; tool: string }>; named: Set<string> }> = [];
-  const groupOf = messages.map((message) => message.content.map(() => -1));
-  let resultSince = true;
-  messages.forEach((message, i) => message.content.forEach((block, j) => {
-    if (block.type === 'tool_use') {
-      if (resultSince) groups.push({ calls: [], named: new Set() });
-      resultSince = false;
-      groups[groups.length - 1]!.calls.push({ id: block.id, message: i, tool: block.name });
-    } else if (block.type === 'tool_result') {
-      resultSince = true;
-      const group = groups[groups.length - 1];
-      if (!group) return;
-      groupOf[i]![j] = groups.length - 1;
-      if (typeof block.toolUseId === 'string' && group.calls.some((c) => c.id === block.toolUseId)) group.named.add(block.toolUseId);
+  // Each call's block, whether a result after it names its id, for the
+  // fallback: a result whose id names no call doesn't take a call some
+  // later result names.
+  const namedAfter = new Set<ContentBlock>();
+  const resultIds = new Set<string>();
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const content = messages[i]!.content;
+    for (let j = content.length - 1; j >= 0; j--) {
+      const block = content[j]!;
+      if (block.type === 'tool_result' && typeof block.toolUseId === 'string') resultIds.add(block.toolUseId);
+      else if (block.type === 'tool_use' && resultIds.has(block.id)) namedAfter.add(block);
     }
-  }));
-
-  // Per group, whether each of its calls has a result the model reads as its answer.
-  const done = groups.map((group) => group.calls.map(() => false));
-  const answered = new Set<string>();
+  }
+  // The calls since the last kept result, as the wire shows them: a result
+  // left out doesn't end them. Each with its message and tool, whether a
+  // later result names it, and whether a kept result answers it.
+  let calls: Array<{ id: string; message: number; tool: string; named: boolean; done: boolean }> = [];
+  let keptSince = false;
+  // Per call id, the calls so far that carry it, and how many of those a kept result answers.
+  const carried = new Map<string, number>();
+  const answered = new Map<string, number>();
   const released = new Set<string>();
   // Kept results that name a tool other than their call's: they go out
   // without the name, so they read back by place, as they were kept.
@@ -134,21 +134,26 @@ function withoutCalllessResults(
     const order: number[] = [];
     const content = message.content;
     for (let j = 0; j < content.length;) {
-      if (content[j]!.type !== 'tool_result') {
+      const first = content[j]!;
+      if (first.type === 'tool_use') {
+        if (keptSince) calls = [];
+        keptSince = false;
+        calls.push({ id: first.id, message: i, tool: first.name, named: namedAfter.has(first), done: false });
+        carried.set(first.id, (carried.get(first.id) ?? 0) + 1);
+        order.push(j++);
+        continue;
+      }
+      if (first.type !== 'tool_result') {
         order.push(j++);
         continue;
       }
       const run: number[] = [];
       while (j < content.length && content[j]!.type === 'tool_result') run.push(j++);
-      const g = groupOf[i]![run[0]!]!;
-      const group = groups[g];
-      const calls = group?.calls ?? [];
-      const doneHere = done[g] ?? [];
       const taken = new Set<number>();
       const placeOf = new Map<number, number>();
-      const take = (at: number, fits: (call: { id: string; message: number }) => boolean): void => {
+      const take = (at: number, fits: (call: { id: string; message: number; named: boolean }) => boolean): void => {
         for (let k = 0; k < calls.length; k++) {
-          if (taken.has(k) || doneHere[k] || !fits(calls[k]!)) continue;
+          if (taken.has(k) || calls[k]!.done || !fits(calls[k]!)) continue;
           taken.add(k);
           placeOf.set(at, k);
           return;
@@ -163,7 +168,7 @@ function withoutCalllessResults(
         if (named !== undefined) take(at, (call) => call.id === named);
       }
       for (const at of run) {
-        if (namedOf(at) === undefined) take(at, (call) => call.message === i && !group!.named.has(call.id));
+        if (namedOf(at) === undefined) take(at, (call) => call.message === i && !call.named);
       }
       // Whether the model reads the result at `at` as its own call's answer:
       // the first call not yet answered, of the tool it names where that's
@@ -173,7 +178,7 @@ function withoutCalllessResults(
         const block = content[at] as ToolResultContent;
         const tool = !block.isError && block.toolName === calls[place]!.tool ? block.toolName : undefined;
         for (let k = 0; k < calls.length; k++) {
-          if (doneHere[k] || (tool !== undefined && calls[k]!.tool !== tool)) continue;
+          if (calls[k]!.done || (tool !== undefined && calls[k]!.tool !== tool)) continue;
           return k === place;
         }
         return false;
@@ -182,10 +187,12 @@ function withoutCalllessResults(
       const keptHere: number[] = [];
       for (let p = waiting.findIndex(readsAsOwn); p >= 0; p = waiting.findIndex(readsAsOwn)) {
         const at = waiting.splice(p, 1)[0]!;
-        doneHere[placeOf.get(at)!] = true;
-        answered.add(calls[placeOf.get(at)!]!.id);
+        const call = calls[placeOf.get(at)!]!;
+        call.done = true;
+        answered.set(call.id, (answered.get(call.id) ?? 0) + 1);
         keptHere.push(at);
       }
+      if (keptHere.length > 0) keptSince = true;
       const reordered = keptHere.some((at, k) => k > 0 && at < keptHere[k - 1]!);
       for (const at of run) {
         const block = content[at] as ToolResultContent;
@@ -196,7 +203,7 @@ function withoutCalllessResults(
           continue;
         }
         const named = namedOf(at);
-        onEvent(named !== undefined && answered.has(named)
+        onEvent(named !== undefined && (carried.get(named) ?? 0) > 0 && answered.get(named) === carried.get(named)
           ? { kind: 'stray_tool_result_dropped', toolUseId: named, reason: 'answered' }
           : { kind: 'orphan_tool_result_dropped', toolUseId: typeof block.toolUseId === 'string' ? block.toolUseId : '<missing>' });
         if (block.rawXml !== undefined) released.add(block.rawXml);

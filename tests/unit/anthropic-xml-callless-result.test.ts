@@ -131,6 +131,18 @@ describe('AnthropicXmlFormatter: a tool result that answers no call', () => {
     expect(events).toEqual([{ kind: 'orphan_tool_result_dropped', toolUseId: 'id_from_nowhere' }]);
   });
 
+  it('leaves a call to a result in a later message that names it, so a result whose id names no call is left out rather than taking that call', () => {
+    const { rendered, events } = build([
+      { participant: 'User', content: [text('look')] },
+      { participant: 'Agent', content: [call('a'), result('id_from_nowhere', 'zz-stray-in-place')] },
+      { participant: 'Tool', content: [result('a', 'zz-a')] },
+      { participant: 'Agent', content: [] },
+    ]);
+    expect(rendered).toContain('zz-a');
+    expect(rendered).not.toContain('zz-stray-in-place');
+    expect(events).toEqual([{ kind: 'orphan_tool_result_dropped', toolUseId: 'id_from_nowhere' }]);
+  });
+
   it('tells the host through onNormalize, naming the result: one that answers no call as an orphan, a second for an answered call as a stray', () => {
     const { events } = build([
       { participant: 'Agent', content: [call('a')] },
@@ -308,6 +320,44 @@ describe('AnthropicXmlFormatter: a tool result that answers no call', () => {
     expect(rendered).toContain('zz-a');
     expect(rendered).toContain('zz-c');
     expect(altered).toEqual([]);
+  });
+
+  it('runs a group of calls on past a results block whose results are all left out, as the wire shows it', () => {
+    for (const [tool, kept] of [['read_file', false], ['search', true]] as const) {
+      const { rendered, events } = build([
+        { participant: 'User', content: [text('look')] },
+        { participant: 'Agent', content: [call('a'), call('b')] },
+        { participant: 'Tool', content: [namedResult('b', 'read_file', 'zz-b')] },
+        { participant: 'Agent', content: [named('c', tool)] },
+        { participant: 'Tool', content: [namedResult('c', tool, 'zz-c')] },
+        { participant: 'Agent', content: [] },
+      ]);
+      expect(rendered).not.toContain('zz-b');
+      if (kept) {
+        expect(rendered).toContain('zz-c');
+        expect(events).toEqual([{ kind: 'orphan_tool_result_dropped', toolUseId: 'b' }]);
+      } else {
+        expect(rendered).not.toContain('zz-c');
+        expect(events).toEqual([
+          { kind: 'orphan_tool_result_dropped', toolUseId: 'b' },
+          { kind: 'orphan_tool_result_dropped', toolUseId: 'c' },
+        ]);
+      }
+    }
+  });
+
+  it('reports a result left out for its place as an orphan, though an earlier cycle answered its id', () => {
+    const { rendered, events } = build([
+      { participant: 'User', content: [text('look')] },
+      { participant: 'Agent', content: [call('q')] },
+      { participant: 'Tool', content: [result('q', 'zz-first')] },
+      { participant: 'Agent', content: [call('p'), call('q')] },
+      { participant: 'Tool', content: [result('q', 'zz-second')] },
+      { participant: 'Agent', content: [] },
+    ]);
+    expect(rendered).toContain('zz-first');
+    expect(rendered).not.toContain('zz-second');
+    expect(events).toEqual([{ kind: 'orphan_tool_result_dropped', toolUseId: 'q' }]);
   });
 
   it('sends a result for each cycle that reuses a call id', () => {

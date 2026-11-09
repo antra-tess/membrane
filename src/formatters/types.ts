@@ -147,9 +147,9 @@ export type NormalizeEvent =
   /**
    * A tool_result whose tool_use id appears nowhere in the message list was
    * left out: a result without its call is never sent, as a result or as
-   * text. In XML tool mode, one that doesn't stand in its call's place, where
-   * the model reads that call's answer. `toolUseId` is `'<missing>'` for a
-   * result with no id.
+   * text. In XML tool mode, also one whose call is in the request where the
+   * model would never read it as its own call's answer.
+   * `toolUseId` is `'<missing>'` for a result with no id.
    */
   | { kind: 'orphan_tool_result_dropped'; toolUseId: string }
   /**
