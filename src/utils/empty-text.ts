@@ -39,7 +39,9 @@ function isEmptyTextBlock(block: unknown): boolean {
 }
 
 /** A request that ends with an assistant message is a prefill to the
- * provider, so the final role can't change. */
+ * provider, so the final role can't change. An effort-only system message
+ * stays, with its content emptied, since the API refuses whitespace text in
+ * it. */
 export function stripEmptyTextMessages<T extends { content: unknown }>(
   messages: readonly T[],
   onDropped?: (block: unknown) => void,
