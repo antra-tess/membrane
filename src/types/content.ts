@@ -220,8 +220,9 @@ export interface RedactedThinkingContent {
 
 /**
  * A change, from this point in the conversation on, to the tools the model is
- * offered and to its system text, made without editing the request's `tools`
- * or `system`, so the prompt cache before it still holds.
+ * offered and to its system text, or to the effort it answers with, made
+ * without editing the request's `tools`, `system` or top-level effort, so the
+ * prompt cache before it still holds.
  *
  * A message holding one holds nothing else; NativeFormatter refuses a message
  * that mixes it with other blocks. Its participant isn't read: the block's
@@ -235,22 +236,36 @@ export interface RedactedThinkingContent {
  * message reported altered): that order within each block, and the blocks in the message's
  * order, so a removal in a later block withdraws a tool an earlier one
  * defined. A tool a change defines can be called like one in `tools`, and a
- * call to it comes back under its name. It goes at the first
- * point at or after its place where the API accepts one: after a user turn,
- * a tool-result turn included, and before an assistant turn or at the end,
- * reading the turns as the adapter's empty-text cleanup leaves them.
+ * call to it comes back under its name. A change of tools or system text goes
+ * at the first point at or after its place where the API accepts one: after a
+ * user turn, a tool-result turn included, and before an assistant turn or at
+ * the end, reading the turns as the adapter's empty-text cleanup leaves them.
  * With no such point, as after a final assistant message, the request is
- * refused before sending. Through any other formatter or adapter, Membrane
- * refuses a request that carries one before sending. Both refusals, and the
- * API's own refusal on a model without mid-conversation system messages, are
+ * refused before sending.
+ *
+ * A block carrying `effort` carries nothing else, and its message holds
+ * nothing else. NativeFormatter sends it, through AnthropicAdapter, as a
+ * `role: 'system'` message with empty content and `output_config: { effort }`,
+ * under the beta `mid-conversation-output-config-2026-07-01`, and the API
+ * applies the effort from the next user turn on. Unlike a change of tools or
+ * system text, it goes exactly at its place: before the first turn holding a
+ * block of a later message, or at the end. The API took one before a user
+ * turn and between a tool call and its result. Its `cacheBreakpoint`, having
+ * no block of its own to hold, goes on the last block before it.
+ *
+ * Through any other formatter or adapter, Membrane refuses a request that
+ * carries a change before sending. That refusal, the one for a change of tools
+ * or system text with no point, and the API's own refusal on a model without
+ * mid-conversation system messages or without per-turn effort, are
  * MembraneErrors with `systemChangeRefused: true`. Through NativeFormatter and
- * AnthropicAdapter, a malformed change, mixed with other blocks or defining a
- * tool whose wire name another holds, is refused as unsupported, without the
- * flag. Through anything else the refusal for the formatter or adapter comes
- * first, with it, unless the formatter can't carry the request's tools at all
- * (`tools` as the request's changes leave them, definitions added and
- * removals taken away): that refusal comes before
- * it, without the flag, since making the change in `tools` would meet it too.
+ * AnthropicAdapter, a malformed change, mixed with other blocks, carrying
+ * `effort` beside another change, or defining a tool whose wire name another
+ * holds, is refused as unsupported, without the flag. Through anything else
+ * the refusal for the formatter or adapter comes first, with it, unless the
+ * formatter can't carry the request's tools at all (`tools` as the request's
+ * changes leave them, definitions added and removals taken away): that refusal
+ * comes before it, without the flag, since making the change in `tools` would
+ * meet it too.
  */
 export interface SystemChangeContent {
   type: 'system_change';
@@ -260,7 +275,17 @@ export interface SystemChangeContent {
   defineTools?: ToolDefinition[];
   /** System text added from here on, one text block each; only whitespace is left out. */
   addSystem?: string[];
+  /** The effort (`output_config.effort`) from the next user turn on, in a block carrying nothing else. */
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 }
+
+/**
+ * Present, as `true`, in releases whose SystemChangeContent carries `effort`. A
+ * caller that may run on an earlier release reads it before sending an
+ * effort-only change, since an earlier NativeFormatter builds no content from
+ * one and leaves it out.
+ */
+export const SYSTEM_CHANGE_EFFORT = true;
 
 export type ContentBlock =
   | TextContent

@@ -34,7 +34,8 @@ export function stripEmptyTextBlocks<T>(blocks: readonly T[], onDropped?: (block
 }
 
 /** A request that ends with an assistant message is a prefill to the
- * provider, so the final role can't change. */
+ * provider, so the final role can't change. An effort-only system message,
+ * whose `output_config` is what it sends, stays though its content is empty. */
 export function stripEmptyTextMessages<T extends { content: unknown }>(
   messages: readonly T[],
   onDropped?: (block: unknown) => void,
@@ -43,7 +44,7 @@ export function stripEmptyTextMessages<T extends { content: unknown }>(
   for (const message of messages) {
     if (Array.isArray(message.content)) {
       const content = stripEmptyTextBlocks(message.content, onDropped);
-      if (content.length > 0) result.push({ ...message, content });
+      if (content.length > 0 || (message as { output_config?: unknown }).output_config != null) result.push({ ...message, content });
     } else if (typeof message.content !== 'string' || hasNonEmptyText(message.content)) {
       result.push(message);
     } else if (message.content !== '') {

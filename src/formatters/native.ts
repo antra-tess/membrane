@@ -59,6 +59,11 @@ function markLastCacheable(blocks: Array<Record<string, unknown>>, cacheControl:
 interface BuiltSystemChange {
   content: Array<Record<string, unknown>>;
   at: number;
+  effort?: NonNullable<SystemChangeContent['effort']>;
+}
+
+function changesToolsOrSystem(change: SystemChangeContent): boolean {
+  return (change.removeTools?.length ?? 0) > 0 || (change.defineTools?.length ?? 0) > 0 || (change.addSystem?.length ?? 0) > 0;
 }
 
 export interface NativeFormatterConfig extends FormatterConfig {
@@ -232,6 +237,19 @@ export class NativeFormatter implements PrefillFormatter {
             `NativeFormatter: message ${i} holds a system_change block beside other blocks. A message holding one holds nothing else.`
           );
         }
+        const effort = changes.find((change) => change.effort !== undefined)?.effort;
+        if (effort !== undefined) {
+          if (changes.length > 1 || changesToolsOrSystem(changes[0]!)) {
+            throw unsupportedError(
+              `NativeFormatter: message ${i} carries an effort change beside another change. A block carrying effort carries nothing else, and its message holds nothing else.`
+            );
+          }
+          if (cacheControl && previousContent && (message.cacheBreakpoint || hasCacheMarker?.(message, i))) {
+            markLastCacheable(previousContent, cacheControl);
+          }
+          systemChanges.push({ content: [], at: i, effort });
+          continue;
+        }
         const content = this.convertSystemChanges(changes, wireNames, () => options.fidelity?.alter(i));
         if (content.length === 0) continue;
         ownBlocks(options.fidelity, content, i);
@@ -404,10 +422,13 @@ export class NativeFormatter implements PrefillFormatter {
   }
 
   /**
-   * The API takes a `role: 'system'` message, or a run of them, only after a
-   * user turn, judging it by the message right before it: before an assistant
-   * turn that follows a user turn, or at the end after a user turn, never
-   * after an assistant turn. It accepts consecutive messages of one role.
+   * The API takes a `role: 'system'` message of tool changes or system text,
+   * or a run of them, only after a user turn, judging it by the message right
+   * before it: before an assistant turn that follows a user turn, or at the
+   * end after a user turn, never after an assistant turn. It accepts
+   * consecutive messages of one role. An effort-only one goes exactly at its
+   * place: before the first message holding a block of a later message, or at
+   * the end.
    */
   private static placeSystemChanges(
     messages: ProviderTurnMessage[],
@@ -434,26 +455,45 @@ export class NativeFormatter implements PrefillFormatter {
     });
     const points = new Map<number, number>();
     for (const turn of turns) if (turn.role === 'assistant' && turn.after === 'user') points.set(turn.first, turn.earliest);
+    const latest = (message: ProviderTurnMessage): number => {
+      let at = -Infinity;
+      for (const block of message.content as Array<{ type?: string; text?: unknown }>) {
+        const from = survives(block) ? origin.get(block) : undefined;
+        if (from !== undefined && from > at) at = from;
+      }
+      return at;
+    };
+    const sent = (change: BuiltSystemChange): ProviderMessage => change.effort !== undefined
+      ? { role: 'system', content: [], output_config: { effort: change.effort } }
+      : { role: 'system', content: change.content };
+    const efforts = changes.filter((change) => change.effort !== undefined);
+    const others = changes.filter((change) => change.effort === undefined);
     const placed: ProviderMessage[] = [];
     let next = 0;
+    let nextEffort = 0;
     messages.forEach((message, index) => {
+      const before: BuiltSystemChange[] = [];
       const earliest = points.get(index);
-      while (earliest !== undefined && earliest !== Infinity && next < changes.length && changes[next]!.at < earliest) {
-        placed.push({ role: 'system', content: changes[next]!.content });
-        next++;
+      while (earliest !== undefined && earliest !== Infinity && next < others.length && others[next]!.at < earliest) {
+        before.push(others[next++]!);
       }
+      const last = Array.isArray(message.content) ? latest(message) : -Infinity;
+      while (nextEffort < efforts.length && efforts[nextEffort]!.at < last) before.push(efforts[nextEffort++]!);
+      for (const change of before.sort((a, b) => a.at - b.at)) placed.push(sent(change));
       placed.push(message);
     });
-    if (next < changes.length) {
+    const after = efforts.slice(nextEffort);
+    if (next < others.length) {
       if (turns[turns.length - 1]?.role !== 'user') {
         throw systemChangeRefusedError(
-          `NativeFormatter: message ${changes[next]!.at}, a system change, has no place the API takes one at or after it: ` +
+          `NativeFormatter: message ${others[next]!.at}, a system change, has no place the API takes one at or after it: ` +
           'a system message goes after a user turn, and before an assistant turn or at the end. ' +
           'End the request with a user turn that has content after it, or make the change in the request\'s tools and system.'
         );
       }
-      for (; next < changes.length; next++) placed.push({ role: 'system', content: changes[next]!.content });
+      after.push(...others.slice(next));
     }
+    for (const change of after.sort((a, b) => a.at - b.at)) placed.push(sent(change));
     return placed;
   }
 
