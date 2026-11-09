@@ -3,8 +3,10 @@ import {
   CacheKeepalive,
   lineageKey,
   type CacheKeepaliveConfig,
+  type KeepaliveCall,
   type KeepaliveEvent,
 } from '../../src/cache-keepalive.js';
+import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import { MembraneError } from '../../src/types/index.js';
 
 const START = Date.parse('2026-11-09T00:00:00Z');
@@ -71,6 +73,7 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(START); });
 afterEach(() => {
   for (const ka of keepalives.splice(0)) ka.stop();
   vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 describe('keepalive failures retire only their own lineage', () => {
@@ -326,5 +329,58 @@ describe('completions that arrive after the lineage moved on', () => {
 
     expect(sent).toHaveLength(1);
     expect(ka.getStatus()).toEqual([]);
+  });
+});
+
+describe("the Anthropic adapter's keepalive sender", () => {
+  it("hands the keepalive a normalized error carrying the provider's stated wait, which holds the model's next poke, after the SDK's own retries", async () => {
+    const calls: KeepaliveCall[] = [];
+    const pokes: number[] = [];
+    const usage = {
+      input_tokens: 12, output_tokens: 0, cache_read_input_tokens: 1000, cache_creation_input_tokens: 0,
+    };
+    vi.stubGlobal('fetch', vi.fn(async (_input: unknown, init: { body: string }) => {
+      const body = JSON.parse(init.body);
+      if (body.max_tokens === 0) {
+        pokes.push(Date.now() - START);
+        return new Response(JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'Rate limited' } }), {
+          status: 429, headers: { 'content-type': 'application/json', 'retry-after': '120' },
+        });
+      }
+      return new Response(JSON.stringify({
+        id: 'response', type: 'message', role: 'assistant', model: 'claude-sonnet-4-5',
+        content: [], stop_reason: 'max_tokens', stop_sequence: null, usage,
+      }), { headers: { 'content-type': 'application/json' } });
+    }));
+    const adapter = new AnthropicAdapter({
+      apiKey: 'test-key',
+      cacheKeepalive: {
+        lanes: ['complete'], refreshAfterMs: 100, checkIntervalMs: 100, maxIdleMs: HOUR, maxConsecutiveErrors: 3,
+        onCall: (call) => { calls.push(call); },
+      },
+    });
+    keepalives.push(adapter.cacheKeepalive!);
+    const seed = wire('claude-sonnet-4-5');
+    await adapter.complete({
+      model: 'claude-sonnet-4-5', maxTokens: 1024,
+      system: seed.system as never, messages: seed.messages as never,
+      extra: { thinking: { type: 'adaptive' } },
+    });
+    await vi.advanceTimersByTimeAsync(2_500);
+
+    expect(calls).toHaveLength(1);
+    const call = calls[0]!;
+    expect(call.outcome).toBe('error');
+    const error = (call as { error: unknown }).error;
+    expect(error).toBeInstanceOf(MembraneError);
+    expect(error).toMatchObject({ type: 'rate_limit', httpStatus: 429, retryAfterMs: 120_000 });
+    expect((error as MembraneError).rawError).toMatchObject({ status: 429 });
+    expect(pokes).toHaveLength(3);
+
+    const failedAt = call.startedAt + call.durationMs - START;
+    await vi.advanceTimersByTimeAsync(failedAt + 120_000 - 1 - 2_500);
+    expect(pokes).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(pokes.length).toBeGreaterThan(3);
   });
 });
