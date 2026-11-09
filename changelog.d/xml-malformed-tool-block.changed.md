@@ -1,15 +1,17 @@
 - XML tool mode: a `function_calls` block whose tags break the format is
   refused whole, never dispatched with the arguments a lenient read made of
   it. That's a block with an invoke that has no closing tag (one the next
-  invoke swallowed included), a value holding a parameter's or an invoke's
-  opening tag as the block's own are written (`<parameter name="…">`,
-  `<invoke name="…">`) or an invoke's closing tag, an invoke or parameter
+  invoke swallowed included), a value holding an opening tag the block
+  itself reads as a parameter's or an invoke's, such as
+  `<parameter name="…">` or `<invoke name='…'/>`, or an invoke's closing
+  tag, an invoke or parameter
   name holding `<` or `>`, an invoke name holding a line terminator, a
   parameter given twice, text inside an invoke outside its parameter
   elements, or a stray tag outside every invoke, which is any `<` in the
-  block's text outside its invokes. A tag named parameter or invoke written
-  another way stays in the value, where before a value holding an invoke tag
-  with a name and another attribute left the block no calls at all. A
+  block's text outside its invokes. A tag named parameter or invoke that the
+  block wouldn't read as one stays in the value, where before a value holding
+  an invoke tag with a name and another attribute left the block no calls
+  at all. A
   closing parameter tag ends the value wherever it stands, as before. A block
   whose opening tag comes while an earlier `function_calls` opening tag is
   still unclosed is refused too, from that tag on, which costs one refused

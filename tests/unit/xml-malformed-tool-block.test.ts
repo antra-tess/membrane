@@ -97,6 +97,11 @@ const malformed: Array<[string, string, string[]]> = [
     ['zz_write'],
   ],
   [
+    'a value holding a self-closing invoke in single quotes',
+    `<invoke name="zz_write"><parameter name="body">one <invoke name='zz_rm'/> ${SECRET}</parameter></invoke>`,
+    ['zz_write', 'zz_rm'],
+  ],
+  [
     'a parameter left open before the next parameter opens',
     `<invoke name="zz_write"><parameter name="path">a.txt\n<parameter name="body">${SECRET}</parameter></invoke>`,
     ['zz_write'],
@@ -298,6 +303,7 @@ describe('a well-formed block parses as before', () => {
   for (const [title, value] of [
     ['a TestNG parameter element', '<suite name="s"><test name="t"><parameter name="browser" value="chrome"/></test></suite>'],
     ['a BPEL invoke element', '<sequence><invoke partnerLink="p" operation="o"/></sequence>'],
+    ['an invoke element with a name and another attribute', '<flow><invoke name="x" partnerLink="p"/></flow>'],
     ['a parameter opening tag with no name', 'one<parameter>two'],
     ['an invoke opening tag with no name', 'one <invoke/> two'],
   ]) {

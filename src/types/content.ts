@@ -148,7 +148,7 @@ export interface ToolUseContent {
    * refused whole, holding the block's raw text, with `input` `{}`: none of
    * the block's calls is taken as the model's. A block is refused whole when
    * its tags break the format (an invoke with no closing tag; a value holding
-   * a parameter's or an invoke's opening tag as the block's own are written,
+   * an opening tag the block itself reads as a parameter's or an invoke's,
    * or an invoke's closing tag; a parameter given twice; text inside an
    * invoke outside its parameter elements; or a stray tag outside every
    * invoke, an invoke opener whose name can't be read included), or when its
