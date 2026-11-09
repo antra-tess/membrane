@@ -22,6 +22,7 @@ import {
 import { errorFromThrown, systemChangeRefusedError } from '../types/errors.js';
 import { stripEmptyTextAfterPassthrough } from '../utils/empty-text.js';
 import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, streamIndex, isEventObject, isToolCallBlock, isToolCallArgumentsDelta, progressOfAnthropicEvent, callerAbort } from './utils.js';
+import { keepLongIntegers } from '../utils/long-integers.js';
 import {
   INTERLEAVED_THINKING_BETA,
   THINKING_BINDING_BETA,
@@ -541,7 +542,7 @@ export class BedrockAdapter implements ProviderAdapter {
       throw errorFromHttpResponse(this.name, response, await response.text(), rawRequest);
     }
 
-    return response.json() as Promise<BedrockMessageResponse>;
+    return JSON.parse(await response.text(), keepLongIntegers) as BedrockMessageResponse;
   }
 
   private async invokeModelWithStream(

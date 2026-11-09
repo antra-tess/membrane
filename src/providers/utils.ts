@@ -1,5 +1,6 @@
 import { MembraneError, TimeoutAbortError, errorFromProviderStatus, networkError, withRawRequest } from '../types/errors.js';
 import { imageForRequest, urlImageForRequest } from '../utils/image-media.js';
+import { keepLongIntegers } from '../utils/long-integers.js';
 import { trackProgress, type ProgressBounds, type ProgressTracker } from '../progress-bounds.js';
 import type { ProgressSeen, SendReport } from '../types/provider.js';
 
@@ -266,7 +267,7 @@ export function toolUseInputFromText(text: unknown): ToolUseInput {
   if (/^[ \t\n\r]*$/.test(text)) return { input: {} };
   let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
+    parsed = JSON.parse(text, keepLongIntegers);
   } catch {
     console.warn("[membrane] Tool arguments aren't valid JSON; input is {} and unparseableInput keeps them (not logged: tool arguments can carry secrets)");
     return { input: {}, unparseableInput: text };

@@ -322,10 +322,11 @@ describe('the adapters carry the provider\'s report', () => {
   });
 
   it('Bedrock, unstreamed: from the response body, with the request\'s own block', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({
+    const body = JSON.stringify({
       content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn', model: 'claude-opus-5-5',
       usage: { input_tokens: 9, output_tokens: 1 }, input_transformations: dropped,
-    }) })));
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, text: async () => body, json: async () => JSON.parse(body) })));
     const adapter = new BedrockAdapter({ accessKeyId: 'k', secretAccessKey: 's', region: 'us-east-1' });
     const sent = wire();
     const response = await adapter.complete(sent as any);
