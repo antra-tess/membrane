@@ -58,8 +58,8 @@ export interface ErrorInfo {
   /** Provider-specific error code */
   providerErrorCode?: string;
 
-  /** See {@link MembraneError.promptTokens}. Given, even as undefined, it's
-   * taken as is, and the message isn't read for it. */
+  /** See {@link MembraneError.promptTokens}. Set where the error's type is
+   * classified, and carried as is: nothing reads the message for it again. */
   promptTokens?: number;
 
   /** Raw error object */
@@ -89,9 +89,11 @@ export class MembraneError extends Error {
    * and writes included, unlike a response's `inputTokens`. Unset where the
    * refusal states no count, as OpenAI's shorter and current forms, the
    * Responses API's and Bedrock's don't. Only the number is kept; the text
-   * stays in `rawError`.
-   * From a provider's body, it's read from the body's own message fields, as
-   * the error's type is, never from a part that can echo the request.
+   * stays in the error's message, and in `rawError` where there is one.
+   * It's read once, from the text the error's type is classified from: from a
+   * provider's body, its own message fields, never a part that can echo the
+   * request. A copy, through `toErrorInfo` or JSON, carries the number or
+   * nothing, and never reads the message again.
    */
   readonly promptTokens?: number;
   /**
@@ -127,10 +129,7 @@ export class MembraneError extends Error {
     this.rawError = serializeError(info.rawError);
     this.rawRequest = info.rawRequest;
     if (info.systemChangeRefused) this.systemChangeRefused = true;
-    if (info.type === 'context_length') {
-      const stated = 'promptTokens' in info ? info.promptTokens : statedPromptTokens(info.message);
-      if (stated !== undefined) this.promptTokens = stated;
-    }
+    if (info.type === 'context_length' && info.promptTokens !== undefined) this.promptTokens = info.promptTokens;
   }
 
   toErrorInfo(): ErrorInfo {
@@ -144,7 +143,7 @@ export class MembraneError extends Error {
       rawError: this.rawError,
       rawRequest: this.rawRequest,
       ...(this.systemChangeRefused ? { systemChangeRefused: true } : {}),
-      ...(this.type === 'context_length' ? { promptTokens: this.promptTokens } : {}),
+      ...(this.promptTokens !== undefined ? { promptTokens: this.promptTokens } : {}),
     };
   }
 }
@@ -196,6 +195,7 @@ export function contextLengthError(message: string, raw?: unknown, rawRequest?: 
     httpStatus: 400,
     rawError: raw,
     rawRequest,
+    promptTokens: statedPromptTokens(message),
   });
 }
 
@@ -722,7 +722,7 @@ export function errorFromProviderStatus(params: {
     rawError: params.rawError ?? params.body,
     rawRequest: params.rawRequest,
     // Read from the same text as the type, for the same reason: with a body, its own message fields only.
-    ...(classification.type === 'context_length' ? { promptTokens: statedPromptTokens(evidence) } : {}),
+    promptTokens: classification.type === 'context_length' ? statedPromptTokens(evidence) : undefined,
   });
 }
 
@@ -1066,6 +1066,7 @@ export function classifyError(error: unknown): ErrorInfo {
         retryable: classification.retryable,
         httpStatus: classification.httpStatus,
         rawError: serializedError,
+        ...(classification.type === 'context_length' ? { promptTokens: statedPromptTokens(error.message) } : {}),
       };
     }
   }
