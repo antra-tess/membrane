@@ -12,14 +12,16 @@
   cut, even right after its opening tag, one whose value held the later tag,
   or text before the block that named the tag. In `stream()` and the event
   stream the earlier tag may be in an earlier turn, a user's message
-  included, but only in the request's last message, the only one the stream
-  reads, so a tag before a cache breakpoint doesn't count. A user's message
-  there that names the tag costs the model's next block one refused round,
-  and the sentence the model gets can't say the tag is the user's. A later
-  request is refused the same way only if that refused exchange isn't kept.
-  `complete()` reads only the new output, so it refuses such a block only
-  when the earlier tag is in that output. A model that names the tag in text
-  before every block is refused each time, and the sentence it gets says why.
+  included, but only in the text the stream parses: the request's assistant
+  prefill, which holds the conversation after the last cache breakpoint and
+  after the last message holding an image. A user's message there whose tag
+  is still unclosed when the model's block opens costs that block one
+  refused round, and the sentence the model gets can't say the tag is the
+  user's. A later request is refused the same way only if that refused
+  exchange isn't kept. `complete()` reads only the new output, so it refuses
+  such a block only when the earlier tag is in that output. A model that
+  names the tag in text before every block is refused each time, and the
+  sentence it gets says why.
   Each named invoke opener in a refused block becomes a call marked
   `unparseableInput` (the block's raw text) with `input` `{}` and a new
   `unparseableReason`: a sentence an executor can give the model, which says
