@@ -158,9 +158,9 @@ export interface ToolUseContent {
    * and its raw text starts there. In a stream that earlier tag may be in an
    * earlier turn, a user's message included, but only in the text the stream
    * parses: the request's assistant prefill, which holds the conversation
-   * after the last cache breakpoint and after the last message holding an
-   * image. `complete()` reads only its own output, so it refuses only when
-   * the earlier tag is in that output.
+   * after the last cache breakpoint, with prompt caching on, the default, and
+   * after the last message holding an image. `complete()` reads only its own
+   * output, so it refuses only when the earlier tag is in that output.
    */
   unparseableInput?: string;
 
