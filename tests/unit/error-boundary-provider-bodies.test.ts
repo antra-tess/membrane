@@ -15,7 +15,7 @@ import { OpenRouterAdapter } from '../../src/providers/openrouter.js';
 import { OpenAIAdapter } from '../../src/providers/openai.js';
 import { BedrockAdapter } from '../../src/providers/bedrock.js';
 import { OpenAIResponsesAPIAdapter } from '../../src/providers/openai-responses-api.js';
-import { MembraneError, classifyError, errorFromThrown, rateLimitError } from '../../src/types/errors.js';
+import { MembraneError, classifyError, contextLengthError, errorFromThrown, rateLimitError } from '../../src/types/errors.js';
 import type { ProviderRequest } from '../../src/types/provider.js';
 
 const request: ProviderRequest = { model: 'zz-model-1', messages: [{ role: 'user', content: 'zz-prompt' }], maxTokens: 16 };
@@ -731,6 +731,37 @@ describe('a context overflow keeps the prompt count its refusal states, as a num
     const error = await failure(new OpenRouterAdapter({ apiKey: 'zz-key-openrouter' }));
     expect(error.type).toBe('context_length');
     expect(error.promptTokens).toBeUndefined();
+  });
+
+  async function renderedEcho(): Promise<MembraneError> {
+    stubHttpFailure(400, { error: { code: 'context_length_exceeded', param: 'messages', input: 'prompt is too long: 5 tokens > 3 maximum' } });
+    return failure(new OpenAIAdapter({ apiKey: 'zz-key-openai' }));
+  }
+
+  it('an error with none keeps none through a copy and a JSON round trip, though its message renders a count', async () => {
+    const none = await renderedEcho();
+    expect(none.promptTokens).toBeUndefined();
+    expect(new MembraneError(none.toErrorInfo()).promptTokens).toBeUndefined();
+    expect(new MembraneError(JSON.parse(JSON.stringify(none.toErrorInfo()))).promptTokens).toBeUndefined();
+  });
+
+  it('a stated count survives a JSON round trip', () => {
+    const stated = anthropicHandled(new Anthropic.APIError(400, anthropicBody('prompt is too long: 210123 tokens > 200000 maximum'), undefined, undefined as never));
+    expect(new MembraneError(JSON.parse(JSON.stringify(stated.toErrorInfo()))).promptTokens).toBe(210123);
+  });
+
+  it('classifyError gives a thrown provider message the count that wrapping it gives', () => {
+    const thrown = new Error('prompt is too long: 210123 tokens > 200000 maximum');
+    expect(classifyError(thrown).type).toBe('context_length');
+    expect(classifyError(thrown).promptTokens).toBe(210123);
+  });
+
+  it("an error that isn't a context overflow takes no count, though one is given", () => {
+    expect(new MembraneError({ type: 'invalid_request', message: 'zz', retryable: false, rawError: undefined, promptTokens: 5 }).promptTokens).toBeUndefined();
+  });
+
+  it('contextLengthError reads the count from the provider text it is given', () => {
+    expect(contextLengthError('prompt is too long: 210123 tokens > 200000 maximum').promptTokens).toBe(210123);
   });
 
   it('a copy keeps it, and a copy of an error with none reads none from its text', () => {
