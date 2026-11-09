@@ -156,8 +156,10 @@ export interface ToolUseContent {
    * was cut off, one of its values held the tag, or text before the block
    * named it. Its calls are then the named invoke openers after that tag,
    * and its raw text starts there. In a stream that earlier tag may be in an
-   * earlier turn, a user's message included; `complete()` reads only its own
-   * output, so it refuses only when the earlier tag is in that output.
+   * earlier turn, a user's message included, but only in the request's last
+   * message, the only one the stream reads, so a tag before a cache
+   * breakpoint doesn't count; `complete()` reads only its own output, so it
+   * refuses only when the earlier tag is in that output.
    */
   unparseableInput?: string;
 
