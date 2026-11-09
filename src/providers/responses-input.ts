@@ -29,21 +29,26 @@ export function isResponsesToolOutput(item: unknown): boolean {
  * of its call. A result without its call is never sent, alone or as text,
  * and the first outputs for a call, in input order, are the ones sent. An
  * output names its call by `call_id`, and a `local_shell_call_output`, which
- * has none, by its `id`, as either id of a `local_shell_call`. An id that is
+ * has none, by its `id`, as either id of a `local_shell_call`. Those two ids
+ * count as one call, so an output under each answers it once. An id that is
  * empty, or not a string, names no call.
  */
 export function unansweredToolOutputs(items: readonly unknown[]): Map<number, 'orphan' | 'stray'> {
+  const alias = shellCallAliases(items);
+  const key = (id: string) => alias.get(id) ?? id;
+  const keysOf = (item: unknown) => [...new Set(callIdsOf(item).map(key))];
   const called = new Set<string>();
-  for (const item of items) if (!isResponsesToolOutput(item)) for (const id of callIdsOf(item)) called.add(id);
+  for (const item of items) if (!isResponsesToolOutput(item)) for (const id of keysOf(item)) called.add(id);
   const before = new Map<string, number>();
   const answered = new Map<string, number>();
   const unanswered = new Map<number, 'orphan' | 'stray'>();
   items.forEach((item, index) => {
     if (!isResponsesToolOutput(item)) {
-      for (const id of callIdsOf(item)) before.set(id, (before.get(id) ?? 0) + 1);
+      for (const id of keysOf(item)) before.set(id, (before.get(id) ?? 0) + 1);
       return;
     }
-    const id = toolOutputCallId(item);
+    const named = toolOutputCallId(item);
+    const id = named === undefined ? undefined : key(named);
     if (id === undefined || !called.has(id)) {
       unanswered.set(index, 'orphan');
       return;
@@ -60,6 +65,17 @@ export function toolOutputCallId(item: unknown): string | undefined {
   if (!isObject(item)) return undefined;
   const id = item.type === 'local_shell_call_output' && item.call_id === undefined ? item.id : item.call_id;
   return typeof id === 'string' && id !== '' ? id : undefined;
+}
+
+/** Each `local_shell_call`'s `id`, mapped to its `call_id` where it has both. */
+function shellCallAliases(items: readonly unknown[]): Map<string, string> {
+  const alias = new Map<string, string>();
+  for (const item of items) {
+    if (!isObject(item) || item.type !== 'local_shell_call') continue;
+    const [callId, id] = callIdsOf(item);
+    if (callId !== undefined && id !== undefined) alias.set(id, callId);
+  }
+  return alias;
 }
 
 /** The ids a call item carries for its output to name. */

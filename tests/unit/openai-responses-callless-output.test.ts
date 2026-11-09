@@ -281,6 +281,17 @@ describe('Responses: a local shell output, and a call id used again', () => {
     });
   }
 
+  it('sends one output for a local shell call answered under each of its ids, leaving out the second', () => {
+    const byCallId = { type: 'local_shell_call_output', id: 'call_1', output: '{"output":"notes.txt"}' };
+    const byId = { type: 'local_shell_call_output', id: 'lsc_1', output: '{"output":"again"}' };
+    const { items, events } = build([
+      { participant: 'Agent', content: [], metadata: { openaiResponsesItems: [shellCall] } },
+      { participant: 'User', content: [], metadata: { openaiResponsesItems: [byCallId, byId] } },
+    ]);
+    expect(items).toEqual([shellCall, byCallId]);
+    expect(events).toEqual([{ kind: 'stray_tool_result_dropped', toolUseId: 'lsc_1', reason: 'answered' }]);
+  });
+
   it('leaves out a local_shell_call_output whose id names no call, reporting that id', () => {
     const output = { type: 'local_shell_call_output', id: 'lsc_9', output: '{}' };
     const { items, events } = build([
