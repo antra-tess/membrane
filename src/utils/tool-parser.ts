@@ -10,7 +10,7 @@ import type {
 import { createHash } from 'node:crypto';
 import { dataUrlImage, imageForRequest, isAcceptedImage, linkImageNote, type RasterImageMediaType } from './image-media.js';
 import { readToolSchema, type ParameterDeclaration, type ToolSchemaReading } from './tool-schema.js';
-import { keepLongIntegers } from './long-integers.js';
+import { parseKeepingLongIntegers } from './long-integers.js';
 
 /**
  * Parsing context shared by the XML entry points.
@@ -143,7 +143,7 @@ function guessParamValue(value: string): unknown {
     return trimmed;
   }
   try {
-    return JSON.parse(trimmed, keepLongIntegers);
+    return parseKeepingLongIntegers(trimmed);
   } catch {
     return trimmed;
   }
@@ -200,7 +200,7 @@ function parseParamValue(
   if (LARGE_INT_RE.test(trimmed)) return digitsAsText(schema, paramName, declaredType, trimmed);
   let parsed: unknown;
   try {
-    parsed = JSON.parse(trimmed, keepLongIntegers);
+    parsed = parseKeepingLongIntegers(trimmed);
   } catch {
     warnParamType(
       schema.toolName,

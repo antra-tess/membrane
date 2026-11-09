@@ -1,7 +1,8 @@
 /**
- * A tool call's arguments keep an integer the model wrote past Number.MAX_SAFE_INTEGER as its digits, a string,
- * wherever membrane parses them from text, so a long id written unquoted (a Discord snowflake) reaches the tool as
- * written instead of rounded.
+ * A tool call's arguments keep an integer the model wrote as plain digits past Number.MAX_SAFE_INTEGER as those
+ * digits, a string, wherever membrane parses them from text, so a long id written unquoted (a Discord snowflake)
+ * reaches the tool as written instead of rounded. A literal with an exponent or a fraction stays a number, and where
+ * the runtime gives the reviver no source text, every value is as JSON.parse gives it.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { toolUseInputFromText } from '../../src/providers/utils.js';
@@ -19,6 +20,8 @@ import { NativeFormatter } from '../../src/formatters/native.js';
 import type { NormalizedRequest, StreamEvent, ToolCall } from '../../src/types/index.js';
 
 const SNOWFLAKE = '1437820485836259419';
+/** Nested far past the depth a reviver's recursive walk reaches (2,314 on Node 24.22, 4,500 on Bun 1.4.4); plain JSON.parse takes it. */
+const DEEP = '['.repeat(100_000) + ']'.repeat(100_000);
 
 describe('toolUseInputFromText keeps an unsafe integer as its digits', () => {
   it('keeps a positive and a negative one, at any depth', () => {
@@ -45,7 +48,14 @@ describe('toolUseInputFromText keeps an unsafe integer as its digits', () => {
   });
 
   it('on a runtime that gives the reviver no source text, every value is as JSON.parse gives it', () => {
-    for (const value of [1.5, 1e20, Number(SNOWFLAKE), 42]) expect(keepLongIntegers('', value)).toBe(value);
+    for (const value of [1.5, 1e20, Number(SNOWFLAKE), 42, SNOWFLAKE, '', null, true, false, { a: 1 }, [1]]) expect(keepLongIntegers('', value)).toBe(value);
+  });
+
+  it('parses input nested past the depth the reviver can walk, as JSON.parse alone does', () => {
+    const parsed = toolUseInputFromText(`{"deep": ${DEEP}, "id": 5}`);
+    expect(parsed.unparseableInput).toBeUndefined();
+    expect((parsed.input as { id?: unknown }).id).toBe(5);
+    expect(Array.isArray((parsed.input as { deep?: unknown }).deep)).toBe(true);
   });
 });
 
@@ -154,6 +164,36 @@ describe('each route a tool call takes keeps the digits', () => {
     const adapter = new BedrockAdapter({ accessKeyId: 'test-key', secretAccessKey: 'test-secret', region: 'us-west-2' });
     const result = await adapter.stream({ model: 'us.anthropic.claude-sonnet-4-20250514-v1:0', messages: [{ role: 'user', content: 'hi' }], maxTokens: 100 } as any, { onChunk: () => {} });
     expect(result.content).toStrictEqual([{ type: 'tool_use', id: 'toolu_zz', name: 'open', input: { channelId: SNOWFLAKE } }]);
+  });
+
+  it('Bedrock, streamed: an event nested past the reviver\'s depth is parsed, not skipped', async () => {
+    const events = [
+      '{"type":"message_start","message":{"usage":{"input_tokens":1}}}',
+      `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_zz","name":"open","input":{"deep":${DEEP}}}}`,
+      '{"type":"content_block_stop","index":0}',
+      '{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":2}}',
+      '{"type":"message_stop"}',
+    ];
+    const frames = events.map(bedrockChunk);
+    const body = new ReadableStream<Uint8Array>({ start(c) { for (const f of frames) c.enqueue(f); c.close(); } });
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, body })));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const adapter = new BedrockAdapter({ accessKeyId: 'test-key', secretAccessKey: 'test-secret', region: 'us-west-2' });
+      const result = await adapter.stream({ model: 'us.anthropic.claude-sonnet-4-20250514-v1:0', messages: [{ role: 'user', content: 'hi' }], maxTokens: 100 } as any, { onChunk: () => {} });
+      expect((result.content as Array<{ type: string; name?: string }>).map((b) => [b.type, b.name])).toStrictEqual([['tool_use', 'open']]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('OpenAI Responses API, streamed: an event nested past the reviver\'s depth is parsed, not dropped', async () => {
+    stubFetchWithSseLines([
+      `{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_zz","call_id":"call_zz","name":"open","arguments":"{}","deep":${DEEP}}}`,
+      '{"type":"response.completed","response":{"id":"resp_zz","model":"gpt-zz","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}',
+    ]);
+    const result = await new OpenAIResponsesAPIAdapter({ apiKey: 'zz-key' }).stream(openAIRequest, { onChunk: () => {} } as any);
+    expect((result.content as Array<{ type: string; name?: string }>).filter((b) => b.type === 'tool_use').map((b) => b.name)).toStrictEqual(['open']);
   });
 });
 

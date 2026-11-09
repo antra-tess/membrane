@@ -20,7 +20,7 @@ import {
 } from '../types/index.js';
 import { errorFromThrown } from '../types/errors.js';
 import { isRawItemCarrier } from '../utils/fidelity.js';
-import { keepLongIntegers } from '../utils/long-integers.js';
+import { parseKeepingLongIntegers } from '../utils/long-integers.js';
 import { convertMcpMedia } from '../utils/mcp-media.js';
 import { toolUseInputFromText, textOnlyToolResultContent, openAIImagePart, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved, streamedToolCalls, isEventObject, callerAbort } from './utils.js';
 
@@ -587,7 +587,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
       }
 
       // A gateway can send a call's arguments as an object, so the body's own parse keeps long integers' digits.
-      const body: unknown = JSON.parse(await response.text(), keepLongIntegers);
+      const body: unknown = parseKeepingLongIntegers(await response.text());
       // A 200 can carry the provider's error, as a stream frame can.
       throwOnStreamErrorFrame(body, 'OpenRouter', request, 'response error');
       return body as OpenRouterResponse;

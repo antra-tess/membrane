@@ -11,3 +11,17 @@ export function keepLongIntegers(_key: string, value: unknown, context?: { sourc
     ? context.source
     : value;
 }
+
+/**
+ * `JSON.parse(text, keepLongIntegers)`, falling back to the plain parse where the reviver's walk, which recurses
+ * through the parsed value, runs out of stack on deeply nested input: `JSON.parse` alone takes that input, as it did
+ * before the reviver, and only its long integers are rounded. Any other error is thrown as `JSON.parse` throws it.
+ */
+export function parseKeepingLongIntegers(text: string): unknown {
+  try {
+    return JSON.parse(text, keepLongIntegers);
+  } catch (error) {
+    if (error instanceof RangeError) return JSON.parse(text);
+    throw error;
+  }
+}
