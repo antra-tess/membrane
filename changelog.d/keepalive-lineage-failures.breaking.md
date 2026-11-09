@@ -11,9 +11,10 @@
     connectome-host logs every event as JSON, so it copes as it is.
   - **What else changes:** a failed poke leaves the lineage's refresh clock
     where it was, so it is tried again at the next check, or once its
-    model's wait ends. A poke that fails with a `MembraneError` whose
-    `retryAfterMs` is finite and positive holds every lineage of that model
-    until the wait has passed, new lineages included. A lineage that falls
+    model's wait ends. A poke that fails with an error whose `retryAfterMs`
+    is a finite positive number, as a `MembraneError` with a stated wait
+    has, holds every lineage of that model until the wait has passed, new
+    lineages included. A lineage that falls
     due an hour or more after its last real request or cache-reading poke is
     dropped instead of sent (`cache-expired`), and so is one whose model's
     wait lasts to that hour or beyond (`wait-past-expiry`).

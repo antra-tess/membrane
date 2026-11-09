@@ -171,6 +171,27 @@ describe("a provider's stated wait holds the model's optional pokes", () => {
     ]);
   });
 
+  it.each([
+    ["holds the model for the retryAfterMs a plain error from a host's own sender states", 15 * MIN, 25 * MIN],
+    ['holds nothing for a retryAfterMs that is a string', String(15 * MIN), 10 * MIN],
+  ] as const)('%s', async (_title, retryAfterMs, a2At) => {
+    let a1Failed = false;
+    const a1 = wire('claude-m', 'A1');
+    const a2 = wire('claude-m', 'A2');
+    const { ka, sent } = setup((payload) => {
+      if (systemOf(payload) === 'A1' && !a1Failed) {
+        a1Failed = true;
+        throw Object.assign(new Error('Busy'), { retryAfterMs });
+      }
+      return hit;
+    }, { refreshAfterMs: 10 * MIN, checkIntervalMs: MIN, maxConsecutiveErrors: 3 });
+    ka.record(a1, undefined, 'stream');
+    ka.record(a2, undefined, 'stream');
+    await vi.advanceTimersByTimeAsync(25 * MIN);
+
+    expect(sent.find((s) => s.system === 'A2')?.at).toBe(a2At);
+  });
+
   it('retires a held lineage whose cache would expire before the wait ends, rather than send it cold', async () => {
     let a1Failed = false;
     const a1 = wire('claude-m', 'A1');

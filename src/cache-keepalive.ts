@@ -17,7 +17,6 @@
 
 import { collectMarkedBlocks } from './utils/cache-marker-budget.js';
 import { isEffortOnlyMessage } from './utils/empty-text.js';
-import { MembraneError } from './types/errors.js';
 import { createHash } from 'node:crypto';
 
 /** Vendor usage fields used by keepalive checks and spend observers. */
@@ -36,9 +35,9 @@ export interface KeepaliveUsage {
 }
 
 /** Sends one poke. Each error it throws counts against the poke's lineage
- * (`maxConsecutiveErrors`). A `MembraneError` with a finite positive
- * `retryAfterMs` also holds the pokes of every lineage of the same model
- * until that wait has passed. */
+ * (`maxConsecutiveErrors`). An error whose `retryAfterMs` is a finite
+ * positive number, as a `MembraneError` with a stated wait has, also holds
+ * the pokes of every lineage of the same model until that wait has passed. */
 export type KeepaliveSend = (
   wire: Record<string, unknown>,
   headers: Record<string, string> | undefined,
@@ -378,8 +377,8 @@ export class CacheKeepalive {
           request: payload, outcome: 'error', error: err,
         });
       }
-      const wait = err instanceof MembraneError ? err.retryAfterMs : undefined;
-      if (wait !== undefined && Number.isFinite(wait) && wait > 0) {
+      const wait = (err as { retryAfterMs?: unknown } | null | undefined)?.retryAfterMs;
+      if (typeof wait === 'number' && Number.isFinite(wait) && wait > 0) {
         this.modelNotBefore.set(modelOf(lin.wire), Date.now() + wait);
       }
       lin.failures += 1;
