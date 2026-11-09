@@ -172,9 +172,9 @@ export interface MembraneHooks {
 
   /**
    * Called with each repair the formatter's tool-pair normalization makes
-   * while building a request (see `NormalizeEvent`), including a stray or
-   * duplicate tool result turned into text, whose `recoveredChars` says how
-   * much of it the model now reads as text. It runs synchronously inside the
+   * while building a request (see `NormalizeEvent`), including a tool result
+   * left out because its call isn't in the request, or because its call
+   * already has one. It runs synchronously inside the
    * build, once per event of every build: each tool-loop round rebuilds, and
    * so does each attempt of `complete()`, so a repair the history keeps
    * needing is reported each time. A streaming path's retry sends the round's

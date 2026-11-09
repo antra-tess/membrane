@@ -68,6 +68,43 @@ export interface AnthropicXmlFormatterConfig extends FormatterConfig {
   maxParticipantsForStop?: number;
 }
 
+/**
+ * The messages without the tool results that answer no call. An XML
+ * transcript's calls carry no id, so a result answers a call before it that
+ * no earlier result answered, as the model reads it; a result with none left
+ * is a result without its call, and is never sent, as a result or as text. A
+ * kept result that shared a dropped one's `rawXml` renders from its fields,
+ * since the raw text holds the dropped result too. `onDropped` hears each
+ * message that lost a result, and whether nothing of it is left.
+ */
+function withoutCalllessResults(
+  messages: NormalizedMessage[],
+  onDropped: (index: number, emptied: boolean) => void,
+): NormalizedMessage[] {
+  let unanswered = 0;
+  return messages.map((message, index) => {
+    const kept: ContentBlock[] = [];
+    const released = new Set<string>();
+    for (const block of message.content) {
+      if (block.type === 'tool_use') unanswered++;
+      if (block.type !== 'tool_result' || unanswered > 0) {
+        if (block.type === 'tool_result') unanswered--;
+        kept.push(block);
+      } else if (block.rawXml !== undefined) {
+        released.add(block.rawXml);
+      }
+    }
+    if (kept.length === message.content.length) return message;
+    const content = kept.map((block) => {
+      if (block.type !== 'tool_result' || block.rawXml === undefined || !released.has(block.rawXml)) return block;
+      const { rawXml: _raw, rawXmlImagesAt: _at, ...rendered } = block;
+      return rendered;
+    });
+    onDropped(index, !holdsContent(content));
+    return { ...message, content };
+  });
+}
+
 function toToolResult(block: ToolResultContent): ToolResult {
   let content: string | ToolResultContentBlock[];
   if (typeof block.content === 'string') {
@@ -189,6 +226,13 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
 
     const providerMessages: ProviderMessage[] = [];
     const joiner = this.config.messageDelimiter ? '' : '\n';
+
+    // Messages a dropped result left empty, whose breakpoints still apply.
+    const emptiedByDrop = new Set<number>();
+    messages = withoutCalllessResults(messages, (index, emptied) => {
+      options.fidelity?.alter(index);
+      if (emptied) emptiedByDrop.add(index);
+    });
 
     let currentConversation: string[] = [];
     let lastNonEmptyParticipant: string | null = null;
@@ -321,21 +365,25 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         if (holdsContent(message.content)) onAltered?.();
       };
 
+      const markConversation = () => {
+        providerMessages.push({
+          role: 'assistant',
+          content: [{ type: 'text', text: currentConversation.join(joiner), cache_control: cacheControl }],
+        });
+        currentConversation = [];
+      };
+
       if (isEmpty && !isLastMessage) {
         omitted();
+        // A breakpoint on a message a dropped result emptied marks what came before it.
+        if (emptiedByDrop.has(i) && currentConversation.length > 0 && promptCaching &&
+          (message.cacheBreakpoint || hasCacheMarker?.(message, i))) markConversation();
         continue;
       }
 
       if (hasCacheMarker && hasCacheMarker(message, i)) {
         if (currentConversation.length > 0 && promptCaching) {
-          const content = currentConversation.join(joiner);
-          const contentBlock: Record<string, unknown> = { type: 'text', text: content };
-          contentBlock.cache_control = cacheControl;
-          providerMessages.push({
-            role: 'assistant',
-            content: [contentBlock],
-          });
-          currentConversation = [];
+          markConversation();
         } else if (currentConversation.length > 0) {
           providerMessages.push({
             role: 'assistant',
@@ -379,16 +427,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         }
       }
 
-      if (message.cacheBreakpoint && promptCaching && currentConversation.length > 0) {
-        const content = currentConversation.join(joiner);
-        const contentBlock: Record<string, unknown> = { type: 'text', text: content };
-        contentBlock.cache_control = cacheControl;
-        providerMessages.push({
-          role: 'assistant',
-          content: [contentBlock],
-        });
-        currentConversation = [];
-      }
+      if (message.cacheBreakpoint && promptCaching && currentConversation.length > 0) markConversation();
     }
 
     let turnPrefix: string;

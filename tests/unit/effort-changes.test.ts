@@ -142,16 +142,16 @@ describe('NativeFormatter: an effort-only system change', () => {
     ]);
   });
 
-  it('goes after a result that pairing turns into text, and before one after it', () => {
+  it('goes after a turn whose result pairing leaves out, and before one after it, the turn kept', () => {
     const orphan = (id: string): NormalizedMessage => ({ participant: 'User', content: [result(id)] });
     const before = build([user('u0'), reply(text('a1')), orphan('t9'), effort('low'), reply(text('a4'))]);
     expect(roles(before)).toEqual(['user', 'assistant', 'user', 'system', 'assistant']);
     expect(before.messages[3]).toEqual(marker('low'));
-    expect(JSON.stringify(before.messages[2])).toContain('t9');
+    expect(before.messages[2]).toEqual({ role: 'user', content: [{ type: 'text', text: '[continuing]' }] });
     const after = build([user('u0'), reply(text('a1')), effort('low'), orphan('t9'), reply(text('a4'))]);
     expect(roles(after)).toEqual(['user', 'assistant', 'system', 'user', 'assistant']);
     expect(after.messages[2]).toEqual(marker('low'));
-    expect(JSON.stringify(after.messages[3])).toContain('t9');
+    expect(after.messages[3]).toEqual({ role: 'user', content: [{ type: 'text', text: '[continuing]' }] });
   });
 
   it('after the whole user turn where a cut would part a tool result from its call', () => {

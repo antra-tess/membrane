@@ -144,17 +144,17 @@ export type NormalizeEvent =
   | { kind: 'synthetic_pending_result'; toolUseId: string; reason: 'trailing' | 'mid_stream' }
   /**
    * A tool_result whose tool_use id appears nowhere in the message list was
-   * rewritten as a text block. `recoveredChars` is the length of the payload
-   * carried across — array-form content is flattened, so a zero here means
-   * the result genuinely had no recoverable text, never that structure was
-   * dropped on the floor.
+   * left out: a result without its call is never sent, as a result or as
+   * text. `toolUseId` is `'<missing>'` for a result with no string id.
    */
-  | { kind: 'orphan_tool_result_textified'; toolUseId: string; recoveredChars: number }
+  | { kind: 'orphan_tool_result_dropped'; toolUseId: string }
   /**
    * A tool_result whose tool_use exists but whose own cycle is already
    * satisfied (a duplicate re-append after a cancellation or stream restart)
-   * was rewritten as a text block. It could not be relocated without
-   * displacing the real result, and dropping it would lose content.
+   * was left out. It could not be relocated without displacing the result
+   * its call already has, and outside its cycle it would be a result standing
+   * where no call is answered. When the later copy was the real output and
+   * the first a placeholder, the real output is the one left out.
    *
    * `reason` names which duplicate shape the producer emitted, since the two
    * point at different producer bugs:
@@ -165,13 +165,12 @@ export type NormalizeEvent =
    *                             envelope, behind a result that already
    *                             answered that call. Pairing is one-to-one, so
    *                             the first result consumes the id and every
-   *                             later copy of it is textified here.
+   *                             later copy of it is left out here.
    */
   | {
-      kind: 'stray_tool_result_textified';
+      kind: 'stray_tool_result_dropped';
       toolUseId: string;
       fromEnvelope: number;
-      recoveredChars: number;
       reason: 'cycle_closed' | 'duplicate_in_cycle';
     }
   | { kind: 'pending_in_flight'; toolUseId: string }

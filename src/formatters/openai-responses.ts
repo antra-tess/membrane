@@ -3,7 +3,6 @@ import type {
   NormalizedMessage,
   ToolCall,
   ToolResult,
-  ToolResultContent,
 } from '../types/index.js';
 import type {
   BuildOptions,
@@ -15,9 +14,8 @@ import type {
   StreamParser,
 } from './types.js';
 import { responsesToolOutput } from '../providers/responses-input.js';
-import { renderResultContent, type ProviderBlock } from './normalize-tool-pairs.js';
 
-import { imageForRequest, toolResultContentForRequest, urlImageForRequest } from '../utils/image-media.js';
+import { imageForRequest, urlImageForRequest } from '../utils/image-media.js';
 import { convertMcpMedia } from '../utils/mcp-media.js';
 import { carriesAnthropicServerBlock } from '../utils/anthropic-server-blocks.js';
 
@@ -68,13 +66,10 @@ class ResponsesPassthroughParser implements StreamParser {
 }
 
 type NativeItem = { type?: string; id?: string; [key: string]: unknown };
-type ConvertedOutput = { item: NativeItem; block: ToolResultContent; onAltered: (() => void) | undefined };
 
-function orphanResultMessage(block: ToolResultContent): NativeItem {
-  const label = `orphan tool_result for ${typeof block.toolUseId === 'string' ? block.toolUseId : '<missing>'}${block.isError === true ? ', an error' : ''}`;
-  const content = toolResultContentForRequest(block.content);
-  const text = `[${label}]: ${renderResultContent({ content } as unknown as ProviderBlock)}`;
-  return { type: 'message', role: 'user', content: [{ type: 'input_text', text }] };
+/** A tool's output item, which answers the call whose `call_id` it names. */
+function isToolOutput(item: NativeItem | null): boolean {
+  return item !== null && typeof item === 'object' && typeof item.type === 'string' && item.type.endsWith('_output');
 }
 
 export function responsesRawItemKey(rawItem: { type?: unknown; id?: unknown }): string {
@@ -94,9 +89,10 @@ export function responsesRawItemKey(rawItem: { type?: unknown; id?: unknown }): 
  * carried when its items are. Within a message, blocks whose items share a
  * type and id are one item, sent once; a block whose item differs under the
  * same key isn't carried. Everything else is converted to Responses input
- * items in its place, and native items are never rewritten. A `tool_result`
- * whose call no input item carries goes in its place as user text,
- * `[orphan tool_result for ID]: …`, as the native formatter sends one.
+ * items in its place, and native items are never rewritten. A tool output,
+ * native or converted, whose call no input item carries is left out, and its
+ * message reported altered: a result without its call is never sent, alone
+ * or as text.
  */
 export class OpenAIResponsesFormatter implements PrefillFormatter {
   readonly name = 'openai-responses';
@@ -109,7 +105,12 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
   buildMessages(messages: NormalizedMessage[], options: BuildOptions): BuildResult {
     messages = convertMcpMedia(messages);
     const items: NativeItem[] = [];
-    const outputs: ConvertedOutput[] = [];
+    // The message each item came from, so a left-out output reports its own.
+    const from = new Map<unknown, number>();
+    const push = (index: number, pushed: readonly NativeItem[]) => {
+      for (const item of pushed) from.set(item, index);
+      items.push(...pushed);
+    };
     let hasImportedItems = false;
 
     for (let index = 0; index < messages.length; index++) {
@@ -117,7 +118,7 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
       const onAltered = options.fidelity ? () => options.fidelity!.alter(index) : undefined;
       const nativeItems = message.metadata?.[OPENAI_RESPONSES_ITEMS_METADATA_KEY];
       if (Array.isArray(nativeItems)) {
-        items.push(...nativeItems as NativeItem[]);
+        push(index, nativeItems as NativeItem[]);
         hasImportedItems = true;
         continue;
       }
@@ -126,8 +127,7 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
       let pendingParts: ContentBlock[] = [];
       const flushPending = () => {
         if (pendingParts.length === 0) return;
-        items.push(...this.convertBlocks(message, pendingParts, options.assistantParticipant, onAltered, (item, block) =>
-          outputs.push({ item, block, onAltered })));
+        push(index, this.convertBlocks(message, pendingParts, options.assistantParticipant, onAltered));
         pendingParts = [];
       };
 
@@ -147,7 +147,7 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
         const key = responsesRawItemKey(rawItem);
         const sent = seenRawItems.get(key);
         if (!sent) {
-          items.push(rawItem);
+          push(index, [rawItem]);
           seenRawItems.set(key, rawItem);
         } else if (sent !== rawItem && JSON.stringify(sent) !== JSON.stringify(rawItem)) {
           onAltered?.();
@@ -156,27 +156,27 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
       flushPending();
     }
 
-    const called = new Set<unknown>();
+    const called = new Set<string>();
     for (const item of items) {
-      if (!item || typeof item !== 'object') continue;
-      if (typeof item.call_id === 'string' && !(typeof item.type === 'string' && item.type.endsWith('_output'))) called.add(item.call_id);
+      if (item && typeof item === 'object' && typeof item.call_id === 'string' && !isToolOutput(item)) called.add(item.call_id);
     }
-    for (const { item, block, onAltered } of outputs) {
-      if (called.has(item.call_id)) continue;
-      items[items.indexOf(item)] = orphanResultMessage(block);
-      onAltered?.();
-    }
+    const sent = items.filter((item) => {
+      if (!isToolOutput(item) || called.has(item.call_id as string)) return true;
+      const at = from.get(item);
+      if (at !== undefined) options.fidelity?.alter(at);
+      return false;
+    });
 
     // `instructions` is a request field apart from the input items, so sending
     // it again doesn't change the input prefix or its caching.
     const hasImportedSystemItem = hasImportedItems ||
-      items.some(item =>
+      sent.some(item =>
         (item.type === 'message' || item.type === undefined) &&
         ((item as { role?: unknown }).role === 'developer' ||
           (item as { role?: unknown }).role === 'system'));
 
     return {
-      messages: items as unknown as BuildResult['messages'],
+      messages: sent as unknown as BuildResult['messages'],
       systemContent: hasImportedSystemItem ? undefined : options.systemPrompt,
       stopSequences: options.additionalStopSequences ?? [],
       nativeTools: options.tools?.map(tool => ({
@@ -193,8 +193,7 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
     message: NormalizedMessage,
     blocks: ContentBlock[],
     assistantParticipant: string,
-    onAltered: (() => void) | undefined,
-    onOutput: (item: NativeItem, block: ToolResultContent) => void,
+    onAltered?: () => void,
   ): NativeItem[] {
     const isAssistant = message.participant === assistantParticipant;
     const out: NativeItem[] = [];
@@ -246,9 +245,11 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
         // A function_call_output has no error flag, so a failed result reads as a plain one.
         const { output, loses } = responsesToolOutput(block.content);
         if (loses || block.isError) onAltered?.();
-        const item = { type: 'function_call_output', call_id: block.toolUseId, output };
-        out.push(item);
-        onOutput(item, block);
+        out.push({
+          type: 'function_call_output',
+          call_id: block.toolUseId,
+          output,
+        });
       } else if (block.type === 'redacted_thinking') {
         flushMessage();
         out.push({ type: 'reasoning', encrypted_content: block.data, summary: [] });

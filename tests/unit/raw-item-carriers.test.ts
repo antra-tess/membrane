@@ -9,7 +9,8 @@ import { toAnthropicContent } from '../../src/providers/anthropic.js';
 import type { NormalizedMessage, NormalizedRequest } from '../../src/types/index.js';
 
 const compactionItem = { type: 'compaction', id: 'cmp_1', encrypted_content: 'opaque-payload' };
-const customToolItem = { type: 'custom_tool_call_output', id: 'ct_1', output: 'opaque-output' };
+const customToolCall = { type: 'custom_tool_call', id: 'ctc_1', call_id: 'call_ct', name: 'shell', input: 'ls' };
+const customToolItem = { type: 'custom_tool_call_output', id: 'ct_1', call_id: 'call_ct', output: 'opaque-output' };
 
 const historyWithCarriers: NormalizedMessage[] = [
   { participant: 'User', content: [{ type: 'text', text: 'hello' }] },
@@ -18,6 +19,7 @@ const historyWithCarriers: NormalizedMessage[] = [
     content: [
       { type: 'text', text: '', rawItem: compactionItem },
       { type: 'text', text: 'real answer' },
+      { type: 'text', text: '', rawItem: customToolCall },
     ],
   },
   {
@@ -93,6 +95,7 @@ describe('zero-width rawItem carrier blocks', () => {
       { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hello' }] },
       compactionItem,
       { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'real answer' }] },
+      customToolCall,
       customToolItem,
       { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'next turn' }] },
     ]);

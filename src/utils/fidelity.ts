@@ -11,9 +11,9 @@ import type { ContentBlock } from '../types/content.js';
  *
  * An alteration is any non-empty consumer block not carried verbatim: a
  * placeholder substituted for an image, an image or block stripped, an
- * unsupported block left out, a tool carrier skipped, a tool_result rewritten
- * as text, nested tool-result media rendered as a note, whitespace-only text
- * removed by a cleanup policy. Removing an exactly empty text block ('') that
+ * unsupported block left out, a tool carrier skipped, a tool_result left out
+ * because its call is missing or already answered, nested tool-result media
+ * rendered as a note, whitespace-only text removed by a cleanup policy. Removing an exactly empty text block ('') that
  * holds no raw form carries nothing and is not an alteration; neither is the
  * faithful rendering of harness or attempt blocks, a block moved between
  * provider messages or within one, the participant-name prefix a multiuser
@@ -127,13 +127,11 @@ export function ownBlocks(fidelity: FidelityNotes | undefined, blocks: readonly 
 
 export function followNormalizedBlocks(
   fidelity: FidelityNotes | undefined,
-): Pick<NormalizeOptions, 'onBlockRewritten'> {
+): Pick<NormalizeOptions, 'onBlockDropped' | 'onBlockReplaced'> {
   if (!fidelity) return {};
   return {
-    onBlockRewritten: (original, replacement) => {
-      fidelity.alterBlock(original);
-      fidelity.ownCopy(original, replacement);
-    },
+    onBlockDropped: (original) => fidelity.alterBlock(original),
+    onBlockReplaced: (original, replacement) => fidelity.ownCopy(original, replacement),
   };
 }
 
