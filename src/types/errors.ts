@@ -87,7 +87,8 @@ export class MembraneError extends Error {
    * request's top-level `output_config.effort`, would not meet this refusal.
    * Through NativeFormatter and AnthropicAdapter, a change refused as malformed
    * (mixed with other blocks in its message, carrying `effort` beside another
-   * change, or a definition whose wire name another tool holds) isn't marked.
+   * change or an `effort` that isn't one of the five levels, or a definition
+   * whose wire name another tool holds) isn't marked.
    * Through anything else the formatter or adapter refusal comes first, and is
    * marked, unless the formatter can't carry the
    * request's tools at all (`tools` as the request's changes leave them): that

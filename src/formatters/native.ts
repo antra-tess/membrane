@@ -60,7 +60,11 @@ interface BuiltSystemChange {
   content: Array<Record<string, unknown>>;
   at: number;
   effort?: NonNullable<SystemChangeContent['effort']>;
+  /** An effort change's breakpoint, or a boundary at its place: marked once the request is placed. */
+  breakpoint?: boolean;
 }
+
+const EFFORT_LEVELS: ReadonlySet<unknown> = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 
 function changesToolsOrSystem(change: SystemChangeContent): boolean {
   return (change.removeTools?.length ?? 0) > 0 || (change.defineTools?.length ?? 0) > 0 || (change.addSystem?.length ?? 0) > 0;
@@ -237,17 +241,20 @@ export class NativeFormatter implements PrefillFormatter {
             `NativeFormatter: message ${i} holds a system_change block beside other blocks. A message holding one holds nothing else.`
           );
         }
-        const effort = changes.find((change) => change.effort !== undefined)?.effort;
-        if (effort !== undefined) {
+        const carrying = changes.find((change) => change.effort !== undefined);
+        if (carrying) {
           if (changes.length > 1 || changesToolsOrSystem(changes[0]!)) {
             throw unsupportedError(
               `NativeFormatter: message ${i} carries an effort change beside another change. A block carrying effort carries nothing else, and its message holds nothing else.`
             );
           }
-          if (cacheControl && previousContent && (message.cacheBreakpoint || hasCacheMarker?.(message, i))) {
-            markLastCacheable(previousContent, cacheControl);
+          if (!EFFORT_LEVELS.has(carrying.effort)) {
+            throw unsupportedError(
+              `NativeFormatter: message ${i} carries the effort ${JSON.stringify(carrying.effort)}, which is not one of 'low', 'medium', 'high', 'xhigh' and 'max'.`
+            );
           }
-          systemChanges.push({ content: [], at: i, effort });
+          const breakpoint = Boolean(cacheControl && (message.cacheBreakpoint || hasCacheMarker?.(message, i)));
+          systemChanges.push({ content: [], at: i, effort: carrying.effort, ...(breakpoint ? { breakpoint } : {}) });
           continue;
         }
         const content = this.convertSystemChanges(changes, wireNames, () => options.fidelity?.alter(i));
@@ -309,17 +316,22 @@ export class NativeFormatter implements PrefillFormatter {
       }
     }
 
+    const followed = followNormalizedBlocks(options.fidelity);
     const normalized = normalizeToolPairs(providerMessages, {
       pendingToolCallIds: options.pendingToolCallIds,
       onEvent: options.onNormalize,
-      ...followNormalizedBlocks(options.fidelity),
+      onBlockRewritten: (original, replacement) => {
+        const at = origin.get(original as object);
+        if (at !== undefined) origin.set(replacement as object, at);
+        followed.onBlockRewritten?.(original, replacement);
+      },
       leadingUserText: options.prefillUserMessage,
     });
 
     let mergedMessages = mergeConsecutiveRoles(normalized.messages);
     mergedMessages = NativeFormatter.pairServerBlocks(mergedMessages, options.fidelity);
     const builtMessages: ProviderMessage[] = systemChanges.length > 0
-      ? NativeFormatter.placeSystemChanges(mergedMessages, systemChanges, origin)
+      ? NativeFormatter.placeSystemChanges(mergedMessages, systemChanges, origin, cacheControl)
       : mergedMessages;
 
     // A message breakpoint caches a prefix from the front of the request, tools
@@ -426,20 +438,79 @@ export class NativeFormatter implements PrefillFormatter {
    * or a run of them, only after a user turn, judging it by the message right
    * before it: before an assistant turn that follows a user turn, or at the
    * end after a user turn, never after an assistant turn. It accepts
-   * consecutive messages of one role. An effort-only one goes exactly at its
-   * place: before the first message holding a block of a later message, or at
-   * the end after a user turn. At the end after an assistant turn it would end
-   * the request on that turn, which the API reads as a prefill.
+   * consecutive messages of one role, and an effort-only message anywhere in
+   * `messages` (Anthropic's effort documentation), so an effort change goes
+   * right after the last block of a message before it, splitting a turn the
+   * merge made across it. At the end after an assistant turn it would end the
+   * request on that turn, which the API reads as a prefill.
    */
   private static placeSystemChanges(
-    messages: ProviderTurnMessage[],
+    merged: ProviderTurnMessage[],
     changes: BuiltSystemChange[],
     origin: WeakMap<object, number>,
+    cacheControl: Record<string, unknown> | undefined,
   ): ProviderMessage[] {
-    const survives = (block: { type?: string; text?: unknown }): boolean =>
+    type Block = { type?: string; text?: unknown };
+    const survives = (block: Block): boolean =>
       (block.type !== 'text' || hasNonEmptyText(block.text)) && !isUnsignedThinking(block);
+    const efforts = changes.filter((change) => change.effort !== undefined);
+    const others = changes.filter((change) => change.effort === undefined);
+
+    // Where each effort change goes: after the last surviving block that came from a message before it. A block
+    // membrane puts ahead of every message (the leading user turn, the context prefix) comes before them all.
+    let seen = false;
+    const keys = merged.map((message) => (message.content as Block[]).map((block) => {
+      const at = origin.get(block as object);
+      if (at !== undefined) {
+        seen = true;
+        return at;
+      }
+      return seen ? undefined : -1;
+    }));
+    const cuts = merged.map(() => new Set<number>());
+    const slots = new Map<BuiltSystemChange, { message: number; cut?: number }>();
+    for (const change of efforts) {
+      let slot: { message: number; cut?: number } = { message: 0 };
+      search: for (let k = merged.length - 1; k >= 0; k--) {
+        const content = merged[k]!.content as Block[];
+        for (let j = content.length - 1; j >= 0; j--) {
+          const key = keys[k]![j];
+          if (key === undefined || key >= change.at || !survives(content[j]!)) continue;
+          if (content.slice(j + 1).some(survives)) {
+            cuts[k]!.add(j);
+            slot = { message: k, cut: j };
+          } else {
+            slot = { message: k + 1 };
+          }
+          break search;
+        }
+      }
+      slots.set(change, slot);
+    }
+
+    // The merged messages, each split after the blocks an effort change follows.
+    const messages: ProviderTurnMessage[] = [];
+    const firstPart: number[] = [];
+    const partAfter = new Map<string, number>();
+    merged.forEach((message, k) => {
+      firstPart.push(messages.length);
+      const content = message.content as Array<Record<string, unknown>>;
+      let from = 0;
+      for (const cut of [...cuts[k]!].sort((a, b) => a - b)) {
+        messages.push({ ...message, content: content.slice(from, cut + 1) });
+        from = cut + 1;
+        partAfter.set(`${k}:${cut}`, messages.length);
+      }
+      messages.push(from === 0 ? message : { ...message, content: content.slice(from) });
+    });
+    const placeOf = (slot: { message: number; cut?: number }): number => slot.cut !== undefined
+      ? partAfter.get(`${slot.message}:${slot.cut}`)!
+      : slot.message < merged.length ? firstPart[slot.message]! : messages.length;
+
+    // Tool changes and system text: before an assistant turn that follows a user turn, at the first one whose
+    // earliest block comes after the change.
     const kept = (message: ProviderTurnMessage): boolean =>
-      Array.isArray(message.content) && (message.content as Array<{ type?: string; text?: unknown }>).some(survives);
+      Array.isArray(message.content) && (message.content as Block[]).some(survives);
     type Turn = { role: ProviderTurnMessage['role']; first: number; earliest: number; after?: ProviderTurnMessage['role'] };
     const turns: Turn[] = [];
     messages.forEach((message, index) => {
@@ -449,41 +520,36 @@ export class NativeFormatter implements PrefillFormatter {
         turn = { role: message.role, first: index, earliest: Infinity, after: turn?.role };
         turns.push(turn);
       }
-      for (const block of message.content as Array<{ type?: string; text?: unknown }>) {
-        const at = survives(block) ? origin.get(block) : undefined;
+      for (const block of message.content as Block[]) {
+        const at = survives(block) ? origin.get(block as object) : undefined;
         if (at !== undefined && at < turn.earliest) turn.earliest = at;
       }
     });
     const points = new Map<number, number>();
     for (const turn of turns) if (turn.role === 'assistant' && turn.after === 'user') points.set(turn.first, turn.earliest);
-    const latest = (message: ProviderTurnMessage): number => {
-      let at = -Infinity;
-      for (const block of message.content as Array<{ type?: string; text?: unknown }>) {
-        const from = survives(block) ? origin.get(block) : undefined;
-        if (from !== undefined && from > at) at = from;
-      }
-      return at;
-    };
+
     const sent = (change: BuiltSystemChange): ProviderMessage => change.effort !== undefined
       ? { role: 'system', content: [], output_config: { effort: change.effort } }
       : { role: 'system', content: change.content };
-    const efforts = changes.filter((change) => change.effort !== undefined);
-    const others = changes.filter((change) => change.effort === undefined);
     const placed: ProviderMessage[] = [];
+    const marked: number[] = [];
+    const emit = (group: BuiltSystemChange[]): void => {
+      for (const change of group.sort((a, b) => a.at - b.at)) {
+        if (change.breakpoint) marked.push(placed.length);
+        placed.push(sent(change));
+      }
+    };
     let next = 0;
-    let nextEffort = 0;
     messages.forEach((message, index) => {
-      const before: BuiltSystemChange[] = [];
+      const before = efforts.filter((change) => placeOf(slots.get(change)!) === index);
       const earliest = points.get(index);
       while (earliest !== undefined && earliest !== Infinity && next < others.length && others[next]!.at < earliest) {
         before.push(others[next++]!);
       }
-      const last = Array.isArray(message.content) ? latest(message) : -Infinity;
-      while (nextEffort < efforts.length && efforts[nextEffort]!.at < last) before.push(efforts[nextEffort++]!);
-      for (const change of before.sort((a, b) => a.at - b.at)) placed.push(sent(change));
+      emit(before);
       placed.push(message);
     });
-    const after = efforts.slice(nextEffort);
+    const after = efforts.filter((change) => placeOf(slots.get(change)!) === messages.length);
     const endsOnUser = turns[turns.length - 1]?.role === 'user';
     if (after.length > 0 && !endsOnUser) {
       throw systemChangeRefusedError(
@@ -501,7 +567,23 @@ export class NativeFormatter implements PrefillFormatter {
       }
       after.push(...others.slice(next));
     }
-    for (const change of after.sort((a, b) => a.at - b.at)) placed.push(sent(change));
+    emit(after);
+
+    // An effort change's breakpoint, having no block of its own, goes on the last cacheable block before it.
+    if (cacheControl) {
+      for (const at of marked) {
+        search: for (let m = at - 1; m >= 0; m--) {
+          const content = placed[m]!.content;
+          if (!Array.isArray(content)) continue;
+          for (let b = content.length - 1; b >= 0; b--) {
+            const block = content[b] as Record<string, unknown>;
+            if (block.type === 'thinking' || block.type === 'redacted_thinking' || !survives(block as Block)) continue;
+            block.cache_control = cacheControl;
+            break search;
+          }
+        }
+      }
+    }
     return placed;
   }
 
