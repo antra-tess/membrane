@@ -346,6 +346,23 @@ describe('AnthropicXmlFormatter: a tool result that answers no call', () => {
     }
   });
 
+  it('ends a group of calls at a user turn the request keeps, so a call left without a result holds no later turn\'s results', () => {
+    const { rendered, events } = build([
+      { participant: 'User', content: [text('look')] },
+      { participant: 'Agent', content: [call('a')] },
+      { participant: 'User', content: [text('and the next file')] },
+      { participant: 'Agent', content: [call('r2')] },
+      { participant: 'Tool', content: [namedResult('r2', 'read_file', 'zz-r2')] },
+      { participant: 'User', content: [text('and one more')] },
+      { participant: 'Agent', content: [call('r3')] },
+      { participant: 'Tool', content: [namedResult('r3', 'read_file', 'zz-r3')] },
+      { participant: 'Agent', content: [] },
+    ]);
+    expect(rendered).toContain('zz-r2');
+    expect(rendered).toContain('zz-r3');
+    expect(events).toEqual([]);
+  });
+
   it('reports a result left out for its place as an orphan, though an earlier cycle answered its id', () => {
     const { rendered, events } = build([
       { participant: 'User', content: [text('look')] },

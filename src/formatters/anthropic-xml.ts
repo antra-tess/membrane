@@ -72,11 +72,12 @@ export interface AnthropicXmlFormatterConfig extends FormatterConfig {
 /**
  * The messages with each tool result where the model reads it as its own
  * call's answer, and without the ones it can't stand there. The transcript
- * carries no ids: a results block answers the calls since the last result
- * the request keeps, since one left out leaves no mark there, and a result
- * reads as answering the first of them not yet answered, of the
- * tool its `<tool_name>` names where it names its call's tool, or of any tool
- * where it doesn't (an error goes out without one). So within each run of
+ * carries no ids: a results block answers the latest calls, those made since
+ * the last result or user turn the request keeps before them, since a result
+ * left out leaves no mark there, and a result reads as answering the first
+ * of them not yet answered, of the tool its `<tool_name>` names where it
+ * names its call's tool, or of any tool where it doesn't (an error goes out
+ * without one). So within each run of
  * results in a message, a result whose id names a call takes that call, and
  * one whose id names no call takes the first call in its own message that no
  * later result names: a generation parsed back from its text gives its calls fresh
@@ -96,6 +97,7 @@ export interface AnthropicXmlFormatterConfig extends FormatterConfig {
  */
 function withoutCalllessResults(
   messages: NormalizedMessage[],
+  assistant: string,
   onEvent: (event: NormalizeEvent) => void,
   onAltered: (index: number, emptied: boolean) => void,
 ): NormalizedMessage[] {
@@ -116,9 +118,10 @@ function withoutCalllessResults(
       else if (block.type === 'tool_use' && resultIds.has(block.id)) namedAfter.add(block);
     }
   }
-  // The calls since the last kept result, as the wire shows them: a result
-  // left out doesn't end them. Each with its message and tool, whether a
-  // later result names it, and whether a kept result answers it.
+  // The latest calls, those made since the last kept result or user turn
+  // before them, as the wire shows them: a result left out doesn't end them.
+  // Each with its message and tool, whether a later result names it, and
+  // whether a kept result answers it.
   let calls: Array<{ id: string; message: number; tool: string; named: boolean; done: boolean }> = [];
   let keptSince = false;
   // Per call id, the calls so far that carry it, and how many of those a kept result answers.
@@ -210,6 +213,9 @@ function withoutCalllessResults(
       }
       order.push(...keptHere);
     }
+    // A user turn the request keeps ends the calls before it: the model reads
+    // a later results block against the calls of its own turn.
+    if (message.participant !== assistant && content.some(holdsTurnContent)) keptSince = true;
     return order;
   });
 
@@ -233,6 +239,12 @@ function withoutCalllessResults(
     onAltered(index, !holdsContent(content));
     return { ...message, content };
   });
+}
+
+/** Whether a block is something besides a tool call or result that a turn shows. */
+function holdsTurnContent(block: ContentBlock): boolean {
+  if (block.type === 'tool_use' || block.type === 'tool_result') return false;
+  return block.type !== 'text' || block.text.trim() !== '';
 }
 
 function toToolResult(block: ToolResultContent): ToolResult {
@@ -364,7 +376,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     // cache-marker check reads the message as the caller gave it.
     const given = messages;
     const heldResult = messages.map((message) => message.content.some((c) => c.type === 'tool_result'));
-    messages = withoutCalllessResults(messages, (event) => options.onNormalize?.(event), (index, emptied) => {
+    messages = withoutCalllessResults(messages, assistantParticipant, (event) => options.onNormalize?.(event), (index, emptied) => {
       options.fidelity?.alter(index);
       if (emptied) emptiedByDrop.add(index);
     });
