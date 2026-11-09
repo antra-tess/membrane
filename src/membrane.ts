@@ -78,7 +78,7 @@ import {
   formatToolResultsForSplitTurn,
   attachSplitResults,
   parseLastToolBlock,
-  verdictAcross,
+  verdictsAfter,
   type ToolBlockVerdict,
   type ProviderImageBlock,
   type SplitResultsRound,
@@ -280,13 +280,12 @@ function toolCallOf(block: ToolUseContent): ToolCall {
   };
 }
 
-function verdictAtPrefillEnd(
+function verdictsAfterPrefill(
   text: string,
   prefillLength: number,
-  startsIn: 'thinking' | 'tool_call' | 'tool_result' | null,
   xmlToolProtocol: boolean,
-): ToolBlockVerdict | undefined {
-  return startsIn === 'tool_call' && xmlToolProtocol ? verdictAcross(text, prefillLength) : undefined;
+): ReadonlyMap<number, ToolBlockVerdict> | undefined {
+  return xmlToolProtocol ? verdictsAfter(text, prefillLength) : undefined;
 }
 
 function isBuildRefusal(error: unknown): error is MembraneError {
@@ -1249,7 +1248,7 @@ export class Membrane {
         lastStopSequence,
         lastProviderStopReason,
         splitRounds,
-        verdictAtPrefillEnd(fullAccumulated, initialPrefillLength, initialBlockType, xmlToolProtocol)
+        verdictsAfterPrefill(fullAccumulated, initialPrefillLength, xmlToolProtocol)
       );
 
       if (providerImageBlocks.length > 0) {
@@ -1266,7 +1265,7 @@ export class Membrane {
       if (this.isCancellation(error, signal)) {
         const fullAccumulated = parser.getAccumulated();
         const newContent = fullAccumulated.slice(initialPrefillLength);
-        const startVerdict = verdictAtPrefillEnd(fullAccumulated, initialPrefillLength, initialBlockType, xmlToolProtocol);
+        const verdicts = verdictsAfterPrefill(fullAccumulated, initialPrefillLength, xmlToolProtocol);
 
         return this.buildAbortedResponse(
           newContent,
@@ -1275,7 +1274,7 @@ export class Membrane {
           executedToolResults,
           this.abortOutcome(error, signal),
           xmlToolProtocol
-            ? attachSplitResults(parseAccumulatedIntoBlocks(newContent, { tools: request.tools, ...(initialBlockType ? { startInsideBlock: initialBlockType, startVerdict } : {}) }), splitRounds).blocks
+            ? attachSplitResults(parseAccumulatedIntoBlocks(newContent, { tools: request.tools, verdicts, ...(initialBlockType ? { startInsideBlock: initialBlockType } : {}) }), splitRounds).blocks
             : streamedThinking.content(newContent, (value, context) => formatter.parseContentBlocks(value, request.tools, context))
         );
       }
@@ -2392,7 +2391,11 @@ export class Membrane {
     let emptyToolBlocks = 0;
     const malformedToolBlocks: ToolBlockDefectKind[] = [];
     if (xmlToolProtocol && toolCalls.length === 0 && rawAssistantText.includes('<function_calls>')) {
-      const { parsed, defect } = parseLastToolBlock(rawAssistantText, { tools: request.tools });
+      // A provider can drop or slice the closing tag's stop, and nothing here
+      // checks it locally, so the parse reads through the first closing tag only.
+      const close = rawAssistantText.indexOf('</function_calls>');
+      const read = close === -1 ? rawAssistantText : rawAssistantText.slice(0, close + '</function_calls>'.length);
+      const { parsed, defect } = parseLastToolBlock(read, { tools: request.tools });
       if (parsed?.calls.length) {
         for (const tc of parsed.calls) {
           toolCalls.push(tc);
@@ -2520,7 +2523,7 @@ export class Membrane {
     triggeredSequence?: string,
     providerStopReason?: string,
     splitRounds: readonly SplitResultsRound[] = [],
-    startVerdict?: ToolBlockVerdict,
+    verdicts?: ReadonlyMap<number, ToolBlockVerdict>,
   ): NormalizedResponse {
     const usage = turnUsage.total;
     let finalContent: ContentBlock[];
@@ -2536,7 +2539,8 @@ export class Membrane {
     } else {
       const parseOptions = {
         tools: request.tools,
-        ...(startInsideBlock ? { startInsideBlock, startVerdict } : {}),
+        verdicts,
+        ...(startInsideBlock ? { startInsideBlock } : {}),
       };
       const parsed = parseAccumulatedIntoBlocks(accumulated, parseOptions);
       const attached = attachSplitResults(parsed, splitRounds);
@@ -2992,10 +2996,10 @@ export class Membrane {
     const abortedPartial = () => {
       const fullAccumulated = parser.getAccumulated();
       const newContent = fullAccumulated.slice(initialPrefillLength);
-      const startVerdict = verdictAtPrefillEnd(fullAccumulated, initialPrefillLength, initialBlockType, xmlToolProtocol);
+      const verdicts = verdictsAfterPrefill(fullAccumulated, initialPrefillLength, xmlToolProtocol);
       return {
         partialContent: xmlToolProtocol
-          ? attachSplitResults(parseAccumulatedIntoBlocks(newContent, { tools: request.tools, ...(initialBlockType ? { startInsideBlock: initialBlockType, startVerdict } : {}) }), splitRounds).blocks
+          ? attachSplitResults(parseAccumulatedIntoBlocks(newContent, { tools: request.tools, verdicts, ...(initialBlockType ? { startInsideBlock: initialBlockType } : {}) }), splitRounds).blocks
           : streamedThinking.content(newContent, (value, context) => formatter.parseContentBlocks(value, request.tools, context)),
         rawAssistantText: newContent,
         toolCalls: [...executedToolCalls],
@@ -3433,7 +3437,7 @@ export class Membrane {
         lastStopSequence,
         lastProviderStopReason,
         splitRounds,
-        verdictAtPrefillEnd(fullAccumulated, initialPrefillLength, initialBlockType, xmlToolProtocol)
+        verdictsAfterPrefill(fullAccumulated, initialPrefillLength, xmlToolProtocol)
       );
 
       this.mergeProviderThinkingBlocks(response.content, providerThinkingBlocks);

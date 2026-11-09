@@ -226,9 +226,9 @@ const PARAMETER_OPENER_AT = /<(?:antml:)?parameter\s+name="([^"<>]+)">/y;
 const PARAMETER_CLOSER = /<\/(?:antml:)?parameter>/g;
 const LOOSE_INVOKE_OPENER = /<(?:antml:)?invoke\s+name=/g;
 const NAMED_INVOKE_OPENER = /<(?:antml:)?invoke\s+name=(["'])((?:(?!\1)[^<>\n\r\u2028\u2029])+)\1/g;
-const TAG_IN_VALUE = /<(?:antml:)?(?:parameter|invoke)\s+name=|<\/(?:antml:)?invoke>/;
+const TAG_IN_VALUE = /<(?:antml:)?(?:parameter|invoke)[\s/>]|<\/(?:antml:)?invoke>/;
 const WHITESPACE_AT = /\s*/y;
-const NAMELESS_INVOKE_OPENER_AT = /^<(?:antml:)?invoke\b/;
+const NAMELESS_INVOKE_OPENER_AT = /^<(?:antml:)?invoke(?=[\s/>]|$)/;
 
 const PLAIN_NAME = /^[\w.:-]{1,64}$/;
 
@@ -303,7 +303,9 @@ function readBlock(inner: string): { defect: ToolBlockDefect } | { calls: BlockC
           `${parameterShown} of ${invoke} holds a parameter's or an invoke's opening tag, or an invoke's closing tag, which a value can't hold, whether its closing parameter tag is missing before it or the value was meant to carry that text`,
         );
       }
-      if (!close) return fail('unclosed-invoke', `${invoke} has no closing invoke tag`);
+      if (!close) {
+        return fail('unclosed-invoke', `${parameterShown} of ${invoke} has no closing parameter tag, and the invoke no closing invoke tag`);
+      }
       if (seen.has(name)) return fail('repeated-parameter', `${parameterShown} is given twice in ${invoke}`);
       seen.add(name);
       call.parameters.push([name, value]);
@@ -328,7 +330,7 @@ function verdictOf(block: ResolvedToolBlock): ToolBlockVerdict {
   const read = block.wasSpliced ? { defect: LEFT_OPEN } : readBlock(block.innerContent);
   if ('calls' in read) return { raw: block.fullMatch, calls: read.calls };
   const calls = [...block.innerContent.matchAll(NAMED_INVOKE_OPENER)].map((m) => ({ at: m.index, name: m[2]!, parameters: [] }));
-  return { defect: read.defect, raw: block.fullMatch, calls };
+  return { defect: read.defect, raw: block.fullMatch, calls: calls.length > 0 ? calls : [{ at: 0, name: '', parameters: [] }] };
 }
 
 function inputOf(call: BlockCall, tools?: ToolDefinition[]): Record<string, unknown> {
@@ -347,12 +349,7 @@ function callsOfBlock(
   const { defect, raw, calls } = given ?? verdictOf(block);
   if (!defect) return { calls: calls.map((call) => ({ name: call.name, input: inputOf(call, tools) })) };
   return {
-    calls: (calls.length > 0 ? calls.map((call) => call.name) : ['']).map((name) => ({
-      name,
-      input: {},
-      unparseableInput: raw,
-      unparseableReason: defect.reason,
-    })),
+    calls: calls.map((call) => ({ name: call.name, input: {}, unparseableInput: raw, unparseableReason: defect.reason })),
     defect: defect.kind,
   };
 }
@@ -375,7 +372,6 @@ interface ResolvedToolBlock {
   innerContent: string;
   fullMatch: string;
   wasSpliced: boolean;
-  outerStart: number;
 }
 
 function resolveToolBlock(text: string, blockMatch: RegExpExecArray): ResolvedToolBlock {
@@ -398,7 +394,6 @@ function resolveToolBlock(text: string, blockMatch: RegExpExecArray): ResolvedTo
       innerContent,
       fullMatch: blockMatch[0],
       wasSpliced: false,
-      outerStart: blockMatch.index,
     };
   }
 
@@ -410,7 +405,6 @@ function resolveToolBlock(text: string, blockMatch: RegExpExecArray): ResolvedTo
     innerContent: innerContent.slice(innermostOpener.index + innermostOpener[0].length),
     fullMatch: text.slice(reanchoredStart, end),
     wasSpliced: true,
-    outerStart: blockMatch.index,
   };
 }
 
@@ -774,11 +768,14 @@ function collectCandidateSpans(text: string): CandidateSpan[] {
   return spans;
 }
 
-export function verdictAcross(text: string, boundary: number): ToolBlockVerdict | undefined {
-  const block = collectLiveToolBlocks(text).find((b) => b.outerStart < boundary && b.end > boundary);
-  if (!block) return undefined;
-  const verdict = verdictOf(block);
-  return { ...verdict, calls: verdict.calls.filter((call) => block.innerStart + call.at >= boundary) };
+export function verdictsAfter(text: string, boundary: number): Map<number, ToolBlockVerdict> {
+  const verdicts = new Map<number, ToolBlockVerdict>();
+  for (const block of collectLiveToolBlocks(text)) {
+    if (block.end <= boundary) continue;
+    const verdict = verdictOf(block);
+    verdicts.set(block.end - boundary, { ...verdict, calls: verdict.calls.filter((call) => block.innerStart + call.at >= boundary) });
+  }
+  return verdicts;
 }
 
 function collectLiveToolBlocks(text: string): ResolvedToolBlock[] {
@@ -814,7 +811,10 @@ const LEGACY_ERROR_REGEX = /<error>\n?([\s\S]*?)\n?<\/error>/g;
 
 export function parseAccumulatedIntoBlocks(
   text: string,
-  options?: ToolParseOptions & { startInsideBlock?: 'thinking' | 'tool_call' | 'tool_result'; startVerdict?: ToolBlockVerdict }
+  options?: ToolParseOptions & {
+    startInsideBlock?: 'thinking' | 'tool_call' | 'tool_result';
+    verdicts?: ReadonlyMap<number, ToolBlockVerdict>;
+  }
 ): {
   blocks: ContentBlock[];
   toolCalls: ToolCall[];
@@ -878,7 +878,7 @@ export function parseAccumulatedIntoBlocks(
 
     if (span.kind === 'calls') {
       const resolvedBlock = span.resolvedBlock;
-      const given = options?.startInsideBlock === 'tool_call' && resolvedBlock.outerStart === 0 ? options.startVerdict : undefined;
+      const given = options?.verdicts?.get(resolvedBlock.end - (processedText.length - text.length));
       if (resolvedBlock.wasSpliced) splicedToolBlocks++;
       // Carried on each tool_use for verbatim prefill replay (antra-tess/membrane#36).
       const rawXml = resolvedBlock.fullMatch;

@@ -91,6 +91,21 @@ const malformed: Array<[string, string, string[]]> = [
     `<invoke name="zz_first"/>\n<zz_stray>${SECRET}</zz_stray>\n<invoke name="zz_second"/>`,
     ['zz_first', 'zz_second'],
   ],
+  [
+    'a value holding a parameter opening tag with no name',
+    `<invoke name="zz_write"><parameter name="body">one<parameter>${SECRET}</parameter></invoke>`,
+    ['zz_write'],
+  ],
+  [
+    'a value holding an invoke opening tag with no name',
+    `<invoke name="zz_write"><parameter name="body">one <invoke/> ${SECRET}</parameter></invoke>`,
+    ['zz_write'],
+  ],
+  [
+    'misspelled closing parameter and invoke tags',
+    `<invoke name="zz_write"><parameter name="path">${SECRET}</param></invok>`,
+    ['zz_write'],
+  ],
 ];
 
 describe('a function_calls block whose tags break the format is refused whole', () => {
@@ -129,6 +144,17 @@ describe('a function_calls block whose tags break the format is refused whole', 
   it('names the parameter whose closing tag is missing', () => {
     const parsed = parseToolCalls(block(malformed[0]![1]));
     expect(parsed!.calls[0]!.unparseableReason).toContain('"path"');
+  });
+
+  it('says a parameter with no closing tag leaves its invoke with none either', () => {
+    const parsed = parseToolCalls(block(`<invoke name="zz_t"><parameter name="p">x</param></invok>`));
+    expect(parsed!.calls[0]!.unparseableReason).toBe('parameter "p" of invoke 1 (zz_t) has no closing parameter tag, and the invoke no closing invoke tag');
+  });
+
+  it('calls a tag whose name only begins with invoke a stray tag, not an invoke opener', () => {
+    const parsed = parseToolCalls(block(`<invoke-other/>\n<invoke name="zz_a"/>`));
+    expect(parsed!.calls.map((c) => c.name)).toEqual(['zz_a']);
+    expect(parsed!.calls[0]!.unparseableReason).toBe('a less-than sign stands outside every invoke, before the first invoke');
   });
 
   it('repeats no invoke or parameter name that is not a plain identifier', () => {
@@ -373,7 +399,8 @@ function request(): NormalizedRequest {
 
 const LEFT_OPEN_REASON = 'a function_calls opening tag came before an earlier one was closed: an earlier block was cut off, a value held the tag, or text before the block named it';
 
-const refusedTurn = `zz calling\n${OPEN}\n<invoke name="zz_write"><parameter name="path">a.txt</paramter>\n<parameter name="body">${SECRET}</parameter></invoke>\n`;
+const refusedInvoke = `<invoke name="zz_write"><parameter name="path">a.txt</paramter>\n<parameter name="body">${SECRET}</parameter></invoke>`;
+const refusedTurn = `zz calling\n${OPEN}\n${refusedInvoke}\n`;
 
 describe('the XML tool loops hand a refused block to the host as an ordinary round', () => {
   it('onToolCalls receives the marked calls, and the warn line names the defect without the value', async () => {
@@ -392,6 +419,7 @@ describe('the XML tool loops hand a refused block to the host as an ordinary rou
     expect(received[0]!.unparseableInput).toContain('zz_write');
     const warning = logger.warnings.find((w) => w.includes('well-formed'));
     expect(warning).toBeDefined();
+    expect(warning).toContain('(tag-in-value)');
     expect(warning).not.toContain(SECRET);
   });
 
@@ -407,6 +435,7 @@ describe('the XML tool loops hand a refused block to the host as an ordinary rou
     }
     expect(received.map((c) => c.name)).toEqual(['zz_write']);
     expect(received[0]!.input).toEqual({});
+    expect(received[0]!.unparseableInput).toBe(block(refusedInvoke));
     expect(received[0]!.unparseableReason).toContain('"path"');
   });
 
@@ -414,8 +443,15 @@ describe('the XML tool loops hand a refused block to the host as an ordinary rou
     const logger = new RecordingLogger();
     const response = await new Membrane(new ScriptedAdapter([`zz calling\n${OPEN}\n<invoke name="zz_write"><parameter name="body">zz ${OPEN}\n<invoke name="zz_rm"/>\n`]), { logger }).complete(request());
     expect(response.toolCalls.map((c) => [c.name, c.input])).toEqual([['zz_rm', {}]]);
+    expect(response.toolCalls[0]!.unparseableInput).toBe(block('<invoke name="zz_rm"/>'));
     expect(response.toolCalls[0]!.unparseableReason).toBe(LEFT_OPEN_REASON);
     expect(logger.warnings.some((w) => w.includes('(left-open-block)'))).toBe(true);
+  });
+
+  it('complete() reads its text only through the first closing function_calls tag, where the streams stop, so no later block runs', async () => {
+    const first = `${OPEN}<invoke name="zz_a"><parameter name="p">x${CLOSE}`;
+    const response = await new Membrane(new ScriptedAdapter([`zz calling\n${first}${OPEN}<invoke name="zz_rm"/>\n`]), { logger: new RecordingLogger() }).complete(request());
+    expect(response.toolCalls.map((c) => [c.name, c.input, c.unparseableInput])).toEqual([['zz_a', {}, first]]);
   });
 
   const afterCutTurn = (): NormalizedRequest => ({
@@ -484,6 +520,13 @@ describe('the XML tool loops hand a refused block to the host as an ordinary rou
     }
     return { received, content };
   };
+  const thinkingTurn = (): NormalizedRequest => ({
+    toolMode: 'xml',
+    messages: [{ participant: 'User', content: [{ type: 'text', text: `zz what does ${OPEN} mean? then write a file` }] }],
+    config: { model: 'zz-test-model', maxTokens: 64, thinking: { enabled: true, budgetTokens: 1024 } },
+    tools: [write],
+  });
+  const thoughtThenCall = `zz thought</thinking>\nzz ok\n${OPEN}\n<invoke name="zz_write"><parameter name="path">zz.txt</parameter></invoke>\n`;
   const continuedTurn = (partial: string): NormalizedRequest => ({
     toolMode: 'xml',
     messages: [
@@ -506,6 +549,30 @@ describe('the XML tool loops hand a refused block to the host as an ordinary rou
       const { received, content } = await abortAfterDispatch(path, continuedTurn(`zz calling\n${OPEN}\n<invoke name="zz_a"/>\n<zz_bad/>\n`), [`<invoke name="zz_b"/>\n`]);
       expect(received.map((c) => c.name)).toEqual(['zz_a', 'zz_b']);
       expect(usesOf(content)).toEqual(marksOf(received.filter((c) => c.name === 'zz_b')));
+    });
+
+    it(`continuing a refused block whose every invoke opened before the prefill's end, ${path} stores no call, since none opened after it`, async () => {
+      const { received, content } = await run(continuedTurn(`zz calling\n${OPEN}\n<invoke name="zz_a"/>\n<zz_bad/>\n`), [`zz\n`]);
+      expect(received.map((c) => [c.name, c.unparseableReason !== undefined])).toEqual([['zz_a', true]]);
+      expect(usesOf(content)).toEqual([]);
+    });
+
+    it(`continuing a refused block with no named invoke, opened before the prefill's end, ${path} stores no nameless call`, async () => {
+      const { received, content } = await run(continuedTurn(`zz calling\n${OPEN}\n<zz_bad/>\n`), [`zz\n`]);
+      expect(received.map((c) => [c.name, c.unparseableReason !== undefined])).toEqual([['', true]]);
+      expect(usesOf(content)).toEqual([]);
+    });
+
+    it(`with a thinking prefill and a user message naming the opening tag, ${path} stores the model's block as dispatch marked it`, async () => {
+      const { received, content } = await run(thinkingTurn(), [thoughtThenCall]);
+      expect(received.map((c) => [c.name, c.unparseableReason ?? null])).toEqual([['zz_write', LEFT_OPEN_REASON]]);
+      expect(usesOf(content)).toEqual(marksOf(received));
+    });
+
+    it(`with a thinking prefill and a user message naming the opening tag, ${path} aborted after dispatch keeps the block as dispatch marked it`, async () => {
+      const { received, content } = await abortAfterDispatch(path, thinkingTurn(), [thoughtThenCall]);
+      expect(received.map((c) => [c.name, c.unparseableReason ?? null])).toEqual([['zz_write', LEFT_OPEN_REASON]]);
+      expect(usesOf(content)).toEqual(marksOf(received));
     });
 
     it(`continuing a block an earlier turn left open with nothing wrong in it, ${path} stores no refusal dispatch didn't make`, async () => {
@@ -573,6 +640,7 @@ describe('the XML tool loops hand a refused block to the host as an ordinary rou
     const response = await new Membrane(new ScriptedAdapter([`zz calling\n${OPEN}\n<invoke name="zz_write"><parameter name="path">a.txt</parameter><parameter name="path">b</parameter></invoke>\n`]), { logger: new RecordingLogger() }).complete(request());
     expect(response.toolCalls.map((c) => c.name)).toEqual(['zz_write']);
     expect(response.toolCalls[0]!.input).toEqual({});
+    expect(response.toolCalls[0]!.unparseableInput).toBe(block(`<invoke name="zz_write"><parameter name="path">a.txt</parameter><parameter name="path">b</parameter></invoke>`));
     expect(response.toolCalls[0]!.unparseableReason).toContain('"path"');
   });
 });
