@@ -3,20 +3,25 @@
   `maxConsecutiveErrors` counts one lineage's failed pokes in a row, of any
   kind. A successful response resets that count, and so does a real request
   recorded for the lineage. At the cap, that lineage alone is dropped, with a
-  `skipped` event whose reason is `failure-cap`. Nothing emits `disabled`
-  now, and an `error` event's `consecutive` counts the failures of the
+  `skipped` event whose reason is `failure-cap`. `KeepaliveEvent` no longer
+  has a `disabled` member, which the whole keepalive emitted as it stopped
+  at the cap. An `error` event's `consecutive` counts the failures of the
   lineage's snapshot that the poke replayed. A poke whose snapshot a real
   request replaced or dropped while it was under way counts on the old one,
   and drops nothing at the cap.
   - **Who needs to act:** an observer that read `disabled` as the keepalive
     stopping. Other lineages now go on, later real requests are still
     recorded, and each lineage spends its own `maxConsecutiveErrors`.
+    TypeScript code that compares a `KeepaliveEvent`'s `type` with
+    `'disabled'` no longer compiles.
   - **Migration:** where an observer acted on `disabled`, it acts on a
-    `skipped` event whose reason is `failure-cap`, for that lineage alone.
-    No sibling's current release acts on `disabled`: connectome-host 0.24.0
-    logs each keepalive event as JSON, and agent-framework 0.34.0 and
-    context-manager 0.27.0 set no keepalive observer. Those releases cope
-    once their ranges admit this version.
+    `skipped` event whose reason is `failure-cap`, for that lineage alone,
+    and drops its `disabled` branch. No sibling's current release acts on
+    `disabled`: connectome-host 0.24.0 logs each keepalive event as JSON,
+    and names `disabled` only in a test's list of events, which its `tsc`
+    doesn't check. agent-framework 0.34.0 and context-manager 0.27.0 set no
+    keepalive observer. Those releases cope once their ranges admit this
+    version.
   - **What else changes:** a failed poke leaves the lineage's refresh clock
     where it was, so it is tried again at the next check, or once its
     model's wait ends. A poke that fails with an error whose `retryAfterMs`

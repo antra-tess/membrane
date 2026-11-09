@@ -158,7 +158,7 @@ describe('the stream lane records a request at message_start', () => {
     expect(client.messages.stream.mock.calls.filter(([wire]: any[]) => isRefused(wire))).toHaveLength(3);
     await a.stream(request('Resident system H'), noCallbacks);
     await vi.advanceTimersByTimeAsync(1000);
-    expect(events.filter(e => e.type === 'error' || e.type === 'disabled')).toEqual([]);
+    expect(events.filter(e => e.type === 'error')).toEqual([]);
     expect(replays().filter(isRefused)).toEqual([]);
     expect(events.filter(e => e.type === 'refreshed').length).toBeGreaterThan(3);
     expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);

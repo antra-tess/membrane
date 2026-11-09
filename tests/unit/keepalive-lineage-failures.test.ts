@@ -92,7 +92,6 @@ describe('keepalive failures retire only their own lineage', () => {
 
       expect(sent.filter((s) => s.model === 'claude-a')).toHaveLength(3);
       expect(trail(events, a)).toEqual(['error 1', 'error 2', 'error 3', 'skipped failure-cap']);
-      expect(events.some((event) => event.type === 'disabled')).toBe(false);
       expect(ka.getStatus().map((s) => s.key)).toEqual([lineageKey(b)]);
       expect(sent.filter((s) => s.model === 'claude-b').length).toBeGreaterThan(10);
 
@@ -392,7 +391,7 @@ describe('completions that arrive after the lineage moved on', () => {
 
       expect(sent).toEqual([10 * MIN]);
       expect(ka.getStatus()).toEqual([]);
-      expect(events.filter((event) => event.type === 'skipped' || event.type === 'disabled')).toEqual([]);
+      expect(events.filter((event) => event.type === 'skipped')).toEqual([]);
     }
   });
 

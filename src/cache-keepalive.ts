@@ -83,9 +83,6 @@ export type KeepaliveEvent =
    *  replaces or drops that snapshot: the poke's failure then counts on the old
    *  one, and drops nothing at the cap. */
   | { type: 'error'; key: string; error: string; consecutive: number }
-  /** The whole keepalive disabling itself. Not emitted: a failure retires
-   *  only its own lineage (`skipped`). */
-  | { type: 'disabled'; reason: string }
   | { type: 'expired'; key: string; idleMs: number };
 
 export interface CacheKeepaliveConfig {

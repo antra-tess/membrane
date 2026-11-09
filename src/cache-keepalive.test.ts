@@ -369,6 +369,12 @@ describe('CacheKeepalive', () => {
     ka.stop();
   });
 
+  it("has no disabled event: an observer's branch on one doesn't compile", () => {
+    const handlesDisabled = (event: KeepaliveEvent) =>
+      // @ts-expect-error
+      event.type === 'disabled';
+  });
+
   it('ignores the aux lane by default', async () => {
     const send = vi.fn().mockResolvedValue(hit);
     const { ka } = setup(send);
