@@ -17,6 +17,7 @@
 
 import { collectMarkedBlocks } from './utils/cache-marker-budget.js';
 import { isEffortOnlyMessage } from './utils/empty-text.js';
+import { MembraneError } from './types/errors.js';
 import { createHash } from 'node:crypto';
 
 /** Vendor usage fields used by keepalive checks and spend observers. */
@@ -34,6 +35,10 @@ export interface KeepaliveUsage {
   inference_geo?: string | null;
 }
 
+/** Sends one poke. Each error it throws counts against the poke's lineage
+ * (`maxConsecutiveErrors`). A `MembraneError` with a finite positive
+ * `retryAfterMs` also holds the pokes of every lineage of the same model
+ * until that wait has passed. */
 export type KeepaliveSend = (
   wire: Record<string, unknown>,
   headers: Record<string, string> | undefined,
@@ -65,8 +70,16 @@ export type KeepaliveCall = {
 export type KeepaliveEvent =
   | { type: 'refreshed'; key: string; lane: KeepaliveLane; readTokens: number; idleMs: number }
   | { type: 'ineffective'; key: string; reason: string; readTokens: number; writeTokens: number }
+  /** A lineage is dropped: its request stopped being warmable (an
+   *  `ineligibleReason`), `failure-cap` (`maxConsecutiveErrors` failed pokes in
+   *  a row), `cache-expired` (an hour since its last confirmed cache read or
+   *  real request, so a poke would write the entry rather than read it), or
+   *  `wait-past-expiry` (a provider's wait for its model ends after that hour). */
   | { type: 'skipped'; key: string; reason: string }
+  /** A poke failed; `consecutive` counts its lineage's failed pokes in a row. */
   | { type: 'error'; key: string; error: string; consecutive: number }
+  /** The whole keepalive disabling itself. Not emitted: a failure retires
+   *  only its own lineage (`skipped`). */
   | { type: 'disabled'; reason: string }
   | { type: 'expired'; key: string; idleMs: number };
 
@@ -91,7 +104,10 @@ export interface CacheKeepaliveConfig {
   /** LRU cap on tracked lineages, to bound memory: each holds a full wire
    *  request. Default 4. */
   maxLineages?: number;
-  /** Consecutive send failures before the whole keepalive disables itself. Default 3. */
+  /** Failed pokes of one lineage in a row, of any kind, at which that lineage
+   *  alone is dropped (a `skipped` event, reason `failure-cap`). A successful
+   *  response resets its count, and so does a real request recorded for it.
+   *  Default 3. */
   maxConsecutiveErrors?: number;
   /**
    * The number of pokes of a lineage in a row coming back without a cache read
@@ -114,8 +130,14 @@ interface Lineage {
   lane: KeepaliveLane;
   lastRealAt: number;
   refreshBaselineAt: number;
+  confirmedWarmAt: number;
   ineffective: number;
+  failures: number;
 }
+
+const CACHE_TTL_MS = 60 * 60 * 1000;
+
+const modelOf = (wire: Record<string, unknown>): string => String(wire.model ?? '');
 
 const DEFAULTS = {
   enabled: true,
@@ -208,7 +230,7 @@ export class CacheKeepalive {
   private lineages = new Map<string, Lineage>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false;
-  private consecutiveErrors = 0;
+  private modelNotBefore = new Map<string, number>();
   private stopped = false;
   private readonly cfg: Required<Omit<CacheKeepaliveConfig, 'onEvent' | 'onCall'>> &
     Pick<CacheKeepaliveConfig, 'onEvent' | 'onCall'>;
@@ -223,7 +245,8 @@ export class CacheKeepalive {
    *  sent, where the cache entry's clock starts: the lineage's touch counts
    *  from it, and its window from it or a later real call the lineage already
    *  has. Left out, both count from now. Call it once per call that gets that
-   *  far. */
+   *  far. It clears the lineage's failed-poke count, and leaves a provider's
+   *  wait for its model in place. */
   record(
     wire: Record<string, unknown>,
     headers: Record<string, string> | undefined,
@@ -248,7 +271,9 @@ export class CacheKeepalive {
       lane,
       lastRealAt: Math.max(sentAt, existing?.lastRealAt ?? sentAt),
       refreshBaselineAt: sentAt,
+      confirmedWarmAt: sentAt,
       ineffective: existing?.ineffective ?? 0,
+      failures: 0,
     });
 
     while (this.lineages.size > this.cfg.maxLineages) {
@@ -270,16 +295,28 @@ export class CacheKeepalive {
     if (this.ticking || this.stopped) return;
     this.ticking = true;
     try {
-      const now = Date.now();
+      for (const [model, notBefore] of this.modelNotBefore) {
+        if (Date.now() >= notBefore) this.modelNotBefore.delete(model);
+      }
       for (const [key, lin] of [...this.lineages]) {
         if (this.stopped) break;
         if (this.lineages.get(key) !== lin) continue;
+        const now = Date.now();
         if (now - lin.lastRealAt >= this.cfg.maxIdleMs) {
           this.lineages.delete(key);
           this.emit({ type: 'expired', key, idleMs: now - lin.lastRealAt });
           continue;
         }
         if (now - lin.refreshBaselineAt < this.cfg.refreshAfterMs) continue;
+        if (now - lin.confirmedWarmAt >= CACHE_TTL_MS) {
+          this.retire(key, lin, 'cache-expired');
+          continue;
+        }
+        const notBefore = this.modelNotBefore.get(modelOf(lin.wire));
+        if (notBefore !== undefined && now < notBefore) {
+          if (lin.confirmedWarmAt + CACHE_TTL_MS <= notBefore) this.retire(key, lin, 'wait-past-expiry');
+          continue;
+        }
         await this.refresh(key, lin);
       }
     } finally {
@@ -307,7 +344,7 @@ export class CacheKeepalive {
         key, lane: lin.lane, startedAt, durationMs: Date.now() - startedAt,
         request: payload, outcome: 'success', response: { ...res },
       });
-      this.consecutiveErrors = 0;
+      lin.failures = 0;
 
       const read = res.usage?.cache_read_input_tokens ?? 0;
       const wrote = res.usage?.cache_creation_input_tokens ?? 0;
@@ -331,6 +368,7 @@ export class CacheKeepalive {
 
       lin.ineffective = 0;
       lin.refreshBaselineAt = startedAt;
+      lin.confirmedWarmAt = startedAt;
       this.emit({ type: 'refreshed', key, lane: lin.lane, readTokens: read, idleMs });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -340,19 +378,20 @@ export class CacheKeepalive {
           request: payload, outcome: 'error', error: err,
         });
       }
-      this.consecutiveErrors += 1;
-      this.emit({ type: 'error', key, error: message, consecutive: this.consecutiveErrors });
-
-      lin.refreshBaselineAt = Date.now();
-
-      if (this.consecutiveErrors >= this.cfg.maxConsecutiveErrors) {
-        this.stop();
-        this.emit({
-          type: 'disabled',
-          reason: `${this.consecutiveErrors} consecutive keepalive failures; last: ${message}`,
-        });
+      const wait = err instanceof MembraneError ? err.retryAfterMs : undefined;
+      if (wait !== undefined && Number.isFinite(wait) && wait > 0) {
+        this.modelNotBefore.set(modelOf(lin.wire), Date.now() + wait);
       }
+      lin.failures += 1;
+      this.emit({ type: 'error', key, error: message, consecutive: lin.failures });
+      if (lin.failures >= this.cfg.maxConsecutiveErrors) this.retire(key, lin, 'failure-cap');
     }
+  }
+
+  private retire(key: string, lin: Lineage, reason: string): void {
+    if (this.stopped || this.lineages.get(key) !== lin) return;
+    this.lineages.delete(key);
+    this.emit({ type: 'skipped', key, reason });
   }
 
   private reportCall(call: KeepaliveCall): void {
@@ -392,5 +431,6 @@ export class CacheKeepalive {
       this.timer = null;
     }
     this.lineages.clear();
+    this.modelNotBefore.clear();
   }
 }

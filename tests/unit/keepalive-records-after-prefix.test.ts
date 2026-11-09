@@ -309,7 +309,7 @@ describe('the touch counts from the send', () => {
     expect(replays()).toHaveLength(2);
   });
 
-  it('a refresh that fails 40 ms after its send backs off from the failure, not its send', async () => {
+  it('a refresh that fails 40 ms after its send leaves the touch at the real call, so the next check tries again', async () => {
     let hold: ReturnType<typeof held> | undefined;
     const { a, events } = adapter(fine, async wire => {
       if (wire.max_tokens === 0 && hold) {
@@ -325,7 +325,9 @@ describe('the touch counts from the send', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(events.filter(e => e.type === 'error')).toHaveLength(1);
     const [lineage] = a.cacheKeepalive!.getStatus();
-    expect(lineage!.idleMs).toBe(0);
+    expect(lineage!.idleMs).toBe(140);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(events.filter(e => e.type === 'error')).toHaveLength(2);
   });
 
   it('a call sent before another on its lineage but recorded after it: its touch is its own send, its window the later call\'s', async () => {

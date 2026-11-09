@@ -330,10 +330,9 @@ describe('CacheKeepalive', () => {
     const send = vi.fn().mockResolvedValue({
       usage: { cache_read_input_tokens: 0, cache_creation_input_tokens: 494_000 },
     });
-    const { ka, events } = setup(send, { maxIneffective: 2 });
+    const { ka, events } = setup(send, { maxIneffective: 2, refreshAfterMs: 20 * 60_000 });
     ka.record(wire(), undefined, 'stream');
 
-    await vi.advanceTimersByTimeAsync(50 * 60_000);
     await vi.advanceTimersByTimeAsync(50 * 60_000);
 
     const bad = events.filter((e) => e.type === 'ineffective');
@@ -355,7 +354,7 @@ describe('CacheKeepalive', () => {
     ka.stop();
   });
 
-  it('hard-disables after consecutive errors instead of becoming a retry storm', async () => {
+  it('drops the failing lineage after consecutive errors instead of becoming a retry storm', async () => {
     const send = vi.fn().mockRejectedValue(new Error('400 invalid_request_error'));
     const { ka, events } = setup(send, { maxConsecutiveErrors: 3 });
     ka.record(wire(), undefined, 'stream');
@@ -363,7 +362,9 @@ describe('CacheKeepalive', () => {
     await vi.advanceTimersByTimeAsync(24 * 60 * 60_000);
 
     expect(send.mock.calls.length).toBe(3);
-    expect(events.some((e) => e.type === 'disabled')).toBe(true);
+    expect(events.map((e) => e.type)).toEqual(['error', 'error', 'error', 'skipped']);
+    expect(events[3]).toEqual({ type: 'skipped', key: lineageKey(wire()), reason: 'failure-cap' });
+    expect(ka.getStatus()).toEqual([]);
     ka.stop();
   });
 

@@ -81,7 +81,7 @@ describe('keepalive terminal call receipts', () => {
     expect(ka.getStatus()).toEqual([]);
   });
 
-  it('reports failed sends exactly once and preserves the error and breaker behavior', async () => {
+  it('reports failed sends exactly once and preserves the error, and drops the lineage at the failure cap', async () => {
     const error = Object.assign(new Error('Upstream failed'), { status: 503 });
     const send = vi.fn().mockRejectedValue(error);
     const { ka, calls, events } = setup(send, { maxConsecutiveErrors: 2 });
@@ -95,7 +95,8 @@ describe('keepalive terminal call receipts', () => {
       expect(call.request.max_tokens).toBe(0);
       expect(call).not.toHaveProperty('headers');
     }
-    expect(events.map(e => e.type)).toEqual(['error', 'error', 'disabled']);
+    expect(events.map(e => e.type)).toEqual(['error', 'error', 'skipped']);
+    expect(events[2]).toMatchObject({ reason: 'failure-cap' });
     expect(ka.getStatus()).toEqual([]);
   });
 
@@ -159,7 +160,8 @@ describe('keepalive terminal call receipts', () => {
     await vi.advanceTimersByTimeAsync(200);
     expect(send).not.toHaveBeenCalled();
     expect(calls).toEqual([]);
-    expect(events.map(event => event.type)).toEqual(['error', 'disabled']);
+    expect(events.map(event => event.type)).toEqual(['error', 'skipped']);
+    expect(events[1]).toMatchObject({ reason: 'failure-cap' });
     expect(ka.getStatus()).toEqual([]);
   });
 
