@@ -86,14 +86,19 @@ export class MembraneError extends Error {
    * length and `max_tokens` exceed context limit: N + K > M", Gemini's "The
    * input token count (N) exceeds ...", and OpenAI's long form, "... However,
    * your messages resulted in N tokens.". It's the whole prompt, cache reads
-   * and writes included, unlike a response's `inputTokens`. Unset where the
-   * refusal states no count, as OpenAI's shorter and current forms, the
-   * Responses API's and Bedrock's don't. Only the number is kept; the text
-   * stays in the error's message, and in `rawError` where there is one.
-   * It's read once, from the text the error's type is classified from: from a
-   * provider's body, its own message fields, never a part that can echo the
-   * request. A copy, through `toErrorInfo` or JSON, carries the number or
-   * nothing, and never reads the message again.
+   * and writes included. Unset where the refusal states no count, as OpenAI's
+   * shorter and current forms, the Responses API's and Bedrock's don't. Only
+   * the number is kept; the text stays in the error's message or its
+   * `rawError`. It's read once, from the text the error's type is classified
+   * from: from a provider's body, the message fields membrane extracts from
+   * it, so an echo of the request beside those fields can't supply one. That
+   * text can hold more than the provider's message, and an echo in it does
+   * supply the count: a body that doesn't parse as JSON, or a string `error`,
+   * is taken whole as the message; and for a status-less Anthropic error
+   * whose body membrane doesn't recognise, or a Bedrock stream error with no
+   * message, the type and the count are read from a rendering of the body.
+   * A copy, through `toErrorInfo` or JSON, carries the number or nothing, and
+   * never reads the message again.
    */
   readonly promptTokens?: number;
   /**
