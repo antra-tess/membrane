@@ -46,7 +46,8 @@ export type KeepaliveSend = (
 export type KeepaliveLane = 'stream' | 'complete';
 
 /** One terminal receipt per KeepaliveSend invocation, not per HTTP attempt.
- * SDK-internal retries belong to that invocation. A success carries the full
+ * A sender's own resends, such as AnthropicAdapter's resend with refreshed
+ * credentials after a 401, belong to that invocation. A success carries the full
  * vendor response and its terminal usage, including ineffective cache writes.
  * Request and response objects are observer-owned copies; recorded request
  * headers are excluded. */
@@ -126,7 +127,7 @@ export interface CacheKeepaliveConfig {
   /** Report background calls to the same ledger as foreground inference.
    * Invoked once on success (including ineffective responses) or failure.
    * Observer errors are isolated, and returned promises never delay the loop.
-   * Skipped and expired lineages do not make calls or receipts.
+   * A lineage makes no call or receipt once it's skipped or expired.
    * Poke serialization failures are reported through onEvent before any sender invocation. */
   onCall?: (call: KeepaliveCall) => void | Promise<void>;
 }
@@ -254,9 +255,10 @@ export class CacheKeepalive {
    *  window count from it. Left out, both count from now. Call it once per
    *  call that gets that far. While the lineage is tracked, a request sent
    *  before its newest recorded one changes nothing, so the lineage replays
-   *  its newest request; once the lineage is dropped, any request recorded
-   *  starts it again. Otherwise it clears the lineage's failed-poke count,
-   *  and leaves a provider's wait for its model in place. */
+   *  its newest request; once the lineage is dropped, a request recorded on a
+   *  listed lane and in a shape kept warm starts it again. Otherwise it clears
+   *  the lineage's failed-poke count, and leaves a provider's wait for its
+   *  model in place. */
   record(
     wire: Record<string, unknown>,
     headers: Record<string, string> | undefined,

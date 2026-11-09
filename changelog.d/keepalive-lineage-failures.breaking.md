@@ -26,8 +26,8 @@
     changes nothing, so the lineage keeps replaying its newest request.
     Before, it replaced the snapshot and set the lineage's touch from its own
     send, and one in a shape that isn't kept warm dropped the lineage. Once a
-    lineage is dropped, any real request recorded starts it again, as
-    before.
+    lineage is dropped, a real request recorded on a listed lane and in a
+    shape kept warm starts it again, as before.
   - **Unchanged:** the replay's bytes and headers, lanes, `maxLineages`,
     `maxIdleMs`, one receipt per send, and `stop()` and
     `enabled: false`.

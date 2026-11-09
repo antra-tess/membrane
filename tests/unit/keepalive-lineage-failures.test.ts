@@ -211,6 +211,18 @@ describe("a provider's stated wait holds the model's optional pokes", () => {
     expect(sent.map((s) => `${s.at / MIN} ${s.system}`)).toEqual(['30 A1', '70 A2']);
     expect(trail(events, a1)).toEqual(['error 1', 'skipped wait-past-expiry']);
   });
+
+  it('retires a held lineage whose wait ends exactly at the hour, as one past it', async () => {
+    const a = wire('claude-m', 'A');
+    const { ka, sent, events } = setup(() => { throw failure(30 * MIN); }, {
+      refreshAfterMs: 30 * MIN, checkIntervalMs: 5 * MIN, maxConsecutiveErrors: 3,
+    });
+    ka.record(a, undefined, 'stream');
+    await vi.advanceTimersByTimeAsync(70 * MIN);
+
+    expect(sent.map((s) => s.at / MIN)).toEqual([30]);
+    expect(trail(events, a)).toEqual(['error 1', 'skipped wait-past-expiry']);
+  });
 });
 
 describe('the confirmed-warm fence', () => {
@@ -292,6 +304,22 @@ describe('a real request recorded after a later-sent one', () => {
     expect(sent.map((s) => `${s.at / MIN} ${s.messages}`)).toEqual([`65 ${JSON.stringify(later.messages)}`]);
     expect(trail(events, later)).toEqual(['refreshed']);
   });
+
+  it('once the lineage is dropped, an earlier-sent request starts it again', async () => {
+    const { ka, sent } = setup(() => hit, { refreshAfterMs: 45 * MIN, checkIntervalMs: 5 * MIN });
+    const earlier = { ...later, messages: marked('A') };
+    await vi.advanceTimersByTimeAsync(20 * MIN);
+    ka.record(later, undefined, 'stream', START + 20 * MIN);
+    await vi.advanceTimersByTimeAsync(5 * MIN);
+    ka.record({ ...later, thinking: { type: 'enabled', budget_tokens: 1000 } }, undefined, 'stream', START + 25 * MIN);
+    expect(ka.getStatus()).toEqual([]);
+    await vi.advanceTimersByTimeAsync(5 * MIN);
+    ka.record(earlier, undefined, 'stream', START);
+
+    expect(ka.getStatus()).toEqual([{ key: lineageKey(later), lane: 'stream', idleMs: 30 * MIN, realIdleMs: 30 * MIN }]);
+    await vi.advanceTimersByTimeAsync(16 * MIN);
+    expect(sent.map((s) => `${s.at / MIN} ${s.messages}`)).toEqual([`45 ${JSON.stringify(earlier.messages)}`]);
+  });
 });
 
 describe('completions that arrive after the lineage moved on', () => {
@@ -370,7 +398,7 @@ describe('completions that arrive after the lineage moved on', () => {
   it('a poke that completes after stop() leaves the service stopped', async () => {
     let resolveFirst: ((value: unknown) => void) | undefined;
     const a = wire();
-    const { ka, sent } = setup(() => new Promise((resolve) => { resolveFirst = resolve; }), {
+    const { ka, sent, events } = setup(() => new Promise((resolve) => { resolveFirst = resolve; }), {
       refreshAfterMs: 10 * MIN, checkIntervalMs: MIN,
     });
     ka.record(a, undefined, 'stream');
@@ -378,6 +406,7 @@ describe('completions that arrive after the lineage moved on', () => {
     ka.stop();
     resolveFirst!(hit);
     await vi.advanceTimersByTimeAsync(MIN);
+    expect(trail(events, a)).toEqual(['refreshed']);
     ka.record(a, undefined, 'stream');
     await vi.advanceTimersByTimeAsync(2 * HOUR);
 
@@ -387,7 +416,7 @@ describe('completions that arrive after the lineage moved on', () => {
 });
 
 describe("the Anthropic adapter's keepalive sender", () => {
-  it("hands the keepalive a normalized error carrying the provider's stated wait, which holds the model's next poke, after the SDK's own retries", async () => {
+  it("hands the keepalive a normalized error carrying the provider's stated wait, which holds the model's next poke, with no retry by the SDK", async () => {
     const calls: KeepaliveCall[] = [];
     const pokes: number[] = [];
     const usage = {
@@ -429,12 +458,12 @@ describe("the Anthropic adapter's keepalive sender", () => {
     expect(error).toBeInstanceOf(MembraneError);
     expect(error).toMatchObject({ type: 'rate_limit', httpStatus: 429, retryAfterMs: 120_000 });
     expect((error as MembraneError).rawError).toMatchObject({ status: 429 });
-    expect(pokes).toHaveLength(3);
+    expect(pokes).toHaveLength(1);
 
     const failedAt = call.startedAt + call.durationMs - START;
     await vi.advanceTimersByTimeAsync(failedAt + 120_000 - 1 - 2_500);
-    expect(pokes).toHaveLength(3);
+    expect(pokes).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(pokes.length).toBeGreaterThan(3);
+    expect(pokes.length).toBeGreaterThan(1);
   });
 });

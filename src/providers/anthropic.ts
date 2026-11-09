@@ -402,7 +402,9 @@ export class AnthropicAdapter implements ProviderAdapter {
           // which turns a cache read into a cache write.
           async (wire, headers) => {
             try {
-              return await this.createMessage(wire as unknown as Anthropic.MessageCreateParamsNonStreaming, headers);
+              return await this.createMessage(
+                wire as unknown as Anthropic.MessageCreateParamsNonStreaming, headers, undefined, { maxRetries: 0 },
+              );
             } catch (error) {
               throw this.handleError(error, wire);
             }
