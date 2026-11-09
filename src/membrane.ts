@@ -2495,8 +2495,8 @@ export class Membrane {
 
     if (diagnostics.malformedToolBlocks?.length) {
       warnLog.warn(
-        `[membrane] ${diagnostics.malformedToolBlocks.length} function_calls block(s) weren't ` +
-        `well-formed (${diagnostics.malformedToolBlocks.join(', ')}): each of their calls is ` +
+        `[membrane] ${diagnostics.malformedToolBlocks.length} function_calls block(s) were ` +
+        `refused (${diagnostics.malformedToolBlocks.join(', ')}): each of their calls is ` +
         `marked unparseableInput, with its reason in unparseableReason and input {}, for ` +
         `the executor to refuse.`
       );

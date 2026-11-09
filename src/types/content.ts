@@ -148,19 +148,20 @@ export interface ToolUseContent {
    * refused whole, holding the block's raw text, with `input` `{}`: none of
    * the block's calls is taken as the model's. A block is refused whole when
    * its tags break the format (an invoke with no closing tag; a value holding
-   * a parameter's or an invoke's opening tag, or an invoke's closing tag; a
-   * parameter given twice; text inside an invoke outside its parameter
-   * elements; or a stray tag outside every invoke, an invoke opener whose
-   * name can't be read included), or when its opening tag comes while an
-   * earlier function_calls opening tag is still unclosed: an earlier block
-   * was cut off, one of its values held the tag, or text before the block
-   * named it. Its calls are then the named invoke openers after that tag,
-   * and its raw text starts there. In a stream that earlier tag may be in an
-   * earlier turn, a user's message included, but only in the text the stream
-   * parses: the request's assistant prefill, which holds the conversation
-   * after the last cache breakpoint, with prompt caching on, the default, and
-   * after the last message holding an image. `complete()` reads only its own
-   * output, so it refuses only when the earlier tag is in that output.
+   * a parameter's or an invoke's opening tag as the block's own are written,
+   * or an invoke's closing tag; a parameter given twice; text inside an
+   * invoke outside its parameter elements; or a stray tag outside every
+   * invoke, an invoke opener whose name can't be read included), or when its
+   * opening tag comes while an earlier function_calls opening tag is still
+   * unclosed: an earlier block was cut off, one of its values held the tag,
+   * or text before the block named it. Its calls are then the named invoke
+   * openers after that tag, and its raw text starts there. In a stream that
+   * earlier tag may be in an earlier turn, a user's message included, but
+   * only in the text the stream parses: the request's assistant prefill,
+   * which holds the conversation after the last cache breakpoint, with prompt
+   * caching on, the default, and after the last image the request sends.
+   * `complete()` reads only its own output, so it refuses only when the
+   * earlier tag is in that output.
    */
   unparseableInput?: string;
 

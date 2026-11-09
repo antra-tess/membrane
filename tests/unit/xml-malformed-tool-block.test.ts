@@ -92,18 +92,13 @@ const malformed: Array<[string, string, string[]]> = [
     ['zz_first', 'zz_second'],
   ],
   [
-    'a value holding a parameter opening tag with no name',
-    `<invoke name="zz_write"><parameter name="body">one<parameter>${SECRET}</parameter></invoke>`,
-    ['zz_write'],
-  ],
-  [
-    'a value holding an invoke opening tag with no name',
-    `<invoke name="zz_write"><parameter name="body">one <invoke/> ${SECRET}</parameter></invoke>`,
-    ['zz_write'],
-  ],
-  [
     'misspelled closing parameter and invoke tags',
     `<invoke name="zz_write"><parameter name="path">${SECRET}</param></invok>`,
+    ['zz_write'],
+  ],
+  [
+    'a parameter left open before the next parameter opens',
+    `<invoke name="zz_write"><parameter name="path">a.txt\n<parameter name="body">${SECRET}</parameter></invoke>`,
     ['zz_write'],
   ],
 ];
@@ -300,6 +295,24 @@ describe('a well-formed block parses as before', () => {
     expect(parsed!.calls[0]!.unparseableReason).toBeUndefined();
   });
 
+  for (const [title, value] of [
+    ['a TestNG parameter element', '<suite name="s"><test name="t"><parameter name="browser" value="chrome"/></test></suite>'],
+    ['a BPEL invoke element', '<sequence><invoke partnerLink="p" operation="o"/></sequence>'],
+    ['a parameter opening tag with no name', 'one<parameter>two'],
+    ['an invoke opening tag with no name', 'one <invoke/> two'],
+  ]) {
+    it(`passes a string value holding ${title} whole, since the block's own tags aren't written that way`, () => {
+      const tools: ToolDefinition[] = [{
+        name: 'zz_write',
+        description: 'zz',
+        inputSchema: { type: 'object', properties: { body: { type: 'string' } } },
+      }];
+      const parsed = parseToolCalls(block(`<invoke name="zz_write"><parameter name="body">${value}</parameter></invoke>`), { tools });
+      expect(parsed!.calls.map((c) => [c.name, c.input])).toEqual([['zz_write', { body: value }]]);
+      expect(parsed!.calls[0]!.unparseableReason).toBeUndefined();
+    });
+  }
+
   it('ignores prose between invokes, as before', () => {
     const parsed = parseToolCalls(block(`zz note\n<invoke name="zz_first"/>\nzz another note\n<invoke name="zz_second"/>`));
     expect(parsed!.calls.map((c) => c.name)).toEqual(['zz_first', 'zz_second']);
@@ -417,7 +430,7 @@ describe('the XML tool loops hand a refused block to the host as an ordinary rou
     expect(received[0]!.input).toEqual({});
     expect(received[0]!.unparseableReason).toContain('"path"');
     expect(received[0]!.unparseableInput).toContain('zz_write');
-    const warning = logger.warnings.find((w) => w.includes('well-formed'));
+    const warning = logger.warnings.find((w) => w.includes('were refused'));
     expect(warning).toBeDefined();
     expect(warning).toContain('(tag-in-value)');
     expect(warning).not.toContain(SECRET);
@@ -445,7 +458,7 @@ describe('the XML tool loops hand a refused block to the host as an ordinary rou
     expect(response.toolCalls.map((c) => [c.name, c.input])).toEqual([['zz_rm', {}]]);
     expect(response.toolCalls[0]!.unparseableInput).toBe(block('<invoke name="zz_rm"/>'));
     expect(response.toolCalls[0]!.unparseableReason).toBe(LEFT_OPEN_REASON);
-    expect(logger.warnings.some((w) => w.includes('(left-open-block)'))).toBe(true);
+    expect(logger.warnings.some((w) => w.includes('were refused (left-open-block)'))).toBe(true);
   });
 
   it('complete() reads its text only through the first closing function_calls tag, where the streams stop, so no later block runs', async () => {
@@ -482,7 +495,7 @@ describe('the XML tool loops hand a refused block to the host as an ordinary rou
   const viaEvents = async (req: NormalizedRequest, texts: string[]) => {
     const stream = new Membrane(new ScriptedAdapter(texts), { logger: new RecordingLogger() }).streamYielding(req);
     const received: ToolCall[] = [];
-    let content: ContentBlock[] = [];
+    let content: ContentBlock[] | undefined;
     for await (const event of stream) {
       if (event.type === 'tool-calls') {
         received.push(...event.calls);
@@ -490,6 +503,7 @@ describe('the XML tool loops hand a refused block to the host as an ordinary rou
       }
       if (event.type === 'complete') content = event.response.content;
     }
+    if (content === undefined) throw new Error('expected a complete event');
     return { received, content };
   };
   const abortAfterDispatch = async (path: string, req: NormalizedRequest, texts: string[]) => {
@@ -509,7 +523,7 @@ describe('the XML tool loops hand a refused block to the host as an ordinary rou
       return { received, content: response.partialContent ?? [] };
     }
     const stream = membrane.streamYielding(req, { signal: controller.signal });
-    let content: ContentBlock[] = [];
+    let content: ContentBlock[] | undefined;
     for await (const event of stream) {
       if (event.type === 'tool-calls') {
         received.push(...event.calls);
@@ -518,6 +532,7 @@ describe('the XML tool loops hand a refused block to the host as an ordinary rou
       }
       if (event.type === 'aborted') content = event.partialContent ?? [];
     }
+    if (content === undefined) throw new Error('expected an aborted event');
     return { received, content };
   };
   const thinkingTurn = (): NormalizedRequest => ({

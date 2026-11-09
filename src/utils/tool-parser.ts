@@ -226,7 +226,6 @@ const PARAMETER_OPENER_AT = /<(?:antml:)?parameter\s+name="([^"<>]+)">/y;
 const PARAMETER_CLOSER = /<\/(?:antml:)?parameter>/g;
 const LOOSE_INVOKE_OPENER = /<(?:antml:)?invoke\s+name=/g;
 const NAMED_INVOKE_OPENER = /<(?:antml:)?invoke\s+name=(["'])((?:(?!\1)[^<>\n\r\u2028\u2029])+)\1/g;
-const TAG_IN_VALUE = /<(?:antml:)?(?:parameter|invoke)[\s/>]|<\/(?:antml:)?invoke>/;
 const WHITESPACE_AT = /\s*/y;
 const NAMELESS_INVOKE_OPENER_AT = /^<(?:antml:)?invoke(?=[\s/>]|$)/;
 
@@ -238,6 +237,16 @@ interface BlockCall {
   at: number;
   name: string;
   parameters: Array<[name: string, value: string]>;
+}
+
+function holdsTag(value: string): boolean {
+  for (let at = value.indexOf('<'); at >= 0; at = value.indexOf('<', at + 1)) {
+    for (const tag of [INVOKE_OPENER_AT, PARAMETER_OPENER_AT, INVOKE_CLOSER_AT]) {
+      tag.lastIndex = at;
+      if (tag.test(value)) return true;
+    }
+  }
+  return false;
 }
 
 function readBlock(inner: string): { defect: ToolBlockDefect } | { calls: BlockCall[] } {
@@ -297,7 +306,7 @@ function readBlock(inner: string): { defect: ToolBlockDefect } | { calls: BlockC
       const close = PARAMETER_CLOSER.exec(inner);
       const value = inner.slice(valueStart, close ? close.index : inner.length);
       const parameterShown = PLAIN_NAME.test(name) ? `parameter "${name}"` : 'a parameter';
-      if (TAG_IN_VALUE.test(value)) {
+      if (holdsTag(value)) {
         return fail(
           'tag-in-value',
           `${parameterShown} of ${invoke} holds a parameter's or an invoke's opening tag, or an invoke's closing tag, which a value can't hold, whether its closing parameter tag is missing before it or the value was meant to carry that text`,

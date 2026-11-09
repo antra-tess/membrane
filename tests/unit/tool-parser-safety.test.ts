@@ -68,7 +68,7 @@ describe('F3 · a truncated block spliced with a later round closer', () => {
   );
   const splicedTurn = `zz_bot: calling now\n${truncatedHalf}${interveningTurn}${realCall}`;
 
-  it('refuses the live block once when the cut came inside an invoke: its calls are marked, and none runs', () => {
+  it('refuses the live block once when the cut came inside an invoke: its calls are marked, with {} for input', () => {
     const parsed = parseToolCalls(splicedTurn);
 
     expect(parsed?.calls.map((c) => [c.name, c.input])).toEqual([['zz_real_tool', {}]]);
@@ -403,7 +403,7 @@ describe('greptile#52-1 · an unclosed invoke head absorbs the next call', () =>
       `<invoke name="zz_inner_tool"><parameter name="fld2">2</parameter></invoke>`
   );
 
-  it('refuses the whole block: the head and the call it swallowed are both marked, and neither runs', () => {
+  it('refuses the whole block: the head and the call it swallowed are both marked, with {} for input', () => {
     const parsed = parseToolCalls(absorbingBlock);
 
     expect(parsed?.calls.map((c) => c.name)).toEqual(['zz_head_tool', 'zz_inner_tool']);
