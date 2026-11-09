@@ -44,6 +44,16 @@ async function streamError(): Promise<MembraneError> {
   return error as MembraneError;
 }
 
+async function adapterStreamError(): Promise<MembraneError> {
+  const adapter = new BedrockAdapter({ accessKeyId: 'zz-key', secretAccessKey: 'zz-secret', region: 'us-east-1' });
+  const error = await adapter.stream(
+    { model: 'zz-model', messages: [{ role: 'user', content: 'zz hello' }], maxTokens: 64 } as never,
+    { onChunk: () => {} },
+  ).then(() => undefined, (e: unknown) => e);
+  expect(error).toBeInstanceOf(MembraneError);
+  return error as MembraneError;
+}
+
 function exceptionStream(payload: object) {
   vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream({
     start(controller) { controller.enqueue(exceptionFrame('validationException', payload)); controller.close(); },
@@ -63,6 +73,25 @@ describe('an error inside a Bedrock stream keeps the provider\'s error on the ra
     const error = await streamError();
     expect(error.message).toContain('Bedrock stream error (validationException)');
     expect((error.rawError as { error?: unknown }).error).toBeUndefined();
+  });
+
+  it('an error event: its own code and wait are read from the event, not from its rendering', async () => {
+    const event = { type: 'error', error: { type: 'overloaded_error', message: 'Busy', retry_after_ms: 17_000 } };
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, body: streamBody([chunkFrame(event)]) })));
+    const error = await adapterStreamError();
+    expect(error.message).toContain('Bedrock stream error: Busy');
+    expect(error.type).toBe('server');
+    expect(error.httpStatus).toBe(529);
+    expect(error.providerErrorCode).toBe('overloaded_error');
+    expect(error.retryAfterMs).toBe(17_000);
+  });
+
+  it("an error event with no message: a wait its rendering echoes isn't read", async () => {
+    const event = { type: 'error', error: { type: 'overloaded_error' }, request: { content: 'zz echo: retry after 80 seconds.' } };
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, body: streamBody([chunkFrame(event)]) })));
+    const error = await adapterStreamError();
+    expect(error.message).toContain('retry after 80 seconds');
+    expect(error.retryAfterMs).toBeUndefined();
   });
 
   it('an error event: the event as it came', async () => {
