@@ -156,9 +156,9 @@ export interface ToolUseContent {
 
   /**
    * Present only with `unparseableInput`: why `input` isn't the model's
-   * arguments, as a sentence an executor can give the model. It names invokes
-   * by position and tool name, parameters by name and tags in words, and
-   * quotes none of the call's text.
+   * arguments, as a sentence an executor can give the model. It names an
+   * invoke by position, a tool or parameter name only where that's a plain
+   * identifier, and tags in words, and quotes none of the call's values.
    */
   unparseableReason?: string;
 
