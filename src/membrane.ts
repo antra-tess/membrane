@@ -77,7 +77,7 @@ import {
   hasImageInToolResults,
   formatToolResultsForSplitTurn,
   attachSplitResults,
-  toolBlockDefectKind,
+  parseLastToolBlock,
   type ProviderImageBlock,
   type SplitResultsRound,
   type ToolBlockDefectKind,
@@ -1607,6 +1607,7 @@ export class Membrane {
             name: restoreToolName(item.name, tools),
             ...toolUseInputFromValue(item.input),
             ...(item.unparseableInput !== undefined ? { unparseableInput: item.unparseableInput } : {}),
+            ...(item.unparseableInput !== undefined && item.unparseableReason !== undefined ? { unparseableReason: item.unparseableReason } : {}),
             ...(item.rawItem ? { rawItem: item.rawItem } : {}),
           });
         } else if (item.type === 'thinking') {
@@ -2330,6 +2331,7 @@ export class Membrane {
             name,
             ...toolUseInputFromValue(block.input),
             ...(block.unparseableInput !== undefined ? { unparseableInput: block.unparseableInput } : {}),
+            ...(block.unparseableInput !== undefined && block.unparseableReason !== undefined ? { unparseableReason: block.unparseableReason } : {}),
           };
           content.push(toolUse);
           toolCalls.push(toolCallOf(toolUse));
@@ -2377,12 +2379,11 @@ export class Membrane {
     let emptyToolBlocks = 0;
     const malformedToolBlocks: ToolBlockDefectKind[] = [];
     if (xmlToolProtocol && toolCalls.length === 0 && rawAssistantText.includes('<function_calls>')) {
-      const parsed = parseToolCalls(rawAssistantText, { tools: request.tools });
+      const { parsed, defect } = parseLastToolBlock(rawAssistantText, { tools: request.tools });
       if (parsed?.calls.length) {
         for (const tc of parsed.calls) {
           toolCalls.push(tc);
         }
-        const defect = toolBlockDefectKind(parsed.fullMatch);
         if (defect) malformedToolBlocks.push(defect);
       } else if (parsed) {
         emptyToolBlocks = 1;

@@ -47,7 +47,7 @@ describe('F8 · invoke tag spelling tolerance', () => {
     const parsed = parseToolCalls(text);
 
     expect(parsed?.calls.map((c) => [c.name, c.input, c.unparseableInput])).toEqual([['', {}, text]]);
-    expect(parsed?.calls[0]?.unparseableReason).toContain("an invoke opening tag can't be read, before the first named invoke");
+    expect(parsed?.calls[0]?.unparseableReason).toBe("invoke 1's opening tag can't be read");
   });
 
   it('keeps an apostrophe inside a double-quoted invoke name', () => {
@@ -68,19 +68,45 @@ describe('F3 · a truncated block spliced with a later round closer', () => {
   );
   const splicedTurn = `zz_bot: calling now\n${truncatedHalf}${interveningTurn}${realCall}`;
 
-  it('re-anchors to the innermost opener so the real call still runs', () => {
+  it('refuses the live block once when the cut came inside an invoke: its calls are marked, and none runs', () => {
     const parsed = parseToolCalls(splicedTurn);
 
-    expect(parsed?.calls.map((c) => c.name)).toEqual(['zz_real_tool']);
-    expect(parsed?.calls[0]?.input).toEqual({ fld2: 'real value' });
+    expect(parsed?.calls.map((c) => [c.name, c.input])).toEqual([['zz_real_tool', {}]]);
+    expect(parsed?.calls[0]?.unparseableReason).toContain('left open');
+    expect(parsed?.calls[0]?.unparseableInput).toBe(realCall);
     expect(parsed?.beforeText).toContain('zz_truncated_tool');
   });
 
-  it('re-anchors on the block-parsing path too', () => {
-    const { blocks, toolCalls } = parseAccumulatedIntoBlocks(splicedTurn);
+  it('refuses it on the block-parsing path too, and reports the block', () => {
+    const { blocks, toolCalls, malformedToolBlocks } = parseAccumulatedIntoBlocks(splicedTurn);
 
     expect(toolCalls.map((c) => c.name)).toEqual(['zz_real_tool']);
+    expect(toolCalls.every((c) => c.unparseableReason !== undefined && Object.keys(c.input).length === 0)).toBe(true);
     expect(blocks.filter((b) => b.type === 'tool_use')).toHaveLength(1);
+    expect(malformedToolBlocks).toEqual(['left-open-block']);
+  });
+
+  it('the resend after that refusal runs, since its span starts after the refused block', () => {
+    const text =
+      `${splicedTurn}\n` +
+      resultsBlock(`<result tool_use_id="ite1"><error>zz refused</error></result>`) +
+      '\nzz_bot: again\n' +
+      realCall;
+
+    const parsed = parseToolCalls(text);
+
+    expect(parsed?.calls.map((c) => [c.name, c.input])).toEqual([['zz_real_tool', { fld2: 'real value' }]]);
+    expect(parsed?.calls[0]?.unparseableReason).toBeUndefined();
+  });
+
+  it('a cut right after the function_calls opener splices as before: the live call runs', () => {
+    const cutAtOpener = `zz_bot: calling now\n${FUNCTION_CALLS_OPEN}\n${interveningTurn}${realCall}`;
+
+    for (const calls of [parseToolCalls(cutAtOpener)!.calls, parseAccumulatedIntoBlocks(cutAtOpener).toolCalls]) {
+      expect(calls.map((c) => [c.name, c.input])).toEqual([['zz_real_tool', { fld2: 'real value' }]]);
+      expect(calls[0]?.unparseableInput).toBeUndefined();
+    }
+    expect(parseAccumulatedIntoBlocks(cutAtOpener).splicedToolBlocks).toBe(1);
   });
 
   it('reports the repair rather than making it silently', () => {
@@ -102,6 +128,7 @@ describe('F3 · a truncated block spliced with a later round closer', () => {
     const parsed = parseToolCalls(text);
 
     expect(parsed?.calls.map((c) => c.name)).toEqual(['zz_real_tool']);
+    expect(parsed?.calls[0]?.unparseableReason).toContain('left open');
   });
 });
 

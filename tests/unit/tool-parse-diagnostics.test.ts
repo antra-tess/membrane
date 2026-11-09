@@ -191,7 +191,8 @@ describe('F8 · a function_calls block that parses to zero invokes', () => {
     );
 
     expect(response.toolCalls.map((c) => [c.name, c.input])).toEqual([['', {}]]);
-    expect(response.toolCalls[0]?.unparseableReason).toContain("an invoke opening tag can't be read, before the first named invoke");
+    expect(response.toolCalls[0]?.unparseableInput).toContain('zz_no_name_attribute');
+    expect(response.toolCalls[0]?.unparseableReason).toBe("invoke 1's opening tag can't be read");
     expect(logger.warnings.some((w) => w.includes("weren't well-formed (stray-tag)"))).toBe(true);
   });
 });

@@ -45,9 +45,11 @@ export interface ToolCall {
    * present, even as the empty string, when `input` isn't the model's
    * arguments. It holds the arguments as they came, as JSON when they came as
    * a value, or, on a call marked because its stream broke the API's block
-   * order, as JSON when they had parsed. An executor can answer the model
-   * with an error result instead of
-   * running the call with `{}`.
+   * order, as JSON when they had parsed. On each call of an XML-mode
+   * function_calls block refused whole, it holds that block's raw text, the
+   * same for each of its calls, and `unparseableReason` says why. An executor
+   * can answer the model with an error result instead of running the call
+   * with `{}`.
    */
   unparseableInput?: string;
   /**

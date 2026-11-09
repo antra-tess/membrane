@@ -253,14 +253,14 @@ function collectInvokes(innerContent: string, tools?: ToolDefinition[]): ParsedI
   return calls;
 }
 
-export type ToolBlockDefectKind = 'unclosed-invoke' | 'tag-in-value' | 'repeated-parameter' | 'text-in-invoke' | 'stray-tag';
+export type ToolBlockDefectKind = 'unclosed-invoke' | 'tag-in-value' | 'repeated-parameter' | 'text-in-invoke' | 'stray-tag' | 'left-open-block';
 
-const INVOKE_OPENER_AT = /<(?:antml:)?invoke\s+name=(["'])((?:(?!\1).)+)\1\s*(\/?)>/y;
+const INVOKE_OPENER_AT = /<(?:antml:)?invoke\s+name=(["'])((?:(?!\1)[^<>])+)\1\s*(\/?)>/y;
 const INVOKE_CLOSER_AT = /<\/(?:antml:)?invoke>/y;
-const PARAMETER_OPENER_AT = /<(?:antml:)?parameter\s+name="([^"]+)">/y;
+const PARAMETER_OPENER_AT = /<(?:antml:)?parameter\s+name="([^"<>]+)">/y;
 const PARAMETER_CLOSER = /<\/(?:antml:)?parameter>/g;
 const LOOSE_INVOKE_OPENER = /<(?:antml:)?invoke\s+name=/g;
-const NAMED_INVOKE_OPENER = /<(?:antml:)?invoke\s+name=(["'])((?:(?!\1).)+)\1/g;
+const NAMED_INVOKE_OPENER = /<(?:antml:)?invoke\s+name=(["'])((?:(?!\1)[^<>])+)\1/g;
 const TAG_IN_VALUE = /<(?:antml:)?(?:parameter|invoke)\s+name=|<\/(?:antml:)?invoke>/;
 const WHITESPACE_AT = /\s*/y;
 const NAMELESS_INVOKE_OPENER_AT = /^<(?:antml:)?invoke\b/;
@@ -286,8 +286,7 @@ function blockDefect(inner: string): { kind: ToolBlockDefectKind; reason: string
       const next = LOOSE_INVOKE_OPENER.exec(inner)?.index ?? inner.length;
       if (inner.slice(pos, next).includes('<')) {
         if (NAMELESS_INVOKE_OPENER_AT.test(inner.slice(pos))) {
-          const where = invokes === 0 ? 'before the first named invoke' : `after invoke ${invokes}`;
-          return { kind: 'stray-tag', reason: `an invoke opening tag can't be read, ${where}` };
+          return { kind: 'stray-tag', reason: `invoke ${invokes + 1}'s opening tag can't be read` };
         }
         const where = invokes === 0 ? 'before the first invoke' : `after invoke ${invokes}`;
         return { kind: 'stray-tag', reason: `a stray tag stands outside every invoke, ${where}` };
@@ -319,15 +318,15 @@ function blockDefect(inner: string): { kind: ToolBlockDefectKind; reason: string
       PARAMETER_CLOSER.lastIndex = valueStart;
       const close = PARAMETER_CLOSER.exec(inner);
       const value = inner.slice(valueStart, close ? close.index : inner.length);
-      const shown = PLAIN_NAME.test(name) ? `"${name}"` : 'a parameter';
+      const parameterShown = PLAIN_NAME.test(name) ? `parameter "${name}"` : 'a parameter';
       if (TAG_IN_VALUE.test(value)) {
         return {
           kind: 'tag-in-value',
-          reason: `parameter ${shown} of ${invoke} holds a parameter's or an invoke's opening tag, or an invoke's closing tag, so its closing parameter tag is missing or misspelled`,
+          reason: `${parameterShown} of ${invoke} holds a parameter's or an invoke's opening tag, or an invoke's closing tag, which a value can't hold, whether its closing parameter tag is missing before it or the value was meant to carry that text`,
         };
       }
       if (!close) return { kind: 'unclosed-invoke', reason: `${invoke} has no closing invoke tag` };
-      if (seen.has(name)) return { kind: 'repeated-parameter', reason: `parameter ${shown} is given twice in ${invoke}` };
+      if (seen.has(name)) return { kind: 'repeated-parameter', reason: `${parameterShown} is given twice in ${invoke}` };
       seen.add(name);
       pos = close.index + close[0].length;
     }
@@ -335,11 +334,16 @@ function blockDefect(inner: string): { kind: ToolBlockDefectKind; reason: string
   return undefined;
 }
 
+const LEFT_OPEN = {
+  kind: 'left-open-block',
+  reason: 'an earlier function_calls block was left open, inside an invoke, before this one opened',
+} as const;
+
 function callsOfBlock(
-  block: { innerContent: string; fullMatch: string },
+  block: { innerContent: string; fullMatch: string; leftOpenInvoke: boolean },
   tools?: ToolDefinition[],
 ): { calls: ParsedInvoke[]; defect?: ToolBlockDefectKind } {
-  const defect = blockDefect(block.innerContent);
+  const defect = block.leftOpenInvoke ? LEFT_OPEN : blockDefect(block.innerContent);
   if (!defect) return { calls: collectInvokes(block.innerContent, tools) };
   const names = [...block.innerContent.matchAll(NAMED_INVOKE_OPENER)].map((m) => m[2]!);
   return {
@@ -353,10 +357,6 @@ function callsOfBlock(
   };
 }
 
-export function toolBlockDefectKind(fullMatch: string): ToolBlockDefectKind | undefined {
-  const inner = /^<(?:antml:)?function_calls>([\s\S]*)<\/(?:antml:)?function_calls>$/.exec(fullMatch)?.[1];
-  return inner === undefined ? undefined : blockDefect(inner)?.kind;
-}
 
 const PARAMETER_REGEX = /<(antml:)?parameter\s+name="([^"]+)">([\s\S]*?)<\/(antml:)?parameter>/g;
 
@@ -372,6 +372,7 @@ interface ResolvedToolBlock {
   innerContent: string;
   fullMatch: string;
   wasSpliced: boolean;
+  leftOpenInvoke: boolean;
 }
 
 function resolveToolBlock(text: string, blockMatch: RegExpExecArray): ResolvedToolBlock {
@@ -393,6 +394,7 @@ function resolveToolBlock(text: string, blockMatch: RegExpExecArray): ResolvedTo
       innerContent,
       fullMatch: blockMatch[0],
       wasSpliced: false,
+      leftOpenInvoke: false,
     };
   }
 
@@ -403,6 +405,7 @@ function resolveToolBlock(text: string, blockMatch: RegExpExecArray): ResolvedTo
     innerContent: innerContent.slice(innermostOpener.index + innermostOpener[0].length),
     fullMatch: text.slice(reanchoredStart, end),
     wasSpliced: true,
+    leftOpenInvoke: /<(?:antml:)?invoke\b/.test(innerContent.slice(0, innermostOpener.index)),
   };
 }
 
@@ -429,6 +432,13 @@ function isFollowedByResults(text: string, afterPos: number): boolean {
  * declared type are parsed by that type instead of guessed.
  */
 export function parseToolCalls(text: string, options?: ToolParseOptions): ParsedToolCalls | null {
+  return parseLastToolBlock(text, options).parsed;
+}
+
+export function parseLastToolBlock(
+  text: string,
+  options?: ToolParseOptions,
+): { parsed: ParsedToolCalls | null; defect?: ToolBlockDefectKind } {
   let lastUnexecutedBlock: ResolvedToolBlock | null = null;
 
   for (const block of collectLiveToolBlocks(text)) {
@@ -438,7 +448,7 @@ export function parseToolCalls(text: string, options?: ToolParseOptions): Parsed
   }
 
   if (!lastUnexecutedBlock) {
-    return null;
+    return { parsed: null };
   }
 
   const { fullMatch } = lastUnexecutedBlock;
@@ -446,16 +456,20 @@ export function parseToolCalls(text: string, options?: ToolParseOptions): Parsed
   const beforeText = text.slice(0, lastUnexecutedBlock.start);
   const afterText = text.slice(lastUnexecutedBlock.end);
 
-  const calls: ToolCall[] = callsOfBlock(lastUnexecutedBlock, options?.tools).calls.map((invoke) => ({
+  const { calls: invokes, defect } = callsOfBlock(lastUnexecutedBlock, options?.tools);
+  const calls: ToolCall[] = invokes.map((invoke) => ({
     id: generateToolId(),
     ...invoke,
   }));
 
   return {
-    calls,
-    beforeText,
-    afterText,
-    fullMatch,
+    parsed: {
+      calls,
+      beforeText,
+      afterText,
+      fullMatch,
+    },
+    ...(defect ? { defect } : {}),
   };
 }
 
