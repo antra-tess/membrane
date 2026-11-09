@@ -23,8 +23,8 @@ export interface ToolParseOptions {
   tools?: ToolDefinition[];
 }
 
-/** 16 digits or more, no decimal: the first length that can pass Number.MAX_SAFE_INTEGER, as Discord snowflakes do. */
-const LARGE_INT_RE = /^\d{16,}$/;
+/** 16 digits or more, no decimal, either sign: the first length that can pass Number.MAX_SAFE_INTEGER, as Discord snowflakes do. */
+const LARGE_INT_RE = /^-?\d{16,}$/;
 
 interface InvokeSchema {
   toolName: string;
@@ -132,7 +132,7 @@ function matchesDeclaredType(value: unknown, declaredType: string): boolean {
 }
 
 /**
- * Unsigned integers of 16 digits or more (Discord snowflakes and the like)
+ * Integers of 16 digits or more, either sign (Discord snowflakes and the like),
  * can lose precision as JavaScript numbers, so they stay strings.
  */
 function guessParamValue(value: string): unknown {
@@ -206,8 +206,7 @@ function parseParamValue(
     );
     return value;
   }
-  const keptDigits = parsed === trimmed && (declaredType === 'number' || declaredType === 'integer');
-  if (!keptDigits && !matchesDeclaredType(parsed, declaredType)) {
+  if (!matchesDeclaredType(parsed, declaredType)) {
     warnParamType(schema.toolName, paramName, declaredType, `the value parsed as ${jsonKindOf(parsed)}`);
   }
   return parsed;

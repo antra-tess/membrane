@@ -5,6 +5,7 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { toolUseInputFromText } from '../../src/providers/utils.js';
+import { keepLongIntegers } from '../../src/utils/long-integers.js';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import { BedrockAdapter } from '../../src/providers/bedrock.js';
 import { fromOpenAIContent } from '../../src/providers/openai.js';
@@ -24,6 +25,7 @@ describe('toolUseInputFromText keeps an unsafe integer as its digits', () => {
 
   it('keeps the boundary: the largest safe integer stays a number, the next unsafe one becomes text', () => {
     expect(toolUseInputFromText('{"n": 9007199254740991}')).toStrictEqual({ input: { n: 9007199254740991 } });
+    expect(toolUseInputFromText('{"n": 9007199254740992}')).toStrictEqual({ input: { n: '9007199254740992' } });
     expect(toolUseInputFromText('{"n": 9007199254740993}')).toStrictEqual({ input: { n: '9007199254740993' } });
     expect(toolUseInputFromText('{"n": -9007199254740993}')).toStrictEqual({ input: { n: '-9007199254740993' } });
   });
@@ -32,6 +34,12 @@ describe('toolUseInputFromText keeps an unsafe integer as its digits', () => {
     expect(toolUseInputFromText('{"a": 1e20, "b": 1.5, "c": 12345678901234567890.5, "d": 42}'))
       .toStrictEqual({ input: { a: 1e20, b: 1.5, c: 12345678901234567890.5, d: 42 } });
     expect(toolUseInputFromText(`{"id": "${SNOWFLAKE}"}`)).toStrictEqual({ input: { id: SNOWFLAKE } });
+    expect(toolUseInputFromText('{"a": 1E400, "b": 12345678901234567890.0, "c": 9007199254740993e0, "d": -0}'))
+      .toStrictEqual({ input: { a: Infinity, b: 12345678901234567890.0, c: 9007199254740993e0, d: -0 } });
+  });
+
+  it('on a runtime that gives the reviver no source text, every value is as JSON.parse gives it', () => {
+    for (const value of [1.5, 1e20, Number(SNOWFLAKE), 42]) expect(keepLongIntegers('', value)).toBe(value);
   });
 });
 
@@ -105,12 +113,25 @@ describe('XML mode keeps the digits at both of its parses', () => {
     expect(parseToolCalls(xml)?.calls[0]?.input).toStrictEqual({ target: { channelId: SNOWFLAKE }, id: `-${SNOWFLAKE}` });
   });
 
-  it('a parameter declared an object or an integer: a nested one and a negative one, with no type warning', () => {
-    const tools = [{ name: 'open', description: 'zz', inputSchema: { type: 'object' as const, properties: { target: { type: 'object' }, id: { type: 'integer' } } } }];
+  it('a parameter declared an object, an integer or a number: a nested one and a negative one, with no type warning', () => {
+    const tools = [{ name: 'open', description: 'zz', inputSchema: { type: 'object' as const, properties: { target: { type: 'object' }, id: { type: 'integer' }, n: { type: 'number' } } } }];
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
-      expect(parseToolCalls(xml, { tools })?.calls[0]?.input).toStrictEqual({ target: { channelId: SNOWFLAKE }, id: `-${SNOWFLAKE}` });
+      const withN = xml.replace('</invoke>', `<parameter name="n">-${SNOWFLAKE}</parameter>\n</invoke>`);
+      expect(parseToolCalls(withN, { tools })?.calls[0]?.input).toStrictEqual({ target: { channelId: SNOWFLAKE }, id: `-${SNOWFLAKE}`, n: `-${SNOWFLAKE}` });
       expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('a negative long id for another declared type is passed through as text, with the same warning as a positive one', () => {
+    const tools = [{ name: 'open', description: 'zz', inputSchema: { type: 'object' as const, properties: { flag: { type: 'boolean' } } } }];
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const call = `<function_calls>\n<invoke name="open">\n<parameter name="flag">-${SNOWFLAKE}</parameter>\n</invoke>\n</function_calls>`;
+      expect(parseToolCalls(call, { tools })?.calls[0]?.input).toStrictEqual({ flag: `-${SNOWFLAKE}` });
+      expect(warn.mock.calls.map((c) => String(c[0]))).toEqual([expect.stringContaining('too large to represent exactly')]);
     } finally {
       warn.mockRestore();
     }
