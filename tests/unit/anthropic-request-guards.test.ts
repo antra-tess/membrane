@@ -176,10 +176,10 @@ describe('AnthropicAdapter: sampling-parameter model gate', () => {
   it('strips sampling for each listed id and its dated snapshots, and sends it as given to an unlisted later version', async () => {
     const listed = [
       'claude-opus-4-7', 'claude-opus-4-8', 'claude-opus-5', 'claude-opus-5-5', 'claude-sonnet-5',
-      'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5', 'claude-fable-5-1', 'claude-mythos-5',
-      'claude-mythos-5-1', 'claude-mythos-preview',
+      'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5', 'claude-fable-5-1', 'claude-fable-5-2', 'claude-mythos-5',
+      'claude-mythos-5-1', 'claude-mythos-5-2', 'claude-mythos-preview',
     ];
-    const unlisted = ['claude-opus-5-6', 'claude-opus-5-50', 'claude-sonnet-5-6', 'claude-fable-5-2', 'claude-fable-5-10', 'claude-mythos-5-2', 'claude-haiku-5-6'];
+    const unlisted = ['claude-opus-5-6', 'claude-opus-5-50', 'claude-sonnet-5-6', 'claude-fable-5-3', 'claude-fable-5-10', 'claude-mythos-5-3', 'claude-haiku-5-6'];
     const { adapter, captured } = captureAdapter();
 
     for (const model of [...listed, ...listed.map((id) => `${id}-20260301`), ...unlisted]) {
@@ -204,7 +204,8 @@ describe('AnthropicAdapter: sampling-parameter model gate', () => {
         ...(sampling.providerParams ? { providerParams: sampling.providerParams } : {}),
       } as any);
 
-    await send('claude-mythos-5-2', { temperature: 0.2 });
+    await send('claude-mythos-5-3', { temperature: 0.2 });
+    await send('claude-mythos-5-3', { providerParams: { temperature: 0.2 } });
     await send('claude-mythos-5-2', { providerParams: { temperature: 0.2 } });
     await send('claude-mythos-5-1', { temperature: 0.2 });
     await send('claude-mythos-5-1', { providerParams: { temperature: 0.2 } });
@@ -213,8 +214,9 @@ describe('AnthropicAdapter: sampling-parameter model gate', () => {
     await send('claude-opus-5-5', { temperature: 0.2 });
 
     expect(captured.map((request: any) => [request.model, request.temperature])).toEqual([
+      ['claude-mythos-5-3', undefined],
+      ['claude-mythos-5-3', 0.2],
       ['claude-mythos-5-2', undefined],
-      ['claude-mythos-5-2', 0.2],
       ['claude-mythos-5-1', undefined],
       ['claude-mythos-5-1', undefined],
       ['claude-fable-5-1', undefined],

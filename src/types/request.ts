@@ -41,7 +41,7 @@ export interface GenerationConfig {
      * the Anthropic and Bedrock adapters add when the body they send carries
      * it) hides reasoning as 'omitted' does, but returns the progress notes
      * the model writes between tool calls ("found X, checking Y next") as
-     * text. On Fable 5 and 5.1 and Mythos 5.1 those notes come back as
+     * text. On Fable 5, 5.1 and 5.2 and Mythos 5.1 those notes come back as
      * `thinking` blocks, and on Opus 5.5 and Sonnet 5.5 those longer than a
      * sentence or two do, each signed and placed just before the `tool_use`
      * it introduces, where earlier models returned them as `text`. Under
@@ -80,7 +80,9 @@ export interface GenerationConfig {
      * left out; with this set it gets `{ type: 'adaptive', block_binding }`,
      * plus `display` when that is set. Fable 5 and Fable 5.1 accept the
      * binding config, and with `display: 'summarized'` beside it return signed
-     * thinking with its text. Mythos hasn't been tried, and the family has
+     * thinking with its text. Fable 5.2 accepts it too, and drops a block
+     * when the tool list before it changed; other changes before it weren't
+     * tried, nor 'summarized' beside it. Mythos hasn't been tried, and the family has
      * refused thinking configs with a 400 before, so for a Mythos model setting
      * it may fail every request. Bedrock's acceptance of the beta hasn't been
      * tried either. The Bedrock adapter sends this beta whenever the body
