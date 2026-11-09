@@ -181,8 +181,10 @@ export interface MembraneHooks {
    * request as built, with no new build. A hook that throws fails the build,
    * before anything is sent. A promise it returns isn't awaited, so its
    * rejection is the caller's to handle. Only NativeFormatter's builds
-   * normalize, AnthropicXmlFormatter's native mode included; the XML,
-   * completions and Responses builds report none.
+   * normalize, AnthropicXmlFormatter's native mode included. The Responses
+   * build and AnthropicXmlFormatter's XML mode report the two
+   * `*_tool_result_dropped` events for the results they leave out, and the
+   * completions build reports none.
    */
   onNormalize?: (event: NormalizeEvent) => void;
 }

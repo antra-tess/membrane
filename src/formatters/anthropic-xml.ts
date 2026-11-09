@@ -15,6 +15,7 @@ import type {
   BuildOptions,
   BuildResult,
   FormatterConfig,
+  NormalizeEvent,
   ProviderMessage,
 } from './types.js';
 import {
@@ -69,30 +70,55 @@ export interface AnthropicXmlFormatterConfig extends FormatterConfig {
 }
 
 /**
- * The messages without the tool results that answer no call. An XML
- * transcript's calls carry no id, so a result answers a call before it that
- * no earlier result answered, as the model reads it; a result with none left
- * is a result without its call, and is never sent, as a result or as text. A
- * kept result that shared a dropped one's `rawXml` renders from its fields,
- * since the raw text holds the dropped result too. `onDropped` hears each
- * message that lost a result, and whether nothing of it is left.
+ * The messages without the tool results that answer no call. A result whose
+ * id names a call in the request answers it when the call comes before it and
+ * no earlier result answered it. One whose id names no call answers the
+ * earliest call before it in its own message that no result answered: a
+ * generation parsed back from its text gives its calls fresh ids, and keeps
+ * its results beside them. A result that answers no call is never sent, as a
+ * result or as text: in the transcript the model pairs results with calls by
+ * position, so it would read it as another call's result. A kept result that
+ * shared a dropped one's `rawXml` renders from its fields, since the raw text
+ * holds the dropped result too. `onEvent` hears each drop, and `onDropped`
+ * each message that lost a result, and whether nothing of it is left.
  */
 function withoutCalllessResults(
   messages: NormalizedMessage[],
+  onEvent: (event: NormalizeEvent) => void,
   onDropped: (index: number, emptied: boolean) => void,
 ): NormalizedMessage[] {
-  let unanswered = 0;
+  const callIds = new Set<string>();
+  for (const message of messages) {
+    for (const block of message.content) if (block.type === 'tool_use') callIds.add(block.id);
+  }
+  const before = new Set<string>();
+  const answered = new Set<string>();
   return messages.map((message, index) => {
     const kept: ContentBlock[] = [];
     const released = new Set<string>();
+    const ownCalls: string[] = [];
     for (const block of message.content) {
-      if (block.type === 'tool_use') unanswered++;
-      if (block.type !== 'tool_result' || unanswered > 0) {
-        if (block.type === 'tool_result') unanswered--;
-        kept.push(block);
-      } else if (block.rawXml !== undefined) {
-        released.add(block.rawXml);
+      if (block.type === 'tool_use') {
+        before.add(block.id);
+        ownCalls.push(block.id);
       }
+      if (block.type !== 'tool_result') {
+        kept.push(block);
+        continue;
+      }
+      const named = typeof block.toolUseId === 'string' && callIds.has(block.toolUseId) ? block.toolUseId : undefined;
+      const call = named !== undefined
+        ? (before.has(named) && !answered.has(named) ? named : undefined)
+        : ownCalls.find((id) => !answered.has(id));
+      if (call !== undefined) {
+        answered.add(call);
+        kept.push(block);
+        continue;
+      }
+      onEvent(named !== undefined && answered.has(named)
+        ? { kind: 'stray_tool_result_dropped', toolUseId: named, reason: 'answered' }
+        : { kind: 'orphan_tool_result_dropped', toolUseId: typeof block.toolUseId === 'string' ? block.toolUseId : '<missing>' });
+      if (block.rawXml !== undefined) released.add(block.rawXml);
     }
     if (kept.length === message.content.length) return message;
     const content = kept.map((block) => {
@@ -229,7 +255,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
 
     // Messages a dropped result left empty, whose breakpoints still apply.
     const emptiedByDrop = new Set<number>();
-    messages = withoutCalllessResults(messages, (index, emptied) => {
+    messages = withoutCalllessResults(messages, (event) => options.onNormalize?.(event), (index, emptied) => {
       options.fidelity?.alter(index);
       if (emptied) emptiedByDrop.add(index);
     });

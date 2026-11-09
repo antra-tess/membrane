@@ -4,5 +4,6 @@
   altered. OpenAI's Codex backend, reached through a ChatGPT subscription,
   refuses such a `function_call_output` ("No tool call found for function
   call output with call_id …"), so the whole request failed there, as when a
-  context window had cut the call. An output whose call, of any call type, is
-  anywhere in the input is sent as before.
+  context window had cut the call. A later output for a call an earlier output
+  answered is left out the same way, so one output goes per call. An output
+  whose call, of any call type, is anywhere in the input is sent as before.

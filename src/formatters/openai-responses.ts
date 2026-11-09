@@ -92,7 +92,8 @@ export function responsesRawItemKey(rawItem: { type?: unknown; id?: unknown }): 
  * items in its place, and native items are never rewritten. A tool output,
  * native or converted, whose call no input item carries is left out, and its
  * message reported altered: a result without its call is never sent, alone
- * or as text.
+ * or as text. So is one whose call an earlier output already answered: the
+ * first output for a call is the one sent.
  */
 export class OpenAIResponsesFormatter implements PrefillFormatter {
   readonly name = 'openai-responses';
@@ -160,8 +161,17 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
     for (const item of items) {
       if (item && typeof item === 'object' && typeof item.call_id === 'string' && !isToolOutput(item)) called.add(item.call_id);
     }
+    const answered = new Set<string>();
     const sent = items.filter((item) => {
-      if (!isToolOutput(item) || called.has(item.call_id as string)) return true;
+      if (!isToolOutput(item)) return true;
+      const id = item.call_id as string;
+      if (called.has(id) && !answered.has(id)) {
+        answered.add(id);
+        return true;
+      }
+      options.onNormalize?.(called.has(id)
+        ? { kind: 'stray_tool_result_dropped', toolUseId: id, reason: 'answered' }
+        : { kind: 'orphan_tool_result_dropped', toolUseId: typeof id === 'string' ? id : '<missing>' });
       const at = from.get(item);
       if (at !== undefined) options.fidelity?.alter(at);
       return false;

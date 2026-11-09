@@ -120,16 +120,18 @@ export interface BuildOptions {
    */
   pendingToolCallIds?: ReadonlySet<string>;
 
-  /** Telemetry callback for the tool-pair normalizer's events (`NormalizeEvent`). */
+  /** Telemetry callback for the tool-pair normalizer's events, and the drops other builders make (`NormalizeEvent`). */
   onNormalize?: (event: NormalizeEvent) => void;
 }
 
 /**
  * Events emitted by the tool-pair normalizer, through
- * `BuildOptions.onNormalize`: one per block it moves, synthesizes or
- * rewrites, except a result's `toolUseId` renamed `tool_use_id`, which
+ * `BuildOptions.onNormalize`: one per block it moves, synthesizes, leaves out
+ * or rewrites, except a result's `toolUseId` renamed `tool_use_id`, which
  * emits none, and `pending_in_flight` for a pending call it leaves
- * unmatched.
+ * unmatched. The Responses formatter and `AnthropicXmlFormatter` in XML tool
+ * mode emit the two `*_tool_result_dropped` events too, for each result they
+ * leave out.
  */
 export type NormalizeEvent =
   | { kind: 'block_re_roled'; blockType: string; from: 'user' | 'assistant'; to: 'user' | 'assistant' }
@@ -145,7 +147,8 @@ export type NormalizeEvent =
   /**
    * A tool_result whose tool_use id appears nowhere in the message list was
    * left out: a result without its call is never sent, as a result or as
-   * text. `toolUseId` is `'<missing>'` for a result with no string id.
+   * text. In XML tool mode, one that answers no call before it. `toolUseId`
+   * is `'<missing>'` for a result with no string id.
    */
   | { kind: 'orphan_tool_result_dropped'; toolUseId: string }
   /**
@@ -166,12 +169,19 @@ export type NormalizeEvent =
    *                             answered that call. Pairing is one-to-one, so
    *                             the first result consumes the id and every
    *                             later copy of it is left out here.
+   *   - `'answered'`          → from a builder with no turns as the normalizer
+   *                             builds them (the Responses formatter, XML
+   *                             tool mode): an earlier result answered the
+   *                             call this one names.
+   *
+   * `fromEnvelope`, the normalizer's envelope the copy was in, is set on the
+   * native path only.
    */
   | {
       kind: 'stray_tool_result_dropped';
       toolUseId: string;
-      fromEnvelope: number;
-      reason: 'cycle_closed' | 'duplicate_in_cycle';
+      fromEnvelope?: number;
+      reason: 'cycle_closed' | 'duplicate_in_cycle' | 'answered';
     }
   | { kind: 'pending_in_flight'; toolUseId: string }
   | {

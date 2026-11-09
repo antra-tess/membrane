@@ -10,13 +10,14 @@ const result = (id: string, content: string, rawXml?: string): ContentBlock =>
 
 function build(messages: NormalizedMessage[], promptCaching = false) {
   const fidelity = new FidelityNotes();
+  const events: unknown[] = [];
   const built = new AnthropicXmlFormatter().buildMessages(messages, {
-    assistantParticipant: 'Agent', promptCaching, cacheMarkers: 'cm-owned', fidelity,
+    assistantParticipant: 'Agent', promptCaching, cacheMarkers: 'cm-owned', fidelity, onNormalize: (event: unknown) => events.push(event),
   } as any);
   const rendered = built.messages
     .map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content)))
     .join('\n');
-  return { built, rendered, altered: [...fidelity.altered].sort((a, b) => a - b) };
+  return { built, rendered, altered: [...fidelity.altered].sort((a, b) => a - b), events };
 }
 
 describe('AnthropicXmlFormatter: a tool result that answers no call', () => {
@@ -33,16 +34,30 @@ describe('AnthropicXmlFormatter: a tool result that answers no call', () => {
     expect(altered).toEqual([1]);
   });
 
-  it('answers a call before it as the model reads the transcript, whatever its id, and leaves out a second for the same call', () => {
+  it('pairs a result with the call its id names, so a second result for one call is left out though another call still waits', () => {
     const { rendered, altered } = build([
       { participant: 'User', content: [text('look')] },
-      { participant: 'Agent', content: [call('generated_1')] },
-      { participant: 'Tool', content: [result('call_from_the_text', 'zz-first'), result('call_from_the_text', 'zz-again')] },
+      { participant: 'Agent', content: [call('a'), call('b')] },
+      { participant: 'Tool', content: [result('a', 'zz-a'), result('a', 'zz-again'), result('b', 'zz-b')] },
       { participant: 'Agent', content: [] },
     ]);
-    expect(rendered).toContain('zz-first');
+    expect(rendered).toContain('zz-a');
+    expect(rendered).toContain('zz-b');
     expect(rendered).not.toContain('zz-again');
     expect(altered).toEqual([2]);
+  });
+
+  it('pairs a result whose id names no call by position, within its own message only, as a generation parsed from its text holds its calls and results', () => {
+    const { rendered, altered } = build([
+      { participant: 'User', content: [text('look')] },
+      { participant: 'Agent', content: [text('reading'), call('generated_1'), result('id_from_the_text', 'zz-paired'), text('read')] },
+      { participant: 'Agent', content: [call('generated_2')] },
+      { participant: 'Tool', content: [result('id_from_elsewhere', 'zz-elsewhere')] },
+      { participant: 'Agent', content: [] },
+    ]);
+    expect(rendered).toContain('zz-paired');
+    expect(rendered).not.toContain('zz-elsewhere');
+    expect(altered).toEqual([3]);
   });
 
   it('does not answer a call that comes after it', () => {
@@ -82,5 +97,17 @@ describe('AnthropicXmlFormatter: a tool result that answers no call', () => {
     expect((marked[0] as any).text).toContain('zz-ok');
     expect((marked[0] as any).text).not.toContain('next');
     expect(JSON.stringify(built.messages)).not.toContain('zz-ghost');
+  });
+
+  it('tells the host through onNormalize, naming the result: one that answers no call as an orphan, a second for an answered call as a stray', () => {
+    const { events } = build([
+      { participant: 'Agent', content: [call('a')] },
+      { participant: 'Tool', content: [result('a', 'one'), result('a', 'two'), result('zz', 'three')] },
+      { participant: 'Agent', content: [] },
+    ]);
+    expect(events).toEqual([
+      { kind: 'stray_tool_result_dropped', toolUseId: 'a', reason: 'answered' },
+      { kind: 'orphan_tool_result_dropped', toolUseId: 'zz' },
+    ]);
   });
 });

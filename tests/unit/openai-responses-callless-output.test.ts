@@ -17,8 +17,9 @@ const sent = (id: string) => ({ type: 'function_call_output', call_id: id, outpu
 
 function build(messages: unknown[]) {
   const fidelity = new FidelityNotes();
-  const built = new OpenAIResponsesFormatter().buildMessages(messages as any, { ...options, fidelity } as any);
-  return { items: built.messages as any[], altered: [...fidelity.altered] };
+  const events: unknown[] = [];
+  const built = new OpenAIResponsesFormatter().buildMessages(messages as any, { ...options, fidelity, onNormalize: (event: unknown) => events.push(event) } as any);
+  return { items: built.messages as any[], altered: [...fidelity.altered], events };
 }
 
 describe('Responses: a tool output whose call no input item carries', () => {
@@ -76,6 +77,31 @@ describe('Responses: a tool output whose call no input item carries', () => {
     ]);
     expect(items).toEqual([called('call_1'), sent('call_1')]);
     expect(altered).toEqual([1]);
+  });
+
+  it('leaves out a later output for a call an earlier output answered, native or converted, keeping the first in input order', () => {
+    const again = { type: 'function_call_output', call_id: 'call_1', output: 'carried again' };
+    const { items, altered } = build([
+      { participant: 'Agent', content: [call('call_1')] },
+      { participant: 'User', content: [result('call_1')] },
+      { participant: 'User', content: [result('call_1', 'a second answer')] },
+      { participant: 'User', content: [], metadata: { openaiResponsesItems: [again] } },
+    ]);
+    expect(items).toEqual([called('call_1'), sent('call_1')]);
+    expect(altered).toEqual([2, 3]);
+  });
+
+  it('tells the host through onNormalize, naming the result: a call-less output as an orphan, a second output as a stray its call already answered', () => {
+    const { events } = build([
+      { participant: 'Agent', content: [call('call_1')] },
+      { participant: 'User', content: [result('call_1'), result('call_1', 'again'), result('call_9')] },
+      { participant: 'User', content: [result(42)] },
+    ]);
+    expect(events).toEqual([
+      { kind: 'stray_tool_result_dropped', toolUseId: 'call_1', reason: 'answered' },
+      { kind: 'orphan_tool_result_dropped', toolUseId: 'call_9' },
+      { kind: 'orphan_tool_result_dropped', toolUseId: '<missing>' },
+    ]);
   });
 
   it('pairs with a call carried as a native item, on a block or in a message, of any call type', () => {
