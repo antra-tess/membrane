@@ -85,20 +85,42 @@ describe('NativeFormatter: an effort-only system change', () => {
     expect(built.messages[2]).toEqual(marker('medium'));
   });
 
-  it('inside a run of user messages that would merge, splits the run there', () => {
+  it('inside a run of user messages that merge into one turn, goes after that turn, its earlier blocks first as they were', () => {
     const built = build([user('u0'), reply(text('a1')), user('u2'), effort('max'), user('u4')]);
-    expect(built.messages).toEqual([wireUser('u0'), wireReply('a1'), wireUser('u2'), marker('max'), wireUser('u4')]);
+    expect(built.messages).toEqual([
+      wireUser('u0'), wireReply('a1'), { role: 'user', content: [{ type: 'text', text: 'u2' }, { type: 'text', text: 'u4' }] }, marker('max'),
+    ]);
   });
 
-  it('inside a run of assistant messages that would merge, splits the run there', () => {
+  it('inside a run of assistant messages that merge into one turn, goes after that turn', () => {
     const built = build([user('u0'), reply(text('a1')), effort('low'), reply(text('a3')), user('u4')]);
-    expect(built.messages).toEqual([wireUser('u0'), wireReply('a1'), marker('low'), wireReply('a3'), wireUser('u4')]);
+    expect(built.messages).toEqual([
+      wireUser('u0'), { role: 'assistant', content: [{ type: 'text', text: 'a1' }, { type: 'text', text: 'a3' }] }, marker('low'), wireUser('u4'),
+    ]);
   });
 
-  it('first, after what the formatter puts before every message (the user turn it opens with, the context prefix), splitting the assistant turn the prefix opens', () => {
+  it('after an assistant turn whose call it followed, before the results, which stay with the call', () => {
+    const built = build([user('u0'), reply(call('ta')), effort('low'), reply(text('a3')), { participant: 'User', content: [result('ta')] }]);
+    expect(built.messages).toEqual([
+      wireUser('u0'), { role: 'assistant', content: [wireCall('ta'), { type: 'text', text: 'a3' }] }, marker('low'),
+      { role: 'user', content: [wireResult('ta')] },
+    ]);
+  });
+
+  it('two changes inside one turn keep their order after it', () => {
+    const built = build([
+      user('u0'), reply(call('ta'), call('tb')), { participant: 'User', content: [result('ta')] }, effort('low'),
+      { participant: 'User', content: [result('tb')] }, effort('high'), user('u6'),
+    ]);
+    expect(built.messages.slice(2)).toEqual([
+      { role: 'user', content: [wireResult('ta'), wireResult('tb'), { type: 'text', text: 'u6' }] }, marker('low'), marker('high'),
+    ]);
+  });
+
+  it('first, after what the formatter puts before every message: the user turn it opens with, and the turn the context prefix opens', () => {
     const built = build([effort('low'), reply(text('a1')), user('u2')], { contextPrefix: 'P' });
-    expect(roles(built)).toEqual(['user', 'assistant', 'system', 'assistant', 'user']);
-    expect(texts(built).slice(1)).toEqual(['P', '', 'a1', 'u2']);
+    expect(roles(built)).toEqual(['user', 'assistant', 'system', 'user']);
+    expect(texts(built).slice(1)).toEqual(['P|a1', '', 'u2']);
     expect(roles(build([effort('low'), reply(text('a1')), user('u2')]))).toEqual(['user', 'system', 'assistant', 'user']);
   });
 
@@ -216,7 +238,7 @@ describe('NativeFormatter: an effort-only system change', () => {
     }))).toEqual(['assistant:a1']);
   });
 
-  it('a breakpoint on it goes on the last cacheable block before it as the request is built: a change\'s text, past content with none, inside a split run', () => {
+  it('a breakpoint on it goes on the last cacheable block before it as the request is built: a change\'s text, past content with none, past a merged turn', () => {
     const marked = (built: { messages: Array<{ role: string; content: unknown }> }) =>
       built.messages.flatMap((m, i) => (m.content as Array<Record<string, unknown>>).filter((b) => b.cache_control).map((b) => `${i}:${m.role}:${b.text}`));
     const bp = { ...effort('low'), cacheBreakpoint: true };
@@ -226,7 +248,7 @@ describe('NativeFormatter: an effort-only system change', () => {
     expect(marked(build([user('u0'), reply(signed), bp, user('u3')], { promptCaching: true })))
       .toEqual(['0:user:u0']);
     expect(marked(build([user('u0'), reply(text('a1')), user('u2'), bp, user('u4')], { promptCaching: true })))
-      .toEqual(['2:user:u2']);
+      .toEqual(['2:user:u4']);
     expect(marked(build([user('u0'), reply(text('a1'), text(' ')), bp, user('u3')], { promptCaching: true })))
       .toEqual(['1:assistant:a1']);
   });
@@ -255,7 +277,9 @@ describe('NativeFormatter: an effort-only system change', () => {
   it('an effort that can\'t be written as JSON is still refused as unsupported, naming it', () => {
     const circular: Record<string, unknown> = {};
     circular.self = circular;
-    for (const level of [circular, 10n]) {
+    const bare: Record<string, unknown> = Object.create(null);
+    bare.self = bare;
+    for (const [level, name] of [[circular, '[object Object]'], [10n, '10'], [bare, 'a value that has no text form']] as const) {
       let thrown: unknown;
       try {
         build([user('u0'), changes({ type: 'system_change', effort: level } as unknown as SystemChangeContent), user('u2')]);
@@ -263,6 +287,7 @@ describe('NativeFormatter: an effort-only system change', () => {
         thrown = error;
       }
       expect(thrown).toMatchObject({ type: 'unsupported', retryable: false });
+      expect((thrown as Error).message).toContain(name);
     }
   });
 });
@@ -281,6 +306,11 @@ describe('the cache wire receipt and an effort-only system message', () => {
     const high = computeCacheWireReceipt(raw('high'));
     expect(low.markers).toHaveLength(1);
     expect(low.markers[0]!.prefixHash).not.toBe(high.markers[0]!.prefixHash);
+    const stringForm = (level: string) => computeCacheWireReceipt({
+      ...raw(level),
+      messages: [raw(level).messages[0], { role: 'system', content: '', output_config: { effort: level } }, raw(level).messages[2]],
+    });
+    expect(stringForm('low').markers[0]!.prefixHash).not.toBe(stringForm('high').markers[0]!.prefixHash);
   });
 });
 
@@ -298,6 +328,11 @@ describe('the empty-text cleanup and an effort-only system message', () => {
   it('reads the final role past it, so dropping an empty user turn after it changes nothing', () => {
     const messages = [{ role: 'user', content: [{ type: 'text', text: 'u0' }] }, marker('low'), { role: 'user', content: [{ type: 'text', text: '' }] }];
     expect(stripEmptyTextMessages(messages)).toEqual([messages[0], messages[1]]);
+  });
+
+  it('drops an empty message of another role, even one carrying output_config', () => {
+    const messages = [{ role: 'user', content: [{ type: 'text', text: 'u0' }] }, { role: 'user', content: [], output_config: { effort: 'low' } }];
+    expect(stripEmptyTextMessages(messages)).toEqual([messages[0]]);
   });
 
   it('still drops a system message with empty content and no effort', () => {
@@ -465,7 +500,7 @@ describe('refusals around an effort-only system message', () => {
   it('a refusal for the formatter or adapter names the top-level effort for an effort change', async () => {
     const adapter = new RecordingAdapter(false);
     const refused = new Membrane(adapter, { formatter: new NativeFormatter() }).complete(request([user('u0'), reply(text('a1')), effort('low'), user('u3')]));
-    await expect(refused).rejects.toThrow(/output_config\.effort/);
+    await expect(refused).rejects.toThrow(/output_config\.effort in its providerParams/);
   });
 
   it('BedrockAdapter refuses a message carrying output_config before sending, flagged', async () => {
@@ -476,6 +511,9 @@ describe('refusals around an effort-only system message', () => {
     const raw = { model: 'claude-opus-5-5', maxTokens: 64, messages: [{ role: 'user', content: [{ type: 'text', text: 'u0' }] }, marker('low'), { role: 'user', content: [{ type: 'text', text: 'u2' }] }] };
     await expect(adapter.complete(raw as any)).rejects.toMatchObject({ systemChangeRefused: true, retryable: false });
     await expect(adapter.stream(raw as any, { onChunk: () => {} } as any)).rejects.toMatchObject({ systemChangeRefused: true, retryable: false });
+    await expect(adapter.complete(raw as any)).rejects.toThrow(/output_config\.effort in the request's extra/);
+    const emptied = { ...raw, messages: [raw.messages[0], { role: 'assistant', content: [{ type: 'text', text: '' }] }, marker('low')] };
+    await expect(adapter.complete(emptied as any)).rejects.toMatchObject({ systemChangeRefused: true });
     expect(send).not.toHaveBeenCalled();
   });
 });

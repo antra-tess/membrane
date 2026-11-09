@@ -61,14 +61,15 @@ export function stripEmptyTextMessages<T extends { content: unknown }>(
 }
 
 function carriesOutputConfig(message: unknown): boolean {
-  return (message as { output_config?: unknown }).output_config != null;
+  const { role, output_config } = message as { role?: unknown; output_config?: unknown };
+  return role === 'system' && output_config != null;
 }
 
 /** The role of the last message that isn't an effort-only system message: the turn the request ends on. */
 export function lastTurnRole(messages: readonly unknown[]): unknown {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i] as { role?: unknown } | undefined;
-    if (!(message?.role === 'system' && carriesOutputConfig(message))) return message?.role;
+    if (!carriesOutputConfig(message)) return message?.role;
   }
   return undefined;
 }

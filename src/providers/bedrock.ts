@@ -490,15 +490,15 @@ export class BedrockAdapter implements ProviderAdapter {
       params.anthropic_beta = [...new Set([...existing, THINKING_DISPLAY_UPDATES_BETA])];
     }
 
-    stripEmptyTextAfterPassthrough(params, onContentAltered ? (dropped) => onContentAltered(blockBuiltFrom(dropped)) : undefined);
     const effortAt = params.messages.findIndex((message) => (message as { output_config?: unknown }).output_config != null);
     if (effortAt >= 0) {
       throw systemChangeRefusedError(
         `BedrockAdapter: message ${effortAt} carries output_config, an effort-only system message, which BedrockAdapter doesn't send. ` +
-        'Set the effort in the request\'s top-level output_config.effort instead.',
+        'Set the effort at the request\'s top level instead, as output_config.effort in the request\'s extra.',
         params,
       );
     }
+    stripEmptyTextAfterPassthrough(params, onContentAltered ? (dropped) => onContentAltered(blockBuiltFrom(dropped)) : undefined);
     return params;
   }
 

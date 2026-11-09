@@ -251,16 +251,17 @@ export interface RedactedThinkingContent {
  * turn; anywhere else, it takes effect from the next user turn with new
  * input, and a turn of only tool results isn't new input (Anthropic's effort
  * documentation, "Change effort mid-conversation"). Unlike a change of tools
- * or system text, it goes exactly at its place: right after the last block of
- * a message before it, or first when there is none, and messages of one role
- * that would merge into one turn around it are sent as two turns. Where that
- * would part a tool's result from its call's turn, it goes after the whole
- * turn instead, which by the rule above governs the same reply. At the end
- * after an assistant turn it would end the request on that turn, which the
- * API reads as a prefill, so the request is refused before sending. Its
- * `cacheBreakpoint`, or a boundary at its place, having no block of its own
- * to hold, goes on the last block before it in the request that can hold
- * one; with none, nothing is marked.
+ * or system text, it goes at its place: right after the turn holding the
+ * last block of a message before it, so exactly there unless messages of one
+ * role that membrane merges into one turn lie on both sides of it, when it
+ * goes after that turn, which by the rule above governs the same reply. With
+ * no message before it, it goes after any turn the formatter puts ahead of
+ * every message (the leading user turn it adds, the context prefix), or
+ * first. At the end after an assistant turn it would end the request on that
+ * turn, which the API reads as a prefill, so the request is refused before
+ * sending. Its `cacheBreakpoint`, or a boundary at its place, having no
+ * block of its own to hold, goes on the last block before it in the request
+ * that can hold one; with none, nothing is marked.
  *
  * Through a formatter that doesn't render system changes or an adapter that
  * doesn't send them, Membrane refuses a request that carries a change before

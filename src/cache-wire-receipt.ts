@@ -102,7 +102,10 @@ function flattenWireBlocks(rawRequest: unknown): ReceiptUnit[] {
         }));
       } else {
         out.push({
-          identity: { surface: 'message', messageIndex, role: record.role, content },
+          identity: {
+            surface: 'message', messageIndex, role: record.role, content,
+            ...(record.output_config != null ? { output_config: record.output_config } : {}),
+          },
           marked: hasCacheControl(message),
           estimatedChars: stableStringify(message).length,
         });

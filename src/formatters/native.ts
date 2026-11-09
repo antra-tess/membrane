@@ -70,7 +70,11 @@ function named(value: unknown): string {
   try {
     return JSON.stringify(value) ?? String(value);
   } catch {
-    return String(value);
+    try {
+      return String(value);
+    } catch {
+      return 'a value that has no text form';
+    }
   }
 }
 
@@ -448,12 +452,12 @@ export class NativeFormatter implements PrefillFormatter {
    * end after a user turn, never after an assistant turn. It accepts
    * consecutive messages of one role, and an effort-only message anywhere in
    * `messages` (Anthropic's effort documentation), so an effort change goes
-   * right after the last block of a message before it, splitting a turn the
-   * merge made across it. At the end after an assistant turn it would end the
-   * request on that turn, which the API reads as a prefill.
+   * right after the turn holding the last block of a message before it. At the
+   * end after an assistant turn it would end the request on that turn, which
+   * the API reads as a prefill.
    */
   private static placeSystemChanges(
-    merged: ProviderTurnMessage[],
+    messages: ProviderTurnMessage[],
     changes: BuiltSystemChange[],
     origin: WeakMap<object, number>,
     cacheControl: Record<string, unknown> | undefined,
@@ -463,16 +467,9 @@ export class NativeFormatter implements PrefillFormatter {
       (block.type !== 'text' || hasNonEmptyText(block.text)) && !isUnsignedThinking(block);
     const efforts = changes.filter((change) => change.effort !== undefined);
     const others = changes.filter((change) => change.effort === undefined);
-    // A result goes in its call's turn, so no cut leaves one in a turn's later part.
-    const answersCall = (block: Block): boolean => {
-      const type = (anthropicServerBlockFor(block) as { type?: unknown } | undefined)?.type ?? block.type;
-      return typeof type === 'string' && (type === 'tool_result' || type.endsWith('_tool_result'));
-    };
-
-    // Where each effort change goes: after the last surviving block that came from a message before it. A block
-    // membrane puts ahead of every message (the leading user turn, the context prefix) comes before them all.
+    // A block membrane puts ahead of every message (the leading user turn, the context prefix) counts as before them all.
     let seen = false;
-    const keys = merged.map((message) => (message.content as Block[]).map((block) => {
+    const keys = messages.map((message) => (message.content as Block[]).map((block) => {
       const at = origin.get(block as object);
       if (at !== undefined) {
         seen = true;
@@ -480,46 +477,15 @@ export class NativeFormatter implements PrefillFormatter {
       }
       return seen ? undefined : -1;
     }));
-    const cuts = merged.map(() => new Set<number>());
-    const slots = new Map<BuiltSystemChange, { message: number; cut?: number }>();
+    const slots = new Map<BuiltSystemChange, number>();
     for (const change of efforts) {
-      let slot: { message: number; cut?: number } = { message: 0 };
-      search: for (let k = merged.length - 1; k >= 0; k--) {
-        const content = merged[k]!.content as Block[];
-        for (let j = content.length - 1; j >= 0; j--) {
-          const key = keys[k]![j];
-          if (key === undefined || key >= change.at || !survives(content[j]!)) continue;
-          const later = content.slice(j + 1);
-          if (later.some(survives) && !later.some(answersCall)) {
-            cuts[k]!.add(j);
-            slot = { message: k, cut: j };
-          } else {
-            slot = { message: k + 1 };
-          }
-          break search;
-        }
+      let slot = 0;
+      for (let k = messages.length - 1; k >= 0 && slot === 0; k--) {
+        const content = messages[k]!.content as Block[];
+        if (content.some((block, j) => keys[k]![j] !== undefined && keys[k]![j]! < change.at && survives(block))) slot = k + 1;
       }
       slots.set(change, slot);
     }
-
-    // The merged messages, each split after the blocks an effort change follows.
-    const messages: ProviderTurnMessage[] = [];
-    const firstPart: number[] = [];
-    const partAfter = new Map<string, number>();
-    merged.forEach((message, k) => {
-      firstPart.push(messages.length);
-      const content = message.content as Array<Record<string, unknown>>;
-      let from = 0;
-      for (const cut of [...cuts[k]!].sort((a, b) => a - b)) {
-        messages.push({ ...message, content: content.slice(from, cut + 1) });
-        from = cut + 1;
-        partAfter.set(`${k}:${cut}`, messages.length);
-      }
-      messages.push(from === 0 ? message : { ...message, content: content.slice(from) });
-    });
-    const placeOf = (slot: { message: number; cut?: number }): number => slot.cut !== undefined
-      ? partAfter.get(`${slot.message}:${slot.cut}`)!
-      : slot.message < merged.length ? firstPart[slot.message]! : messages.length;
 
     // Tool changes and system text: before an assistant turn that follows a user turn, at the first one whose
     // earliest block comes after the change.
@@ -555,7 +521,7 @@ export class NativeFormatter implements PrefillFormatter {
     };
     let next = 0;
     messages.forEach((message, index) => {
-      const before = efforts.filter((change) => placeOf(slots.get(change)!) === index);
+      const before = efforts.filter((change) => slots.get(change) === index);
       const earliest = points.get(index);
       while (earliest !== undefined && earliest !== Infinity && next < others.length && others[next]!.at < earliest) {
         before.push(others[next++]!);
@@ -563,7 +529,7 @@ export class NativeFormatter implements PrefillFormatter {
       emit(before);
       placed.push(message);
     });
-    const after = efforts.filter((change) => placeOf(slots.get(change)!) === messages.length);
+    const after = efforts.filter((change) => slots.get(change) === messages.length);
     const endsOnUser = turns[turns.length - 1]?.role === 'user';
     if (after.length > 0 && !endsOnUser) {
       throw systemChangeRefusedError(
