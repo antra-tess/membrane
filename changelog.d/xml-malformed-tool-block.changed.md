@@ -10,8 +10,8 @@
   elements, or a stray tag outside every invoke, which is any `<` in the
   block's text outside its invokes. A tag named parameter or invoke that the
   block wouldn't read as one stays in the value, where before a value holding
-  an invoke tag with a name and another attribute left the block no calls
-  at all. A
+  an invoke tag with its name first and another attribute dropped the call
+  it was in. A
   closing parameter tag ends the value wherever it stands, as before. A block
   whose opening tag comes while an earlier `function_calls` opening tag is
   still unclosed is refused too, from that tag on, which costs one refused
