@@ -77,8 +77,10 @@ import {
   hasImageInToolResults,
   formatToolResultsForSplitTurn,
   attachSplitResults,
+  toolBlockDefectKind,
   type ProviderImageBlock,
   type SplitResultsRound,
+  type ToolBlockDefectKind,
 } from './utils/tool-parser.js';
 import { IncrementalXmlParser, type ProcessChunkResult } from './utils/stream-parser.js';
 import type { ChunkMeta, BlockEvent, MembraneBlockType, MembraneBlock } from './types/streaming.js';
@@ -272,6 +274,7 @@ function toolCallOf(block: ToolUseContent): ToolCall {
     name: block.name,
     input: block.input,
     ...(block.unparseableInput !== undefined ? { unparseableInput: block.unparseableInput } : {}),
+    ...(block.unparseableReason !== undefined ? { unparseableReason: block.unparseableReason } : {}),
   };
 }
 
@@ -2372,12 +2375,15 @@ export class Membrane {
     }
 
     let emptyToolBlocks = 0;
+    const malformedToolBlocks: ToolBlockDefectKind[] = [];
     if (xmlToolProtocol && toolCalls.length === 0 && rawAssistantText.includes('<function_calls>')) {
       const parsed = parseToolCalls(rawAssistantText, { tools: request.tools });
       if (parsed?.calls.length) {
         for (const tc of parsed.calls) {
           toolCalls.push(tc);
         }
+        const defect = toolBlockDefectKind(parsed.fullMatch);
+        if (defect) malformedToolBlocks.push(defect);
       } else if (parsed) {
         emptyToolBlocks = 1;
       }
@@ -2385,7 +2391,7 @@ export class Membrane {
     const unclosedToolBlock = xmlToolProtocol && endsWithPartialToolBlock(rawAssistantText);
 
     let stopReason = this.mapStopReason(providerResponse.stopReason);
-    if (xmlToolProtocol) this.reportToolParseDiagnostics({ unclosedToolBlock, emptyToolBlocks }, stopReason);
+    if (xmlToolProtocol) this.reportToolParseDiagnostics({ unclosedToolBlock, emptyToolBlocks, malformedToolBlocks }, stopReason);
     const endTurnTools = xmlToolProtocol
       ? undefined
       : this.toolUseWithEndTurn(content, stopReason, providerResponse, 0);
@@ -2439,7 +2445,7 @@ export class Membrane {
       unclosedToolBlock: boolean;
       emptyToolBlocks: number;
       splicedToolBlocks?: number;
-      unclosedInvokeHeads?: number;
+      malformedToolBlocks?: readonly ToolBlockDefectKind[];
     },
     stopReason: StopReason
   ): void {
@@ -2470,12 +2476,12 @@ export class Membrane {
       );
     }
 
-    if (diagnostics.unclosedInvokeHeads) {
+    if (diagnostics.malformedToolBlocks?.length) {
       warnLog.warn(
-        `[membrane] ${diagnostics.unclosedInvokeHeads} <invoke> head(s) were left ` +
-        `unclosed and swallowed the invoke that followed — nothing was dispatched ` +
-        `under an unclosed head's name, and the call it absorbed was re-anchored ` +
-        `and ran with its own parameters.`
+        `[membrane] ${diagnostics.malformedToolBlocks.length} function_calls block(s) weren't ` +
+        `well-formed (${diagnostics.malformedToolBlocks.join(', ')}): each of their calls is ` +
+        `marked unparseableInput, with its reason in unparseableReason and input {}, for ` +
+        `the executor to refuse.`
       );
     }
   }

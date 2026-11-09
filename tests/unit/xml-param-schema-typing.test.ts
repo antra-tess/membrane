@@ -156,7 +156,7 @@ describe('schema-typed parameter parsing', () => {
     expect(toolCalls[0]!.input).toEqual({ fld1: '  zz-indented-line \n', fld3: 42 });
   });
 
-  it('types a re-anchored invoke against the tool it actually dispatches', () => {
+  it('types nothing in a block whose head swallowed another invoke, since the block is refused whole', () => {
     const zzOuterTool: ToolDefinition = {
       name: 'zz_outer_tool',
       description: 'obviously-fake tool the swallowed head names',
@@ -171,8 +171,9 @@ describe('schema-typed parameter parsing', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const parsed = parseToolCalls(xml, { tools: [zzOuterTool, zzEditTool] });
-      expect(parsed!.calls.map(c => c.name)).toEqual(['zz_edit_tool']);
-      expect(parsed!.calls[0]!.input.fld1).toBe('  {"ite1": 1}  ');
+      expect(parsed!.calls.map(c => c.name)).toEqual(['zz_outer_tool', 'zz_edit_tool']);
+      expect(parsed!.calls.map(c => c.input)).toEqual([{}, {}]);
+      expect(parsed!.calls.every(c => c.unparseableReason !== undefined)).toBe(true);
       expect(warn).not.toHaveBeenCalled();
     } finally {
       warn.mockRestore();

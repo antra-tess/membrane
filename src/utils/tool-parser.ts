@@ -234,66 +234,123 @@ const INVOKE_REGEX =
 
 const INVOKE_NAME_GROUP = 3;
 const INVOKE_BODY_GROUP = 4;
-const INVOKE_CLOSER_PREFIX_GROUP = 5;
 
-// Without /g: a /g regex's exec moves its lastIndex, and this read runs inside
-// the outer one's iteration.
-const INVOKE_REANCHOR_REGEX = new RegExp(INVOKE_REGEX.source);
-
-const INVOKE_OPEN_REGEX = /<(antml:)?invoke\s+name=/g;
-
-const INVOKE_CLOSE_TAG = '</invoke>';
-
-interface ParsedInvokes {
-  calls: Array<{ name: string; input: Record<string, unknown> }>;
-  unclosedHeads: number;
+interface ParsedInvoke {
+  name: string;
+  input: Record<string, unknown>;
+  unparseableInput?: string;
+  unparseableReason?: string;
 }
 
-function invokeOpenerOffsets(invokeBody: string): number[] {
-  const offsets: number[] = [];
-  INVOKE_OPEN_REGEX.lastIndex = 0;
-  let openerMatch: RegExpExecArray | null;
-  while ((openerMatch = INVOKE_OPEN_REGEX.exec(invokeBody)) !== null) {
-    offsets.push(openerMatch.index);
-  }
-  return offsets;
-}
-
-function collectInvokes(innerContent: string, tools?: ToolDefinition[]): ParsedInvokes {
-  const calls: Array<{ name: string; input: Record<string, unknown> }> = [];
-  let unclosedHeads = 0;
-
+function collectInvokes(innerContent: string, tools?: ToolDefinition[]): ParsedInvoke[] {
+  const calls: ParsedInvoke[] = [];
   INVOKE_REGEX.lastIndex = 0;
   let invokeMatch: RegExpExecArray | null;
   while ((invokeMatch = INVOKE_REGEX.exec(innerContent)) !== null) {
-    const invokeBody = invokeMatch[INVOKE_BODY_GROUP];
-    const swallowedOpenerOffsets = invokeBody === undefined ? [] : invokeOpenerOffsets(invokeBody);
+    const name = invokeMatch[INVOKE_NAME_GROUP] ?? '';
+    calls.push({ name, input: parseInvokeParameters(invokeMatch[INVOKE_BODY_GROUP], name, tools) });
+  }
+  return calls;
+}
 
-    if (swallowedOpenerOffsets.length === 0) {
-      const name = invokeMatch[INVOKE_NAME_GROUP] ?? '';
-      calls.push({ name, input: parseInvokeParameters(invokeBody, name, tools) });
+export type ToolBlockDefectKind = 'unclosed-invoke' | 'tag-in-value' | 'repeated-parameter' | 'text-in-invoke' | 'stray-tag';
+
+const INVOKE_OPENER_AT = /<(?:antml:)?invoke\s+name=(["'])((?:(?!\1).)+)\1\s*(\/?)>/y;
+const INVOKE_CLOSER_AT = /<\/(?:antml:)?invoke>/y;
+const PARAMETER_OPENER_AT = /<(?:antml:)?parameter\s+name="([^"]+)">/y;
+const PARAMETER_CLOSER = /<\/(?:antml:)?parameter>/g;
+const LOOSE_INVOKE_OPENER = /<(?:antml:)?invoke\s+name=/g;
+const NAMED_INVOKE_OPENER = /<(?:antml:)?invoke\s+name=(["'])((?:(?!\1).)+)\1/g;
+const TAG_IN_VALUE = /<(?:antml:)?(?:parameter|invoke)\s+name=|<\/(?:antml:)?invoke>/;
+const WHITESPACE_AT = /\s*/y;
+
+const PLAIN_NAME = /^[\w.:-]{1,64}$/;
+
+function blockDefect(inner: string): { kind: ToolBlockDefectKind; reason: string } | undefined {
+  const at = (re: RegExp, pos: number): RegExpExecArray | null => {
+    re.lastIndex = pos;
+    return re.exec(inner);
+  };
+  const skipSpace = (pos: number): number => {
+    WHITESPACE_AT.lastIndex = pos;
+    WHITESPACE_AT.exec(inner);
+    return WHITESPACE_AT.lastIndex;
+  };
+  let pos = 0;
+  let invokes = 0;
+  while ((pos = skipSpace(pos)) < inner.length) {
+    const opener = at(INVOKE_OPENER_AT, pos);
+    if (!opener) {
+      LOOSE_INVOKE_OPENER.lastIndex = pos + 1;
+      const next = LOOSE_INVOKE_OPENER.exec(inner)?.index ?? inner.length;
+      if (inner.slice(pos, next).includes('<')) {
+        const where = invokes === 0 ? 'before the first invoke' : `after invoke ${invokes}`;
+        return { kind: 'stray-tag', reason: `a stray tag stands outside every invoke, ${where}` };
+      }
+      pos = next;
       continue;
     }
-
-    unclosedHeads += swallowedOpenerOffsets.length;
-
-    const fullMatch = invokeMatch[0];
-    const closerLength =
-      INVOKE_CLOSE_TAG.length + (invokeMatch[INVOKE_CLOSER_PREFIX_GROUP]?.length ?? 0);
-    const bodyOffset = fullMatch.length - closerLength - invokeBody!.length;
-    const innermostOffset = swallowedOpenerOffsets[swallowedOpenerOffsets.length - 1]!;
-    const reanchoredMatch = INVOKE_REANCHOR_REGEX.exec(fullMatch.slice(bodyOffset + innermostOffset));
-
-    if (reanchoredMatch) {
-      const name = reanchoredMatch[INVOKE_NAME_GROUP] ?? '';
-      calls.push({
-        name,
-        input: parseInvokeParameters(reanchoredMatch[INVOKE_BODY_GROUP], name, tools),
-      });
+    invokes++;
+    const invoke = `invoke ${invokes}${PLAIN_NAME.test(opener[2]!) ? ` (${opener[2]})` : ''}`;
+    pos += opener[0].length;
+    if (opener[3] === '/') continue;
+    const seen = new Set<string>();
+    for (;;) {
+      pos = skipSpace(pos);
+      const closer = at(INVOKE_CLOSER_AT, pos);
+      if (closer) {
+        pos += closer[0].length;
+        break;
+      }
+      const parameter = at(PARAMETER_OPENER_AT, pos);
+      if (!parameter) {
+        if (pos >= inner.length || at(INVOKE_OPENER_AT, pos)) {
+          return { kind: 'unclosed-invoke', reason: `${invoke} has no closing invoke tag` };
+        }
+        return { kind: 'text-in-invoke', reason: `${invoke} holds text outside its parameter elements` };
+      }
+      const name = parameter[1]!;
+      const valueStart = pos + parameter[0].length;
+      PARAMETER_CLOSER.lastIndex = valueStart;
+      const close = PARAMETER_CLOSER.exec(inner);
+      const value = inner.slice(valueStart, close ? close.index : inner.length);
+      const shown = PLAIN_NAME.test(name) ? `"${name}"` : 'a parameter';
+      if (TAG_IN_VALUE.test(value)) {
+        return {
+          kind: 'tag-in-value',
+          reason: `parameter ${shown} of ${invoke} holds a parameter's or an invoke's opening tag, or an invoke's closing tag, so its closing parameter tag is missing or misspelled`,
+        };
+      }
+      if (!close) return { kind: 'unclosed-invoke', reason: `${invoke} has no closing invoke tag` };
+      if (seen.has(name)) return { kind: 'repeated-parameter', reason: `parameter ${shown} is given twice in ${invoke}` };
+      seen.add(name);
+      pos = close.index + close[0].length;
     }
   }
+  return undefined;
+}
 
-  return { calls, unclosedHeads };
+function callsOfBlock(
+  block: { innerContent: string; fullMatch: string },
+  tools?: ToolDefinition[],
+): { calls: ParsedInvoke[]; defect?: ToolBlockDefectKind } {
+  const defect = blockDefect(block.innerContent);
+  if (!defect) return { calls: collectInvokes(block.innerContent, tools) };
+  const names = [...block.innerContent.matchAll(NAMED_INVOKE_OPENER)].map((m) => m[2]!);
+  return {
+    calls: (names.length > 0 ? names : ['']).map((name) => ({
+      name,
+      input: {},
+      unparseableInput: block.fullMatch,
+      unparseableReason: defect.reason,
+    })),
+    defect: defect.kind,
+  };
+}
+
+export function toolBlockDefectKind(fullMatch: string): ToolBlockDefectKind | undefined {
+  const inner = /^<(?:antml:)?function_calls>([\s\S]*)<\/(?:antml:)?function_calls>$/.exec(fullMatch)?.[1];
+  return inner === undefined ? undefined : blockDefect(inner)?.kind;
 }
 
 const PARAMETER_REGEX = /<(antml:)?parameter\s+name="([^"]+)">([\s\S]*?)<\/(antml:)?parameter>/g;
@@ -379,15 +436,14 @@ export function parseToolCalls(text: string, options?: ToolParseOptions): Parsed
     return null;
   }
 
-  const { innerContent, fullMatch } = lastUnexecutedBlock;
+  const { fullMatch } = lastUnexecutedBlock;
 
   const beforeText = text.slice(0, lastUnexecutedBlock.start);
   const afterText = text.slice(lastUnexecutedBlock.end);
 
-  const calls: ToolCall[] = collectInvokes(innerContent, options?.tools).calls.map((invoke) => ({
+  const calls: ToolCall[] = callsOfBlock(lastUnexecutedBlock, options?.tools).calls.map((invoke) => ({
     id: generateToolId(),
-    name: invoke.name,
-    input: invoke.input,
+    ...invoke,
   }));
 
   return {
@@ -735,7 +791,7 @@ export function parseAccumulatedIntoBlocks(
   unclosedToolBlock: boolean;
   emptyToolBlocks: number;
   splicedToolBlocks: number;
-  unclosedInvokeHeads: number;
+  malformedToolBlocks: ToolBlockDefectKind[];
   resultSpans: ResultSpan[];
 } {
   let processedText = text;
@@ -751,7 +807,7 @@ export function parseAccumulatedIntoBlocks(
   const toolResults: ToolResult[] = [];
   let emptyToolBlocks = 0;
   let splicedToolBlocks = 0;
-  let unclosedInvokeHeads = 0;
+  const malformedToolBlocks: ToolBlockDefectKind[] = [];
 
   type BlockPosition = {
     start: number;
@@ -797,20 +853,16 @@ export function parseAccumulatedIntoBlocks(
       const blockToolCalls: ContentBlock[] = [];
       const blockCalls: ToolCall[] = [];
 
-      const parsedInvokes = collectInvokes(resolvedBlock.innerContent, options?.tools);
-      unclosedInvokeHeads += parsedInvokes.unclosedHeads;
+      const parsedInvokes = callsOfBlock(resolvedBlock, options?.tools);
+      if (parsedInvokes.defect) malformedToolBlocks.push(parsedInvokes.defect);
       for (const invoke of parsedInvokes.calls) {
-        const toolName = invoke.name;
-        const input = invoke.input;
-
         const id = generateToolId();
-        blockCalls.push({ id, name: toolName, input });
-        callSites.push({ id, name: toolName, pos: resolvedBlock.start });
+        blockCalls.push({ id, ...invoke });
+        callSites.push({ id, name: invoke.name, pos: resolvedBlock.start });
         blockToolCalls.push({
           type: 'tool_use',
           id,
-          name: toolName,
-          input,
+          ...invoke,
           rawXml,
         });
       }
@@ -955,7 +1007,7 @@ export function parseAccumulatedIntoBlocks(
     unclosedToolBlock: endsWithPartialToolBlock(textOutsideSpans(processedText, survivingSpans)),
     emptyToolBlocks,
     splicedToolBlocks,
-    unclosedInvokeHeads,
+    malformedToolBlocks,
     resultSpans,
   };
 }

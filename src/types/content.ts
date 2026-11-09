@@ -144,8 +144,23 @@ export interface ToolUseContent {
    * trusting a plausible `{}`. The call's ToolCall carries it too. A
    * request sends `input` as stored, so round reports don't count a marked
    * call as altered: this field records the replacement.
+   * In XML tool mode it is also set on every call of a function_calls block
+   * whose tags break the format (an invoke with no closing tag; a value
+   * holding a parameter's or an invoke's opening tag, or an invoke's closing
+   * tag; a parameter given twice; text inside an invoke outside its parameter
+   * elements; or a stray tag outside every invoke), holding the block's raw
+   * text, with `input` `{}`: none of the block's calls is taken as the
+   * model's.
    */
   unparseableInput?: string;
+
+  /**
+   * Present only with `unparseableInput`: why `input` isn't the model's
+   * arguments, as a sentence an executor can give the model. It names invokes
+   * by position and tool name, parameters by name and tags in words, and
+   * quotes none of the call's text.
+   */
+  unparseableReason?: string;
 
   /** See {@link TextContent.rawItem}. */
   rawItem?: unknown;
