@@ -711,7 +711,8 @@ export class BedrockAdapter implements ProviderAdapter {
                 for (let i = 0; i < binaryStr.length; i++) {
                   bytes[i] = binaryStr.charCodeAt(i);
                 }
-                decoded = JSON.parse(new TextDecoder().decode(bytes));
+                // A content_block_start can carry a tool call's arguments itself, so long integers keep their digits here too.
+                decoded = JSON.parse(new TextDecoder().decode(bytes), keepLongIntegers);
                 skipped = 'bytes that decode to no object';
               }
             } catch (e) {

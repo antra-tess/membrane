@@ -99,7 +99,44 @@ describe('each route a tool call takes keeps the digits', () => {
     const result = await adapter.complete({ model: 'us.anthropic.claude-sonnet-4-20250514-v1:0', messages: [{ role: 'user', content: 'hi' }], maxTokens: 100 } as any);
     expect(result.content).toStrictEqual([{ type: 'tool_use', id: 'toolu_zz', name: 'open', input: { channelId: SNOWFLAKE } }]);
   });
+
+  it('Bedrock, streamed: a block start that carries the arguments itself', async () => {
+    const events = [
+      '{"type":"message_start","message":{"usage":{"input_tokens":1}}}',
+      `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_zz","name":"open","input":{"channelId":${SNOWFLAKE}}}}`,
+      '{"type":"content_block_stop","index":0}',
+      '{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":2}}',
+      '{"type":"message_stop"}',
+    ];
+    const frames = events.map(bedrockChunk);
+    const body = new ReadableStream<Uint8Array>({ start(c) { for (const f of frames) c.enqueue(f); c.close(); } });
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, body })));
+    const adapter = new BedrockAdapter({ accessKeyId: 'test-key', secretAccessKey: 'test-secret', region: 'us-west-2' });
+    const result = await adapter.stream({ model: 'us.anthropic.claude-sonnet-4-20250514-v1:0', messages: [{ role: 'user', content: 'hi' }], maxTokens: 100 } as any, { onChunk: () => {} });
+    expect(result.content).toStrictEqual([{ type: 'tool_use', id: 'toolu_zz', name: 'open', input: { channelId: SNOWFLAKE } }]);
+  });
 });
+
+/** One event-stream frame of Bedrock's response stream, carrying `json` as written, so an unquoted long integer survives. */
+function bedrockChunk(json: string): Uint8Array {
+  const encode = (s: string) => new TextEncoder().encode(s);
+  const name = encode(':event-type');
+  const value = encode('chunk');
+  const headers = new Uint8Array(1 + name.length + 1 + 2 + value.length);
+  headers[0] = name.length;
+  headers.set(name, 1);
+  headers[1 + name.length] = 7;
+  new DataView(headers.buffer).setUint16(2 + name.length, value.length, false);
+  headers.set(value, 4 + name.length);
+  const payload = encode(JSON.stringify({ bytes: Buffer.from(encode(json)).toString('base64') }));
+  const frame = new Uint8Array(12 + headers.length + payload.length + 4);
+  const view = new DataView(frame.buffer);
+  view.setUint32(0, frame.length, false);
+  view.setUint32(4, headers.length, false);
+  frame.set(headers, 12);
+  frame.set(payload, 12 + headers.length);
+  return frame;
+}
 
 describe('XML mode keeps the digits at both of its parses', () => {
   const xml = `<function_calls>
