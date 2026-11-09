@@ -78,6 +78,7 @@ import {
   formatToolResultsForSplitTurn,
   attachSplitResults,
   parseLastToolBlock,
+  leftOpenAcross,
   type ProviderImageBlock,
   type SplitResultsRound,
   type ToolBlockDefectKind,
@@ -1237,7 +1238,8 @@ export class Membrane {
         initialBlockType,
         lastStopSequence,
         lastProviderStopReason,
-        splitRounds
+        splitRounds,
+        initialBlockType === 'tool_call' && xmlToolProtocol && leftOpenAcross(fullAccumulated, initialPrefillLength)
       );
 
       if (providerImageBlocks.length > 0) {
@@ -1254,6 +1256,7 @@ export class Membrane {
       if (this.isCancellation(error, signal)) {
         const fullAccumulated = parser.getAccumulated();
         const newContent = fullAccumulated.slice(initialPrefillLength);
+        const leftOpenAtStart = initialBlockType === 'tool_call' && xmlToolProtocol && leftOpenAcross(fullAccumulated, initialPrefillLength);
 
         return this.buildAbortedResponse(
           newContent,
@@ -1262,7 +1265,7 @@ export class Membrane {
           executedToolResults,
           this.abortOutcome(error, signal),
           xmlToolProtocol
-            ? attachSplitResults(parseAccumulatedIntoBlocks(newContent, { tools: request.tools, ...(initialBlockType ? { startInsideBlock: initialBlockType } : {}) }), splitRounds).blocks
+            ? attachSplitResults(parseAccumulatedIntoBlocks(newContent, { tools: request.tools, ...(initialBlockType ? { startInsideBlock: initialBlockType, leftOpenAtStart } : {}) }), splitRounds).blocks
             : streamedThinking.content(newContent, (value, context) => formatter.parseContentBlocks(value, request.tools, context))
         );
       }
@@ -2507,6 +2510,7 @@ export class Membrane {
     triggeredSequence?: string,
     providerStopReason?: string,
     splitRounds: readonly SplitResultsRound[] = [],
+    leftOpenAtStart = false,
   ): NormalizedResponse {
     const usage = turnUsage.total;
     let finalContent: ContentBlock[];
@@ -2522,7 +2526,7 @@ export class Membrane {
     } else {
       const parseOptions = {
         tools: request.tools,
-        ...(startInsideBlock ? { startInsideBlock } : {}),
+        ...(startInsideBlock ? { startInsideBlock, leftOpenAtStart } : {}),
       };
       const parsed = parseAccumulatedIntoBlocks(accumulated, parseOptions);
       const attached = attachSplitResults(parsed, splitRounds);
@@ -2976,10 +2980,12 @@ export class Membrane {
     };
 
     const abortedPartial = () => {
-      const newContent = parser.getAccumulated().slice(initialPrefillLength);
+      const fullAccumulated = parser.getAccumulated();
+      const newContent = fullAccumulated.slice(initialPrefillLength);
+      const leftOpenAtStart = initialBlockType === 'tool_call' && xmlToolProtocol && leftOpenAcross(fullAccumulated, initialPrefillLength);
       return {
         partialContent: xmlToolProtocol
-          ? attachSplitResults(parseAccumulatedIntoBlocks(newContent, { tools: request.tools, ...(initialBlockType ? { startInsideBlock: initialBlockType } : {}) }), splitRounds).blocks
+          ? attachSplitResults(parseAccumulatedIntoBlocks(newContent, { tools: request.tools, ...(initialBlockType ? { startInsideBlock: initialBlockType, leftOpenAtStart } : {}) }), splitRounds).blocks
           : streamedThinking.content(newContent, (value, context) => formatter.parseContentBlocks(value, request.tools, context)),
         rawAssistantText: newContent,
         toolCalls: [...executedToolCalls],
@@ -3416,7 +3422,8 @@ export class Membrane {
         initialBlockType,
         lastStopSequence,
         lastProviderStopReason,
-        splitRounds
+        splitRounds,
+        initialBlockType === 'tool_call' && xmlToolProtocol && leftOpenAcross(fullAccumulated, initialPrefillLength)
       );
 
       this.mergeProviderThinkingBlocks(response.content, providerThinkingBlocks);

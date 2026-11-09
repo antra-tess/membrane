@@ -311,6 +311,8 @@ function request(): NormalizedRequest {
   };
 }
 
+const LEFT_OPEN_REASON = 'an earlier function_calls block holding an invoke was left open before this one opened';
+
 const refusedTurn = `zz calling\n${OPEN}\n<invoke name="zz_write"><parameter name="path">a.txt</paramter>\n<parameter name="body">${SECRET}</parameter></invoke>\n`;
 
 describe('the XML tool loops hand a refused block to the host as an ordinary round', () => {
@@ -354,6 +356,48 @@ describe('the XML tool loops hand a refused block to the host as an ordinary rou
     expect(response.toolCalls.map((c) => [c.name, c.input])).toEqual([['zz_rm', {}]]);
     expect(response.toolCalls[0]!.unparseableReason).toContain('left open');
     expect(logger.warnings.some((w) => w.includes('(left-open-block)'))).toBe(true);
+  });
+
+  const afterCutTurn = (): NormalizedRequest => ({
+    toolMode: 'xml',
+    messages: [
+      { participant: 'User', content: [{ type: 'text', text: 'go' }] },
+      { participant: 'Agent', content: [{ type: 'text', text: `zz writing\n${OPEN}\n<invoke name="zz_write"><parameter name="body">zz cut mid` }] },
+      { participant: 'User', content: [{ type: 'text', text: 'go on' }] },
+    ],
+    config: { model: 'zz-test-model', maxTokens: 64 },
+    tools: [write],
+  });
+  const usesOf = (content: ContentBlock[]) => content
+    .filter((b): b is Extract<ContentBlock, { type: 'tool_use' }> => b.type === 'tool_use')
+    .map((u) => [u.name, u.unparseableReason ?? null]);
+
+  it('after an earlier turn cut inside an invoke, stream() marks the call in its content as dispatch marked it', async () => {
+    const received: ToolCall[] = [];
+    const response = await new Membrane(new ScriptedAdapter([`zz again\n${OPEN}\n<invoke name="zz_rm"/>\n`]), { logger: new RecordingLogger() }).stream(afterCutTurn(), {
+      onToolCalls: async (calls) => {
+        received.push(...calls);
+        return calls.map((c) => ({ toolUseId: c.id, content: 'zz refused', isError: true }));
+      },
+    });
+    if (!('details' in response)) throw new Error('expected a completed response');
+    expect(received.map((c) => [c.name, c.unparseableReason ?? null])).toEqual([['zz_rm', LEFT_OPEN_REASON]]);
+    expect(usesOf(response.content)).toEqual([['zz_rm', LEFT_OPEN_REASON]]);
+  });
+
+  it('after an earlier turn cut inside an invoke, the event stream marks the call in its final content as its tool-calls event did', async () => {
+    const stream = new Membrane(new ScriptedAdapter([`zz again\n${OPEN}\n<invoke name="zz_rm"/>\n`]), { logger: new RecordingLogger() }).streamYielding(afterCutTurn());
+    const received: ToolCall[] = [];
+    let content: ContentBlock[] = [];
+    for await (const event of stream) {
+      if (event.type === 'tool-calls') {
+        received.push(...event.calls);
+        stream.provideToolResults(event.calls.map((c) => ({ toolUseId: c.id, content: 'zz refused', isError: true })));
+      }
+      if (event.type === 'complete') content = event.response.content;
+    }
+    expect(received.map((c) => [c.name, c.unparseableReason ?? null])).toEqual([['zz_rm', LEFT_OPEN_REASON]]);
+    expect(usesOf(content)).toEqual([['zz_rm', LEFT_OPEN_REASON]]);
   });
 
   it('complete() returns the same marked calls', async () => {

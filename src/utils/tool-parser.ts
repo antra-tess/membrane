@@ -336,7 +336,7 @@ function blockDefect(inner: string): { kind: ToolBlockDefectKind; reason: string
 
 const LEFT_OPEN = {
   kind: 'left-open-block',
-  reason: 'an earlier function_calls block was left open, inside an invoke, before this one opened',
+  reason: 'an earlier function_calls block holding an invoke was left open before this one opened',
 } as const;
 
 function callsOfBlock(
@@ -373,6 +373,7 @@ interface ResolvedToolBlock {
   fullMatch: string;
   wasSpliced: boolean;
   leftOpenInvoke: boolean;
+  outerStart: number;
 }
 
 function resolveToolBlock(text: string, blockMatch: RegExpExecArray): ResolvedToolBlock {
@@ -395,6 +396,7 @@ function resolveToolBlock(text: string, blockMatch: RegExpExecArray): ResolvedTo
       fullMatch: blockMatch[0],
       wasSpliced: false,
       leftOpenInvoke: false,
+      outerStart: blockMatch.index,
     };
   }
 
@@ -406,6 +408,7 @@ function resolveToolBlock(text: string, blockMatch: RegExpExecArray): ResolvedTo
     fullMatch: text.slice(reanchoredStart, end),
     wasSpliced: true,
     leftOpenInvoke: /<(?:antml:)?invoke\b/.test(innerContent.slice(0, innermostOpener.index)),
+    outerStart: blockMatch.index,
   };
 }
 
@@ -769,6 +772,15 @@ function collectCandidateSpans(text: string): CandidateSpan[] {
   return spans;
 }
 
+/**
+ * Whether the function_calls block that spans `boundary` in `text` was left
+ * open inside an invoke before the block it resolves to: what the response's
+ * final parse, which starts at the boundary inside that block, can't see.
+ */
+export function leftOpenAcross(text: string, boundary: number): boolean {
+  return collectLiveToolBlocks(text).some((block) => block.outerStart < boundary && block.end > boundary && block.leftOpenInvoke);
+}
+
 function collectLiveToolBlocks(text: string): ResolvedToolBlock[] {
   const live: ResolvedToolBlock[] = [];
   for (const span of retainOutermostSpans(collectCandidateSpans(text))) {
@@ -802,7 +814,7 @@ const LEGACY_ERROR_REGEX = /<error>\n?([\s\S]*?)\n?<\/error>/g;
 
 export function parseAccumulatedIntoBlocks(
   text: string,
-  options?: ToolParseOptions & { startInsideBlock?: 'thinking' | 'tool_call' | 'tool_result' }
+  options?: ToolParseOptions & { startInsideBlock?: 'thinking' | 'tool_call' | 'tool_result'; leftOpenAtStart?: boolean }
 ): {
   blocks: ContentBlock[];
   toolCalls: ToolCall[];
@@ -865,7 +877,9 @@ export function parseAccumulatedIntoBlocks(
     }
 
     if (span.kind === 'calls') {
-      const resolvedBlock = span.resolvedBlock;
+      const resolvedBlock = options?.startInsideBlock === 'tool_call' && options.leftOpenAtStart !== undefined && span.resolvedBlock.outerStart === 0
+        ? { ...span.resolvedBlock, leftOpenInvoke: options.leftOpenAtStart }
+        : span.resolvedBlock;
       if (resolvedBlock.wasSpliced) splicedToolBlocks++;
       // Carried on each tool_use for verbatim prefill replay (antra-tess/membrane#36).
       const rawXml = resolvedBlock.fullMatch;
