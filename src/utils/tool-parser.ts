@@ -263,6 +263,7 @@ const LOOSE_INVOKE_OPENER = /<(?:antml:)?invoke\s+name=/g;
 const NAMED_INVOKE_OPENER = /<(?:antml:)?invoke\s+name=(["'])((?:(?!\1).)+)\1/g;
 const TAG_IN_VALUE = /<(?:antml:)?(?:parameter|invoke)\s+name=|<\/(?:antml:)?invoke>/;
 const WHITESPACE_AT = /\s*/y;
+const NAMELESS_INVOKE_OPENER_AT = /^<(?:antml:)?invoke\b/;
 
 const PLAIN_NAME = /^[\w.:-]{1,64}$/;
 
@@ -284,6 +285,10 @@ function blockDefect(inner: string): { kind: ToolBlockDefectKind; reason: string
       LOOSE_INVOKE_OPENER.lastIndex = pos + 1;
       const next = LOOSE_INVOKE_OPENER.exec(inner)?.index ?? inner.length;
       if (inner.slice(pos, next).includes('<')) {
+        if (NAMELESS_INVOKE_OPENER_AT.test(inner.slice(pos))) {
+          const where = invokes === 0 ? 'before the first named invoke' : `after invoke ${invokes}`;
+          return { kind: 'stray-tag', reason: `an invoke opening tag can't be read, ${where}` };
+        }
         const where = invokes === 0 ? 'before the first invoke' : `after invoke ${invokes}`;
         return { kind: 'stray-tag', reason: `a stray tag stands outside every invoke, ${where}` };
       }

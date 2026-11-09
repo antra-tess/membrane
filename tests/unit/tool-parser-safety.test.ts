@@ -47,7 +47,7 @@ describe('F8 · invoke tag spelling tolerance', () => {
     const parsed = parseToolCalls(text);
 
     expect(parsed?.calls.map((c) => [c.name, c.input, c.unparseableInput])).toEqual([['', {}, text]]);
-    expect(parsed?.calls[0]?.unparseableReason).toContain('stray tag');
+    expect(parsed?.calls[0]?.unparseableReason).toContain("an invoke opening tag can't be read, before the first named invoke");
   });
 
   it('keeps an apostrophe inside a double-quoted invoke name', () => {

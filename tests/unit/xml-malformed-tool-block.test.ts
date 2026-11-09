@@ -139,6 +139,12 @@ describe('a function_calls block whose tags break the format is refused whole', 
     expect(parsed!.calls[0]!.unparseableReason).not.toContain('zz');
   });
 
+  it("says an invoke opener can't be read, rather than calling it a stray tag", () => {
+    const parsed = parseToolCalls(block(`<invoke name="zz_first"/>\n<invoke name="">\n</invoke>`));
+    expect(parsed!.calls.map((c) => c.name)).toEqual(['zz_first']);
+    expect(parsed!.calls[0]!.unparseableReason).toBe("an invoke opening tag can't be read, after invoke 1");
+  });
+
   it('names a parameter given twice', () => {
     const parsed = parseToolCalls(block(malformed[5]![1]));
     expect(parsed!.calls[0]!.unparseableReason).toContain('"path"');
