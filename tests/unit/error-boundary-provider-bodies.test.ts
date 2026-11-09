@@ -666,7 +666,7 @@ describe('a context overflow keeps the prompt count its refusal states, as a num
     expect(error.promptTokens).toBe(130112);
   });
 
-  it("openai's older form, \"However, you requested N tokens (… in the messages, … in the completion)\", states no count of the prompt alone", async () => {
+  it("openai's older form, \"However, you requested N tokens (… in the messages, … in the completion)\", states no total of the prompt", async () => {
     stubHttpFailure(400, {
       error: {
         message: "This model's maximum context length is 4097 tokens. However, you requested 4200 tokens (3200 in the messages, 1000 in the completion). Please reduce the length of the messages or completion.",
