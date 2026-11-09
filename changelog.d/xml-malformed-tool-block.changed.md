@@ -6,13 +6,14 @@
   `<` or `>`, an invoke name holding a line terminator, a parameter given
   twice, text inside an invoke outside its parameter elements, or a stray tag
   outside every invoke, which is any `<` in the block's text outside its
-  invokes. A block whose
-  opening tag comes before an earlier `function_calls` block was closed is
-  refused too, from that tag on, whether a value held the tag or max_tokens
-  cut the earlier block, even right after its opening tag. In `stream()` and
-  the event stream, the earlier block may be an earlier turn's, which costs
-  one refused round: the resend runs. `complete()` reads only the new output,
-  so it refuses such a block only when the earlier block is in that output.
+  invokes. A block whose opening tag comes while an earlier `function_calls`
+  opening tag is still unclosed is refused too, from that tag on, which costs
+  one refused round: the resend runs. That's an earlier block max_tokens
+  cut, even right after its opening tag, one whose value held the later tag,
+  or text before the block that named the tag. In `stream()` and the event
+  stream the earlier tag may be in an earlier turn. `complete()` reads only
+  the new output, so it refuses such a block only when the earlier tag is in
+  that output.
   Each named invoke opener in a refused block becomes a call marked
   `unparseableInput` (the block's raw text) with `input` `{}` and a new
   `unparseableReason`: a sentence an executor can give the model, which says

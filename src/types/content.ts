@@ -151,13 +151,13 @@ export interface ToolUseContent {
    * a parameter's or an invoke's opening tag, or an invoke's closing tag; a
    * parameter given twice; text inside an invoke outside its parameter
    * elements; or a stray tag outside every invoke, an invoke opener whose
-   * name can't be read included), or when its opening tag comes before an
-   * earlier function_calls block was closed, whether that block was cut off
-   * or one of its values held the tag. Its calls are then the named invoke
-   * openers after that tag, and its raw text starts there.
-   * In a stream that earlier block may be an earlier turn's; `complete()`
-   * reads only its own output, so it refuses only when the earlier block is
-   * in that output.
+   * name can't be read included), or when its opening tag comes while an
+   * earlier function_calls opening tag is still unclosed: an earlier block
+   * was cut off, one of its values held the tag, or text before the block
+   * named it. Its calls are then the named invoke openers after that tag,
+   * and its raw text starts there. In a stream that earlier tag may be in an
+   * earlier turn; `complete()` reads only its own output, so it refuses only
+   * when the earlier tag is in that output.
    */
   unparseableInput?: string;
 

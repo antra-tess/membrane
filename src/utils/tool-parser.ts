@@ -337,7 +337,7 @@ function blockDefect(inner: string): { kind: ToolBlockDefectKind; reason: string
 
 const LEFT_OPEN = {
   kind: 'left-open-block',
-  reason: 'a function_calls opening tag came before an earlier function_calls block was closed, whether that block was cut off or a value held the tag',
+  reason: 'a function_calls opening tag came before an earlier one was closed: an earlier block was cut off, a value held the tag, or text before the block named it',
 } as const;
 
 export interface ToolBlockVerdict {

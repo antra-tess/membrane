@@ -2477,7 +2477,7 @@ export class Membrane {
       warnLog.warn(
         `[membrane] ${diagnostics.splicedToolBlocks} tool block(s) spanned a second ` +
         `<function_calls> opener and were re-anchored to the innermost one, and refused: ` +
-        `an earlier block in this conversation's assistant text was cut off, or a value held the tag.`
+        `an earlier block in this conversation's assistant text was cut off, a value held the tag, or text before the block named it.`
       );
     }
 

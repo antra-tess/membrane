@@ -210,6 +210,15 @@ describe('names hold no tag text, and the reasons say what broke', () => {
     expect(calls[0]!.unparseableReason).toBe('invoke 1 (zz_a) has no closing invoke tag before invoke 2 opens');
   });
 
+  it('text naming the function_calls opening tag before a block refuses that block, and the sentence names text as a cause', () => {
+    const later = block('<invoke name="zz_run"/>');
+    for (const calls of Object.values(marked(`zz I will write the ${OPEN} tag now.\n${later}`))) {
+      expect(calls.map((c) => [c.name, c.input])).toEqual([['zz_run', {}]]);
+      expect(calls[0]!.unparseableInput).toBe(later);
+      expect(calls[0]!.unparseableReason).toBe(LEFT_OPEN_REASON);
+    }
+  });
+
   it('every block re-anchored past an earlier opening tag is refused, whatever that earlier block held', () => {
     for (const earlier of ['<invok name="zz_lost"/>', '<invoke-other/>', '']) {
       const text = `${OPEN}\n${earlier}\n${block('<invoke name="zz_run"/>')}`;
@@ -362,7 +371,7 @@ function request(): NormalizedRequest {
   };
 }
 
-const LEFT_OPEN_REASON = 'a function_calls opening tag came before an earlier function_calls block was closed, whether that block was cut off or a value held the tag';
+const LEFT_OPEN_REASON = 'a function_calls opening tag came before an earlier one was closed: an earlier block was cut off, a value held the tag, or text before the block named it';
 
 const refusedTurn = `zz calling\n${OPEN}\n<invoke name="zz_write"><parameter name="path">a.txt</paramter>\n<parameter name="body">${SECRET}</parameter></invoke>\n`;
 
