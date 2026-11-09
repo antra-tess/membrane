@@ -51,9 +51,9 @@ import { CacheKeepalive, type CacheKeepaliveConfig } from '../cache-keepalive.js
  *     takes a `top_p` of 0.99.
  *   - Fable 5.2: measured on 2026-11-09; it refuses `temperature` 0.2,
  *     `top_k` 40 and `top_p` 0.9 with a 400, and takes a `top_p` of 0.99.
- *   - Mythos 5.1 and Mythos 5.2: not measured (Mythos 5.2's docs page says it
- *     requires verification). The Fable and Mythos family always thinks,
- *     and with thinking on the API takes no custom `temperature` or `top_k`.
+ *   - Mythos 5.1 and Mythos 5.2: not measured. The Fable and Mythos family
+ *     always thinks, and with thinking on the API takes no custom
+ *     `temperature` or `top_k`.
  */
 const NO_TEMPERATURE_MODELS = [
   'claude-opus-4-7',

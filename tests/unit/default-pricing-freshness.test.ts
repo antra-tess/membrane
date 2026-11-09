@@ -88,6 +88,12 @@ describe('Anthropic 5.x rows match the published price page (2026-11-09)', () =>
       expect(getDefaultPricing(id)).toEqual(pricing);
     });
   }
+
+  it('prices a dated Fable 5 or Mythos 5 snapshot as its own model, not as the 5.2 its id begins with', () => {
+    expect(getDefaultPricing('claude-fable-5-20260301')).toEqual(usd(10, 50, 12.50, 1));
+    expect(getDefaultPricing('claude-mythos-5-20260301')).toEqual(usd(10, 50, 12.50, 1));
+    expect(getDefaultPricing('claude-fable-5-1-20261001')).toEqual(usd(10, 50, 12.50, 0.25));
+  });
 });
 
 describe('pricing freshness is machine-readable', () => {

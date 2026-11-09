@@ -141,8 +141,7 @@ export const PRICING_TABLE: readonly PricingRow[] = [
     pricing: { inputPerMillion: 1, outputPerMillion: 5, cacheWritePerMillion: 1.25, cacheReadPerMillion: 0.10, currency: 'USD', asOf: ANTHROPIC_PRICING_LAST_VERIFIED },
   },
   {
-    // Retired except on Bedrock and Google Cloud. Not on the price page as read
-    // on 2026-11-09, so it keeps the date it carried before that reading.
+    // Retired except on Bedrock and Google Cloud.
     prefix: 'claude-3-5-haiku',
     pricing: { inputPerMillion: 0.80, outputPerMillion: 4, cacheWritePerMillion: 1, cacheReadPerMillion: 0.08, currency: 'USD', asOf: '2026-10-19' },
   },
@@ -302,10 +301,21 @@ export const PRICING_TABLE: readonly PricingRow[] = [
   { prefix: 'gemini-2.5-pro-preview-tts', pricing: null },
 ];
 
+/**
+ * Whether `prefix` names `modelId`: the id is the prefix, or goes on from it
+ * with anything but a digit, unless the prefix itself ends in `-`. So
+ * `claude-fable-5` names `claude-fable-5-20260301`, and `claude-fable-5-2`
+ * doesn't.
+ */
+function prefixNames(prefix: string, modelId: string): boolean {
+  if (!modelId.startsWith(prefix)) return false;
+  return prefix.endsWith('-') || !/^\d/.test(modelId.slice(prefix.length));
+}
+
 export function getDefaultPricing(modelId: string, at: number = Date.now()): ModelPricing | undefined {
   let best: PricingRow | undefined;
   for (const row of PRICING_TABLE) {
-    if (modelId.startsWith(row.prefix) && row.prefix.length > (best?.prefix.length ?? 0)) {
+    if (prefixNames(row.prefix, modelId) && row.prefix.length > (best?.prefix.length ?? 0)) {
       best = row;
     }
   }
