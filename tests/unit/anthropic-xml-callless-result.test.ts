@@ -7,6 +7,9 @@ const text = (value: string): ContentBlock => ({ type: 'text', text: value });
 const call = (id: string): ContentBlock => ({ type: 'tool_use', id, name: 'read_file', input: { path: 'notes.txt' } });
 const result = (id: string, content: string, rawXml?: string): ContentBlock =>
   ({ type: 'tool_result', toolUseId: id, content, ...(rawXml ? { rawXml } : {}) }) as ContentBlock;
+const named = (id: string, name: string): ContentBlock => ({ type: 'tool_use', id, name, input: {} });
+const namedResult = (id: string, toolName: string, content: string): ContentBlock =>
+  ({ type: 'tool_result', toolUseId: id, toolName, content }) as ContentBlock;
 
 function build(messages: NormalizedMessage[], promptCaching = false) {
   const fidelity = new FidelityNotes();
@@ -166,6 +169,101 @@ describe('AnthropicXmlFormatter: a tool result that answers no call', () => {
       expect(altered).toEqual([2]);
       expect(events).toEqual([]);
     }
+  });
+
+  it('keeps the host\'s order for results that name different tools, as a host that leads with one result stores them', () => {
+    const { rendered, altered, events } = build([
+      { participant: 'User', content: [text('look')] },
+      { participant: 'Agent', content: [call('a'), named('f', 'subagent--fork')] },
+      { participant: 'Tool', content: [namedResult('f', 'subagent--fork', 'zz-f'), namedResult('a', 'read_file', 'zz-a')] },
+      { participant: 'Agent', content: [] },
+    ]);
+    expect(rendered.indexOf('zz-f')).toBeGreaterThan(-1);
+    expect(rendered.indexOf('zz-a')).toBeGreaterThan(rendered.indexOf('zz-f'));
+    expect(altered).toEqual([]);
+    expect(events).toEqual([]);
+  });
+
+  it('keeps a result that names its tool though an earlier call of another tool is unanswered', () => {
+    const { rendered, altered, events } = build([
+      { participant: 'User', content: [text('look')] },
+      { participant: 'Agent', content: [call('a'), named('s', 'search')] },
+      { participant: 'Tool', content: [namedResult('s', 'search', 'zz-s')] },
+      { participant: 'Agent', content: [] },
+    ]);
+    expect(rendered).toContain('<tool_name>search</tool_name>');
+    expect(rendered).toContain('zz-s');
+    expect(altered).toEqual([]);
+    expect(events).toEqual([]);
+  });
+
+  it('moves a result the model can\'t tell apart after the results of the calls before its own, leaving a result that names its tool where the host put it', () => {
+    const { rendered, altered, events } = build([
+      { participant: 'User', content: [text('look')] },
+      { participant: 'Agent', content: [call('a'), named('s', 'search'), named('l', 'list')] },
+      { participant: 'Tool', content: [
+        namedResult('l', 'list', 'zz-l'),
+        { type: 'tool_result', toolUseId: 's', toolName: 'search', content: 'zz-s-failed', isError: true } as ContentBlock,
+        namedResult('a', 'read_file', 'zz-a'),
+      ] },
+      { participant: 'Agent', content: [] },
+    ]);
+    const at = (s: string) => rendered.indexOf(s);
+    expect(at('zz-l')).toBeGreaterThan(-1);
+    expect(at('zz-a')).toBeGreaterThan(at('zz-l'));
+    expect(at('zz-s-failed')).toBeGreaterThan(at('zz-a'));
+    expect(altered).toEqual([2]);
+    expect(events).toEqual([]);
+  });
+
+  it('reads an error by its place, since it goes out without its tool\'s name', () => {
+    const { rendered, altered, events } = build([
+      { participant: 'User', content: [text('look')] },
+      { participant: 'Agent', content: [call('a'), named('s', 'search')] },
+      { participant: 'Tool', content: [{ type: 'tool_result', toolUseId: 's', toolName: 'search', content: 'zz-s-failed', isError: true } as ContentBlock] },
+      { participant: 'Agent', content: [] },
+    ]);
+    expect(rendered).not.toContain('zz-s-failed');
+    expect(altered).toEqual([2]);
+    expect(events).toEqual([{ kind: 'orphan_tool_result_dropped', toolUseId: 's' }]);
+  });
+
+  it('reads a result that names a tool other than its call\'s by its place', () => {
+    const { rendered, altered } = build([
+      { participant: 'User', content: [text('look')] },
+      { participant: 'Agent', content: [call('a')] },
+      { participant: 'Tool', content: [namedResult('a', 'search', 'zz-a')] },
+      { participant: 'Agent', content: [] },
+    ]);
+    expect(rendered).toContain('zz-a');
+    expect(altered).toEqual([]);
+  });
+
+  it('leaves out a second result for a call a result in an earlier message answered', () => {
+    const { rendered, altered, events } = build([
+      { participant: 'User', content: [text('look')] },
+      { participant: 'Agent', content: [call('a'), call('b')] },
+      { participant: 'Tool', content: [namedResult('a', 'read_file', 'zz-first')] },
+      { participant: 'Tool', content: [namedResult('a', 'read_file', 'zz-again'), namedResult('b', 'read_file', 'zz-b')] },
+      { participant: 'Agent', content: [] },
+    ]);
+    expect(rendered).toContain('zz-first');
+    expect(rendered).toContain('zz-b');
+    expect(rendered).not.toContain('zz-again');
+    expect(altered).toEqual([3]);
+    expect(events).toEqual([{ kind: 'stray_tool_result_dropped', toolUseId: 'a', reason: 'answered' }]);
+  });
+
+  it('moves results of one tool, each naming it, into call order', () => {
+    const { rendered, altered } = build([
+      { participant: 'User', content: [text('look')] },
+      { participant: 'Agent', content: [call('a'), call('b')] },
+      { participant: 'Tool', content: [namedResult('b', 'read_file', 'zz-b'), namedResult('a', 'read_file', 'zz-a')] },
+      { participant: 'Agent', content: [] },
+    ]);
+    expect(rendered.indexOf('zz-a')).toBeGreaterThan(-1);
+    expect(rendered.indexOf('zz-b')).toBeGreaterThan(rendered.indexOf('zz-a'));
+    expect(altered).toEqual([2]);
   });
 
   it('keeps a sorted run only up to the first place nothing answers', () => {

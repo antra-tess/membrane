@@ -71,19 +71,21 @@ export interface AnthropicXmlFormatterConfig extends FormatterConfig {
 
 /**
  * The messages with each tool result where the model reads it as its own
- * call's answer, and without the ones it can't stand there. In the
- * transcript a results block answers the calls block before it by position,
- * ids aside: the k-th result after the calls since the last result answers
- * the k-th of them. So within each run of results in a message, a result
- * whose id names a call takes that call's place, and one whose id names no
- * call takes the next place whose call is in its own message and that no
+ * call's answer, and without the ones it can't stand there. The transcript
+ * carries no ids: a results block answers the calls since the last result,
+ * and a result reads as answering the first of them not yet answered, of the
+ * tool its `<tool_name>` names where it names its call's tool, or of any tool
+ * where it doesn't (an error goes out without one). So within each run of
+ * results in a message, a result whose id names a call takes that call, and
+ * one whose id names no call takes the first call in its own message that no
  * result names: a generation parsed back from its text gives its calls fresh
- * ids, and keeps its results beside them. The run is sorted by place, as a
- * host that stores results as their tools finish needs, and a result is kept
- * while its place is the next one to answer. One that isn't kept takes no
- * place and is never sent, as a result or as text, since the model would
- * read it as another call's result. Results don't move between messages. A
- * kept result renders from its fields when its run was reordered, or when a
+ * ids, and keeps its results beside them. The run keeps the host's order,
+ * which a host can choose, except that a result that would read as another
+ * call's answer waits until it reads as its own: results the model can't tell
+ * apart, of one tool or without a name, go in call order, as a host that
+ * stores results as their tools finish needs. One that never reads as its own
+ * is never sent, as a result or as text. Results don't move between messages.
+ * A kept result renders from its fields when its run was reordered, or when a
  * left-out result in any message shared its `rawXml`, since the raw text
  * holds the old order or the other result. `onEvent` hears each result left
  * out, and `onAltered` each message changed, and whether nothing of it is
@@ -98,16 +100,16 @@ function withoutCalllessResults(
   for (const message of messages) {
     for (const block of message.content) if (block.type === 'tool_use') callIds.add(block.id);
   }
-  // The calls each calls block answers, in order, with the message each is in,
-  // and the calls a result in its span names by id.
-  const groups: Array<{ calls: Array<{ id: string; message: number }>; named: Set<string> }> = [];
+  // The calls each calls block answers, in order, with the message and tool of
+  // each, and the calls a result in its span names by id.
+  const groups: Array<{ calls: Array<{ id: string; message: number; tool: string }>; named: Set<string> }> = [];
   const groupOf = messages.map((message) => message.content.map(() => -1));
   let resultSince = true;
   messages.forEach((message, i) => message.content.forEach((block, j) => {
     if (block.type === 'tool_use') {
       if (resultSince) groups.push({ calls: [], named: new Set() });
       resultSince = false;
-      groups[groups.length - 1]!.calls.push({ id: block.id, message: i });
+      groups[groups.length - 1]!.calls.push({ id: block.id, message: i, tool: block.name });
     } else if (block.type === 'tool_result') {
       resultSince = true;
       const group = groups[groups.length - 1];
@@ -117,11 +119,12 @@ function withoutCalllessResults(
     }
   }));
 
-  const answeredPlaces = groups.map(() => 0);
+  // Per group, whether each of its calls has a result the model reads as its answer.
+  const done = groups.map((group) => group.calls.map(() => false));
   const answered = new Set<string>();
   const released = new Set<string>();
-  // Each message's blocks as they go out, by index: a run of results sorted
-  // by place, without the ones left out.
+  // Each message's blocks as they go out, by index: a run of results in the
+  // order the model reads each as its own call's answer, without the ones left out.
   const orders = messages.map((message, i) => {
     const order: number[] = [];
     const content = message.content;
@@ -134,13 +137,13 @@ function withoutCalllessResults(
       while (j < content.length && content[j]!.type === 'tool_result') run.push(j++);
       const g = groupOf[i]![run[0]!]!;
       const group = groups[g];
-      const from = answeredPlaces[g] ?? 0;
+      const calls = group?.calls ?? [];
+      const doneHere = done[g] ?? [];
       const taken = new Set<number>();
       const placeOf = new Map<number, number>();
       const take = (at: number, fits: (call: { id: string; message: number }) => boolean): void => {
-        if (!group) return;
-        for (let k = from; k < group.calls.length; k++) {
-          if (taken.has(k) || !fits(group.calls[k]!)) continue;
+        for (let k = 0; k < calls.length; k++) {
+          if (taken.has(k) || doneHere[k] || !fits(calls[k]!)) continue;
           taken.add(k);
           placeOf.set(at, k);
           return;
@@ -157,16 +160,27 @@ function withoutCalllessResults(
       for (const at of run) {
         if (namedOf(at) === undefined) take(at, (call) => call.message === i && !group!.named.has(call.id));
       }
-      const sorted = run.filter((at) => placeOf.has(at)).sort((a, b) => placeOf.get(a)! - placeOf.get(b)!);
+      // Whether the model reads the result at `at` as its own call's answer:
+      // the first call not yet answered, of the tool it names where that's
+      // its call's, or of any tool.
+      const readsAsOwn = (at: number): boolean => {
+        const place = placeOf.get(at)!;
+        const block = content[at] as ToolResultContent;
+        const tool = !block.isError && block.toolName === calls[place]!.tool ? block.toolName : undefined;
+        for (let k = 0; k < calls.length; k++) {
+          if (doneHere[k] || (tool !== undefined && calls[k]!.tool !== tool)) continue;
+          return k === place;
+        }
+        return false;
+      };
+      const waiting = run.filter((at) => placeOf.has(at));
       const keptHere: number[] = [];
-      let next = from;
-      for (const at of sorted) {
-        if (placeOf.get(at) !== next) break;
+      for (let p = waiting.findIndex(readsAsOwn); p >= 0; p = waiting.findIndex(readsAsOwn)) {
+        const at = waiting.splice(p, 1)[0]!;
+        doneHere[placeOf.get(at)!] = true;
+        answered.add(calls[placeOf.get(at)!]!.id);
         keptHere.push(at);
-        answered.add(group!.calls[next]!.id);
-        next++;
       }
-      if (group) answeredPlaces[g] = next;
       const reordered = keptHere.some((at, k) => k > 0 && at < keptHere[k - 1]!);
       for (const at of run) {
         const block = content[at] as ToolResultContent;

@@ -20,16 +20,19 @@
     `[continuing]`), so no request becomes a prefill and no two assistant
     turns merge. A second result is left out even when it, not the first, was
     the real output behind a placeholder. `AnthropicXmlFormatter` in XML tool
-    mode sends each result where the model reads it as its call's answer: a
-    results block answers the calls since the last result by position, so
-    the k-th result after them must answer the k-th call. Within a message's
-    run of results, one whose id names a call takes that call's place, and
-    one whose id names no call takes the place of a call in its own message
-    that no result names, as a generation parsed back from its text holds
-    them. The run is sorted by place, so results stored as their tools
-    finished go out in call order, rendered from their fields. A result is
-    left out while a call before its own is still unanswered. Each cycle
-    that reuses a call id gets its result. A breakpoint on a message that leaves empty
+    mode sends each result where the model reads it as its call's answer.
+    The transcript carries no ids: a result reads as answering the first
+    call since the last result not yet answered, of the tool its
+    `<tool_name>` names where that is its call's tool, or of any tool where
+    it isn't, as with an error, which goes out without one. Within a
+    message's run of results, one whose id names a call takes that call, and
+    one whose id names no call takes a call in its own message that no
+    result names, as a generation parsed back from its text holds them. The
+    run keeps the host's order, except that a result that would read as
+    another call's answer waits until it reads as its own: results the model
+    can't tell apart, of one tool or without a name, go out in call order,
+    rendered from their fields. A result that never reads as its own is left
+    out. Each cycle that reuses a call id gets its result. A breakpoint on a message that leaves empty
     marks what came before it. On every path the round report marks the
     message a result came from as altered.
   - **Prompt cache:** a stored history that holds such a result sends a
