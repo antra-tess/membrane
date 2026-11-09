@@ -4,7 +4,7 @@ export const DEFAULT_PRICING_LAST_VERIFIED = '2026-08-25';
 
 export const GOOGLE_PRICING_LAST_VERIFIED = '2026-10-14';
 
-export const ANTHROPIC_PRICING_LAST_VERIFIED = '2026-10-19';
+export const ANTHROPIC_PRICING_LAST_VERIFIED = '2026-11-09';
 
 /**
  * Google states when a rate changes as a date ("through November 30, 2026",
@@ -53,6 +53,14 @@ export const PRICING_TABLE: readonly PricingRow[] = [
   // Anthropic — https://platform.claude.com/docs/en/about-claude/pricing.
   // The cache-write column is the 5-minute TTL bucket; the 1-hour bucket costs
   // more and this table has no field for it.
+  {
+    prefix: 'claude-fable-5-2',
+    pricing: { inputPerMillion: 8, outputPerMillion: 40, cacheWritePerMillion: 10, cacheReadPerMillion: 0.20, currency: 'USD', asOf: ANTHROPIC_PRICING_LAST_VERIFIED },
+  },
+  {
+    prefix: 'claude-mythos-5-2',
+    pricing: { inputPerMillion: 8, outputPerMillion: 40, cacheWritePerMillion: 10, cacheReadPerMillion: 0.20, currency: 'USD', asOf: ANTHROPIC_PRICING_LAST_VERIFIED },
+  },
   {
     prefix: 'claude-fable-5-1',
     pricing: { inputPerMillion: 10, outputPerMillion: 50, cacheWritePerMillion: 12.50, cacheReadPerMillion: 0.25, currency: 'USD', asOf: ANTHROPIC_PRICING_LAST_VERIFIED },
@@ -133,9 +141,10 @@ export const PRICING_TABLE: readonly PricingRow[] = [
     pricing: { inputPerMillion: 1, outputPerMillion: 5, cacheWritePerMillion: 1.25, cacheReadPerMillion: 0.10, currency: 'USD', asOf: ANTHROPIC_PRICING_LAST_VERIFIED },
   },
   {
-    // Retired except on Bedrock and Google Cloud.
+    // Retired except on Bedrock and Google Cloud. Not on the price page as read
+    // on 2026-11-09, so it keeps the date it carried before that reading.
     prefix: 'claude-3-5-haiku',
-    pricing: { inputPerMillion: 0.80, outputPerMillion: 4, cacheWritePerMillion: 1, cacheReadPerMillion: 0.08, currency: 'USD', asOf: ANTHROPIC_PRICING_LAST_VERIFIED },
+    pricing: { inputPerMillion: 0.80, outputPerMillion: 4, cacheWritePerMillion: 1, cacheReadPerMillion: 0.08, currency: 'USD', asOf: '2026-10-19' },
   },
   {
     // Fully retired: the last published rate, not a current one.
