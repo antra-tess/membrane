@@ -328,8 +328,9 @@ describe('completions that arrive after the lineage moved on', () => {
     const a = wire('claude-m', 'A');
     const b = wire('claude-m', 'B');
     const { ka, sent, events } = setup((payload) => {
-      if (systemOf(payload) === 'A' && !rejectFirst) {
-        return new Promise((_resolve, reject) => { rejectFirst = reject; });
+      if (systemOf(payload) === 'A') {
+        if (!rejectFirst) return new Promise((_resolve, reject) => { rejectFirst = reject; });
+        throw failure();
       }
       return hit;
     }, { refreshAfterMs: 10 * MIN, checkIntervalMs: MIN, maxConsecutiveErrors: 1 });
@@ -343,9 +344,9 @@ describe('completions that arrive after the lineage moved on', () => {
     await vi.advanceTimersByTimeAsync(10 * MIN);
 
     expect(sent.map((s) => `${s.at / MIN} ${s.system}`)).toEqual(['10 A', '17 B', '21 A']);
-    expect(events.filter((event) => event.type === 'skipped' || event.type === 'disabled')).toEqual([]);
-    expect(trail(events, a)).toEqual(['error 1', 'refreshed']);
-    expect(ka.getStatus().map((s) => s.key).sort()).toEqual([lineageKey(a), lineageKey(b)].sort());
+    expect(trail(events, a)).toEqual(['error 1', 'error 1', 'skipped failure-cap']);
+    expect(trail(events, b)).toEqual(['refreshed']);
+    expect(ka.getStatus().map((s) => s.key)).toEqual([lineageKey(b)]);
   });
 
   it('a record() made from an error event is kept: the cap retires only the lineage that reached it', async () => {

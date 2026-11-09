@@ -78,7 +78,10 @@ export type KeepaliveEvent =
    *  `wait-past-expiry` (a provider's wait for its model ends at or after that
    *  hour). */
   | { type: 'skipped'; key: string; reason: string }
-  /** A poke failed; `consecutive` counts its lineage's failed pokes in a row. */
+  /** A poke failed; `consecutive` counts the failed pokes in a row of the
+   *  snapshot it replayed. A real request recorded while the poke was under way
+   *  replaces or drops that snapshot: the poke's failure then counts on the old
+   *  one, and drops nothing at the cap. */
   | { type: 'error'; key: string; error: string; consecutive: number }
   /** The whole keepalive disabling itself. Not emitted: a failure retires
    *  only its own lineage (`skipped`). */
@@ -127,7 +130,8 @@ export interface CacheKeepaliveConfig {
   /** Report background calls to the same ledger as foreground inference.
    * Invoked once on success (including ineffective responses) or failure.
    * Observer errors are isolated, and returned promises never delay the loop.
-   * A lineage makes no call or receipt once it's skipped or expired.
+   * A lineage starts no call once it's skipped or expired; a call already under
+   * way still reports its receipt.
    * Poke serialization failures are reported through onEvent before any sender invocation. */
   onCall?: (call: KeepaliveCall) => void | Promise<void>;
 }
