@@ -22,6 +22,7 @@ import {
 import { errorFromThrown, systemChangeRefusedError } from '../types/errors.js';
 import { stripEmptyTextAfterPassthrough } from '../utils/empty-text.js';
 import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, streamIndex, isEventObject, isToolCallBlock, isToolCallArgumentsDelta, progressOfAnthropicEvent, callerAbort } from './utils.js';
+import { parseKeepingLongIntegers } from '../utils/long-integers.js';
 import {
   INTERLEAVED_THINKING_BETA,
   THINKING_BINDING_BETA,
@@ -541,7 +542,7 @@ export class BedrockAdapter implements ProviderAdapter {
       throw errorFromHttpResponse(this.name, response, await response.text(), rawRequest);
     }
 
-    return response.json() as Promise<BedrockMessageResponse>;
+    return parseKeepingLongIntegers(await response.text()) as BedrockMessageResponse;
   }
 
   private async invokeModelWithStream(
@@ -710,7 +711,8 @@ export class BedrockAdapter implements ProviderAdapter {
                 for (let i = 0; i < binaryStr.length; i++) {
                   bytes[i] = binaryStr.charCodeAt(i);
                 }
-                decoded = JSON.parse(new TextDecoder().decode(bytes));
+                // A content_block_start can carry a tool call's arguments itself, so long integers keep their digits here too.
+                decoded = parseKeepingLongIntegers(new TextDecoder().decode(bytes));
                 skipped = 'bytes that decode to no object';
               }
             } catch (e) {
