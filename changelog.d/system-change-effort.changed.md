@@ -14,7 +14,7 @@
   request ending on an assistant turn after an effort change, which earlier releases sent as a prefill
   without the effort, is now refused, and a prefill can carry its effort at the top level instead. Its
   `cacheBreakpoint`, or a boundary at its place, goes on the last block that can hold one and comes from
-  a message before it. The
+  a message before it, or from a turn the formatter puts ahead of every message. The
   API's refusals of it, on a model without per-turn effort and on a thinking setting that fixes the
   effort, are marked `systemChangeRefused`, as is a request carrying it through a formatter that doesn't
   render system changes or an adapter that doesn't send them, Bedrock's included, before sending, unless
