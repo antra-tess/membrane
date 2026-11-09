@@ -13,7 +13,8 @@
   or text before the block that named the tag. In `stream()` and the event
   stream the earlier tag may be in an earlier turn. `complete()` reads only
   the new output, so it refuses such a block only when the earlier tag is in
-  that output.
+  that output. A model that names the tag in text before every block is
+  refused each time, and the sentence it gets says why.
   Each named invoke opener in a refused block becomes a call marked
   `unparseableInput` (the block's raw text) with `input` `{}` and a new
   `unparseableReason`: a sentence an executor can give the model, which says
