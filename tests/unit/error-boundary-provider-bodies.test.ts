@@ -653,6 +653,38 @@ describe('a context overflow keeps the prompt count its refusal states, as a num
     expect(error.promptTokens).toBeUndefined();
   });
 
+  it("openai's long form, \"… However, your messages resulted in N tokens.\", states N", async () => {
+    stubHttpFailure(400, {
+      error: {
+        message: "This model's maximum context length is 128000 tokens. However, your messages resulted in 130112 tokens. Please reduce the length of the messages.",
+        type: 'invalid_request_error',
+        code: 'context_length_exceeded',
+      },
+    });
+    const error = await failure(new OpenAIAdapter({ apiKey: 'zz-key-openai' }));
+    expect(error.type).toBe('context_length');
+    expect(error.promptTokens).toBe(130112);
+  });
+
+  it("openai's older form, \"However, you requested N tokens (… in the messages, … in the completion)\", states no count of the prompt alone", async () => {
+    stubHttpFailure(400, {
+      error: {
+        message: "This model's maximum context length is 4097 tokens. However, you requested 4200 tokens (3200 in the messages, 1000 in the completion). Please reduce the length of the messages or completion.",
+        code: 'context_length_exceeded',
+      },
+    });
+    const error = await failure(new OpenAIAdapter({ apiKey: 'zz-key-openai' }));
+    expect(error.type).toBe('context_length');
+    expect(error.promptTokens).toBeUndefined();
+  });
+
+  it("openai's current form, \"Your input exceeds the context window of this model\", states no count", async () => {
+    stubHttpFailure(400, { error: { message: 'Your input exceeds the context window of this model. Please adjust your input and try again.', code: 'context_length_exceeded' } });
+    const error = await failure(new OpenAIAdapter({ apiKey: 'zz-key-openai' }));
+    expect(error.type).toBe('context_length');
+    expect(error.promptTokens).toBeUndefined();
+  });
+
   it("openai: \"This model's maximum context length is M tokens.\" states no count", async () => {
     stubHttpFailure(400, { error: { message: "This model's maximum context length is 128000 tokens.", code: 'context_length_exceeded' } });
     const error = await failure(new OpenAIAdapter({ apiKey: 'zz-key-openai' }));
