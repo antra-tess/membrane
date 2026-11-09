@@ -9,5 +9,5 @@
   `anthropic-version` headers are saved, a request holding what looks like a
   credential (such as `mcp_servers[].authorization_token`) stays in memory
   only, and the file is written atomically with mode 0600. One keepalive per
-  file. New `KeepaliveEvent`s: `restored`, `persist-error` and
-  `not-persisted`.
+  file; `CacheKeepalive#persistPath` says which file it is saving to. New
+  `KeepaliveEvent`s: `restored`, `persist-error` and `not-persisted`.
