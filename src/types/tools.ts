@@ -56,7 +56,8 @@ export interface ToolCall {
    * Present only with `unparseableInput`: why `input` isn't the model's
    * arguments, as a sentence an executor can give the model. Set on every
    * call of an XML-mode function_calls block refused whole
-   * (ToolUseContent.unparseableInput says when one is).
+   * (ToolUseContent.unparseableInput says when one is), and kept as given
+   * where an adapter marks a call with a sentence of its own.
    */
   unparseableReason?: string;
 }

@@ -175,7 +175,7 @@ class ReasonedToolCallAdapter extends TruncatedToolCallAdapter {
 }
 
 describe('an adapter\'s tool_use block that carries unparseableReason', () => {
-  it('keeps it on the stream path\'s content and call', async () => {
+  it('keeps it on the stream path\'s content', async () => {
     const response: any = await new Membrane(new ReasonedToolCallAdapter()).stream(createRequest(), { onChunk: () => {} });
     const toolUse = response.content.find((b: any) => b.type === 'tool_use');
     expect(toolUse.unparseableInput).toBe(truncatedArguments);

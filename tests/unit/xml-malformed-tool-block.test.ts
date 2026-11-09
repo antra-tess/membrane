@@ -22,7 +22,6 @@ const OPEN = '<' + 'function_calls>';
 const CLOSE = '</' + 'function_calls>';
 const block = (inner: string): string => `${OPEN}\n${inner}\n${CLOSE}`;
 
-// What the parser escapes in a result (tool-parser.ts STRUCTURAL_TAG_RE): a reason must match none of it.
 const STRUCTURAL_TAG = /<\/?(?:antml:)?(?:function_calls|function_results|invoke|result|stdout|error|tool_name)\b/;
 const SECRET = 'zzsecretvalue';
 
@@ -202,7 +201,33 @@ describe('names hold no tag text, and the reasons say what broke', () => {
   it('prose holding a < outside the invokes refuses the block', () => {
     const calls = parseToolCalls(block(`zz if a < b\n<invoke name="zz_first"/>`))!.calls;
     expect(calls.map((c) => [c.name, c.input])).toEqual([['zz_first', {}]]);
-    expect(calls[0]!.unparseableReason).toContain('a stray tag stands outside every invoke');
+    expect(calls[0]!.unparseableReason).toBe('a less-than sign stands outside every invoke, before the first invoke');
+  });
+
+  it('an invoke opener inside an open invoke is named as coming before that invoke closes', () => {
+    const calls = parseToolCalls(block(`<invoke name="zz_a"><invoke name="zz_b"/></invoke>`))!.calls;
+    expect(calls.map((c) => c.name)).toEqual(['zz_a', 'zz_b']);
+    expect(calls[0]!.unparseableReason).toBe('invoke 1 (zz_a) has no closing invoke tag before invoke 2 opens');
+  });
+
+  it('every block re-anchored past an earlier opening tag is refused, whatever that earlier block held', () => {
+    for (const earlier of ['<invok name="zz_lost"/>', '<invoke-other/>', '']) {
+      const text = `${OPEN}\n${earlier}\n${block('<invoke name="zz_run"/>')}`;
+      for (const calls of Object.values(marked(text))) {
+        expect(calls.map((c) => [c.name, c.input])).toEqual([['zz_run', {}]]);
+        expect(calls[0]!.unparseableReason).toBe(LEFT_OPEN_REASON);
+      }
+    }
+  });
+
+  it('an invoke name holding a line terminator refuses the block, so no later call runs in its place', () => {
+    for (const terminator of ['\n', '\r', '\u2028', '\u2029']) {
+      const text = block(`<invoke name="zz_a${terminator}b"/>\n<invoke name="zz_second"/>`);
+      for (const calls of Object.values(marked(text))) {
+        expect(calls.map((c) => c.name)).toEqual(['zz_second']);
+        expect(calls[0]!.unparseableInput).toBe(text);
+      }
+    }
   });
 
   it('an opener the parser can\'t read is named by its place among the invoke openers', () => {
@@ -300,6 +325,22 @@ class ScriptedAdapter implements ProviderAdapter {
   }
 }
 
+class AbortingAdapter extends ScriptedAdapter {
+  override async stream(request: ProviderRequest, callbacks: StreamCallbacks, options?: ProviderRequestOptions): Promise<ProviderResponse> {
+    if (options?.signal?.aborted) throw options.signal.reason;
+    return super.stream(request, callbacks, options);
+  }
+}
+
+class RequestRecordingAdapter extends ScriptedAdapter {
+  readonly requests: ProviderRequest[] = [];
+
+  override async stream(request: ProviderRequest, callbacks: StreamCallbacks, options?: ProviderRequestOptions): Promise<ProviderResponse> {
+    this.requests.push(request);
+    return super.stream(request, callbacks, options);
+  }
+}
+
 class RecordingLogger implements MembraneLogger {
   readonly warnings: string[] = [];
   debug(): void {}
@@ -321,7 +362,7 @@ function request(): NormalizedRequest {
   };
 }
 
-const LEFT_OPEN_REASON = 'a function_calls opening tag came before an earlier function_calls block holding an invoke was closed, whether that block was cut off or a value held the tag';
+const LEFT_OPEN_REASON = 'a function_calls opening tag came before an earlier function_calls block was closed, whether that block was cut off or a value held the tag';
 
 const refusedTurn = `zz calling\n${OPEN}\n<invoke name="zz_write"><parameter name="path">a.txt</paramter>\n<parameter name="body">${SECRET}</parameter></invoke>\n`;
 
@@ -378,9 +419,106 @@ describe('the XML tool loops hand a refused block to the host as an ordinary rou
     config: { model: 'zz-test-model', maxTokens: 64 },
     tools: [write],
   });
-  const usesOf = (content: ContentBlock[]) => content
-    .filter((b): b is Extract<ContentBlock, { type: 'tool_use' }> => b.type === 'tool_use')
-    .map((u) => [u.name, u.unparseableReason ?? null]);
+  const marksOf = (calls: Array<{ name: string; input: unknown; unparseableInput?: string; unparseableReason?: string }>) =>
+    calls.map((c) => [c.name, c.input, c.unparseableInput ?? null, c.unparseableReason ?? null]);
+  const usesOf = (content: ContentBlock[]) => marksOf(content.filter((b): b is Extract<ContentBlock, { type: 'tool_use' }> => b.type === 'tool_use'));
+  const refuseAll = (calls: ToolCall[]) => calls.map((c) => ({ toolUseId: c.id, content: 'zz refused', isError: true }));
+  const viaStream = async (req: NormalizedRequest, texts: string[]) => {
+    const received: ToolCall[] = [];
+    const response = await new Membrane(new ScriptedAdapter(texts), { logger: new RecordingLogger() }).stream(req, {
+      onToolCalls: async (calls) => {
+        received.push(...calls);
+        return refuseAll(calls);
+      },
+    });
+    if (!('details' in response)) throw new Error('expected a completed response');
+    return { received, content: response.content };
+  };
+  const viaEvents = async (req: NormalizedRequest, texts: string[]) => {
+    const stream = new Membrane(new ScriptedAdapter(texts), { logger: new RecordingLogger() }).streamYielding(req);
+    const received: ToolCall[] = [];
+    let content: ContentBlock[] = [];
+    for await (const event of stream) {
+      if (event.type === 'tool-calls') {
+        received.push(...event.calls);
+        stream.provideToolResults(refuseAll(event.calls));
+      }
+      if (event.type === 'complete') content = event.response.content;
+    }
+    return { received, content };
+  };
+  const abortAfterDispatch = async (path: string, req: NormalizedRequest, texts: string[]) => {
+    const controller = new AbortController();
+    const membrane = new Membrane(new AbortingAdapter(texts), { logger: new RecordingLogger() });
+    const received: ToolCall[] = [];
+    if (path === 'stream()') {
+      const response = await membrane.stream(req, {
+        signal: controller.signal,
+        onToolCalls: async (calls) => {
+          received.push(...calls);
+          controller.abort();
+          return refuseAll(calls);
+        },
+      });
+      if (!('aborted' in response)) throw new Error('expected an aborted response');
+      return { received, content: response.partialContent ?? [] };
+    }
+    const stream = membrane.streamYielding(req, { signal: controller.signal });
+    let content: ContentBlock[] = [];
+    for await (const event of stream) {
+      if (event.type === 'tool-calls') {
+        received.push(...event.calls);
+        stream.provideToolResults(refuseAll(event.calls));
+        controller.abort();
+      }
+      if (event.type === 'aborted') content = event.partialContent ?? [];
+    }
+    return { received, content };
+  };
+  const continuedTurn = (partial: string): NormalizedRequest => ({
+    toolMode: 'xml',
+    messages: [
+      { participant: 'User', content: [{ type: 'text', text: 'go' }] },
+      { participant: 'Claude', content: [{ type: 'text', text: partial }] },
+    ],
+    config: { model: 'zz-test-model', maxTokens: 64 },
+    tools: [write],
+  });
+
+  for (const [path, run] of [['stream()', viaStream], ['the event stream', viaEvents]] as const) {
+    it(`continuing a turn inside a block whose earlier part holds a stray tag, ${path} stores the call as dispatch marked it`, async () => {
+      const { received, content } = await run(continuedTurn(`zz calling\n${OPEN}\n<invoke name="zz_a"/>\n<zz_bad/>\n`), [`<invoke name="zz_b"/>\n`]);
+      expect(received.map((c) => c.name)).toEqual(['zz_a', 'zz_b']);
+      expect(received.every((c) => c.unparseableReason !== undefined)).toBe(true);
+      expect(usesOf(content)).toEqual(marksOf(received.filter((c) => c.name === 'zz_b')));
+    });
+
+    it(`continuing a turn inside a block whose earlier part holds a stray tag, ${path} aborted after dispatch keeps the call as dispatch marked it`, async () => {
+      const { received, content } = await abortAfterDispatch(path, continuedTurn(`zz calling\n${OPEN}\n<invoke name="zz_a"/>\n<zz_bad/>\n`), [`<invoke name="zz_b"/>\n`]);
+      expect(received.map((c) => c.name)).toEqual(['zz_a', 'zz_b']);
+      expect(usesOf(content)).toEqual(marksOf(received.filter((c) => c.name === 'zz_b')));
+    });
+
+    it(`continuing a block an earlier turn left open with nothing wrong in it, ${path} stores no refusal dispatch didn't make`, async () => {
+      const { received, content } = await run(continuedTurn(`zz calling\n${OPEN}\n`), [`<invoke name="zz_write"><parameter name="path">zz.txt</parameter></invoke>\n`]);
+      expect(marksOf(received)).toEqual([['zz_write', { path: 'zz.txt' }, null, null]]);
+      expect(usesOf(content)).toEqual(marksOf(received));
+    });
+  }
+
+  it('after a turn cut inside an invoke, the refusal goes back to the model and its resend runs', async () => {
+    const adapter = new RequestRecordingAdapter([`zz again\n${OPEN}\n<invoke name="zz_rm"/>\n`, `zz resend\n${OPEN}\n<invoke name="zz_rm"/>\n`]);
+    const rounds: ToolCall[][] = [];
+    await new Membrane(adapter, { logger: new RecordingLogger() }).stream(afterCutTurn(), {
+      onToolCalls: async (calls) => {
+        rounds.push(calls);
+        return calls.map((c) => ({ toolUseId: c.id, content: c.unparseableReason === undefined ? 'zz ran' : 'zz refused', isError: c.unparseableReason !== undefined }));
+      },
+    });
+    expect(rounds.map((calls) => marksOf(calls).map(([name, , , reason]) => [name, reason]))).toEqual([[['zz_rm', LEFT_OPEN_REASON]], [['zz_rm', null]]]);
+    expect(adapter.requests.length).toBeGreaterThanOrEqual(2);
+    expect(JSON.stringify(adapter.requests[1])).toContain('zz refused');
+  });
 
   it('after an earlier turn cut inside an invoke, stream() marks the call in its content as dispatch marked it', async () => {
     const received: ToolCall[] = [];
@@ -392,7 +530,7 @@ describe('the XML tool loops hand a refused block to the host as an ordinary rou
     });
     if (!('details' in response)) throw new Error('expected a completed response');
     expect(received.map((c) => [c.name, c.unparseableReason ?? null])).toEqual([['zz_rm', LEFT_OPEN_REASON]]);
-    expect(usesOf(response.content)).toEqual([['zz_rm', LEFT_OPEN_REASON]]);
+    expect(usesOf(response.content)).toEqual(marksOf(received));
   });
 
   it('after an earlier turn cut inside an invoke, the event stream marks the call in its final content as its tool-calls event did', async () => {
@@ -407,7 +545,7 @@ describe('the XML tool loops hand a refused block to the host as an ordinary rou
       if (event.type === 'complete') content = event.response.content;
     }
     expect(received.map((c) => [c.name, c.unparseableReason ?? null])).toEqual([['zz_rm', LEFT_OPEN_REASON]]);
-    expect(usesOf(content)).toEqual([['zz_rm', LEFT_OPEN_REASON]]);
+    expect(usesOf(content)).toEqual(marksOf(received));
   });
 
   it('complete() returns the same marked calls', async () => {
@@ -445,6 +583,24 @@ describe('stored turns replay as before', () => {
     });
   }
 
+  it('a block the old parser stored more calls from than the new one gives replays once', () => {
+    const text = block(`<invoke name="zz_a<b"/>\n<invoke name="zz_c<d"/>`);
+    const stored: ContentBlock[] = [
+      { type: 'tool_use', id: 'zz_t1', name: 'zz_a<b', input: {}, rawXml: text },
+      { type: 'tool_use', id: 'zz_t2', name: 'zz_c<d', input: {}, rawXml: text },
+      { type: 'tool_result', toolUseId: 'zz_t1', content: 'zz ran 1', isError: false },
+      { type: 'tool_result', toolUseId: 'zz_t2', content: 'zz ran 2', isError: false },
+    ];
+    expect(occurrences(render(stored), text)).toBe(1);
+  });
+
+  it('a refused block after one left open replays once', () => {
+    const later = block(`<invoke name="zz_x\ny"/>\n<invoke name="zz_b"/>`);
+    const { blocks, toolCalls } = parseAccumulatedIntoBlocks(`zz calling\n${OPEN}\n<invoke name="zz_old"/>\n${later}`);
+    const results: ContentBlock[] = toolCalls.map((c) => ({ type: 'tool_result', toolUseId: c.id, content: `zz refused ${c.name}`, isError: true }));
+    expect(occurrences(render([...blocks, ...results]), later)).toBe(1);
+  });
+
   it('a turn stored before the change, whose call the old parser re-anchored, replays its block once and unchanged', () => {
     const text = block(malformed[6]![1]);
     const stored: ContentBlock[] = [
@@ -455,5 +611,66 @@ describe('stored turns replay as before', () => {
     const rendered = render(stored);
     expect(occurrences(rendered, text)).toBe(1);
     expect(rendered).toContain('zz ran');
+  });
+});
+
+describe('the strict walk and the invoke regexes read every block the walk accepts alike', () => {
+  const random = (seed: number) => () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const next = random(254);
+  const pick = <T,>(items: readonly T[]): T => items[Math.floor(next() * items.length)]!;
+  const some = (items: readonly string[], most: number): string => Array.from({ length: Math.floor(next() * (most + 1)) }, () => pick(items)).join('');
+  const nameParts = ['a', 'b', '_', '1', ' ', '-', '.', '/', '=', '"', "'", '<', '>', '\n', '\r', '\u2028', '\u2029', '\t'];
+  const valueParts = ['zz', ' ', '\n', 'a < b', '>', '"', "'", '<invoke name="zz_x">', '<invoke name="zz_y"/>', '</invoke>', '<parameter name="zz_q">', '</parameter>', '<invoke name="zz_z"/>', '<function_results>', '<br>'];
+  const proseParts = ['', '', '\n', ' zz note ', ' a < b ', '\n\n'];
+
+  it('a block the walk accepts gives the calls it was written with; a block it refuses gives only marked calls', () => {
+    let compared = 0;
+    let refused = 0;
+    for (let round = 0; round < 20000; round++) {
+      const written: Array<{ name: string; parameters: string[] }> = [];
+      let asWritten = true;
+      let inner = some(proseParts, 1);
+      const invokes = 1 + Math.floor(next() * 3);
+      for (let k = 0; k < invokes; k++) {
+        const quote = pick(['"', "'"]);
+        const prefix = pick(['', 'antml:']);
+        const name = `zz${some(nameParts, 2)}`;
+        if (name.includes(quote)) asWritten = false;
+        const parameters: string[] = [];
+        let body = '';
+        const count = Math.floor(next() * 3);
+        for (let j = 0; j < count; j++) {
+          const parameter = `p${some(nameParts, 2)}`;
+          if (parameter.includes('"')) asWritten = false;
+          parameters.push(parameter);
+          const value = some(valueParts, 3);
+          if (value.includes('</')) asWritten = false;
+          body += `<${prefix}parameter name="${parameter}">${value}</${prefix}parameter>${pick(['', '\n'])}`;
+        }
+        inner += count === 0 && next() < 0.5
+          ? `<${prefix}invoke name=${quote}${name}${quote}/>`
+          : `<${prefix}invoke name=${quote}${name}${quote}>${body}</${prefix}invoke>`;
+        inner += some(proseParts, 1);
+        written.push({ name, parameters });
+      }
+      const text = block(inner);
+      for (const calls of [parseToolCalls(text)?.calls ?? [], parseAccumulatedIntoBlocks(text).toolCalls]) {
+        if (calls.some((c) => c.unparseableInput !== undefined)) {
+          refused++;
+          expect(calls.every((c) => c.unparseableInput === text && c.unparseableReason !== undefined)).toBe(true);
+        } else {
+          if (!asWritten) continue;
+          compared++;
+          expect(calls.map((c) => [c.name, Object.keys(c.input)])).toEqual(written.map((w) => [w.name, w.parameters]));
+        }
+      }
+    }
+    expect(compared).toBeGreaterThan(2000);
+    expect(refused).toBeGreaterThan(2000);
   });
 });

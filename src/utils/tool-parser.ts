@@ -255,12 +255,12 @@ function collectInvokes(innerContent: string, tools?: ToolDefinition[]): ParsedI
 
 export type ToolBlockDefectKind = 'unclosed-invoke' | 'tag-in-value' | 'repeated-parameter' | 'text-in-invoke' | 'stray-tag' | 'left-open-block';
 
-const INVOKE_OPENER_AT = /<(?:antml:)?invoke\s+name=(["'])((?:(?!\1)[^<>])+)\1\s*(\/?)>/y;
+const INVOKE_OPENER_AT = /<(?:antml:)?invoke\s+name=(["'])((?:(?!\1)[^<>\n\r\u2028\u2029])+)\1\s*(\/?)>/y;
 const INVOKE_CLOSER_AT = /<\/(?:antml:)?invoke>/y;
 const PARAMETER_OPENER_AT = /<(?:antml:)?parameter\s+name="([^"<>]+)">/y;
 const PARAMETER_CLOSER = /<\/(?:antml:)?parameter>/g;
 const LOOSE_INVOKE_OPENER = /<(?:antml:)?invoke\s+name=/g;
-const NAMED_INVOKE_OPENER = /<(?:antml:)?invoke\s+name=(["'])((?:(?!\1)[^<>])+)\1/g;
+const NAMED_INVOKE_OPENER = /<(?:antml:)?invoke\s+name=(["'])((?:(?!\1)[^<>\n\r\u2028\u2029])+)\1/g;
 const TAG_IN_VALUE = /<(?:antml:)?(?:parameter|invoke)\s+name=|<\/(?:antml:)?invoke>/;
 const WHITESPACE_AT = /\s*/y;
 const NAMELESS_INVOKE_OPENER_AT = /^<(?:antml:)?invoke\b/;
@@ -289,7 +289,7 @@ function blockDefect(inner: string): { kind: ToolBlockDefectKind; reason: string
           return { kind: 'stray-tag', reason: `invoke ${invokes + 1}'s opening tag can't be read` };
         }
         const where = invokes === 0 ? 'before the first invoke' : `after invoke ${invokes}`;
-        return { kind: 'stray-tag', reason: `a stray tag stands outside every invoke, ${where}` };
+        return { kind: 'stray-tag', reason: `a less-than sign stands outside every invoke, ${where}` };
       }
       pos = next;
       continue;
@@ -308,8 +308,9 @@ function blockDefect(inner: string): { kind: ToolBlockDefectKind; reason: string
       }
       const parameter = at(PARAMETER_OPENER_AT, pos);
       if (!parameter) {
-        if (pos >= inner.length || at(INVOKE_OPENER_AT, pos)) {
-          return { kind: 'unclosed-invoke', reason: `${invoke} has no closing invoke tag` };
+        if (pos >= inner.length) return { kind: 'unclosed-invoke', reason: `${invoke} has no closing invoke tag` };
+        if (at(INVOKE_OPENER_AT, pos)) {
+          return { kind: 'unclosed-invoke', reason: `${invoke} has no closing invoke tag before invoke ${invokes + 1} opens` };
         }
         return { kind: 'text-in-invoke', reason: `${invoke} holds text outside its parameter elements` };
       }
@@ -336,25 +337,40 @@ function blockDefect(inner: string): { kind: ToolBlockDefectKind; reason: string
 
 const LEFT_OPEN = {
   kind: 'left-open-block',
-  reason: 'a function_calls opening tag came before an earlier function_calls block holding an invoke was closed, whether that block was cut off or a value held the tag',
+  reason: 'a function_calls opening tag came before an earlier function_calls block was closed, whether that block was cut off or a value held the tag',
 } as const;
 
+export interface ToolBlockVerdict {
+  defect?: { kind: ToolBlockDefectKind; reason: string };
+  raw: string;
+}
+
+function verdictOf(block: ResolvedToolBlock): ToolBlockVerdict {
+  const defect = block.wasSpliced ? LEFT_OPEN : blockDefect(block.innerContent);
+  return { ...(defect ? { defect } : {}), raw: block.fullMatch };
+}
+
 function callsOfBlock(
-  block: { innerContent: string; fullMatch: string; leftOpenInvoke: boolean },
+  block: ResolvedToolBlock,
   tools?: ToolDefinition[],
+  given?: ToolBlockVerdict,
 ): { calls: ParsedInvoke[]; defect?: ToolBlockDefectKind } {
-  const defect = block.leftOpenInvoke ? LEFT_OPEN : blockDefect(block.innerContent);
+  const { defect, raw } = given ?? verdictOf(block);
   if (!defect) return { calls: collectInvokes(block.innerContent, tools) };
   const names = [...block.innerContent.matchAll(NAMED_INVOKE_OPENER)].map((m) => m[2]!);
   return {
     calls: (names.length > 0 ? names : ['']).map((name) => ({
       name,
       input: {},
-      unparseableInput: block.fullMatch,
+      unparseableInput: raw,
       unparseableReason: defect.reason,
     })),
     defect: defect.kind,
   };
+}
+
+export function invokeOpenerCount(text: string): number {
+  return text.match(LOOSE_INVOKE_OPENER)?.length ?? 0;
 }
 
 
@@ -372,7 +388,6 @@ interface ResolvedToolBlock {
   innerContent: string;
   fullMatch: string;
   wasSpliced: boolean;
-  leftOpenInvoke: boolean;
   outerStart: number;
 }
 
@@ -395,7 +410,6 @@ function resolveToolBlock(text: string, blockMatch: RegExpExecArray): ResolvedTo
       innerContent,
       fullMatch: blockMatch[0],
       wasSpliced: false,
-      leftOpenInvoke: false,
       outerStart: blockMatch.index,
     };
   }
@@ -407,7 +421,6 @@ function resolveToolBlock(text: string, blockMatch: RegExpExecArray): ResolvedTo
     innerContent: innerContent.slice(innermostOpener.index + innermostOpener[0].length),
     fullMatch: text.slice(reanchoredStart, end),
     wasSpliced: true,
-    leftOpenInvoke: /<(?:antml:)?invoke\b/.test(innerContent.slice(0, innermostOpener.index)),
     outerStart: blockMatch.index,
   };
 }
@@ -772,8 +785,9 @@ function collectCandidateSpans(text: string): CandidateSpan[] {
   return spans;
 }
 
-export function leftOpenAcross(text: string, boundary: number): boolean {
-  return collectLiveToolBlocks(text).some((block) => block.outerStart < boundary && block.end > boundary && block.leftOpenInvoke);
+export function verdictAcross(text: string, boundary: number): ToolBlockVerdict | undefined {
+  const block = collectLiveToolBlocks(text).find((b) => b.outerStart < boundary && b.end > boundary);
+  return block ? verdictOf(block) : undefined;
 }
 
 function collectLiveToolBlocks(text: string): ResolvedToolBlock[] {
@@ -809,7 +823,7 @@ const LEGACY_ERROR_REGEX = /<error>\n?([\s\S]*?)\n?<\/error>/g;
 
 export function parseAccumulatedIntoBlocks(
   text: string,
-  options?: ToolParseOptions & { startInsideBlock?: 'thinking' | 'tool_call' | 'tool_result'; leftOpenAtStart?: boolean }
+  options?: ToolParseOptions & { startInsideBlock?: 'thinking' | 'tool_call' | 'tool_result'; startVerdict?: ToolBlockVerdict }
 ): {
   blocks: ContentBlock[];
   toolCalls: ToolCall[];
@@ -872,16 +886,15 @@ export function parseAccumulatedIntoBlocks(
     }
 
     if (span.kind === 'calls') {
-      const resolvedBlock = options?.startInsideBlock === 'tool_call' && options.leftOpenAtStart !== undefined && span.resolvedBlock.outerStart === 0
-        ? { ...span.resolvedBlock, leftOpenInvoke: options.leftOpenAtStart }
-        : span.resolvedBlock;
+      const resolvedBlock = span.resolvedBlock;
+      const given = options?.startInsideBlock === 'tool_call' && resolvedBlock.outerStart === 0 ? options.startVerdict : undefined;
       if (resolvedBlock.wasSpliced) splicedToolBlocks++;
       // Carried on each tool_use for verbatim prefill replay (antra-tess/membrane#36).
       const rawXml = resolvedBlock.fullMatch;
       const blockToolCalls: ContentBlock[] = [];
       const blockCalls: ToolCall[] = [];
 
-      const parsedInvokes = callsOfBlock(resolvedBlock, options?.tools);
+      const parsedInvokes = callsOfBlock(resolvedBlock, options?.tools, given);
       if (parsedInvokes.defect) malformedToolBlocks.push(parsedInvokes.defect);
       for (const invoke of parsedInvokes.calls) {
         const id = generateToolId();

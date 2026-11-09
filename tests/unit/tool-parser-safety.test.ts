@@ -108,12 +108,12 @@ describe('F3 · a truncated block spliced with a later round closer', () => {
     }
   });
 
-  it('a cut right after the function_calls opener splices as before: the live call runs', () => {
+  it('a cut right after the function_calls opener is refused once too, as every re-anchored block is', () => {
     const cutAtOpener = `zz_bot: calling now\n${FUNCTION_CALLS_OPEN}\n${interveningTurn}${realCall}`;
 
     for (const calls of [parseToolCalls(cutAtOpener)!.calls, parseAccumulatedIntoBlocks(cutAtOpener).toolCalls]) {
-      expect(calls.map((c) => [c.name, c.input])).toEqual([['zz_real_tool', { fld2: 'real value' }]]);
-      expect(calls[0]?.unparseableInput).toBeUndefined();
+      expect(calls.map((c) => [c.name, c.input])).toEqual([['zz_real_tool', {}]]);
+      expect(calls[0]?.unparseableReason).toContain('whether that block was cut off or a value held the tag');
     }
     expect(parseAccumulatedIntoBlocks(cutAtOpener).splicedToolBlocks).toBe(1);
   });

@@ -21,6 +21,7 @@ import {
   parseToolCalls as parseToolCallsXml,
   formatToolResults as formatToolResultsXml,
   parseAccumulatedIntoBlocks,
+  invokeOpenerCount,
   formatToolDefinitions,
   toolDefinitionForPrompt,
   toolResultImage,
@@ -123,7 +124,7 @@ function rawXmlGroupCapacity(rawXml: string, kind: 'results' | 'calls', memo: Ma
   let count = memo.get(rawXml);
   if (count === undefined) {
     const parsed = parseAccumulatedIntoBlocks(rawXml);
-    count = kind === 'results' ? parsed.toolResults.length : parsed.toolCalls.length;
+    count = kind === 'results' ? parsed.toolResults.length : Math.max(parsed.toolCalls.length, invokeOpenerCount(rawXml));
     memo.set(rawXml, count);
   }
   return count > 0 ? count : Infinity;
