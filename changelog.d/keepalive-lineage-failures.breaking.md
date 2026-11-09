@@ -14,10 +14,13 @@
     model's wait ends. A poke that fails with an error whose `retryAfterMs`
     is a finite positive number, as a `MembraneError` with a stated wait
     has, holds every lineage of that model until the wait has passed, new
-    lineages included. A lineage that falls
-    due an hour or more after its last real request or cache-reading poke is
-    dropped instead of sent (`cache-expired`), and so is one whose model's
-    wait lasts to that hour or beyond (`wait-past-expiry`).
+    lineages included. A lineage that falls due an hour or more after its
+    last real request or cache-reading poke is dropped instead of sent
+    (`cache-expired`), and so is one whose model's wait lasts to that hour
+    or beyond (`wait-past-expiry`). An ineffective poke doesn't count as a
+    read for that hour, so at the default `refreshAfterMs` a lineage is
+    dropped before a second ineffective poke, and `maxIneffective` above 1
+    has no effect there.
   - **Unchanged:** the replay's bytes and headers, lanes, `maxLineages`,
-    `maxIdleMs`, `maxIneffective`, one receipt per send, and `stop()` and
+    `maxIdleMs`, one receipt per send, and `stop()` and
     `enabled: false`.

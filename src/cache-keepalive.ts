@@ -110,7 +110,11 @@ export interface CacheKeepaliveConfig {
   maxConsecutiveErrors?: number;
   /**
    * The number of pokes of a lineage in a row coming back without a cache read
-   * (no read, or a write) at which the lineage is dropped. Default 2.
+   * (no read, or a write) at which the lineage is dropped. Default 2. An
+   * ineffective poke doesn't count as a cache read, so at the default
+   * `refreshAfterMs` the next poke would fall more than an hour after the last
+   * real request or cache-reading poke, and the lineage is dropped as
+   * `cache-expired` before a second ineffective poke is sent.
    */
   maxIneffective?: number;
   /** Each keepalive event as it happens. An error it throws is ignored. */
