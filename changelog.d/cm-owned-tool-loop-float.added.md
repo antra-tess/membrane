@@ -1,9 +1,7 @@
 - **`cacheMarkers: 'cm-owned'` callers:** a caller can now ask for the
   floating cache marker with `floatingCacheMarker: true`, on the request or as
   the config's `defaultFloatingCacheMarker`. Left unset, a `cm-owned` request
-  carries only the markers its caller placed, as before. A config that already
-  sets `defaultFloatingCacheMarker: true`, the default it documented before,
-  now turns the float, and the take, on for `cm-owned` requests too. When
+  carries only the markers its caller placed, as before. When
   asked for, the native tool loop's later requests carry the float on their
   newest message, and on the message before the round's calling turn when two
   or more slots are free and its block can carry one. It is placed after the
@@ -27,7 +25,7 @@
   the round's calling turn can be marked, when it ends in text. Where the
   float is placed, each later call then pays to write the part of its request
   it can't read: its newest round, once the turn's opening is cached. A later
-  read of that write needs a marker at the same TTL whose backward search
+  read of that write needs a marker whose backward search
   reaches it, within that TTL and with the prefix up to there unchanged: on
   the Claude API, the turn's next call can reach it across one round of tool
   calls, since the backward search checks 20 positions and counts a run of
@@ -44,12 +42,12 @@
   `cacheTtl` and every marker before it at 1h, a prompt-cache keepalive after
   such a turn refreshes through that float, so it keeps the turn's rounds warm
   too. A caller on context-manager's kv-unified strategy should ask for it
-  only with a context-manager release whose cache receipts leave a tool loop's
-  later calls out of its cache reference. With an older one, a floated call
+  only with context-manager 0.25.0 or later, whose cache receipts leave a tool
+  loop's later calls out of its cache reference. With an older one, a floated call
   whose marker count differs from the compile's clears kv-unified's cache
   reference, so its next compile weighs no cache costs, and one whose count
-  matches records its own wire receipt beside the reference the first call
-  set.
+  matches sets the reference again from the compile's layout, as the first
+  call did, and records its own wire receipt with it.
 - **Provider adapters:** `ProviderAdapter.sendsCacheMarkersOn` says which
   content blocks an adapter sends a `cache_control` marker on. A list of types
   narrows both where a float goes and the take to blocks of those types:

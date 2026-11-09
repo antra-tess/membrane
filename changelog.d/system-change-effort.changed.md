@@ -3,7 +3,7 @@
   `NativeFormatter` and `AnthropicAdapter` send it as a `role: 'system'` message with empty
   content and `output_config: { effort }`, with the beta `mid-conversation-output-config-2026-07-01`,
   so a caller changes effort without changing the request's top-level `output_config.effort`, which
-  would rewrite the cached prompt. Placed directly after a user turn with new input, it sets the effort
+  can rewrite the cached prompt. Placed directly after a user turn with new input, it sets the effort
   for the reply to that turn; anywhere else, from the next user turn with new input (Anthropic's effort
   documentation, "Change effort mid-conversation"). Unlike a change of tools or system text, it goes
   at its place, right after the turn holding the last block of a message before it: exactly there
