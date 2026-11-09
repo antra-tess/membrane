@@ -2,51 +2,48 @@
   tool result without its call, and a second result for a call that already
   has one, are left out of the request, never sent as text.
   `NormalizeEvent`'s `orphan_tool_result_textified` is now
-  `orphan_tool_result_dropped` (`toolUseId`), and `stray_tool_result_textified`
-  is now `stray_tool_result_dropped` (`toolUseId`, `reason`, and
-  `fromEnvelope` on the native path only, where it is set as before).
-  Neither carries `recoveredChars`, and `reason` gains `'answered'`, which
-  the builders without the normalizer's turns send. The Responses formatter
-  and `AnthropicXmlFormatter` in XML tool mode now report their drops through
+  `orphan_tool_result_dropped` (`toolUseId`, `'<missing>'` for a result with
+  no id or an empty one), and `stray_tool_result_textified` is now
+  `stray_tool_result_dropped` (`toolUseId`, `reason`, and `fromEnvelope` on
+  the native path only, where it is set as before). Neither carries
+  `recoveredChars`, and `reason` gains `'answered'`, which the builders
+  without the normalizer's turns send. The Responses formatter and
+  `AnthropicXmlFormatter` in XML tool mode now report their drops through
   `onNormalize` with these two events too, so a host hears each drop through
   one listener whatever its path. `NormalizeOptions.onBlockRewritten` is
-  gone: `onBlockDropped` hears each block left out, and `onBlockReplaced` each
-  block put in an input block's place.
+  gone: `onBlockDropped` hears each block left out, and `onBlockReplaced`
+  each block put in an input block's place.
   - **What a request carries now:** `NativeFormatter`, and
     `AnthropicXmlFormatter` in native tool mode, leave such a result out. A
-    cache marker it carried moves to the last cacheable block before it,
-    unless that block carries one already, and a user turn the drop empties
-    stays, holding the leading text (`prefillUserMessage`, else
-    `[continuing]`), so no request becomes a prefill and no two assistant
-    turns merge. A second result is left out even when it, not the first, was
-    the real output behind a placeholder. `AnthropicXmlFormatter` in XML tool
-    mode sends each result where the model reads it as its call's answer.
-    The transcript carries no ids: a result reads as answering the first not
-    yet answered of the latest calls, those made since the last result or user
-    turn the request keeps before them, of the tool its `<tool_name>` names
-    where that is its call's tool, or of any tool where it isn't, as with an
-    error, which goes out without one. Within a message's run of results, one
-    whose id names a call takes that call, and one whose id names no call
-    takes a call in its own message that no later result names, as a
-    generation parsed back from its text holds them. The run keeps the host's
-    order, except that a result that would read as another call's answer waits
-    until it reads as its own: results the model can't tell apart, of one tool
-    or without a name, go out in call order, rendered from their fields. A
-    result that never reads as its own is left out, and a kept result that
-    names a tool other than its call's goes out without the name. Each cycle
-    that reuses a call id gets its result. A breakpoint on a message that
-    leaves empty marks what came before it. On every path the round report
-    marks the message a result came from as altered.
+    cache marker it carried moves to the last cacheable block before it in
+    the messages, unless that block carries a marker of its own; with no
+    such block it goes with the result, and none moves onto the system
+    prompt. A user turn the drop empties stays, holding the leading text
+    (`prefillUserMessage`, else `[continuing]`), so no request becomes a
+    prefill and no two assistant turns merge. A second result is left out
+    even when it, not the first, was the real output behind a placeholder.
+    `AnthropicXmlFormatter` in XML tool mode sends a result only where the
+    model reads it as its own call's answer, by our reading of how a model
+    reads a transcript that carries no ids, which no run with a model has
+    tested; `withoutCalllessResults` in `src/formatters/anthropic-xml.ts`
+    says how, and when a result moves, goes without its name, or renders
+    from its fields. A breakpoint on a message that then shows nothing marks
+    the conversation text before it. On every path the round report marks
+    the message a result came from as altered.
   - **Prompt cache:** a stored history that holds such a result sends a
     different prefix once a host upgrades, so its first request after the
-    upgrade misses the prompt cache from that result on.
-  - **Migration:** a hook that matches the old kinds matches the new ones,
-    without `recoveredChars`; a switch over `reason` needs a case for
-    `'answered'`, and code that reads `fromEnvelope` must allow it absent. A
-    caller whose history gives each call one result, after it, in its call's
-    place, sees no difference.
-  - **Unchanged:** a result whose call is in the request, wherever the
-    normalizer moves it, and the `[pending]` result a call without one gets.
+    upgrade misses the prompt cache from that result on. In XML tool mode,
+    so does one that stores results out of their calls' order where the
+    model can't tell them apart, or holds a result naming a tool other than
+    its call's.
+  - **Migration:** a hook that matches the old kinds has to match the new
+    ones instead, without `recoveredChars`; a switch over `reason` needs a
+    case for `'answered'`, and code that reads `fromEnvelope` must allow it
+    absent. A caller whose history gives each call one result, after it, in
+    its call's place, naming its call's tool, sees no difference.
+  - **Unchanged:** on the native path, the first result for a call in the
+    request, wherever the normalizer moves it, and the `[pending]` result a
+    call without one gets.
   - **Siblings:** none of agent-framework, connectome-host and
     context-manager reads these events or options at runtime, so every
     release of each copes. context-manager's tests name the old kinds, so

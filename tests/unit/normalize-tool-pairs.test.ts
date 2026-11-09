@@ -762,12 +762,11 @@ describe('normalizeToolPairs', () => {
       expect(out.messages.flatMap((m) => m.content).filter((b) => b.cache_control)).toEqual([{ type: 'text', text: 'go', cache_control: marker }]);
     });
 
-    it('lets the marker go when the block before it carries one inside its content', () => {
+    it('moves the marker onto the block before it though that block carries one inside its content, which the wire doesn\'t send', () => {
       const earlier = { type: 'ephemeral' };
       const kept = { ...r('ite1'), content: [{ type: 'text', text: 'payload', cache_control: earlier }] } as ProviderBlock;
       const out = normalize([user(t('go')), assistant(u('ite1')), user(kept, { ...r('ite1', 'again'), cache_control: marker })]);
-      expect(JSON.stringify(out.messages).match(/cache_control/g)).toHaveLength(1);
-      expect(out.messages.at(-1)!.content).toEqual([kept]);
+      expect(out.messages.at(-1)!.content).toEqual([{ ...kept, cache_control: marker }]);
     });
 
     it('reads a missing block as cacheable, as the floating marker did before', () => {
@@ -1341,5 +1340,25 @@ describe('PREFIX_REWRITING_NORMALIZE_EVENT_KINDS', () => {
       'stray_tool_result_dropped',
       'synthetic_pending_result',
     ]);
+  });
+});
+
+describe('normalizeToolPairs: a pending result made earlier, and the missing id', () => {
+  it('reports no replacement for a dropped block by a [pending] result an earlier normalization made, which is an input block now', () => {
+    const first = normalize([user(t('go')), assistant(u('m1'))]);
+    const pending = first.messages[2]!.content[0]!;
+    expect(pending).toMatchObject({ type: 'tool_result', content: '[pending]' });
+    const replaced: Array<[ProviderBlock, ProviderBlock]> = [];
+    normalize(
+      [...first.messages.slice(0, 2), user(pending, r('zz-orphan'))],
+      { onBlockReplaced: (original, replacement) => replaced.push([original, replacement]) },
+    );
+    expect(replaced).toEqual([]);
+  });
+
+  it('reports a result with an empty id as missing one', () => {
+    const { events, onEvent } = collectEvents();
+    normalize([user(t('go')), assistant(t('ok')), user(r(''))], { onEvent });
+    expect(events.filter((e) => e.kind === 'orphan_tool_result_dropped')).toEqual([{ kind: 'orphan_tool_result_dropped', toolUseId: '<missing>' }]);
   });
 });

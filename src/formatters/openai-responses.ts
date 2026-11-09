@@ -13,7 +13,7 @@ import type {
   StreamEmission,
   StreamParser,
 } from './types.js';
-import { responsesToolOutput, unansweredToolOutputs } from '../providers/responses-input.js';
+import { responsesToolOutput, toolOutputCallId, unansweredToolOutputs } from '../providers/responses-input.js';
 
 import { imageForRequest, urlImageForRequest } from '../utils/image-media.js';
 import { convertMcpMedia } from '../utils/mcp-media.js';
@@ -88,7 +88,8 @@ export function responsesRawItemKey(rawItem: { type?: unknown; id?: unknown }): 
  * native or converted, whose call no input item carries is left out, and its
  * message reported altered: a result without its call is never sent, alone
  * or as text. So is one past as many outputs for a call id as there are
- * calls that carry it: the first outputs for a call are the ones sent.
+ * calls before it that carry it: the first outputs for a call are the ones
+ * sent (unansweredToolOutputs).
  */
 export class OpenAIResponsesFormatter implements PrefillFormatter {
   readonly name = 'openai-responses';
@@ -159,10 +160,10 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
     const sent = items.filter((item, index) => {
       const drop = unanswered.get(index);
       if (drop === undefined) return true;
-      const id = item.call_id;
+      const id = toolOutputCallId(item);
       options.onNormalize?.(drop === 'stray'
-        ? { kind: 'stray_tool_result_dropped', toolUseId: id as string, reason: 'answered' }
-        : { kind: 'orphan_tool_result_dropped', toolUseId: typeof id === 'string' && id !== '' ? id : '<missing>' });
+        ? { kind: 'stray_tool_result_dropped', toolUseId: id!, reason: 'answered' }
+        : { kind: 'orphan_tool_result_dropped', toolUseId: id ?? '<missing>' });
       options.fidelity?.alter(from[index]!);
       return false;
     });

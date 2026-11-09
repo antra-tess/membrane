@@ -151,6 +151,7 @@ export function normalizeToolPairs(
   const orphanRes = resolveOrphans(envelopes, pending, onEvent, drop);
   envelopes = orphanRes.envelopes;
   const ready = orphanRes.ready;
+  const synthesized = orphanRes.synthesized;
 
   envelopes = evictInterlopers(envelopes, onEvent);
 
@@ -500,7 +501,10 @@ type Drop = (
   event: NormalizeEvent,
 ) => void;
 
-/** A result's cache marker: its own, or else the last one inside its content, where a provider reads one too. */
+/**
+ * A dropped result's cache marker, as a textified result carried it: its
+ * own, or else the last one inside its content.
+ */
 function cacheMarkerOf(block: ProviderBlock): unknown {
   if (block.cache_control) return block.cache_control;
   const content = (block as { content?: unknown }).content;
@@ -520,8 +524,10 @@ export function isCacheableBlock(block: Record<string, unknown> | null | undefin
 /**
  * A dropped block's cache marker goes to the last cacheable block before it
  * that the wire keeps, so the request still caches the prefix the marker
- * asked for, unless that block carries a marker already, on itself or in its
- * content. With nothing such before it, the marker goes too.
+ * asked for, unless that block carries a marker of its own already. One
+ * inside its content doesn't count: the wire sends a block nested in a
+ * result without its marker. With nothing such before it in the messages,
+ * the marker goes too.
  */
 function moveCacheMarker(
   envelopes: Envelope[],
@@ -535,7 +541,7 @@ function moveCacheMarker(
     for (let k = blocks.length - 1; k >= 0; k--) {
       const target = blocks[k]!;
       if (!isCacheableBlock(target) || (target.type === 'text' && !hasNonEmptyText(target.text))) continue;
-      if (cacheMarkerOf(target)) return;
+      if (target.cache_control) return;
       const copy = { ...target, cache_control: marker };
       blocks[k] = copy;
       onBlockReplaced?.(target, copy);
@@ -658,6 +664,8 @@ function evictInterlopers(
 interface OrphanResolution {
   envelopes: Envelope[];
   ready: boolean;
+  /** The `[pending]` results this normalization made, which no input block is. */
+  synthesized: ReadonlySet<ProviderBlock>;
 }
 
 function resolveOrphans(
@@ -667,6 +675,7 @@ function resolveOrphans(
   drop: Drop,
 ): OrphanResolution {
   let ready = true;
+  const synthesized = new Set<ProviderBlock>();
 
   const allUseIds = new Set<string>();
   for (const env of envelopes) {
@@ -684,7 +693,7 @@ function resolveOrphans(
     for (const block of env.content) {
       const id = block.type === 'tool_result' ? getToolUseId(block) : undefined;
       if (block.type !== 'tool_result' || (typeof id === 'string' && allUseIds.has(id))) kept.push(block);
-      else drop(envelopes, i, kept, block, { kind: 'orphan_tool_result_dropped', toolUseId: id ?? '<missing>' });
+      else drop(envelopes, i, kept, block, { kind: 'orphan_tool_result_dropped', toolUseId: typeof id === 'string' && id !== '' ? id : '<missing>' });
     }
     env.content = kept;
   }
@@ -718,6 +727,7 @@ function resolveOrphans(
         continue;
       }
       const synth = syntheticToolResult(useId);
+      synthesized.add(synth);
       nextEnv.content.splice(callOrderInsertionIndex(nextEnv, useIds, useIdIndex), 0, synth);
       onEvent({
         kind: 'synthetic_pending_result',
@@ -727,7 +737,7 @@ function resolveOrphans(
     }
   }
 
-  return { envelopes, ready };
+  return { envelopes, ready, synthesized };
 }
 
 function callOrderInsertionIndex(
@@ -952,9 +962,6 @@ function removeFirstMatchingResult(
   return null;
 }
 
-/** The `[pending]` results the normalizer made, which no input block is. */
-const synthesized = new WeakSet<ProviderBlock>();
-
 function syntheticToolResult(toolUseId: string): ProviderBlock {
   const block: ProviderBlock = {
     type: 'tool_result',
@@ -962,7 +969,6 @@ function syntheticToolResult(toolUseId: string): ProviderBlock {
     content: '[pending]',
     is_error: false,
   };
-  synthesized.add(block);
   return block;
 }
 

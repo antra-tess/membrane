@@ -265,3 +265,53 @@ describe('the subscription adapter\'s own conversion of messages in normalized f
     expect(heard).toContain(orphan);
   });
 });
+
+describe('Responses: a local shell output, and a call id used again', () => {
+  const shellCall = { type: 'local_shell_call', id: 'lsc_1', call_id: 'call_1', action: { type: 'exec', command: ['ls'], env: {} }, status: 'completed' };
+  for (const [which, id] of [['call_id', 'call_1'], ['id', 'lsc_1']] as const) {
+    it(`sends a local_shell_call_output whose id is its call's ${which}, as it has no call_id`, () => {
+      const output = { type: 'local_shell_call_output', id, output: '{"output":"notes.txt"}' };
+      const { items, altered, events } = build([
+        { participant: 'Agent', content: [], metadata: { openaiResponsesItems: [shellCall] } },
+        { participant: 'User', content: [], metadata: { openaiResponsesItems: [output] } },
+      ]);
+      expect(items).toEqual([shellCall, output]);
+      expect(altered).toEqual([]);
+      expect(events).toEqual([]);
+    });
+  }
+
+  it('leaves out a local_shell_call_output whose id names no call, reporting that id', () => {
+    const output = { type: 'local_shell_call_output', id: 'lsc_9', output: '{}' };
+    const { items, events } = build([
+      { participant: 'Agent', content: [], metadata: { openaiResponsesItems: [shellCall] } },
+      { participant: 'User', content: [], metadata: { openaiResponsesItems: [output] } },
+    ]);
+    expect(items).toEqual([shellCall]);
+    expect(events).toEqual([{ kind: 'orphan_tool_result_dropped', toolUseId: 'lsc_9' }]);
+  });
+
+  it('judges a second output for a call id by the calls before it, so an id used again keeps the later call\'s output', () => {
+    const fc = (n: number) => ({ type: 'function_call', id: `fc_${n}`, call_id: 'x', name: 'read_file', arguments: '{}' });
+    const out = (output: string) => ({ type: 'function_call_output', call_id: 'x', output });
+    const { items, events } = build([
+      { participant: 'Agent', content: [], metadata: { openaiResponsesItems: [fc(1)] } },
+      { participant: 'User', content: [], metadata: { openaiResponsesItems: [out('first'), out('again')] } },
+      { participant: 'Agent', content: [], metadata: { openaiResponsesItems: [fc(2)] } },
+      { participant: 'User', content: [], metadata: { openaiResponsesItems: [out('second')] } },
+    ]);
+    expect(items).toEqual([fc(1), out('first'), fc(2), out('second')]);
+    expect(events).toEqual([{ kind: 'stray_tool_result_dropped', toolUseId: 'x', reason: 'answered' }]);
+  });
+
+  it('still sends one output stored ahead of its only call', () => {
+    const fc = { type: 'function_call', id: 'fc_1', call_id: 'y', name: 'read_file', arguments: '{}' };
+    const out = { type: 'function_call_output', call_id: 'y', output: 'early' };
+    const { items, events } = build([
+      { participant: 'User', content: [], metadata: { openaiResponsesItems: [out] } },
+      { participant: 'Agent', content: [], metadata: { openaiResponsesItems: [fc] } },
+    ]);
+    expect(items).toEqual([out, fc]);
+    expect(events).toEqual([]);
+  });
+});

@@ -21,39 +21,52 @@ export function isResponsesToolOutput(item: unknown): boolean {
 }
 
 /**
- * The tool outputs in `items` that are never sent, by position: one whose
- * `call_id` no call item carries, of any call type anywhere in the input,
- * or that names no call at all (`'orphan'`), and one past as many outputs
- * for a call id as there are calls that carry it (`'stray'`). A result
- * without its call is never sent, alone or as text, and the first outputs
- * for a call, in input order, are the ones sent. An id that is empty, or
- * not a string, names no call.
+ * The tool outputs in `items` that are never sent, by position: one that
+ * names no call that any call item carries, of any call type anywhere in the
+ * input, or that names no call at all (`'orphan'`), and one past as many
+ * outputs for a call id as there are calls before it that carry it
+ * (`'stray'`), counting one when none does, since an output may stand ahead
+ * of its call. A result without its call is never sent, alone or as text,
+ * and the first outputs for a call, in input order, are the ones sent. An
+ * output names its call by `call_id`, and a `local_shell_call_output`, which
+ * has none, by its `id`, as either id of a `local_shell_call`. An id that is
+ * empty, or not a string, names no call.
  */
 export function unansweredToolOutputs(items: readonly unknown[]): Map<number, 'orphan' | 'stray'> {
-  const calls = new Map<string, number>();
-  for (const item of items) {
-    const id = callIdOf(item);
-    if (id !== undefined && !isResponsesToolOutput(item)) calls.set(id, (calls.get(id) ?? 0) + 1);
-  }
+  const called = new Set<string>();
+  for (const item of items) if (!isResponsesToolOutput(item)) for (const id of callIdsOf(item)) called.add(id);
+  const before = new Map<string, number>();
   const answered = new Map<string, number>();
   const unanswered = new Map<number, 'orphan' | 'stray'>();
   items.forEach((item, index) => {
-    if (!isResponsesToolOutput(item)) return;
-    const id = callIdOf(item);
-    const count = id === undefined ? 0 : calls.get(id) ?? 0;
-    if (count === 0) {
+    if (!isResponsesToolOutput(item)) {
+      for (const id of callIdsOf(item)) before.set(id, (before.get(id) ?? 0) + 1);
+      return;
+    }
+    const id = toolOutputCallId(item);
+    if (id === undefined || !called.has(id)) {
       unanswered.set(index, 'orphan');
       return;
     }
-    const sent = answered.get(id!) ?? 0;
-    if (sent >= count) unanswered.set(index, 'stray');
-    else answered.set(id!, sent + 1);
+    const sent = answered.get(id) ?? 0;
+    if (sent >= Math.max(1, before.get(id) ?? 0)) unanswered.set(index, 'stray');
+    else answered.set(id, sent + 1);
   });
   return unanswered;
 }
 
-function callIdOf(item: unknown): string | undefined {
-  return isObject(item) && typeof item.call_id === 'string' && item.call_id !== '' ? item.call_id : undefined;
+/** The id a tool output names its call by, if it names one. */
+export function toolOutputCallId(item: unknown): string | undefined {
+  if (!isObject(item)) return undefined;
+  const id = item.type === 'local_shell_call_output' && item.call_id === undefined ? item.id : item.call_id;
+  return typeof id === 'string' && id !== '' ? id : undefined;
+}
+
+/** The ids a call item carries for its output to name. */
+function callIdsOf(item: unknown): string[] {
+  if (!isObject(item)) return [];
+  const ids = [item.call_id, item.type === 'local_shell_call' ? item.id : undefined];
+  return [...new Set(ids.filter((id): id is string => typeof id === 'string' && id !== ''))];
 }
 
 /**

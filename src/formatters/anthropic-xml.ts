@@ -92,14 +92,13 @@ export interface AnthropicXmlFormatterConfig extends FormatterConfig {
  * A kept result renders from its fields when its run was reordered, or when a
  * left-out result in any message shared its `rawXml`, since the raw text
  * holds the old order or the other result. `onEvent` hears each result left
- * out, and `onAltered` each message changed, and whether nothing of it is
- * left.
+ * out, and `onAltered` each message changed.
  */
 function withoutCalllessResults(
   messages: NormalizedMessage[],
   assistant: string,
   onEvent: (event: NormalizeEvent) => void,
-  onAltered: (index: number, emptied: boolean) => void,
+  onAltered: (index: number) => void,
 ): NormalizedMessage[] {
   const callIds = new Set<string>();
   for (const message of messages) {
@@ -128,9 +127,10 @@ function withoutCalllessResults(
   const carried = new Map<string, number>();
   const answered = new Map<string, number>();
   const released = new Set<string>();
-  // Kept results that name a tool other than their call's: they go out
-  // without the name, so they read back by place, as they were kept.
-  const unnamed = new Set<ContentBlock>();
+  // Per message, the places of kept results that name a tool other than
+  // their call's: they go out without the name, so they read back by place,
+  // as they were kept.
+  const unnamed = messages.map(() => new Set<number>());
   // Each message's blocks as they go out, by index: a run of results in the
   // order the model reads each as its own call's answer, without the ones left out.
   const orders = messages.map((message, i) => {
@@ -147,6 +147,10 @@ function withoutCalllessResults(
         continue;
       }
       if (first.type !== 'tool_result') {
+        // A user turn the request keeps ends the calls before it, from where
+        // it starts: the model reads a later results block against the calls
+        // of its own turn.
+        if (message.participant !== assistant && holdsTurnContent(first)) keptSince = true;
         order.push(j++);
         continue;
       }
@@ -201,21 +205,18 @@ function withoutCalllessResults(
         const block = content[at] as ToolResultContent;
         if (keptHere.includes(at)) {
           const misnamed = !block.isError && block.toolName !== undefined && block.toolName !== calls[placeOf.get(at)!]!.tool;
-          if (misnamed) unnamed.add(block);
+          if (misnamed) unnamed[i]!.add(at);
           if ((reordered || misnamed) && block.rawXml !== undefined) released.add(block.rawXml);
           continue;
         }
         const named = namedOf(at);
         onEvent(named !== undefined && (carried.get(named) ?? 0) > 0 && answered.get(named) === carried.get(named)
           ? { kind: 'stray_tool_result_dropped', toolUseId: named, reason: 'answered' }
-          : { kind: 'orphan_tool_result_dropped', toolUseId: typeof block.toolUseId === 'string' ? block.toolUseId : '<missing>' });
+          : { kind: 'orphan_tool_result_dropped', toolUseId: typeof block.toolUseId === 'string' && block.toolUseId !== '' ? block.toolUseId : '<missing>' });
         if (block.rawXml !== undefined) released.add(block.rawXml);
       }
       order.push(...keptHere);
     }
-    // A user turn the request keeps ends the calls before it: the model reads
-    // a later results block against the calls of its own turn.
-    if (message.participant !== assistant && content.some(holdsTurnContent)) keptSince = true;
     return order;
   });
 
@@ -225,7 +226,7 @@ function withoutCalllessResults(
     const content: ContentBlock[] = order.map((at) => {
       const block = message.content[at]!;
       if (block.type !== 'tool_result') return block;
-      if (unnamed.has(block)) {
+      if (unnamed[index]!.has(at)) {
         const { rawXml: _raw, rawXmlImagesAt: _at, toolName: _name, ...rendered } = block;
         changed = true;
         return rendered;
@@ -236,7 +237,7 @@ function withoutCalllessResults(
       return rendered;
     });
     if (!changed) return message;
-    onAltered(index, !holdsContent(content));
+    onAltered(index);
     return { ...message, content };
   });
 }
@@ -376,16 +377,16 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     const providerMessages: ProviderMessage[] = [];
     const joiner = this.config.messageDelimiter ? '' : '\n';
 
-    // Messages a dropped result left empty, whose breakpoints still apply.
-    const emptiedByDrop = new Set<number>();
+    // Messages the filter changed: one it leaves showing nothing keeps its breakpoint.
+    const filtered = new Set<number>();
     // A message that held a result keeps the continuation state it had, so a
     // drop doesn't fold the next assistant message into it, and the caller's
     // cache-marker check reads the message as the caller gave it.
     const given = messages;
     const heldResult = messages.map((message) => message.content.some((c) => c.type === 'tool_result'));
-    messages = withoutCalllessResults(messages, assistantParticipant, (event) => options.onNormalize?.(event), (index, emptied) => {
+    messages = withoutCalllessResults(messages, assistantParticipant, (event) => options.onNormalize?.(event), (index) => {
       options.fidelity?.alter(index);
-      if (emptied) emptiedByDrop.add(index);
+      filtered.add(index);
     });
 
     let currentConversation: string[] = [];
@@ -527,25 +528,30 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         currentConversation = [];
       };
 
+      // At a message the caller's check marks, the conversation so far goes as
+      // its own message, marked when caching.
+      const partConversation = () => {
+        if (currentConversation.length === 0) return;
+        if (promptCaching) {
+          markConversation();
+          return;
+        }
+        providerMessages.push({
+          role: 'assistant',
+          content: currentConversation.join(joiner),
+        });
+        currentConversation = [];
+      };
+
       if (isEmpty && !isLastMessage) {
         omitted();
-        // A breakpoint on a message a dropped result emptied marks what came before it.
-        if (emptiedByDrop.has(i) && currentConversation.length > 0 && promptCaching &&
-          (message.cacheBreakpoint || hasCacheMarker?.(given[i]!, i))) markConversation();
+        // A breakpoint on a message the filter left showing nothing marks the
+        // conversation before it.
+        if (filtered.has(i) && (hasCacheMarker?.(given[i]!, i) || (message.cacheBreakpoint && promptCaching))) partConversation();
         continue;
       }
 
-      if (hasCacheMarker && hasCacheMarker(given[i]!, i)) {
-        if (currentConversation.length > 0 && promptCaching) {
-          markConversation();
-        } else if (currentConversation.length > 0) {
-          providerMessages.push({
-            role: 'assistant',
-            content: currentConversation.join(joiner),
-          });
-          currentConversation = [];
-        }
-      }
+      if (hasCacheMarker && hasCacheMarker(given[i]!, i)) partConversation();
 
       const shouldInjectHere = toolInjectionIndex > 0 ? i >= toolInjectionIndex : i === 0;
       if (hasToolsForConversation && !toolsInjected && shouldInjectHere) {

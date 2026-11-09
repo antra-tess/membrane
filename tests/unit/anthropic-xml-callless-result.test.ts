@@ -453,3 +453,74 @@ describe('AnthropicXmlFormatter: a tool result that answers no call', () => {
     expect(rendered).not.toContain('zz-ghost');
   });
 });
+
+describe('AnthropicXmlFormatter: where a user turn starts, what a drop empties, and the missing id', () => {
+  it('ends a group of calls where the user turn starts inside a message, so a call after its text holds its own result', () => {
+    const { rendered, events } = build([
+      { participant: 'User', content: [text('look')] },
+      { participant: 'Agent', content: [call('a')] },
+      { participant: 'User', content: [text('and this one'), call('c'), result('c', 'zz-c')] },
+      { participant: 'Agent', content: [] },
+    ]);
+    expect(rendered).toContain('zz-c');
+    expect(events).toEqual([]);
+  });
+
+  it('sends a result object without its name only where it names a tool other than its call\'s, though the same object answers another call too', () => {
+    const shared = namedResult('a', 'search', 'zz-shared');
+    const { rendered } = build([
+      { participant: 'User', content: [text('look')] },
+      { participant: 'Agent', content: [named('a', 'read_file')] },
+      { participant: 'Tool', content: [shared] },
+      { participant: 'User', content: [text('and search')] },
+      { participant: 'Agent', content: [named('u', 'read_file'), named('a', 'search')] },
+      { participant: 'Tool', content: [shared] },
+      { participant: 'Agent', content: [] },
+    ]);
+    expect(rendered.match(/<tool_name>search<\/tool_name>/g)).toHaveLength(1);
+  });
+
+  for (const [kind, block] of [
+    ['blank text', text(' ')],
+    ['a thinking block', { type: 'thinking', thinking: 'a thought' }],
+    ['an image with a url source', { type: 'image', source: { type: 'url', url: 'https://example.com/a.png' } }],
+  ] as Array<[string, ContentBlock]>) {
+    it(`keeps the breakpoint of a message a drop leaves showing nothing, beside ${kind}, marking what came before it`, () => {
+      const { built } = build([
+        { participant: 'User', content: [text('go')] },
+        { participant: 'Agent', content: [text('zz-ok')] },
+        { participant: 'Tool', cacheBreakpoint: true, content: [block, result('call_9', 'zz-ghost')] },
+        { participant: 'User', content: [text('next')] },
+        { participant: 'Agent', content: [] },
+      ], true);
+      const marked = built.messages.flatMap((m) => (Array.isArray(m.content) ? m.content : []))
+        .filter((b: any) => b.cache_control);
+      expect(marked).toHaveLength(1);
+      expect((marked[0] as any).text).toContain('zz-ok');
+      expect((marked[0] as any).text).not.toContain('next');
+    });
+  }
+
+  it('without prompt caching, parts the conversation at a message a drop empties that the caller\'s check marks, as at any marked message', () => {
+    const marked = (message: NormalizedMessage) => message.content.some((block: any) => block.cache_control);
+    const built = new AnthropicXmlFormatter().buildMessages([
+      { participant: 'User', content: [text('go')] },
+      { participant: 'Agent', content: [text('zz-ok')] },
+      { participant: 'Tool', content: [{ ...result('call_9', 'zz-ghost'), cache_control: { type: 'ephemeral' } } as ContentBlock] },
+      { participant: 'User', content: [text('next')] },
+      { participant: 'Agent', content: [] },
+    ], { assistantParticipant: 'Agent', promptCaching: false, cacheMarkers: 'cm-owned', hasCacheMarker: marked } as any);
+    const holding = built.messages.find((m) => JSON.stringify(m.content).includes('zz-ok'))!;
+    expect(JSON.stringify(holding.content)).not.toContain('next');
+    expect(JSON.stringify(built.messages)).not.toContain('cache_control');
+  });
+
+  it('reports a result with an empty id as missing one', () => {
+    const { events } = build([
+      { participant: 'User', content: [text('look')] },
+      { participant: 'Tool', content: [result('', 'zz-ghost')] },
+      { participant: 'Agent', content: [] },
+    ]);
+    expect(events).toEqual([{ kind: 'orphan_tool_result_dropped', toolUseId: '<missing>' }]);
+  });
+});
