@@ -19,7 +19,7 @@ import {
 } from '../types/index.js';
 import { errorFromThrown } from '../types/errors.js';
 import { isRawItemCarrier } from '../utils/fidelity.js';
-import { toolUseInputFromText, textOnlyToolResultContent, openAIImagePart, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved, streamedToolCalls, isEventObject, callerAbort } from './utils.js';
+import { toolUseInputFromText, textOnlyToolResultContent, toolResultWireContent, type ToolResultWirePart, type ToolResultImageMode, openAIImagePart, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved, streamedToolCalls, isEventObject, callerAbort } from './utils.js';
 import { requiresCompletionTokens, noTemperatureSupport, noStopSupport } from './openai.js';
 import { convertMcpMedia } from '../utils/mcp-media.js';
 
@@ -99,6 +99,8 @@ interface OpenAIResponse {
   };
 }
 
+export type { ToolResultImageMode } from './utils.js';
+
 export interface OpenAICompatibleAdapterConfig {
   /** Base URL for the API (required, e.g., 'http://localhost:11434/v1') */
   baseURL: string;
@@ -114,6 +116,11 @@ export interface OpenAICompatibleAdapterConfig {
   
   /** Additional headers to include with requests */
   extraHeaders?: Record<string, string>;
+
+  /** How tool-result images are delivered. Default 'native'. Set
+   *  'text-only' for text-only models or string-only servers — the result
+   *  becomes the placeholder, exactly as before the image parity change. */
+  toolResultImages?: ToolResultImageMode;
 }
 
 const OPENAI_MAX_STOP_SEQUENCES = 4;
@@ -130,6 +137,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   private apiKey: string;
   private defaultMaxTokens: number;
   private extraHeaders: Record<string, string>;
+  private toolResultImages: ToolResultImageMode;
 
   constructor(config: OpenAICompatibleAdapterConfig) {
     if (!config.baseURL) {
@@ -141,6 +149,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     this.apiKey = config.apiKey ?? '';
     this.defaultMaxTokens = config.defaultMaxTokens ?? 4096;
     this.extraHeaders = config.extraHeaders ?? {};
+    this.toolResultImages = config.toolResultImages ?? 'native';
   }
 
   supportsModel(_modelId: string): boolean {
@@ -411,7 +420,9 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
             toolResults.push({
               role: 'tool' as const,
               tool_call_id: block.tool_use_id || block.toolUseId,
-              content: textOnlyToolResultContent(block.content),
+              content: this.toolResultImages === 'text-only'
+                ? textOnlyToolResultContent(block.content)
+                : toolResultWireContent(block.content),
             });
           }
         }
@@ -603,14 +614,15 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
  * Convert normalized content blocks to OpenAI message format
  */
 export function toOpenAIMessages(
-  messages: { role: string; content: ContentBlock[] }[]
+  messages: { role: string; content: ContentBlock[] }[],
+  toolResultImages: ToolResultImageMode = 'native',
 ): OpenAIMessage[] {
   const result: OpenAIMessage[] = [];
   
   for (const msg of messages) {
     const textParts: string[] = [];
     const toolCalls: OpenAIToolCall[] = [];
-    const toolResults: { id: string; content: string }[] = [];
+    const toolResults: { id: string; content: string | ToolResultWirePart[] }[] = [];
     let reasoningText = '';
 
     for (const block of msg.content) {
@@ -633,7 +645,9 @@ export function toOpenAIMessages(
       } else if (block.type === 'tool_result') {
         toolResults.push({
           id: block.toolUseId,
-          content: textOnlyToolResultContent(block.content),
+          content: toolResultImages === 'text-only'
+            ? textOnlyToolResultContent(block.content)
+            : toolResultWireContent(block.content),
         });
       }
     }

@@ -5,3 +5,4 @@ dist
 *.tgz
 .npmrc
 .DS_Store
+nohup.out

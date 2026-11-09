@@ -281,8 +281,13 @@ export function toolUseInputFromValue(value: unknown): ToolUseInput {
 
 /** Constant text, so a history that holds it serializes to the same bytes on every request (the prompt cache reads bytes). */
 export const TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER =
-  '[system: an image in this tool result was NOT shown to you — tool results ' +
-  'reach this model as text only. You are not seeing this image.]';
+  '[system: this image was NOT shown to you — the image source could not be ' +
+  'delivered to this model. You are not seeing this image.]';
+
+/** How tool-result images are sent to the endpoint (review finding 1). */
+export type ToolResultImageMode =
+  | 'native'     // emit image_url parts (default; endpoints we verified honor them)
+  | 'text-only'; // force the placeholder: text-only models, string-only servers
 
 function carriesInlineImageData(block: unknown): boolean {
   if (!block || typeof block !== 'object') return false;
@@ -325,6 +330,90 @@ export function textOnlyToolResultContent(content: unknown): string {
     return block;
   });
   return JSON.stringify(replaced ? blocks : content);
+}
+
+
+/**
+ * Serialize tool_result content for the OpenRouter Chat Completions wire.
+ *
+ * The Responses API path already emits tool-result images as native parts;
+ * this brings the Chat Completions path to parity where the endpoint
+ * provably honors them (verified against OpenRouter + a multimodal model,
+ * 2026-10-16). Image-free arrays keep the legacy stringified form so a
+ * history that holds them serializes to the same bytes on every request;
+ * images with unusable sources degrade to the same constant placeholder
+ * {@link TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER} used by the text-only
+ * path, so the placeholder's cache-stability guarantee is preserved.
+ */
+export type ToolResultWirePart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
+export function toolResultWireContent(content: unknown): string | ToolResultWirePart[] {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return JSON.stringify(content);
+  const imageish = (block: unknown): boolean => {
+    if (!block || typeof block !== 'object') return false;
+    const t = (block as { type?: unknown }).type;
+    return t === 'image' || t === 'generated_image';
+  };
+  if (!content.some(imageish)) {
+    return JSON.stringify(content);
+  }
+  const parts: ToolResultWirePart[] = [];
+  for (const block of content) {
+    if (imageish(block)) {
+      const b = block as {
+        type?: unknown;
+        data?: unknown;
+        mimeType?: unknown;
+        source?: { type?: unknown; data?: unknown; media_type?: unknown; mediaType?: unknown; url?: unknown };
+      };
+      let url: string | null = null;
+      // Validate before emitting: empty payloads and non-image data URLs get
+      // the placeholder, not an image part a provider may reject wholesale.
+      const validDataUrl = (u: string): boolean => {
+        if (u.startsWith('data:image/')) return true;
+        if (u.startsWith('data:')) return false;
+        return true; // http(s) and other remote URLs are passed through as-is
+      };
+      const asImagePart = (u: string): ToolResultWirePart =>
+        validDataUrl(u) && !u.endsWith(';base64,')
+          ? { type: 'image_url', image_url: { url: u } }
+          : { type: 'text', text: TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER };
+      if (b.type === 'generated_image' && typeof b.data === 'string') {
+        // mimeType may name the actual encoding; honor it over the PNG default.
+        url = `data:${typeof b.mimeType === 'string' && b.mimeType ? b.mimeType : 'image/png'};base64,${b.data}`;
+      } else if (b.type === 'image' && typeof b.data === 'string') {
+        // MCP-shaped image content: data on the block itself; mimeType when present.
+        url = `data:${typeof b.mimeType === 'string' && b.mimeType ? b.mimeType : 'image/png'};base64,${b.data}`;
+      } else if (b.type === 'image' && b.source && typeof b.source === 'object') {
+        if (b.source.type === 'base64' && typeof b.source.data === 'string') {
+          const mediaType =
+            (typeof b.source.media_type === 'string' && b.source.media_type) ||
+            (typeof b.source.mediaType === 'string' && b.source.mediaType) ||
+            'image/png';
+          url = `data:${mediaType};base64,${b.source.data}`;
+        } else if (b.source.type === 'url' && typeof b.source.url === 'string') {
+          url = b.source.url;
+        }
+      }
+      parts.push(url ? asImagePart(url) : { type: 'text', text: TEXT_ONLY_TOOL_RESULT_IMAGE_PLACEHOLDER });
+    } else if (
+      block &&
+      typeof block === 'object' &&
+      (block as { type?: unknown }).type === 'text' &&
+      typeof (block as { text?: unknown }).text === 'string'
+    ) {
+      parts.push({ type: 'text', text: (block as { text: string }).text });
+    } else {
+      // JSON.stringify(undefined) is undefined, not a string — an undefined
+      // array entry would produce a text part with no text field (finding 16).
+      const serialized = JSON.stringify(block) ?? 'null';
+      parts.push({ type: 'text', text: serialized });
+    }
+  }
+  return parts;
 }
 
 /**
