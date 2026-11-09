@@ -13,7 +13,7 @@ import type {
   StreamEmission,
   StreamParser,
 } from './types.js';
-import { responsesToolOutput } from '../providers/responses-input.js';
+import { responsesToolOutput, unansweredToolOutputs } from '../providers/responses-input.js';
 
 import { imageForRequest, urlImageForRequest } from '../utils/image-media.js';
 import { convertMcpMedia } from '../utils/mcp-media.js';
@@ -66,11 +66,6 @@ class ResponsesPassthroughParser implements StreamParser {
 }
 
 type NativeItem = { type?: string; id?: string; [key: string]: unknown };
-
-/** A tool's output item, which answers the call whose `call_id` it names. */
-function isToolOutput(item: NativeItem | null): boolean {
-  return item !== null && typeof item === 'object' && typeof item.type === 'string' && item.type.endsWith('_output');
-}
 
 export function responsesRawItemKey(rawItem: { type?: unknown; id?: unknown }): string {
   return typeof rawItem.id === 'string'
@@ -157,20 +152,13 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
       flushPending();
     }
 
-    const called = new Set<string>();
-    for (const item of items) {
-      if (item && typeof item === 'object' && typeof item.call_id === 'string' && !isToolOutput(item)) called.add(item.call_id);
-    }
-    const answered = new Set<string>();
+    const unanswered = unansweredToolOutputs(items);
     const sent = items.filter((item) => {
-      if (!isToolOutput(item)) return true;
-      const id = item.call_id as string;
-      if (called.has(id) && !answered.has(id)) {
-        answered.add(id);
-        return true;
-      }
-      options.onNormalize?.(called.has(id)
-        ? { kind: 'stray_tool_result_dropped', toolUseId: id, reason: 'answered' }
+      const drop = unanswered.get(item);
+      if (drop === undefined) return true;
+      const id = item.call_id;
+      options.onNormalize?.(drop === 'stray'
+        ? { kind: 'stray_tool_result_dropped', toolUseId: id as string, reason: 'answered' }
         : { kind: 'orphan_tool_result_dropped', toolUseId: typeof id === 'string' ? id : '<missing>' });
       const at = from.get(item);
       if (at !== undefined) options.fidelity?.alter(at);

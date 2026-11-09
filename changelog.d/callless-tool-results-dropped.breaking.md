@@ -23,10 +23,10 @@
     mode leaves out a result that answers no call: one whose id names a call
     pairs with it when the call comes before it and nothing answered it yet,
     and one whose id names no call pairs by position with a call before it in
-    its own message, as a generation parsed back from its text holds them. A
-    breakpoint on a message that leaves empty marks what came before it. On
-    every path the round report marks the message a result came from as
-    altered.
+    its own message that no result names, as a generation parsed back from
+    its text holds them. A breakpoint on a message that leaves empty marks
+    what came before it. On every path the round report marks the message a
+    result came from as altered.
   - **Migration:** a hook that matches the old kinds matches the new ones,
     without `recoveredChars`; a switch over `reason` needs a case for
     `'answered'`, and code that reads `fromEnvelope` must allow it absent. A

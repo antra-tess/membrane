@@ -1,6 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OpenAIResponsesFormatter } from '../../src/formatters/openai-responses.js';
+import { normalizeResponsesInput } from '../../src/providers/responses-input.js';
+import { OpenAIResponsesAPIAdapter } from '../../src/providers/openai-responses-api.js';
 import { FidelityNotes } from '../../src/utils/fidelity.js';
+
+afterEach(() => { vi.unstubAllGlobals(); });
 
 const options = {
   participantMode: 'multiuser' as const,
@@ -138,5 +142,55 @@ describe('Responses: a tool output whose call no input item carries', () => {
       { participant: 'User', content: [result('call_9')] },
     ]);
     expect(items).toEqual([null, { type: 42, call_id: 'call_1' }]);
+  });
+});
+
+describe('the subscription adapter\'s own conversion of messages in normalized form', () => {
+  const wireCall = (id: string) => ({ type: 'tool_use', id, name: 'read_file', input: { path: 'notes.txt' } });
+  const wireResult = (id: string, content = 'notes: the meeting is at noon.') => ({ type: 'tool_result', tool_use_id: id, content });
+
+  it('leaves out a tool_result whose call no input item carries, and a second for an answered call, telling onDropped the block each came from', () => {
+    const orphan = wireResult('call_9', 'zz-orphan');
+    const again = wireResult('call_1', 'zz-again');
+    const standalone = { type: 'function_call_output', call_id: 'call_7', output: 'zz-standalone' };
+    const heard: unknown[] = [];
+    const items = normalizeResponsesInput([
+      { role: 'user', content: [{ type: 'text', text: 'Read it.' }] },
+      { role: 'assistant', content: [wireCall('call_1')] },
+      { role: 'user', content: [wireResult('call_1'), again, orphan] },
+      standalone,
+    ] as any, (block) => heard.push(block));
+    expect(items.map((item: any) => item.type)).toEqual(['message', 'function_call', 'function_call_output']);
+    expect((items[2] as any).call_id).toBe('call_1');
+    expect(JSON.stringify(items)).not.toContain('zz-');
+    expect(heard).toEqual([again, orphan, standalone]);
+  });
+
+  it('keeps an output whose call is anywhere in the input, and sends nothing else differently', () => {
+    const heard: unknown[] = [];
+    const items = normalizeResponsesInput([
+      { role: 'user', content: [wireResult('call_1')] },
+      { role: 'assistant', content: [wireCall('call_1')] },
+    ] as any, (block) => heard.push(block));
+    expect(items.map((item: any) => item.type)).toEqual(['function_call_output', 'function_call']);
+    expect(heard).toEqual([]);
+  });
+
+  it('sends the request without it, and onContentAltered hears the block the host handed in', async () => {
+    const bodies: any[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)));
+      return new Response('', { status: 500 });
+    }));
+    const orphan = wireResult('call_9', 'zz-orphan');
+    const heard: unknown[] = [];
+    await new OpenAIResponsesAPIAdapter({ mode: 'subscription', credentials: async () => ({ token: 'zz-token' }) }).complete({
+      model: 'gpt-5.4', maxTokens: 32,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'Read it.' }, orphan] }],
+    } as any, { onContentAltered: (block) => heard.push(block) }).catch(() => undefined);
+    expect(bodies.length).toBeGreaterThan(0);
+    expect(JSON.stringify(bodies[0].input)).not.toContain('zz-orphan');
+    expect(bodies[0].input.some((item: any) => item.type === 'function_call_output')).toBe(false);
+    expect(heard).toContain(orphan);
   });
 });

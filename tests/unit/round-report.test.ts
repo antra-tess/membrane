@@ -848,11 +848,13 @@ describe('Greptile\'s review of #104', () => {
   it('Responses subscription normalization reports a tool result whose nested content it can\'t carry, wrapped or standalone', () => {
     let dropped = 0;
     const lossy = [{ type: 'text', text: 'result' }, { type: 'document', source: { type: 'base64', mediaType: 'application/pdf', data: 'JVBERi0=' } }];
-    normalizeResponsesInput([{ role: 'user', content: [{ type: 'tool_result', toolUseId: 'c1', content: lossy }] }] as any, () => dropped++);
+    // each result's call, so none is left out as a result without its call
+    const calls = (...ids: string[]) => ids.map((id) => ({ type: 'function_call', call_id: id, name: 'noop', arguments: '{}' }));
+    normalizeResponsesInput([...calls('c1'), { role: 'user', content: [{ type: 'tool_result', toolUseId: 'c1', content: lossy }] }] as any, () => dropped++);
     expect(dropped).toBe(1);
-    normalizeResponsesInput([{ type: 'tool_result', toolUseId: 'c2', content: lossy }] as any, () => dropped++);
+    normalizeResponsesInput([...calls('c2'), { type: 'tool_result', toolUseId: 'c2', content: lossy }] as any, () => dropped++);
     expect(dropped).toBe(2);
-    normalizeResponsesInput([{ role: 'user', content: [
+    normalizeResponsesInput([...calls('c3', 'c4'), { role: 'user', content: [
       { type: 'tool_result', toolUseId: 'c3', content: [{ type: 'text', text: 'ok' }] },
       { type: 'tool_result', toolUseId: 'c4', content: 'ok' },
     ] }] as any, () => dropped++);
@@ -1221,6 +1223,8 @@ describe('an automated review of #104\'s own range', () => {
       { role: 'assistant', content: [{ type: 'text', text: 'see' }, image, call] },
       { role: 'user', content: [failed] },
       { role: 'user', content: [fine] },
+      // the call `fine` answers, so it isn't left out as a result without its call
+      { type: 'function_call', call_id: 'c2', name: 'noop', arguments: '{}' },
     ] as any, (block) => { heard.push(block); notes.alterBlock(block); });
     expect(heard).toHaveLength(3);
     expect(heard[0]).toBe(image);
@@ -1229,7 +1233,7 @@ describe('an automated review of #104\'s own range', () => {
     expect([...notes.altered].sort()).toEqual([0, 1]);
     expect(notes.established).toBe(true);
     let standalone = 0;
-    normalizeResponsesInput([{ type: 'tool_result', toolUseId: 'c3', content: 'boom', is_error: true }] as any, () => standalone++);
+    normalizeResponsesInput([{ type: 'function_call', call_id: 'c3', name: 'noop', arguments: '{}' }, { type: 'tool_result', toolUseId: 'c3', content: 'boom', is_error: true }] as any, () => standalone++);
     expect(standalone).toBe(1);
   });
 

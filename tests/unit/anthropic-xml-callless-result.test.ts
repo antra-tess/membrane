@@ -99,6 +99,18 @@ describe('AnthropicXmlFormatter: a tool result that answers no call', () => {
     expect(JSON.stringify(built.messages)).not.toContain('zz-ghost');
   });
 
+  it('leaves a call to the result that names it by id, so a result whose id names no call before it in the message is left out rather than taking that call', () => {
+    const { rendered, altered, events } = build([
+      { participant: 'User', content: [text('look')] },
+      { participant: 'Agent', content: [call('a'), result('id_from_nowhere', 'zz-stray-in-place'), result('a', 'zz-a')] },
+      { participant: 'Agent', content: [] },
+    ]);
+    expect(rendered).toContain('zz-a');
+    expect(rendered).not.toContain('zz-stray-in-place');
+    expect(altered).toEqual([1]);
+    expect(events).toEqual([{ kind: 'orphan_tool_result_dropped', toolUseId: 'id_from_nowhere' }]);
+  });
+
   it('tells the host through onNormalize, naming the result: one that answers no call as an orphan, a second for an answered call as a stray', () => {
     const { events } = build([
       { participant: 'Agent', content: [call('a')] },
