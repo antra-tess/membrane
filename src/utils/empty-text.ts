@@ -35,7 +35,8 @@ export function stripEmptyTextBlocks<T>(blocks: readonly T[], onDropped?: (block
 
 /** A request that ends with an assistant message is a prefill to the
  * provider, so the final role can't change. An effort-only system message,
- * whose `output_config` is what it sends, stays though its content is empty. */
+ * whose `output_config` is what it sends, stays though its content is empty,
+ * and the final role is read past it (lastTurnRole). */
 export function stripEmptyTextMessages<T extends { content: unknown }>(
   messages: readonly T[],
   onDropped?: (block: unknown) => void,
@@ -44,19 +45,32 @@ export function stripEmptyTextMessages<T extends { content: unknown }>(
   for (const message of messages) {
     if (Array.isArray(message.content)) {
       const content = stripEmptyTextBlocks(message.content, onDropped);
-      if (content.length > 0 || (message as { output_config?: unknown }).output_config != null) result.push({ ...message, content });
-    } else if (typeof message.content !== 'string' || hasNonEmptyText(message.content)) {
+      if (content.length > 0 || carriesOutputConfig(message)) result.push({ ...message, content });
+    } else if (typeof message.content !== 'string' || hasNonEmptyText(message.content) || carriesOutputConfig(message)) {
       result.push(message);
     } else if (message.content !== '') {
       onDropped?.(undefined);
     }
   }
-  const finalRole = (messages.at(-1) as { role?: unknown } | undefined)?.role;
-  const retainedRole = (result.at(-1) as { role?: unknown } | undefined)?.role;
+  const finalRole = lastTurnRole(messages);
+  const retainedRole = lastTurnRole(result);
   if (result.length > 0 && typeof finalRole === 'string' && typeof retainedRole === 'string' && finalRole !== retainedRole) {
     throw invalidRequestError(`Removing empty final ${finalRole} content would change the request's final role to ${retainedRole}.`);
   }
   return result;
+}
+
+function carriesOutputConfig(message: unknown): boolean {
+  return (message as { output_config?: unknown }).output_config != null;
+}
+
+/** The role of the last message that isn't an effort-only system message: the turn the request ends on. */
+export function lastTurnRole(messages: readonly unknown[]): unknown {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i] as { role?: unknown } | undefined;
+    if (!(message?.role === 'system' && carriesOutputConfig(message))) return message?.role;
+  }
+  return undefined;
 }
 
 export function stripEmptyTextAfterPassthrough<T extends { messages: { content: unknown }[]; system?: unknown }>(

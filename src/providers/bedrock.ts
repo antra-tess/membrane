@@ -19,7 +19,7 @@ import {
   networkError,
   withRawRequest,
 } from '../types/index.js';
-import { errorFromThrown } from '../types/errors.js';
+import { errorFromThrown, systemChangeRefusedError } from '../types/errors.js';
 import { stripEmptyTextAfterPassthrough } from '../utils/empty-text.js';
 import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, streamIndex, isEventObject, isToolCallBlock, isToolCallArgumentsDelta, progressOfAnthropicEvent, callerAbort } from './utils.js';
 import {
@@ -491,6 +491,14 @@ export class BedrockAdapter implements ProviderAdapter {
     }
 
     stripEmptyTextAfterPassthrough(params, onContentAltered ? (dropped) => onContentAltered(blockBuiltFrom(dropped)) : undefined);
+    const effortAt = params.messages.findIndex((message) => (message as { output_config?: unknown }).output_config != null);
+    if (effortAt >= 0) {
+      throw systemChangeRefusedError(
+        `BedrockAdapter: message ${effortAt} carries output_config, an effort-only system message, which BedrockAdapter doesn't send. ` +
+        'Set the effort in the request\'s top-level output_config.effort instead.',
+        params,
+      );
+    }
     return params;
   }
 

@@ -66,6 +66,14 @@ interface BuiltSystemChange {
 
 const EFFORT_LEVELS: ReadonlySet<unknown> = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 
+function named(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
 function changesToolsOrSystem(change: SystemChangeContent): boolean {
   return (change.removeTools?.length ?? 0) > 0 || (change.defineTools?.length ?? 0) > 0 || (change.addSystem?.length ?? 0) > 0;
 }
@@ -250,7 +258,7 @@ export class NativeFormatter implements PrefillFormatter {
           }
           if (!EFFORT_LEVELS.has(carrying.effort)) {
             throw unsupportedError(
-              `NativeFormatter: message ${i} carries the effort ${JSON.stringify(carrying.effort)}, which is not one of 'low', 'medium', 'high', 'xhigh' and 'max'.`
+              `NativeFormatter: message ${i} carries the effort ${named(carrying.effort)}, which is not one of 'low', 'medium', 'high', 'xhigh' and 'max'.`
             );
           }
           const breakpoint = Boolean(cacheControl && (message.cacheBreakpoint || hasCacheMarker?.(message, i)));
@@ -455,6 +463,11 @@ export class NativeFormatter implements PrefillFormatter {
       (block.type !== 'text' || hasNonEmptyText(block.text)) && !isUnsignedThinking(block);
     const efforts = changes.filter((change) => change.effort !== undefined);
     const others = changes.filter((change) => change.effort === undefined);
+    // A result goes in its call's turn, so no cut leaves one in a turn's later part.
+    const answersCall = (block: Block): boolean => {
+      const type = (anthropicServerBlockFor(block) as { type?: unknown } | undefined)?.type ?? block.type;
+      return typeof type === 'string' && (type === 'tool_result' || type.endsWith('_tool_result'));
+    };
 
     // Where each effort change goes: after the last surviving block that came from a message before it. A block
     // membrane puts ahead of every message (the leading user turn, the context prefix) comes before them all.
@@ -476,7 +489,8 @@ export class NativeFormatter implements PrefillFormatter {
         for (let j = content.length - 1; j >= 0; j--) {
           const key = keys[k]![j];
           if (key === undefined || key >= change.at || !survives(content[j]!)) continue;
-          if (content.slice(j + 1).some(survives)) {
+          const later = content.slice(j + 1);
+          if (later.some(survives) && !later.some(answersCall)) {
             cuts[k]!.add(j);
             slot = { message: k, cut: j };
           } else {
@@ -554,7 +568,7 @@ export class NativeFormatter implements PrefillFormatter {
     if (after.length > 0 && !endsOnUser) {
       throw systemChangeRefusedError(
         `NativeFormatter: message ${after[0]!.at}, an effort change, would end the request with no user turn after the last assistant turn, ` +
-        'which the API reads as a prefill. End the request with a user turn, or set the effort at the request\'s top level instead.'
+        'which the API reads as a prefill. Put the change before that assistant turn, or end the request with a user turn after it.'
       );
     }
     if (next < others.length) {

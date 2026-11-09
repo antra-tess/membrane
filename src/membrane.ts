@@ -1873,7 +1873,7 @@ export class Membrane {
       throw systemChangeRefusedError(
         `A system_change block goes only through a formatter that renders it (NativeFormatter) and an adapter that sends it (AnthropicAdapter); ` +
         `this request has formatter "${activeFormatter.name}" and adapter "${this.adapter.name}". ` +
-        'Send it through those two, or make the change in the request\'s tools and system instead.'
+        'Send it through those two, or make the change in the request\'s tools and system, or an effort change in its top-level output_config.effort, instead.'
       );
     }
     const additionalStopSequences = Array.isArray(request.stopSequences)
