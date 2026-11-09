@@ -105,8 +105,14 @@ describe('XML mode keeps the digits at both of its parses', () => {
     expect(parseToolCalls(xml)?.calls[0]?.input).toStrictEqual({ target: { channelId: SNOWFLAKE }, id: `-${SNOWFLAKE}` });
   });
 
-  it('a parameter declared an object or an integer: a nested one and a negative one', () => {
+  it('a parameter declared an object or an integer: a nested one and a negative one, with no type warning', () => {
     const tools = [{ name: 'open', description: 'zz', inputSchema: { type: 'object' as const, properties: { target: { type: 'object' }, id: { type: 'integer' } } } }];
-    expect(parseToolCalls(xml, { tools })?.calls[0]?.input).toStrictEqual({ target: { channelId: SNOWFLAKE }, id: `-${SNOWFLAKE}` });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(parseToolCalls(xml, { tools })?.calls[0]?.input).toStrictEqual({ target: { channelId: SNOWFLAKE }, id: `-${SNOWFLAKE}` });
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

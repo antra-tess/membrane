@@ -206,7 +206,8 @@ function parseParamValue(
     );
     return value;
   }
-  if (!matchesDeclaredType(parsed, declaredType)) {
+  const keptDigits = parsed === trimmed && (declaredType === 'number' || declaredType === 'integer');
+  if (!keptDigits && !matchesDeclaredType(parsed, declaredType)) {
     warnParamType(schema.toolName, paramName, declaredType, `the value parsed as ${jsonKindOf(parsed)}`);
   }
   return parsed;
