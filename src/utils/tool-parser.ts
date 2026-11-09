@@ -23,8 +23,8 @@ export interface ToolParseOptions {
   tools?: ToolDefinition[];
 }
 
-/** 16 digits or more, no decimal, either sign: the first length that can pass Number.MAX_SAFE_INTEGER, as Discord snowflakes do. */
-const LARGE_INT_RE = /^-?\d{16,}$/;
+/** 16 digits or more, no decimal: the first length that can pass Number.MAX_SAFE_INTEGER, as Discord snowflakes do. */
+const LARGE_INT_RE = /^\d{16,}$/;
 
 interface InvokeSchema {
   toolName: string;
@@ -132,8 +132,10 @@ function matchesDeclaredType(value: unknown, declaredType: string): boolean {
 }
 
 /**
- * Integers of 16 digits or more, either sign (Discord snowflakes and the like),
- * can lose precision as JavaScript numbers, so they stay strings.
+ * Unsigned integers of 16 digits or more (Discord snowflakes and the like)
+ * can lose precision as JavaScript numbers, so they stay strings. Past the
+ * safe range, the parse keeps any other integer's digits too, a negative one
+ * included.
  */
 function guessParamValue(value: string): unknown {
   const trimmed = value.trim();
@@ -151,6 +153,19 @@ function withoutFraming(value: string): string {
   const start = value.startsWith('\n') ? 1 : 0;
   const end = value.length > start && value.endsWith('\n') ? value.length - 1 : value.length;
   return value.slice(start, end);
+}
+
+/** A whole parameter kept as its digits answers a `number` or `integer` declaration; any other declaration warns. */
+function digitsAsText(schema: InvokeSchema, paramName: string, declaredType: string, digits: string): string {
+  if (declaredType !== 'number' && declaredType !== 'integer') {
+    warnParamType(
+      schema.toolName,
+      paramName,
+      declaredType,
+      'the value is an integer too large to represent exactly; passing its digits through as text'
+    );
+  }
+  return digits;
 }
 
 function parseParamValue(
@@ -182,18 +197,7 @@ function parseParamValue(
     return withoutFraming(value);
   }
 
-  if (LARGE_INT_RE.test(trimmed)) {
-    // JSON.parse rounds digits past Number.MAX_SAFE_INTEGER, so they stay text.
-    if (declaredType !== 'number' && declaredType !== 'integer') {
-      warnParamType(
-        schema.toolName,
-        paramName,
-        declaredType,
-        'the value is an integer too large to represent exactly; passing its digits through as text'
-      );
-    }
-    return trimmed;
-  }
+  if (LARGE_INT_RE.test(trimmed)) return digitsAsText(schema, paramName, declaredType, trimmed);
   let parsed: unknown;
   try {
     parsed = JSON.parse(trimmed, keepLongIntegers);
@@ -206,6 +210,8 @@ function parseParamValue(
     );
     return value;
   }
+  // The parse kept the whole parameter as its own text: a negative integer past the safe range.
+  if (parsed === trimmed) return digitsAsText(schema, paramName, declaredType, trimmed);
   if (!matchesDeclaredType(parsed, declaredType)) {
     warnParamType(schema.toolName, paramName, declaredType, `the value parsed as ${jsonKindOf(parsed)}`);
   }

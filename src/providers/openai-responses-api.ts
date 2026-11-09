@@ -2,6 +2,7 @@ import { unreportedUsage } from '../utils/usage.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { nativeInputForRequest, normalizeResponsesInput } from './responses-input.js';
 import { blockHandedIn, convertMcpMedia } from '../utils/mcp-media.js';
+import { keepLongIntegers } from '../utils/long-integers.js';
 import { fetchWithCredentials, type CredentialResolver } from './credentials.js';
 import { assertMessagePrefillSupported } from './request-capabilities.js';
 
@@ -250,7 +251,8 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
       const response = await this.fetchResponse(responsesRequest, signal);
 
       await this.assertSuccessfulHTTPResponse(response, responsesRequest);
-      const data = (await response.json()) as OpenAIResponsesAPIResponse;
+      // A gateway can send a call's arguments as an object, so the body's own parse keeps long integers' digits.
+      const data = JSON.parse(await response.text(), keepLongIntegers) as OpenAIResponsesAPIResponse;
       this.assertSuccessfulAPIResponse(data, responsesRequest, 'response error');
       return this.parseResponse(data, request.model, responsesRequest);
     } catch (error) {
@@ -289,7 +291,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
 
         let event: any;
         try {
-          event = JSON.parse(data);
+          event = JSON.parse(data, keepLongIntegers);
         } catch {
           return;
         }

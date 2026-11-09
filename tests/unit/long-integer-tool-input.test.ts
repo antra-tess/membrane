@@ -8,7 +8,11 @@ import { toolUseInputFromText } from '../../src/providers/utils.js';
 import { keepLongIntegers } from '../../src/utils/long-integers.js';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import { BedrockAdapter } from '../../src/providers/bedrock.js';
-import { fromOpenAIContent } from '../../src/providers/openai.js';
+import { OpenAIAdapter } from '../../src/providers/openai.js';
+import { OpenAICompatibleAdapter } from '../../src/providers/openai-compatible.js';
+import { OpenRouterAdapter } from '../../src/providers/openrouter.js';
+import { OpenAIResponsesAPIAdapter } from '../../src/providers/openai-responses-api.js';
+import { stubFetchWithSseLines } from '../helpers/sse-fixtures.js';
 import { parseToolCalls } from '../../src/utils/tool-parser.js';
 import { Membrane } from '../../src/membrane.js';
 import { NativeFormatter } from '../../src/formatters/native.js';
@@ -27,6 +31,8 @@ describe('toolUseInputFromText keeps an unsafe integer as its digits', () => {
     expect(toolUseInputFromText('{"n": 9007199254740991}')).toStrictEqual({ input: { n: 9007199254740991 } });
     expect(toolUseInputFromText('{"n": 9007199254740992}')).toStrictEqual({ input: { n: '9007199254740992' } });
     expect(toolUseInputFromText('{"n": 9007199254740993}')).toStrictEqual({ input: { n: '9007199254740993' } });
+    expect(toolUseInputFromText('{"n": -9007199254740991}')).toStrictEqual({ input: { n: -9007199254740991 } });
+    expect(toolUseInputFromText('{"n": -9007199254740992}')).toStrictEqual({ input: { n: '-9007199254740992' } });
     expect(toolUseInputFromText('{"n": -9007199254740993}')).toStrictEqual({ input: { n: '-9007199254740993' } });
   });
 
@@ -87,9 +93,43 @@ describe('each route a tool call takes keeps the digits', () => {
     expect(calls.map((c) => c.input)).toStrictEqual([{ channelId: SNOWFLAKE }]);
   });
 
-  it('OpenAI-style: the arguments string', () => {
-    const blocks = fromOpenAIContent({ role: 'assistant', content: null, tool_calls: [{ id: 'call_zz', type: 'function', function: { name: 'open', arguments: `{"channelId": ${SNOWFLAKE}}` } }] } as any);
-    expect(blocks).toStrictEqual([{ type: 'tool_use', id: 'call_zz', name: 'open', input: { channelId: SNOWFLAKE } }]);
+  // A gateway may send a call's arguments as an object rather than a JSON string; the body's own parse must keep them.
+  const ARGUMENTS = [['a JSON string', JSON.stringify(`{"channelId": ${SNOWFLAKE}}`)], ['an object', `{"channelId": ${SNOWFLAKE}}`]] as const;
+  const CHAT_ADAPTERS = [
+    ['OpenAI', () => new OpenAIAdapter({ apiKey: 'zz-key' })],
+    ['openai-compatible', () => new OpenAICompatibleAdapter({ baseURL: 'http://localhost:9/v1', apiKey: 'zz-key' })],
+    ['OpenRouter', () => new OpenRouterAdapter({ apiKey: 'zz-key' })],
+  ] as const;
+  const openAIRequest = { model: 'zz/model-1', maxTokens: 64, messages: [{ role: 'user', content: 'zz prompt' }] } as any;
+  const toolInputs = (content: unknown[]) => (content as Array<{ type: string; input?: unknown }>).filter((b) => b.type === 'tool_use').map((b) => b.input);
+
+  for (const [adapterName, make] of CHAT_ADAPTERS) {
+    for (const [shape, args] of ARGUMENTS) {
+      it(`${adapterName}, not streamed: the arguments as ${shape}`, async () => {
+        const body = `{"id":"zz-gen","object":"chat.completion","created":1,"model":"zz/model-1","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_zz","type":"function","function":{"name":"open","arguments":${args}}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`;
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(body, { status: 200, headers: { 'content-type': 'application/json' } })));
+        const result = await make().complete(openAIRequest);
+        expect(toolInputs(result.content)).toStrictEqual([{ channelId: SNOWFLAKE }]);
+      });
+    }
+  }
+
+  for (const [shape, args] of ARGUMENTS) {
+    it(`OpenAI Responses API, not streamed: the arguments as ${shape}`, async () => {
+      const body = `{"id":"resp_zz","model":"gpt-zz","status":"completed","output":[{"type":"function_call","id":"fc_zz","call_id":"call_zz","name":"open","arguments":${args}}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`;
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(body, { status: 200, headers: { 'content-type': 'application/json' } })));
+      const result = await new OpenAIResponsesAPIAdapter({ apiKey: 'zz-key' }).complete(openAIRequest);
+      expect(toolInputs(result.content)).toStrictEqual([{ channelId: SNOWFLAKE }]);
+    });
+  }
+
+  it('OpenAI Responses API, streamed: an output item whose arguments are an object', async () => {
+    stubFetchWithSseLines([
+      `{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_zz","call_id":"call_zz","name":"open","arguments":{"channelId":${SNOWFLAKE}}}}`,
+      '{"type":"response.completed","response":{"id":"resp_zz","model":"gpt-zz","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}',
+    ]);
+    const result = await new OpenAIResponsesAPIAdapter({ apiKey: 'zz-key' }).stream(openAIRequest, { onChunk: () => {} } as any);
+    expect(toolInputs(result.content)).toStrictEqual([{ channelId: SNOWFLAKE }]);
   });
 
   it('Bedrock, not streamed: the response body', async () => {
@@ -157,6 +197,19 @@ describe('XML mode keeps the digits at both of its parses', () => {
       const withN = xml.replace('</invoke>', `<parameter name="n">-${SNOWFLAKE}</parameter>\n</invoke>`);
       expect(parseToolCalls(withN, { tools })?.calls[0]?.input).toStrictEqual({ target: { channelId: SNOWFLAKE }, id: `-${SNOWFLAKE}`, n: `-${SNOWFLAKE}` });
       expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('a negative integer of 16 digits within the safe range parses as a number, and one JSON refuses warns, as on main', () => {
+    const tools = [{ name: 'open', description: 'zz', inputSchema: { type: 'object' as const, properties: { id: { type: 'integer' }, n: { type: 'integer' } } } }];
+    const call = (id: string, n: string) => `<function_calls>\n<invoke name="open">\n<parameter name="id">${id}</parameter>\n<parameter name="n">${n}</parameter>\n</invoke>\n</function_calls>`;
+    expect(parseToolCalls(call('-1234567890123456', '-1234567890123456'))?.calls[0]?.input).toStrictEqual({ id: -1234567890123456, n: -1234567890123456 });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(parseToolCalls(call('-1234567890123456', '-0000000000000001'), { tools })?.calls[0]?.input).toStrictEqual({ id: -1234567890123456, n: '-0000000000000001' });
+      expect(warn.mock.calls.map((c) => String(c[0]))).toEqual([expect.stringContaining('not valid JSON')]);
     } finally {
       warn.mockRestore();
     }
