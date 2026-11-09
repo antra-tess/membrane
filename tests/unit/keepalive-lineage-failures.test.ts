@@ -36,7 +36,7 @@ function failure(retryAfterMs?: number, retryable = true): MembraneError {
   });
 }
 
-type Sent = { at: number; model: string; system: string };
+type Sent = { at: number; model: string; system: string; messages: string };
 const systemOf = (payload: Record<string, unknown>) => (payload.system as Array<{ text: string }>)[0]!.text;
 
 const keepalives: CacheKeepalive[] = [];
@@ -48,7 +48,7 @@ function setup(
   const sent: Sent[] = [];
   const events: KeepaliveEvent[] = [];
   const send = async (payload: Record<string, unknown>) => {
-    sent.push({ at: Date.now() - START, model: String(payload.model), system: systemOf(payload) });
+    sent.push({ at: Date.now() - START, model: String(payload.model), system: systemOf(payload), messages: JSON.stringify(payload.messages) });
     return (await respond(payload)) as { usage?: Record<string, number> };
   };
   const ka: CacheKeepalive = new CacheKeepalive(send, {
@@ -258,6 +258,27 @@ describe('the confirmed-warm fence', () => {
 
     expect(sent.map((s) => `${s.at / MIN} ${s.model}`)).toEqual(['55 claude-a']);
     expect(trail(events, b)).toEqual(['skipped cache-expired']);
+  });
+});
+
+describe('a real request recorded after a later-sent one', () => {
+  const marked = (text: string) => [{ role: 'user', content: [{ type: 'text', text, cache_control: { type: 'ephemeral', ttl: '1h' } }] }];
+  const later = { ...wire('claude-m', 'Resident system'), messages: marked('B') };
+  it.each([
+    ['with the same prefix', { ...later }],
+    ['with another marked message', { ...later, messages: marked('A') }],
+    ['in a shape that is not kept warm', { ...later, thinking: { type: 'enabled', budget_tokens: 1000 } }],
+  ] as const)('%s changes nothing: the newer snapshot, its touch and its window stay', async (_label, earlier) => {
+    const { ka, sent, events } = setup(() => hit, { refreshAfterMs: 45 * MIN, checkIntervalMs: 5 * MIN });
+    await vi.advanceTimersByTimeAsync(20 * MIN);
+    ka.record(later, undefined, 'stream', START + 20 * MIN);
+    await vi.advanceTimersByTimeAsync(10 * MIN);
+    ka.record(earlier, undefined, 'stream', START);
+
+    expect(ka.getStatus()).toEqual([{ key: lineageKey(later), lane: 'stream', idleMs: 10 * MIN, realIdleMs: 10 * MIN }]);
+    await vi.advanceTimersByTimeAsync(36 * MIN);
+    expect(sent.map((s) => `${s.at / MIN} ${s.messages}`)).toEqual([`65 ${JSON.stringify(later.messages)}`]);
+    expect(trail(events, later)).toEqual(['refreshed']);
   });
 });
 

@@ -245,11 +245,12 @@ export class CacheKeepalive {
 
   /** Record a real request the provider is known to have begun answering, so
    *  it has processed the request's prefix. `sentAt` is when the request was
-   *  sent, where the cache entry's clock starts: the lineage's touch counts
-   *  from it, and its window from it or a later real call the lineage already
-   *  has. Left out, both count from now. Call it once per call that gets that
-   *  far. It clears the lineage's failed-poke count, and leaves a provider's
-   *  wait for its model in place. */
+   *  sent, where the cache entry's clock starts: the lineage's touch and its
+   *  window count from it. Left out, both count from now. Call it once per
+   *  call that gets that far. A request sent before the lineage's newest
+   *  recorded one changes nothing, so the lineage replays its newest request.
+   *  Otherwise it clears the lineage's failed-poke count, and leaves a
+   *  provider's wait for its model in place. */
   record(
     wire: Record<string, unknown>,
     headers: Record<string, string> | undefined,
@@ -259,20 +260,21 @@ export class CacheKeepalive {
     if (this.stopped) return;
     if (!this.cfg.lanes.includes(lane)) return;
 
-    const reason = ineligibleReason(wire);
     const key = lineageKey(wire);
+    const existing = this.lineages.get(key);
+    if (existing && sentAt < existing.lastRealAt) return;
+    const reason = ineligibleReason(wire);
     if (reason) {
       if (this.lineages.delete(key)) this.emit({ type: 'skipped', key, reason });
       return;
     }
 
-    const existing = this.lineages.get(key);
     this.lineages.delete(key);
     this.lineages.set(key, {
       wire,
       headers,
       lane,
-      lastRealAt: Math.max(sentAt, existing?.lastRealAt ?? sentAt),
+      lastRealAt: sentAt,
       refreshBaselineAt: sentAt,
       confirmedWarmAt: sentAt,
       ineffective: existing?.ineffective ?? 0,

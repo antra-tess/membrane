@@ -330,10 +330,10 @@ describe('the touch counts from the send', () => {
     expect(events.filter(e => e.type === 'error')).toHaveLength(2);
   });
 
-  it('a call sent before another on its lineage but recorded after it: its touch is its own send, its window the later call\'s', async () => {
+  it('a call sent before another on its lineage but recorded after it changes nothing: the later call\'s snapshot, touch and window stay', async () => {
     const first = held();
     let calls = 0;
-    const { a } = adapter(fine, replayAnswer,
+    const { a, replays } = adapter(fine, replayAnswer,
       () => ++calls === 1 ? heldStream(first.promise, [messageStart, ...rest]) : sdkStream([messageStart, ...rest]));
     const older = a.stream(request('Resident system X', 2), noCallbacks);
     await vi.advanceTimersByTimeAsync(80);
@@ -343,8 +343,11 @@ describe('the touch counts from the send', () => {
     await older;
     const [lineage, ...others] = a.cacheKeepalive!.getStatus();
     expect(others).toEqual([]);
-    expect(lineage!.idleMs).toBe(90);
+    expect(lineage!.idleMs).toBe(10);
     expect(lineage!.realIdleMs).toBe(10);
+    await vi.advanceTimersByTimeAsync(90);
+    expect(replays()).toHaveLength(1);
+    expect(replays()[0].messages).toHaveLength(1);
   });
 });
 
