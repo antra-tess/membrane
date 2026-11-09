@@ -654,6 +654,14 @@ export class CacheKeepalive {
     }
   }
 
+  /** The file the keepalive is saving to: `statePath`, until another
+   *  keepalive takes it over or the keepalive is disabled. A host can also
+   *  test `'persistPath' in CacheKeepalive.prototype` to tell whether this
+   *  membrane supports `statePath` at all. */
+  get persistPath(): string | undefined {
+    return this.stopped ? undefined : this.statePath;
+  }
+
   /** A snapshot of the tracked lineages. */
   getStatus(): Array<{ key: string; lane: KeepaliveLane; idleMs: number; realIdleMs: number }> {
     const now = Date.now();

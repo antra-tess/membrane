@@ -631,6 +631,9 @@ describe('CacheKeepalive statePath (across restarts)', () => {
     first.ka.record(wire({ system: [{ type: 'text', text: 'c', cache_control: { type: 'ephemeral', ttl: '1h' } }] }), undefined, 'stream');
     expect(readFileSync(statePath, 'utf8')).toBe(written);
     expect(first.events).toContainEqual(expect.objectContaining({ type: 'persist-error', op: 'save' }));
+    expect(first.ka.persistPath).toBeUndefined();
+    expect(second.ka.persistPath).toBe(statePath);
+    expect('persistPath' in CacheKeepalive.prototype).toBe(true);
     first.ka.stop();
     second.ka.stop();
   });
