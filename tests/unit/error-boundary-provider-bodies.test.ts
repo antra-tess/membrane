@@ -62,6 +62,17 @@ describe('a context overflow in each provider\'s own words is context_length', (
     expect(anthropicHandled(new Anthropic.APIError(400, body, undefined, undefined as never)).type).toBe('context_length');
   });
 
+  it("anthropic: \"prompt is too long\" in the SDK's message, with a null or absent body", () => {
+    for (const body of [null, undefined]) {
+      const error = anthropicHandled(new Anthropic.APIError(400, body as never, 'prompt is too long: 210123 tokens > 200000 maximum', undefined as never));
+      expect(error.type, String(body)).toBe('context_length');
+      expect(error.retryable, String(body)).toBe(false);
+      const server = anthropicHandled(new Anthropic.APIError(500, body as never, 'prompt is too long: 210123 tokens > 200000 maximum', undefined as never));
+      expect(server.type, String(body)).toBe('server');
+      expect(server.retryable, String(body)).toBe(true);
+    }
+  });
+
   it('gemini: "The input token count (N) exceeds the maximum number of input tokens allowed (M)"', async () => {
     stubHttpFailure(400, {
       error: {

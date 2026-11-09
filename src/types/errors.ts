@@ -678,7 +678,7 @@ export function errorFromProviderStatus(params: {
   // With a body, the caller's message is a rendering of it (the Anthropic
   // SDK's "400 {...}"), and a body with no message field can echo the
   // request, so only the body's message fields are read.
-  const ownText = fields.message ?? (params.body === undefined ? params.message : undefined);
+  const ownText = fields.message ?? (params.body === undefined || params.body === null ? params.message : undefined);
   const evidence = [ownText, fields.upstreamMessage].filter((text): text is string => !!text).join('\n');
 
   const classification =
