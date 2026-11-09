@@ -16,6 +16,7 @@
 // length is processed and not cached.
 
 import { collectMarkedBlocks } from './utils/cache-marker-budget.js';
+import { isEffortOnlyMessage } from './utils/empty-text.js';
 import { createHash } from 'node:crypto';
 
 /** Vendor usage fields used by keepalive checks and spend observers. */
@@ -184,7 +185,7 @@ export function messagesForRefresh(messages: readonly unknown[]): unknown[] {
   }
   let end = from;
   while (end < messages.length && !isUser(messages[end])) end++;
-  while (end + 1 < messages.length && isUser(messages[end + 1])) end++;
+  while (end + 1 < messages.length && (isUser(messages[end + 1]) || isEffortOnlyMessage(messages[end + 1]))) end++;
   return messages.slice(0, end + 1);
 }
 

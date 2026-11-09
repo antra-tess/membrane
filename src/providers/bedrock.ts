@@ -19,7 +19,7 @@ import {
   networkError,
   withRawRequest,
 } from '../types/index.js';
-import { errorFromThrown } from '../types/errors.js';
+import { errorFromThrown, systemChangeRefusedError } from '../types/errors.js';
 import { stripEmptyTextAfterPassthrough } from '../utils/empty-text.js';
 import { createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, streamIndex, isEventObject, isToolCallBlock, isToolCallArgumentsDelta, progressOfAnthropicEvent, callerAbort } from './utils.js';
 import {
@@ -295,6 +295,8 @@ export class BedrockAdapter implements ProviderAdapter {
    * the Anthropic API's convention; not measured against Bedrock directly.
    */
   readonly usageCacheConvention = 'cache-excluded' as const;
+  /** Builds blocks as AnthropicAdapter does (anthropicWireMessages): every top-level block it sends keeps its cache_control, without its ttl. */
+  readonly sendsCacheMarkersOn = true;
 
   private accessKeyId: string;
   private secretAccessKey: string;
@@ -488,6 +490,14 @@ export class BedrockAdapter implements ProviderAdapter {
       params.anthropic_beta = [...new Set([...existing, THINKING_DISPLAY_UPDATES_BETA])];
     }
 
+    const effortAt = params.messages.findIndex((message) => (message as { output_config?: unknown }).output_config != null);
+    if (effortAt >= 0) {
+      throw systemChangeRefusedError(
+        `BedrockAdapter: message ${effortAt} carries output_config, an effort-only system message, which BedrockAdapter doesn't send. ` +
+        'Set the effort at the request\'s top level instead, as output_config.effort in the request\'s extra.',
+        params,
+      );
+    }
     stripEmptyTextAfterPassthrough(params, onContentAltered ? (dropped) => onContentAltered(blockBuiltFrom(dropped)) : undefined);
     return params;
   }

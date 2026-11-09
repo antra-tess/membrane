@@ -189,6 +189,23 @@ export interface ProviderAdapter {
    * through it is refused. */
   readonly sendsSystemChanges?: boolean;
 
+  /** The content block types this adapter sends a cache_control marker on,
+   * which decides where membrane may place a floating marker and whether it
+   * may take a caller's marker to make room for one under `cm-owned`
+   * (NormalizedRequest.floatingCacheMarker):
+   * - left out: a float may go on any block membrane would mark (never a
+   *   thinking block), and no caller's marker is taken, since membrane can't
+   *   tell whether the marker it would place is sent;
+   * - `true`: a marker on any block membrane would place one on, so a float
+   *   may go on any such block, and a caller's marker may be taken.
+   *   AnthropicAdapter and BedrockAdapter declare it;
+   * - a list of types: a float goes only on a block of one of them, and a
+   *   caller's marker is taken only for such a float. OpenRouterAdapter
+   *   declares `['text']`: its image, audio, tool-use and tool-result parts
+   *   carry none.
+   * A decorator should forward this; one that doesn't leaves it out. */
+  readonly sendsCacheMarkersOn?: readonly string[] | true;
+
   /**
    * True when this adapter carries the content of every message in the
    * ProviderRequest it receives into its API call (format conversion
@@ -547,4 +564,14 @@ export interface StreamCallbacks {
    * cut off part-way is not thereby valid for replay.
    */
   onThinkingSignature?: (index: number, signature: string) => void;
+  /**
+   * A tool call's argument JSON as it streams (Anthropic `input_json_delta`):
+   * each non-empty fragment, in order, by the position of the block it belongs
+   * to, a tool_use block or a server tool's (server_tool_use, mcp_tool_use),
+   * whose input streams the same way. Fragments are raw and need not be valid
+   * JSON on their own; the block's finished payload (onContentBlock) stays
+   * authoritative. Only the Anthropic adapter calls it: the Bedrock and
+   * OpenAI-family adapters also receive argument fragments, and don't.
+   */
+  onToolInputDelta?: (index: number, partialJson: string) => void;
 }

@@ -1,0 +1,679 @@
+/**
+ * A change of `output_config.effort` at the top of a request rewrites the whole cached prefix.
+ *
+ * In the Anthropic API, under the beta `mid-conversation-output-config-2026-07-01`: a `role: 'system'`
+ * message with empty content and `output_config: { effort }` changes the effort: for the reply to the user turn
+ * it directly follows, when that turn holds new input, and otherwise from the next user turn with new input
+ * (Anthropic's effort documentation, "Change effort mid-conversation").
+ * Claude Opus 5.5 took one before the last user turn, before a tool result, and with no top-level effort;
+ * Claude Opus 5 took one before the last user turn. Fable 5, Haiku 4.5 and Sonnet 4.6 refused it with a 400
+ * saying "output_config.effort requires a model that supports per-turn effort; this model does not", and
+ * without the beta the API refused it as "messages.2.output_config: Extra inputs are not permitted".
+ * Opus 5.5 took one at the end after a user turn, and as the first message. Sonnet 5.5 with
+ * `thinking: between_tools` and Haiku 5.5 with thinking disabled refused one that differs from the level in
+ * effect, saying "effort cannot change when thinking is disabled on this model". Opus 5.5 refused a request
+ * ending with one after an assistant turn as an assistant prefill. Opus 5.5 took one whose content was `[]` or
+ * `''`, and refused one whose content was `' '`, `[{ type: 'text', text: '' }]` or `[{ type: 'text', text: ' ' }]`,
+ * saying "system text blocks must contain non-whitespace text".
+ */
+
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import Anthropic from '@anthropic-ai/sdk';
+import { Membrane } from '../../src/membrane.js';
+import { NativeFormatter } from '../../src/formatters/native.js';
+import { AnthropicAdapter, isSystemChangeRefusal } from '../../src/providers/anthropic.js';
+import { MembraneError } from '../../src/types/errors.js';
+import { stripEmptyTextMessages } from '../../src/utils/empty-text.js';
+import { assertMessagePrefillSupported } from '../../src/providers/request-capabilities.js';
+import { BedrockAdapter } from '../../src/providers/bedrock.js';
+import { computeCacheWireReceipt } from '../../src/cache-wire-receipt.js';
+import { messagesForRefresh } from '../../src/cache-keepalive.js';
+import * as membraneModule from '../../src/index.js';
+import type {
+  ContentBlock,
+  NormalizedMessage,
+  NormalizedRequest,
+  ProviderAdapter,
+  ProviderRequest,
+  ProviderResponse,
+  StreamCallbacks,
+  SystemChangeContent,
+  ToolDefinition,
+} from '../../src/types/index.js';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+const schema = { type: 'object' as const, properties: { city: { type: 'string' as const } }, required: ['city'] };
+const tool = (name: string): ToolDefinition => ({ name, description: `Tool ${name}.`, inputSchema: schema });
+const text = (t: string): ContentBlock => ({ type: 'text', text: t });
+const user = (t: string): NormalizedMessage => ({ participant: 'User', content: [text(t)] });
+const reply = (...content: ContentBlock[]): NormalizedMessage => ({ participant: 'Claude', content });
+const change = (c: Omit<SystemChangeContent, 'type'>): SystemChangeContent => ({ type: 'system_change', ...c });
+const changes = (...blocks: SystemChangeContent[]): NormalizedMessage => ({ participant: 'Harness', content: blocks });
+const effort = (level: NonNullable<SystemChangeContent['effort']>): NormalizedMessage => changes(change({ effort: level }));
+const call = (id: string): ContentBlock => ({ type: 'tool_use', id, name: 'get_time', input: { city: 'Paris' } });
+const result = (id: string): ContentBlock => ({ type: 'tool_result', toolUseId: id, content: 'noon' });
+
+const options = { participantMode: 'simple' as const, assistantParticipant: 'Claude', humanParticipant: 'User', tools: [tool('get_time')] };
+const build = (messages: NormalizedMessage[], extra: Record<string, unknown> = {}) =>
+  new NativeFormatter().buildMessages(messages, { ...options, ...extra });
+const roles = (built: { messages: Array<{ role: string }> }) => built.messages.map((m) => m.role);
+const texts = (built: { messages: Array<{ content: unknown }> }) => built.messages
+  .map((m) => (m.content as Array<{ text?: unknown }>).map((b) => (typeof b.text === 'string' ? b.text : '')).join('|'));
+const marker = (level: string) => ({ role: 'system', content: [], output_config: { effort: level } });
+const wireUser = (t: string) => ({ role: 'user', content: [{ type: 'text', text: t }] });
+const wireReply = (t: string) => ({ role: 'assistant', content: [{ type: 'text', text: t }] });
+const wireCall = (id: string) => ({ type: 'tool_use', id, name: 'get_time', input: { city: 'Paris' } });
+const wireResult = (id: string) => ({ type: 'tool_result', tool_use_id: id, content: 'noon' });
+
+describe('NativeFormatter: an effort-only system change', () => {
+  it('goes as a role "system" message with empty content and the effort as output_config', () => {
+    const built = build([user('u0'), reply(text('a1')), effort('low'), user('u3')]);
+    expect(roles(built)).toEqual(['user', 'assistant', 'system', 'user']);
+    expect(built.messages[2]).toEqual(marker('low'));
+  });
+
+  it('goes where the caller puts it, before the user turn after it, where a tool change goes after that turn', () => {
+    expect(roles(build([user('u0'), reply(text('a1')), effort('high'), user('u3'), reply(text('a4'))])))
+      .toEqual(['user', 'assistant', 'system', 'user', 'assistant']);
+    expect(roles(build([user('u0'), reply(text('a1')), changes(change({ addSystem: ['s'] })), user('u3'), reply(text('a4'))])))
+      .toEqual(['user', 'assistant', 'user', 'system', 'assistant']);
+  });
+
+  it('between a tool call and its result, goes before the result', () => {
+    const built = build([user('u0'), reply(call('t1')), effort('medium'), { participant: 'User', content: [result('t1')] }]);
+    expect(roles(built)).toEqual(['user', 'assistant', 'system', 'user']);
+    expect(built.messages[2]).toEqual(marker('medium'));
+  });
+
+  it('inside a run of user messages that merge into one turn, goes after that turn, its earlier blocks first as they were', () => {
+    const built = build([user('u0'), reply(text('a1')), user('u2'), effort('max'), user('u4')]);
+    expect(built.messages).toEqual([
+      wireUser('u0'), wireReply('a1'), { role: 'user', content: [{ type: 'text', text: 'u2' }, { type: 'text', text: 'u4' }] }, marker('max'),
+    ]);
+  });
+
+  it('inside a run of assistant messages that merge into one turn, goes after that turn', () => {
+    const built = build([user('u0'), reply(text('a1')), effort('low'), reply(text('a3')), user('u4')]);
+    expect(built.messages).toEqual([
+      wireUser('u0'), { role: 'assistant', content: [{ type: 'text', text: 'a1' }, { type: 'text', text: 'a3' }] }, marker('low'), wireUser('u4'),
+    ]);
+  });
+
+  it('after an assistant turn whose call it followed, before the results, which stay with the call', () => {
+    const built = build([user('u0'), reply(call('ta')), effort('low'), reply(text('a3')), { participant: 'User', content: [result('ta')] }]);
+    expect(built.messages).toEqual([
+      wireUser('u0'), { role: 'assistant', content: [wireCall('ta'), { type: 'text', text: 'a3' }] }, marker('low'),
+      { role: 'user', content: [wireResult('ta')] },
+    ]);
+  });
+
+  it('two changes inside one turn keep their order after it', () => {
+    const built = build([
+      user('u0'), reply(call('ta'), call('tb')), { participant: 'User', content: [result('ta')] }, effort('low'),
+      { participant: 'User', content: [result('tb')] }, effort('high'), user('u6'),
+    ]);
+    expect(built.messages.slice(2)).toEqual([
+      { role: 'user', content: [wireResult('ta'), wireResult('tb'), { type: 'text', text: 'u6' }] }, marker('low'), marker('high'),
+    ]);
+  });
+
+  it('first, after what the formatter puts before every message: the user turn it opens with, and the turn the context prefix opens', () => {
+    const built = build([effort('low'), reply(text('a1')), user('u2')], { contextPrefix: 'P' });
+    expect(roles(built)).toEqual(['user', 'assistant', 'system', 'user']);
+    expect(texts(built).slice(1)).toEqual(['P|a1', '', 'u2']);
+    expect(roles(build([effort('low'), reply(text('a1')), user('u2')]))).toEqual(['user', 'system', 'assistant', 'user']);
+  });
+
+  it('goes after every block of a message before it, a result that pairing moves ahead of an earlier turn included', () => {
+    const built = build([
+      user('u0'), reply(call('t1')), user('u2'), reply(text('a3')), effort('low'),
+      { participant: 'User', content: [result('t1')] }, user('u6'),
+    ]);
+    expect(built.messages).toEqual([
+      wireUser('u0'),
+      { role: 'assistant', content: [wireCall('t1')] },
+      { role: 'user', content: [wireResult('t1'), { type: 'text', text: 'u2' }] },
+      wireReply('a3'),
+      marker('low'),
+      wireUser('u6'),
+    ]);
+  });
+
+  it('goes after a result that pairing turns into text, and before one after it', () => {
+    const orphan = (id: string): NormalizedMessage => ({ participant: 'User', content: [result(id)] });
+    const before = build([user('u0'), reply(text('a1')), orphan('t9'), effort('low'), reply(text('a4'))]);
+    expect(roles(before)).toEqual(['user', 'assistant', 'user', 'system', 'assistant']);
+    expect(before.messages[3]).toEqual(marker('low'));
+    expect(JSON.stringify(before.messages[2])).toContain('t9');
+    const after = build([user('u0'), reply(text('a1')), effort('low'), orphan('t9'), reply(text('a4'))]);
+    expect(roles(after)).toEqual(['user', 'assistant', 'system', 'user', 'assistant']);
+    expect(after.messages[2]).toEqual(marker('low'));
+    expect(JSON.stringify(after.messages[3])).toContain('t9');
+  });
+
+  it('after the whole user turn where a cut would part a tool result from its call', () => {
+    const built = build([
+      user('u0'), reply(call('ta'), call('tb')), { participant: 'User', content: [result('ta')] }, effort('low'),
+      { participant: 'User', content: [result('tb'), text('t4')] },
+    ]);
+    expect(built.messages).toEqual([
+      wireUser('u0'),
+      { role: 'assistant', content: [wireCall('ta'), wireCall('tb')] },
+      { role: 'user', content: [wireResult('ta'), wireResult('tb'), { type: 'text', text: 't4' }] },
+      marker('low'),
+    ]);
+  });
+
+  it('after the whole assistant turn where a cut would part a server tool\'s result from its call', () => {
+    const carrier = (item: unknown): ContentBlock => ({ type: 'text', text: '', rawItem: item } as ContentBlock);
+    const use = { type: 'server_tool_use', id: 'srvtoolu_1', name: 'web_search', input: { query: 'x' } };
+    const found = { type: 'web_search_tool_result', tool_use_id: 'srvtoolu_1', content: [] };
+    const built = build([user('ask'), reply(carrier(use)), effort('low'), reply(carrier(found), text('a3')), user('u4')], { anthropicServerBlocks: true });
+    expect(roles(built)).toEqual(['user', 'assistant', 'system', 'user']);
+    expect((built.messages[1]!.content as Array<{ type: string }>).map((b) => b.type)).toEqual(['server_tool_use', 'web_search_tool_result', 'text']);
+  });
+
+  it('before an empty final assistant message leaves the cleanup to refuse the final role it would change, as without the change', () => {
+    const built = build([user('u0'), effort('low'), reply(text('   '))]);
+    expect(roles(built)).toEqual(['user', 'system', 'assistant']);
+    expect(() => stripEmptyTextMessages(built.messages)).toThrow(/final role/);
+  });
+
+  it('at the end after a user turn, goes at the end', () => {
+    const built = build([user('u0'), reply(text('a1')), user('u2'), effort('xhigh')]);
+    expect(roles(built)).toEqual(['user', 'assistant', 'user', 'system']);
+    expect(built.messages[3]).toEqual(marker('xhigh'));
+  });
+
+  it('at the end after an assistant turn, which would end the request on that turn, is refused before sending, flagged', () => {
+    for (const messages of [
+      [user('u0'), reply(text('a1')), effort('xhigh')],
+      [user('u0'), reply(text('a1')), effort('xhigh'), reply(text('a3'))],
+    ]) {
+      let thrown: unknown;
+      try {
+        build(messages);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toMatchObject({ systemChangeRefused: true, retryable: false });
+      expect((thrown as Error).message).toMatch(/prefill/);
+      expect((thrown as Error).message).toMatch(/to send a prefill, set the effort at the request's top level/i);
+      expect((thrown as Error).message).toMatch(/end the request with a user turn after the change/i);
+    }
+  });
+
+  it('alone, with no turn at all, is refused before sending, flagged, naming no assistant turn', () => {
+    let thrown: unknown;
+    try {
+      build([effort('xhigh')]);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toMatchObject({ systemChangeRefused: true, retryable: false });
+    expect((thrown as Error).message).toMatch(/no user turn after it/);
+    expect((thrown as Error).message).not.toMatch(/assistant|prefill/);
+  });
+
+  it('keeps its place beside a tool change: each goes where its own rule puts it, and where both land together the effort goes first', () => {
+    const kinds = (messages: NormalizedMessage[]) => build(messages).messages
+      .map((m) => m.role === 'system' ? ((m as { output_config?: { effort?: string } }).output_config ? `effort:${(m as { output_config: { effort: string } }).output_config.effort}` : 'change') : m.role);
+    const s = changes(change({ addSystem: ['s'] }));
+    expect(kinds([user('u0'), reply(text('a1')), s, effort('low'), user('u4'), reply(text('a5'))]))
+      .toEqual(['user', 'assistant', 'effort:low', 'user', 'change', 'assistant']);
+    expect(kinds([user('u0'), effort('low'), s, reply(text('a3'))])).toEqual(['user', 'effort:low', 'change', 'assistant']);
+    expect(kinds([user('u0'), s, effort('low'), reply(text('a3'))])).toEqual(['user', 'effort:low', 'change', 'assistant']);
+    expect(kinds([user('u0'), s, effort('low')])).toEqual(['user', 'effort:low', 'change']);
+    expect(kinds([user('u0'), effort('low'), s])).toEqual(['user', 'effort:low', 'change']);
+    const t = changes(change({ removeTools: ['get_time'] }));
+    expect(kinds([user('u0'), s, effort('low'), t, effort('high'), reply(text('a5'))]))
+      .toEqual(['user', 'effort:low', 'effort:high', 'change', 'change', 'assistant']);
+  });
+
+  it('carries nothing else: a block with effort and another change, or a message with an effort block beside another, is refused, unflagged', () => {
+    for (const messages of [
+      [user('u0'), changes(change({ effort: 'low', addSystem: ['s'] })), user('u2')],
+      [user('u0'), changes(change({ effort: 'low', removeTools: ['get_time'] })), user('u2')],
+      [user('u0'), changes(change({ effort: 'low' }), change({ addSystem: ['s'] })), user('u2')],
+    ]) {
+      let thrown: unknown;
+      try {
+        build(messages);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(MembraneError);
+      expect((thrown as MembraneError).systemChangeRefused).toBeUndefined();
+      expect(thrown).toMatchObject({ type: 'unsupported', retryable: false });
+    }
+  });
+
+  it('a breakpoint on it, or a boundary at it, goes on the last block before it, which it carries none of its own to hold', () => {
+    const marked = (built: { messages: Array<{ role: string; content: unknown }> }) =>
+      built.messages.flatMap((m) => (m.content as Array<Record<string, unknown>>).filter((b) => b.cache_control).map((b) => `${m.role}:${b.text}`));
+    expect(marked(build([user('u0'), reply(text('a1')), { ...effort('low'), cacheBreakpoint: true }, user('u3')], { promptCaching: true })))
+      .toEqual(['assistant:a1']);
+    expect(marked(build([user('u0'), reply(text('a1')), effort('low'), user('u3')], {
+      promptCaching: true,
+      hasCacheMarker: (_m: NormalizedMessage, index: number) => index === 2,
+    }))).toEqual(['assistant:a1']);
+  });
+
+  it('a breakpoint on it goes on the last cacheable block before it as the request is built: past a change that lands with it, past content with none, past a merged turn', () => {
+    const marked = (built: { messages: Array<{ role: string; content: unknown }> }) =>
+      built.messages.flatMap((m, i) => (m.content as Array<Record<string, unknown>>).filter((b) => b.cache_control).map((b) => `${i}:${m.role}:${b.text}`));
+    const bp = { ...effort('low'), cacheBreakpoint: true };
+    expect(marked(build([user('u0'), changes(change({ addSystem: ['s'] })), bp, reply(text('a3'))], { promptCaching: true })))
+      .toEqual(['0:user:u0']);
+    const signed: ContentBlock = { type: 'thinking', thinking: 'hm', signature: 'sig' } as ContentBlock;
+    expect(marked(build([user('u0'), reply(signed), bp, user('u3')], { promptCaching: true })))
+      .toEqual(['0:user:u0']);
+    expect(marked(build([user('u0'), reply(text('a1')), user('u2'), bp, user('u4')], { promptCaching: true })))
+      .toEqual(['2:user:u2']);
+    expect(marked(build([user('u0'), reply(text('a1')), user('u2'), effort('low'), user('u4')], {
+      promptCaching: true,
+      hasCacheMarker: (_m: NormalizedMessage, index: number) => index === 3,
+    }))).toEqual(['2:user:u2']);
+    expect(marked(build([user('u0'), reply(text('a1'), text(' ')), bp, user('u3')], { promptCaching: true })))
+      .toEqual(['1:assistant:a1']);
+  });
+
+  it('a breakpoint on it with no block before it marks nothing', () => {
+    const built = build([{ ...effort('low'), cacheBreakpoint: true }, user('u1')], { promptCaching: true });
+    expect(JSON.stringify(built.messages)).not.toContain('cache_control');
+    expect(roles(built)).toEqual(['system', 'user']);
+  });
+
+  it('an effort that is not one of the five levels, null included, is refused as unsupported, unflagged, naming it', () => {
+    for (const level of [null, 'extreme']) {
+      let thrown: unknown;
+      try {
+        build([user('u0'), changes({ type: 'system_change', effort: level } as unknown as SystemChangeContent), user('u2')]);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(MembraneError);
+      expect((thrown as MembraneError).systemChangeRefused).toBeUndefined();
+      expect(thrown).toMatchObject({ type: 'unsupported', retryable: false });
+      expect((thrown as Error).message).toContain(JSON.stringify(level));
+    }
+  });
+
+  it('an effort that can\'t be written as JSON is still refused as unsupported, naming it', () => {
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    const bare: Record<string, unknown> = Object.create(null);
+    bare.self = bare;
+    for (const [level, name] of [[circular, '[object Object]'], [10n, '10'], [bare, 'a value that has no text form']] as const) {
+      let thrown: unknown;
+      try {
+        build([user('u0'), changes({ type: 'system_change', effort: level } as unknown as SystemChangeContent), user('u2')]);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toMatchObject({ type: 'unsupported', retryable: false });
+      expect((thrown as Error).message).toContain(name);
+    }
+  });
+});
+
+describe('the cache wire receipt and an effort-only system message', () => {
+  it('hashes its effort into every marked prefix after it', () => {
+    const raw = (level: string) => ({
+      model: 'm',
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'u0' }] },
+        marker(level),
+        { role: 'user', content: [{ type: 'text', text: 'u2', cache_control: { type: 'ephemeral' } }] },
+      ],
+    });
+    const low = computeCacheWireReceipt(raw('low'));
+    const high = computeCacheWireReceipt(raw('high'));
+    expect(low.markers).toHaveLength(1);
+    expect(low.markers[0]!.prefixHash).not.toBe(high.markers[0]!.prefixHash);
+    const stringForm = (level: string) => computeCacheWireReceipt({
+      ...raw(level),
+      messages: [raw(level).messages[0], { role: 'system', content: '', output_config: { effort: level } }, raw(level).messages[2]],
+    });
+    expect(stringForm('low').markers[0]!.prefixHash).not.toBe(stringForm('high').markers[0]!.prefixHash);
+    const withText = (level: string) => computeCacheWireReceipt({
+      ...raw(level),
+      messages: [raw(level).messages[0], { role: 'system', content: [{ type: 'text', text: 's' }], output_config: { effort: level } }, raw(level).messages[2]],
+    });
+    expect(withText('low').markers[0]!.prefixHash).not.toBe(withText('high').markers[0]!.prefixHash);
+  });
+});
+
+describe('the empty-text cleanup and an effort-only system message', () => {
+  it('keeps it, though its content is empty', () => {
+    const messages = [{ role: 'user', content: [{ type: 'text', text: 'u0' }] }, marker('low'), { role: 'user', content: [{ type: 'text', text: 'u2' }] }];
+    expect(stripEmptyTextMessages(messages)).toEqual(messages);
+  });
+
+  it('keeps one whose content is an empty string', () => {
+    const messages = [{ role: 'user', content: 'u0' }, { role: 'system', content: '', output_config: { effort: 'low' } }, { role: 'user', content: 'u2' }];
+    expect(stripEmptyTextMessages(messages)).toEqual(messages);
+  });
+
+  const sysWith = (content: unknown) => ({ role: 'system', content, output_config: { effort: 'low' } });
+
+  it('keeps one whose content is only empty text, with that text dropped', () => {
+    const messages = [wireUser('u0'), sysWith([{ type: 'text', text: '' }]), wireUser('u2')];
+    expect(stripEmptyTextMessages(messages)).toEqual([messages[0], sysWith([]), messages[2]]);
+  });
+
+  it('keeps one at the end whose content is only empty text, reading the final role past it', () => {
+    const messages = [wireUser('u0'), sysWith([{ type: 'text', text: '' }])];
+    expect(stripEmptyTextMessages(messages)).toEqual([messages[0], sysWith([])]);
+  });
+
+  it('keeps one whose content is a whitespace text block with the block dropped and reported, as the API refuses whitespace text in it', () => {
+    const dropped: unknown[] = [];
+    const messages = [wireUser('u0'), sysWith([{ type: 'text', text: ' ' }]), wireUser('u2')];
+    expect(stripEmptyTextMessages(messages, (block) => dropped.push(block))).toEqual([messages[0], sysWith([]), messages[2]]);
+    expect(dropped).toEqual([{ type: 'text', text: ' ' }]);
+  });
+
+  it('keeps one whose content is a whitespace string as an empty string, reported altered, as the API refuses whitespace text in it', () => {
+    const dropped: unknown[] = [];
+    const messages = [wireUser('u0'), sysWith(' '), wireUser('u2')];
+    expect(stripEmptyTextMessages(messages, (block) => dropped.push(block))).toEqual([messages[0], sysWith(''), messages[2]]);
+    expect(dropped).toEqual([undefined]);
+  });
+
+  it('reads the final role past it, so dropping an empty user turn after it changes nothing', () => {
+    const messages = [{ role: 'user', content: [{ type: 'text', text: 'u0' }] }, marker('low'), { role: 'user', content: [{ type: 'text', text: '' }] }];
+    expect(stripEmptyTextMessages(messages)).toEqual([messages[0], messages[1]]);
+  });
+
+  it('drops an empty message of another role, even one carrying output_config', () => {
+    const messages = [{ role: 'user', content: [{ type: 'text', text: 'u0' }] }, { role: 'user', content: [], output_config: { effort: 'low' } }];
+    expect(stripEmptyTextMessages(messages)).toEqual([messages[0]]);
+  });
+
+  it('still drops a system message with empty content and no effort', () => {
+    const messages = [{ role: 'user', content: [{ type: 'text', text: 'u0' }] }, { role: 'system', content: [] }, { role: 'user', content: [{ type: 'text', text: 'u2' }] }];
+    expect(stripEmptyTextMessages(messages)).toEqual([messages[0], messages[2]]);
+  });
+});
+
+describe('AnthropicAdapter and an effort-only system message', () => {
+  const ok = { content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn', model: 'm', usage: { input_tokens: 1, output_tokens: 1 } };
+
+  it('adds the mid-conversation output_config beta when a message carries output_config, beside the others, and not otherwise', async () => {
+    const seen: Array<{ headers?: Record<string, string>; body: any }> = [];
+    const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false }, defaultHeaders: { 'anthropic-beta': 'oauth-2025-04-20' } });
+    (adapter as any).client = { messages: { create: async (body: any, opts: { headers?: Record<string, string> }) => {
+      seen.push({ headers: opts.headers, body });
+      return ok;
+    } } };
+    const base = { model: 'claude-opus-5-5', maxTokens: 100 };
+    const hello = { role: 'user', content: [{ type: 'text', text: 'hello' }] };
+    await adapter.complete({ ...base, messages: [hello, marker('low'), hello] } as any);
+    await adapter.complete({ ...base, messages: [hello, { role: 'system', content: [{ type: 'tool_removal', tool: { type: 'tool_reference', name: 'x' } }] }, marker('low'), hello] } as any);
+    await adapter.complete({ ...base, messages: [hello] } as any);
+    expect(seen.map((s) => s.headers?.['anthropic-beta'])).toEqual([
+      'oauth-2025-04-20,mid-conversation-output-config-2026-07-01',
+      'oauth-2025-04-20,inline-tools-2026-09-15,mid-conversation-output-config-2026-07-01',
+      undefined,
+    ]);
+    expect(seen[0]!.body.messages[1]).toEqual(marker('low'));
+  });
+
+  it('marks the API\'s refusal of per-turn effort, and not the refusal of a top-level effort, which the same request without the change meets too', () => {
+    const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
+    const classify = (message: string) =>
+      (adapter as any).handleError(new Anthropic.APIError(400, { type: 'error', error: { type: 'invalid_request_error', message } }, undefined, new Headers()), { model: 'm' });
+    for (const wording of [
+      'output_config.effort requires a model that supports per-turn effort; this model does not',
+      "messages.2: output_config.effort 'low' differs from the 'high' in effect before it; effort cannot change when thinking is disabled on this model. Use effort 'high', or enable thinking.",
+    ]) {
+      expect(classify(wording)).toMatchObject({ type: 'invalid_request', httpStatus: 400, retryable: false, systemChangeRefused: true });
+    }
+    expect(classify('This model does not support the effort parameter.').systemChangeRefused).toBeUndefined();
+    expect(isSystemChangeRefusal({ error: { message: 'output_config.effort requires a model that supports per-turn effort; this model does not' } })).toBe(true);
+  });
+});
+
+class RecordingAdapter implements ProviderAdapter {
+  readonly name = 'recording';
+  requests: ProviderRequest[] = [];
+  constructor(readonly sendsSystemChanges?: boolean) {}
+  supportsModel(): boolean {
+    return true;
+  }
+  async complete(request: ProviderRequest): Promise<ProviderResponse> {
+    this.requests.push(request);
+    return { content: [{ type: 'text', text: 'ok' }], stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 }, model: request.model, raw: {} };
+  }
+  async stream(request: ProviderRequest, callbacks: StreamCallbacks): Promise<ProviderResponse> {
+    callbacks.onChunk('ok');
+    return this.complete(request);
+  }
+}
+
+const request = (messages: NormalizedMessage[]): NormalizedRequest => ({
+  messages,
+  config: { model: 'claude-opus-5-5', maxTokens: 100 },
+  tools: [tool('get_time')],
+  toolMode: 'native',
+});
+
+describe('Membrane: a request carrying an effort-only system change', () => {
+  const messages = [user('u0'), reply(text('a1')), effort('low'), user('u3')];
+
+  it('through an adapter that does not send system changes, such as Bedrock\'s, is refused before sending, flagged', async () => {
+    const adapter = new RecordingAdapter(false);
+    await expect(new Membrane(adapter, { formatter: new NativeFormatter() }).complete(request(messages)))
+      .rejects.toMatchObject({ systemChangeRefused: true, retryable: false });
+    expect(adapter.requests).toEqual([]);
+  });
+
+  it('through NativeFormatter and the real AnthropicAdapter: goes as the effort-only message with the beta, and the API\'s refusal reaches the caller marked', async () => {
+    const calls: Array<{ body: any; headers?: Record<string, string> }> = [];
+    let refuse = false;
+    const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
+    (adapter as any).client = { messages: {
+      create: async (body: unknown, opts: { headers?: Record<string, string> }) => {
+        calls.push({ body, headers: opts?.headers });
+        if (refuse) {
+          throw new Anthropic.APIError(400, { type: 'error', error: { type: 'invalid_request_error', message: 'output_config.effort requires a model that supports per-turn effort; this model does not' } }, undefined, new Headers());
+        }
+        return { content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn', model: 'm', usage: { input_tokens: 1, output_tokens: 1 } };
+      },
+      stream: () => { throw new Error('not used'); },
+    } };
+    const membrane = new Membrane(adapter, { formatter: new NativeFormatter() });
+    await membrane.complete(request(messages));
+    expect(calls[0]!.body.messages.map((m: { role: string }) => m.role)).toEqual(['user', 'assistant', 'system', 'user']);
+    expect(calls[0]!.body.messages[2]).toEqual(marker('low'));
+    expect(calls[0]!.headers?.['anthropic-beta']).toBe('mid-conversation-output-config-2026-07-01');
+    refuse = true;
+    await expect(membrane.complete(request(messages))).rejects.toMatchObject({ systemChangeRefused: true, httpStatus: 400 });
+  });
+});
+
+describe('a streamed request carrying an effort-only system change, and its keepalive refresh', () => {
+  const finalRound = [
+    { type: 'message_start', message: { id: 'msg_1', type: 'message', role: 'assistant', model: 'claude-opus-5-5', content: [], stop_reason: null, usage: { input_tokens: 5, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 1 } },
+  ];
+  const fakeStream = (events: unknown[]) => ({
+    controller: { abort() {} },
+    [Symbol.asyncIterator]() {
+      let index = 0;
+      return { async next() { return index < events.length ? { value: events[index++], done: false } : { value: undefined, done: true }; } };
+    },
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('streams the message with its beta, and a refresh replays both', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.parse('2026-11-09T00:00:00Z'));
+    const streamed: Array<{ body: any; headers?: Record<string, string> }> = [];
+    const refreshes: Array<{ body: any; headers?: Record<string, string> }> = [];
+    const adapter = new AnthropicAdapter({ apiKey: 'sk-test' });
+    const client: any = { messages: {
+      stream: vi.fn(async (body: any, opts?: { headers?: Record<string, string> }) => {
+        streamed.push({ body: JSON.parse(JSON.stringify(body)), headers: opts?.headers });
+        return fakeStream(finalRound);
+      }),
+      create: vi.fn(async (body: any, opts?: { headers?: Record<string, string> }) => {
+        refreshes.push({ body: JSON.parse(JSON.stringify(body)), headers: opts?.headers });
+        return { id: 'refresh', content: [], stop_reason: 'max_tokens', usage: { input_tokens: 3, output_tokens: 0, cache_read_input_tokens: 100, cache_creation_input_tokens: 0 } };
+      }),
+    } };
+    client.withOptions = () => client;
+    (adapter as any).client = client;
+    const membrane = new Membrane(adapter, { formatter: new NativeFormatter() });
+    const messages = [user('u0'), reply(text('a1')), effort('low'), { ...user('u3'), cacheBreakpoint: true }];
+    const stream = membrane.streamYielding({ ...request(messages), promptCaching: true, cacheTtl: '1h' } as NormalizedRequest, {});
+    for await (const _event of stream) { /* drain */ }
+    expect(streamed).toHaveLength(1);
+    expect(streamed[0]!.body.messages[2]).toEqual(marker('low'));
+    expect(streamed[0]!.headers?.['anthropic-beta']).toContain('mid-conversation-output-config-2026-07-01');
+
+    await vi.advanceTimersByTimeAsync(50 * 60_000);
+    expect(refreshes).toHaveLength(1);
+    expect(refreshes[0]!.body.messages[2]).toEqual(marker('low'));
+    expect(refreshes[0]!.headers?.['anthropic-beta']).toContain('mid-conversation-output-config-2026-07-01');
+    adapter.cacheKeepalive!.stop();
+  });
+});
+
+describe('refusals around an effort-only system message', () => {
+  it('a request ending on an assistant turn and then one is still a prefill', () => {
+    const messages = [{ role: 'user', content: 'u0' }, { role: 'assistant', content: 'a1' }, marker('low')];
+    expect(() => assertMessagePrefillSupported('claude-opus-5-5', messages, undefined, 'anthropic', {})).toThrow(/prefill/);
+  });
+
+  it('a request ending on an assistant turn and then an effort message whose content is only empty text is still a prefill', () => {
+    const messages = [{ role: 'user', content: 'u0' }, { role: 'assistant', content: 'a1' }, { role: 'system', content: [{ type: 'text', text: '' }], output_config: { effort: 'low' } }];
+    expect(() => assertMessagePrefillSupported('claude-opus-5-5', messages, undefined, 'anthropic', {})).toThrow(/prefill/);
+  });
+
+  it('a system message with content as well as output_config is a turn the request ends on, not an effort-only one', () => {
+    const messages = [
+      { role: 'user', content: 'u0' }, { role: 'assistant', content: 'a1' },
+      { role: 'system', content: [{ type: 'text', text: 's' }], output_config: { effort: 'low' } },
+    ];
+    expect(() => assertMessagePrefillSupported('claude-opus-5-5', messages, undefined, 'anthropic', {})).not.toThrow();
+  });
+
+  it('a request whose last message is missing reads no final role, as before', () => {
+    expect(() => assertMessagePrefillSupported('claude-opus-5-5', [{ role: 'user', content: 'u0' }, null], undefined, 'anthropic', {})).not.toThrow();
+  });
+
+  it('a refusal for the formatter or adapter names the top-level effort for an effort change', async () => {
+    const adapter = new RecordingAdapter(false);
+    const refused = new Membrane(adapter, { formatter: new NativeFormatter() }).complete(request([user('u0'), reply(text('a1')), effort('low'), user('u3')]));
+    await expect(refused).rejects.toThrow(/Anthropic's output_config\.effort, in providerParams/);
+  });
+
+  it('BedrockAdapter refuses a message carrying output_config before sending, flagged', async () => {
+    const adapter = new BedrockAdapter({ accessKeyId: 'zz-key', secretAccessKey: 'zz-secret', region: 'us-east-1' });
+    const send = vi.fn();
+    (adapter as any).invokeModel = send;
+    (adapter as any).invokeModelWithStream = send;
+    const raw = { model: 'claude-opus-5-5', maxTokens: 64, messages: [{ role: 'user', content: [{ type: 'text', text: 'u0' }] }, marker('low'), { role: 'user', content: [{ type: 'text', text: 'u2' }] }] };
+    await expect(adapter.complete(raw as any)).rejects.toMatchObject({ systemChangeRefused: true, retryable: false });
+    await expect(adapter.stream(raw as any, { onChunk: () => {} } as any)).rejects.toMatchObject({ systemChangeRefused: true, retryable: false });
+    await expect(adapter.complete(raw as any)).rejects.toThrow(/output_config\.effort in the request's extra/);
+    const emptied = { ...raw, messages: [raw.messages[0], { role: 'assistant', content: [{ type: 'text', text: '' }] }, marker('low')] };
+    await expect(adapter.complete(emptied as any)).rejects.toMatchObject({ systemChangeRefused: true });
+    expect(send).not.toHaveBeenCalled();
+  });
+});
+
+describe('the tool loop\'s floating cache marker and an effort-only system message', () => {
+  const scripted = () => {
+    const requests: any[] = [];
+    const respond = (n: number, request: ProviderRequest): ProviderResponse => ({
+      content: n < 1 ? [{ type: 'tool_use', id: `call-${n + 1}`, name: 'get_time', input: { city: 'Paris' } }] : [{ type: 'text', text: 'done' }],
+      stopReason: n < 1 ? 'tool_use' : 'end_turn',
+      usage: { inputTokens: 1, outputTokens: 1 },
+      model: 'claude-opus-5-5',
+      rawRequest: request,
+      raw: {},
+    } as ProviderResponse);
+    const adapter = {
+      name: 'anthropic',
+      sendsCacheMarkersOn: true,
+      sendsSystemChanges: true,
+      supportsModel: () => true,
+      async complete(request: ProviderRequest) { requests.push(request); return respond(requests.length - 1, request); },
+      async stream(request: ProviderRequest, callbacks: StreamCallbacks) {
+        requests.push(request);
+        const n = requests.length - 1;
+        if (n >= 1) callbacks.onChunk('done');
+        return respond(n, request);
+      },
+    } as unknown as ProviderAdapter;
+    return { adapter, requests };
+  };
+  const loop = (messages: NormalizedMessage[], extra: Partial<NormalizedRequest> = {}): NormalizedRequest => ({
+    ...request(messages), promptCaching: true, cacheTtl: '1h', cacheMarkers: 'cm-owned', floatingCacheMarker: true, assistantParticipant: 'Claude', ...extra,
+  } as NormalizedRequest);
+  const markedAt = (sent: any): number[] => sent.messages.flatMap((m: any, mi: number) =>
+    (Array.isArray(m.content) ? m.content : []).some((b: any) => b.cache_control) ? [mi] : []);
+
+  it('a later call marks the user turn before the change that precedes the calling turn', async () => {
+    const { adapter, requests } = scripted();
+    await new Membrane(adapter, { formatter: new NativeFormatter() })
+      .stream(loop([user('u0'), reply(text('a1')), user('u2'), effort('low')]), { onToolCalls: async (calls) => calls.map((c) => ({ toolUseId: c.id, content: 'ok', isError: false })) });
+    expect(requests[1].messages.map((m: any) => m.role)).toEqual(['user', 'assistant', 'user', 'system', 'assistant', 'user']);
+    expect(markedAt(requests[1])).toEqual([2, 5]);
+  });
+
+  it('a later call marks the user turn before an assistant run that a hook\'s effort-only message sits inside', async () => {
+    const { adapter, requests } = scripted();
+    const beforeRequest = (_normalized: unknown, provider: any) => {
+      const at = provider.messages.findIndex((m: any) => m.role === 'assistant' && Array.isArray(m.content) && m.content.some((b: any) => b.type === 'tool_use'));
+      if (at < 0) return provider;
+      return { ...provider, messages: [...provider.messages.slice(0, at), wireReply('a-text'), marker('low'), ...provider.messages.slice(at)] };
+    };
+    await new Membrane(adapter, { formatter: new NativeFormatter(), hooks: { beforeRequest } })
+      .stream(loop([user('u0')]), { onToolCalls: async (calls) => calls.map((c) => ({ toolUseId: c.id, content: 'ok', isError: false })) });
+    expect(requests[1].messages.map((m: any) => m.role)).toEqual(['user', 'assistant', 'system', 'assistant', 'user']);
+    expect(markedAt(requests[1])).toEqual([0, 4]);
+  });
+
+  it('a later call marks its newest turn past an effort-only message a hook appends', async () => {
+    const { adapter, requests } = scripted();
+    const beforeRequest = (_normalized: unknown, provider: any) => ({ ...provider, messages: [...provider.messages, marker('low')] });
+    await new Membrane(adapter, { formatter: new NativeFormatter(), hooks: { beforeRequest } })
+      .stream(loop([user('u0'), reply(text('a1')), user('u2')]), { onToolCalls: async (calls) => calls.map((c) => ({ toolUseId: c.id, content: 'ok', isError: false })) });
+    expect(requests[1].messages.map((m: any) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant', 'user', 'system']);
+    expect(markedAt(requests[1])).toEqual([2, 4]);
+  });
+});
+
+describe('the keepalive refresh\'s messages and an effort-only system message', () => {
+  it('end where the user turn ends, past an effort-only message inside it', () => {
+    const hour = { cache_control: { type: 'ephemeral', ttl: '1h' } };
+    const messages = [
+      wireUser('u0'),
+      { role: 'assistant', content: [wireCall('c1'), { ...wireCall('c2'), ...hour }] },
+      { role: 'user', content: [wireResult('c1')] },
+      marker('low'),
+      { role: 'user', content: [wireResult('c2')] },
+      wireReply('a5'),
+    ];
+    expect(messagesForRefresh(messages)).toEqual(messages.slice(0, 5));
+  });
+});
+
+describe('the package', () => {
+  it('declares that its system change carries effort', () => {
+    expect(membraneModule.SYSTEM_CHANGE_EFFORT).toBe(true);
+  });
+});

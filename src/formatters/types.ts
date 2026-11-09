@@ -5,6 +5,7 @@ import type {
   ToolCall,
   ToolResult,
   BlockEvent,
+  SystemChangeContent,
 } from '../types/index.js';
 import type {
   ChunkMeta,
@@ -244,6 +245,8 @@ export interface ProviderMessage {
   /** 'system' only for a mid-conversation system message (SystemChangeContent), which a formatter that `rendersSystemChanges` builds. */
   role: 'user' | 'assistant' | 'system';
   content: unknown;
+  /** On an effort-only system message, from SystemChangeContent's `effort`: its empty content goes with this. */
+  output_config?: { effort: NonNullable<SystemChangeContent['effort']> };
 }
 
 /** A user or assistant turn: what the tool-pair normalizer and the role merge take and give. */

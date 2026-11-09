@@ -35,6 +35,7 @@ import type {
   ErrorInfo,
 } from './types/index.js';
 import { lastCacheableBlockIndex } from './formatters/native.js';
+import { sentOnTheWire } from './utils/anthropic-wire-blocks.js';
 import {
   sameThinkingText,
   findSpanningProviderRun,
@@ -43,9 +44,12 @@ import {
 } from './utils/thinking-carriers.js';
 import {
   assertCacheMarkersWithinLimit,
+  collectMarkedBlocks,
   countWireCacheMarkers,
   clampCacheMarkers,
+  ownMessageBlocks,
   ownSystemBlocks,
+  wireBlocksInOrder,
   MAX_CACHE_BREAKPOINTS,
 } from './utils/cache-marker-budget.js';
 import {
@@ -109,6 +113,7 @@ import {
   shedImagesToFitByteBudget, assertWithinByteBudget,
 } from './utils/image-media.js';
 import { convertMcpMedia } from './utils/mcp-media.js';
+import { isEffortOnlyMessage } from './utils/empty-text.js';
 import { getDefaultPricing } from './registry/default-pricing.js';
 import { FidelityNotes, isRawItemCarrier, requestFingerprint, type MessageOrigin } from './utils/fidelity.js';
 
@@ -161,6 +166,17 @@ class NativeBlockTracker {
   onThinkingSignature(index: number, signature: string): void {
     const entry = this.receivedByIndex.get(index);
     if (entry && entry.final === undefined) entry.signature = signature;
+  }
+
+  /** The id and (restored) name a still-open tool_use block started with. */
+  openToolCall(index: number): { toolId?: string; toolName?: string } | undefined {
+    if (this.started.get(index) !== 'tool_call' || this.completed.has(index)) return undefined;
+    const start = this.receivedByIndex.get(index)?.start as { id?: unknown; name?: unknown } | undefined;
+    const name = typeof start?.name === 'string' ? start.name : undefined;
+    return {
+      ...(typeof start?.id === 'string' ? { toolId: start.id } : {}),
+      ...(name !== undefined ? { toolName: this.restoreName ? this.restoreName(name) : name } : {}),
+    };
   }
 
   onChunk(chunk: string): void {
@@ -265,6 +281,81 @@ function isBuildRefusal(error: unknown): error is MembraneError {
 
 function holdsToolUse(content: unknown): boolean {
   return Array.isArray(content) && content.some((block) => (block as { type?: unknown } | null)?.type === 'tool_use');
+}
+
+/**
+ * The marker a float on `target` carries, or undefined where none fits: a
+ * longer TTL may not follow a shorter one, and a marker with no ttl is 5m.
+ */
+function floatControlAt(
+  request: { messages: unknown; system?: unknown; tools?: unknown },
+  target: Record<string, unknown>,
+  cacheControl: { type: 'ephemeral'; ttl?: '5m' | '1h' },
+): { type: 'ephemeral'; ttl?: '5m' | '1h' } | undefined {
+  const blocks = wireBlocksInOrder(request);
+  const at = blocks.indexOf(target);
+  const long = (block: Record<string, unknown>) => (block.cache_control as { ttl?: unknown }).ttl === '1h';
+  const isLong = cacheControl.ttl === '1h' && blocks.slice(0, at).every((block) => !block.cache_control || long(block));
+  if (!isLong && blocks.slice(at + 1).some((block) => block.cache_control && long(block))) return undefined;
+  return isLong || !cacheControl.ttl ? cacheControl : { ...cacheControl, ttl: '5m' };
+}
+
+/**
+ * A float withheld for want of a slot: the markers the request carries, and
+ * whether the adapter's missing `sendsCacheMarkersOn` is what kept a caller's
+ * message marker from being taken to make room.
+ */
+type FloatWithheld = { markers: number; undeclared: boolean };
+
+function placeFloatingMarker(
+  request: { messages: Array<{ role?: string; content?: unknown }>; system?: unknown; tools?: unknown },
+  cacheControl: { type: 'ephemeral'; ttl?: '5m' | '1h' },
+  mayTake: boolean,
+  sendsCacheMarkersOn: ProviderAdapter['sendsCacheMarkersOn'],
+): FloatWithheld | undefined {
+  const takeEarliest = mayTake && sendsCacheMarkersOn !== undefined;
+  const markableBlockTypes = sendsCacheMarkersOn === true ? undefined : sendsCacheMarkersOn;
+  const messages = request.messages;
+  const wireMarkers = countWireCacheMarkers(request);
+  let residuum = MAX_CACHE_BREAKPOINTS - wireMarkers;
+  const unmarkedEnd = (mi: number): Record<string, unknown> | undefined => {
+    const content = messages[mi]?.content;
+    if (!Array.isArray(content) || content.length === 0) return undefined;
+    const blocks = content as Array<Record<string, unknown>>;
+    let at = blocks.length;
+    do at = lastCacheableBlockIndex(blocks.slice(0, at)); while (at >= 0 && !sentOnTheWire(blocks[at]));
+    if (at < 0) return undefined;
+    const block = blocks[at]!;
+    if (markableBlockTypes && !markableBlockTypes.includes(String(block.type))) return undefined;
+    return block.cache_control ? undefined : block;
+  };
+  let newestAt = messages.length - 1;
+  while (newestAt >= 0 && isEffortOnlyMessage(messages[newestAt])) newestAt--;
+  const newestEnd = unmarkedEnd(newestAt);
+  const newest = newestEnd && floatControlAt(request, newestEnd, cacheControl) ? newestEnd : undefined;
+  if (newest && residuum <= 0 && takeEarliest) {
+    const earliest = collectMarkedBlocks({ messages })[0];
+    if (earliest) {
+      delete earliest.cache_control;
+      residuum++;
+    }
+  }
+  if (residuum <= 0) {
+    if (!newest && mayTake) return undefined;
+    const undeclared = mayTake && sendsCacheMarkersOn === undefined && collectMarkedBlocks({ messages }).length > 0;
+    return { markers: wireMarkers, undeclared };
+  }
+  let callingTurn = messages.length - 1;
+  while (callingTurn >= 0 && !(messages[callingTurn]?.role === 'assistant' && holdsToolUse(messages[callingTurn]?.content))) callingTurn--;
+  while (callingTurn > 0 && (messages[callingTurn - 1]?.role === 'assistant' || isEffortOnlyMessage(messages[callingTurn - 1]))) callingTurn--;
+  for (const block of [newest, callingTurn > 0 ? unmarkedEnd(callingTurn - 1) : undefined]) {
+    if (!block || residuum <= 0) continue;
+    const control = floatControlAt(request, block, cacheControl);
+    if (!control) continue;
+    block.cache_control = control;
+    residuum--;
+  }
+  return undefined;
 }
 
 function deliverCacheWireReceipt(request: NormalizedRequest, described: unknown): void {
@@ -1425,12 +1516,16 @@ export class Membrane {
     }
   }
 
-  private floatBudgetWarnState = { lastWarnedAtMs: 0, suppressedSinceWarn: 0 };
+  private readonly floatsAfterHook = new WeakMap<object, { type: 'ephemeral'; ttl?: '5m' | '1h' }>();
+  private floatBudgetWarnStates = {
+    declared: { lastWarnedAtMs: 0, suppressedSinceWarn: 0 },
+    undeclared: { lastWarnedAtMs: 0, suppressedSinceWarn: 0 },
+  };
   private static readonly FLOAT_BUDGET_WARN_INTERVAL_MS = 60_000;
 
-  private warnFloatBudgetExhausted(wireMarkers: number): void {
+  private warnFloatBudgetExhausted(withheld: FloatWithheld): void {
     const now = Date.now();
-    const state = this.floatBudgetWarnState;
+    const state = this.floatBudgetWarnStates[withheld.undeclared ? 'undeclared' : 'declared'];
     const elapsed = now - state.lastWarnedAtMs;
     if (state.lastWarnedAtMs !== 0 && elapsed < Membrane.FLOAT_BUDGET_WARN_INTERVAL_MS) {
       state.suppressedSinceWarn++;
@@ -1441,8 +1536,12 @@ export class Membrane {
     state.suppressedSinceWarn = 0;
     console.warn(
       `[membrane] floating cache marker withheld: upstream markers already ` +
-      `occupy all ${MAX_CACHE_BREAKPOINTS} cache_control slots (${wireMarkers} on the wire). ` +
-      `Tool-round suffixes will not cache incrementally.` +
+      `occupy all ${MAX_CACHE_BREAKPOINTS} cache_control slots (${withheld.markers} in the request)` +
+      (withheld.undeclared
+        ? `; the adapter doesn't declare sendsCacheMarkersOn, so no caller marker was taken ` +
+          `to make room (a decorator should forward it)`
+        : '') +
+      `. Tool-round suffixes will not cache incrementally.` +
       (suppressed > 0 ? ` (${suppressed} further occurrences suppressed since the last warning.)` : '')
     );
   }
@@ -1462,38 +1561,25 @@ export class Membrane {
     const tools = providerRequest.tools;
     const promptCaching = request.promptCaching ?? this.config.defaultPromptCaching ?? true;
     const membraneOwned = (request.cacheMarkers ?? 'membrane-system') === 'membrane-system';
-    const cacheControl = promptCaching && membraneOwned
+    const floatControl = promptCaching
       ? { type: 'ephemeral' as const, ...(request.cacheTtl ? { ttl: request.cacheTtl } : {}) }
       : undefined;
+    const cacheControl = membraneOwned ? floatControl : undefined;
     const upstreamWireMarkers = countWireCacheMarkers({ messages: mergedMessages, system: request.system });
     if (cacheControl && upstreamWireMarkers === 0 && Array.isArray(tools) && tools.length) {
       tools[tools.length - 1] = { ...tools[tools.length - 1], cache_control: cacheControl };
     }
 
     // Anthropic allows 4 cache_control markers, tools and system included, and
-    // looks for a cache entry no more than about 20 blocks back from a marker.
-    const floatingEnabled =
-      request.floatingCacheMarker ?? this.config.defaultFloatingCacheMarker ?? true;
-    if (toolLoopRebuild && floatingEnabled && cacheControl && !prefixRewritten) {
-      const wireMarkers = countWireCacheMarkers({ messages: mergedMessages, system, tools });
-      let residuum = MAX_CACHE_BREAKPOINTS - wireMarkers;
-      if (residuum <= 0) {
-        this.warnFloatBudgetExhausted(wireMarkers);
+    // looks for a cache entry only so far back from a marker.
+    const floatingAsked = request.floatingCacheMarker ?? this.config.defaultFloatingCacheMarker;
+    const floatingEnabled = membraneOwned ? floatingAsked ?? true : floatingAsked === true;
+    if (toolLoopRebuild && floatingEnabled && floatControl && !prefixRewritten) {
+      if (membraneOwned) {
+        const withheld = placeFloatingMarker({ messages: mergedMessages, system, tools }, floatControl, false, this.adapter.sendsCacheMarkersOn);
+        if (withheld) this.warnFloatBudgetExhausted(withheld);
       } else {
-        let callingTurn = mergedMessages.length - 1;
-        while (callingTurn >= 0 && !(mergedMessages[callingTurn]?.role === 'assistant' && holdsToolUse(mergedMessages[callingTurn]?.content))) callingTurn--;
-        while (callingTurn > 0 && mergedMessages[callingTurn - 1]?.role === 'assistant') callingTurn--;
-        const targets = [mergedMessages.length - 1, callingTurn - 1];
-        for (const mi of targets) {
-          if (residuum <= 0 || mi < 0) continue;
-          const content = mergedMessages[mi]?.content;
-          if (!Array.isArray(content) || content.length === 0) continue;
-          const bpIdx = lastCacheableBlockIndex(content as Array<Record<string, unknown>>);
-          if (bpIdx < 0) continue;
-          if ((content[bpIdx] as Record<string, unknown>).cache_control) continue;
-          (content[bpIdx] as Record<string, unknown>).cache_control = cacheControl;
-          residuum--;
-        }
+        this.floatsAfterHook.set(providerRequest, floatControl);
       }
     }
 
@@ -1790,7 +1876,7 @@ export class Membrane {
       throw systemChangeRefusedError(
         `A system_change block goes only through a formatter that renders it (NativeFormatter) and an adapter that sends it (AnthropicAdapter); ` +
         `this request has formatter "${activeFormatter.name}" and adapter "${this.adapter.name}". ` +
-        'Send it through those two, or make the change in the request\'s tools and system instead.'
+        'Send it through those two, or make the change in the request\'s tools and system, or an effort change as the provider\'s top-level effort (Anthropic\'s output_config.effort, in providerParams), instead.'
       );
     }
     const additionalStopSequences = Array.isArray(request.stopSequences)
@@ -1973,7 +2059,7 @@ export class Membrane {
     const hooked = fidelity !== undefined && this.config.hooks?.beforeRequest !== undefined;
     const beforeHook = hooked ? requestFingerprint(request) : undefined;
     const normalizedBefore = hooked ? requestFingerprint(normalizedRequest) : undefined;
-    const finalRequest = (await this.applyBeforeRequestHook(normalizedRequest, request)) as typeof request;
+    let finalRequest = (await this.applyBeforeRequestHook(normalizedRequest, request)) as typeof request;
     if (beforeHook !== undefined) {
       const handed = requestFingerprint(request);
       const normalizedChanged = requestFingerprint(normalizedRequest) !== normalizedBefore;
@@ -1982,6 +2068,17 @@ export class Membrane {
       if (sent !== beforeHook || normalizedChanged) fidelity!.unattributed = true;
     }
     if (fidelity && !this.adapter.reportsContentAlterations) fidelity.uninstrumented = true;
+
+    const floatAfterHook = this.floatsAfterHook.get(request);
+    if (floatAfterHook) {
+      assertCacheMarkersWithinLimit(finalRequest, 'streamOnce');
+      finalRequest = {
+        ...finalRequest,
+        messages: ownMessageBlocks(finalRequest.messages, fidelity ? (original, copy) => fidelity.ownCopy(original, copy) : undefined),
+      };
+      const withheld = placeFloatingMarker(finalRequest, floatAfterHook, true, this.adapter.sendsCacheMarkersOn);
+      if (withheld) this.warnFloatBudgetExhausted(withheld);
+    }
 
     const markerCount = normalizedRequest.cacheMarkers === 'cm-owned'
       ? assertCacheMarkersWithinLimit(finalRequest, 'streamOnce')
@@ -2037,6 +2134,9 @@ export class Membrane {
           : {}),
         ...(sent.onThinkingSignature
           ? { onThinkingSignature: (index: number, signature: string) => { delivered = true; sent.onThinkingSignature!(index, signature); } }
+          : {}),
+        ...(sent.onToolInputDelta
+          ? { onToolInputDelta: (index: number, partialJson: string) => { delivered = true; sent.onToolInputDelta!(index, partialJson); } }
           : {}),
       };
       let attemptResult: ProviderResponse | undefined;
@@ -3341,6 +3441,7 @@ export class Membrane {
       emitTokens = true,
       emitBlocks = true,
       emitUsage = true,
+      emitToolInputDeltas = false,
     } = options;
     const maxToolDepth =
       maxToolDepthOpt === undefined || maxToolDepthOpt === -1
@@ -3431,6 +3532,23 @@ export class Membrane {
               if (stream.isCancelled) return;
               tracker.onThinkingSignature(index, signature);
             },
+            ...(emitTokens && emitToolInputDeltas
+              ? {
+                  onToolInputDelta: (index: number, partialJson: string) => {
+                    if (stream.isCancelled) return;
+                    const call = tracker.openToolCall(index);
+                    if (!call) return;
+                    const meta: ChunkMeta = {
+                      type: 'tool_call',
+                      visible: false,
+                      blockIndex: index,
+                      toolCallPart: 'input',
+                      ...call,
+                    };
+                    stream.emit({ type: 'tokens', content: partialJson, meta });
+                  },
+                }
+              : {}),
           },
           {
             signal: stream.signal,

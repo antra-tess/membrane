@@ -30,6 +30,7 @@ export {
   isRedactedThinkingContent,
   isSystemChangeContent,
   isMediaContent,
+  SYSTEM_CHANGE_EFFORT,
 } from './content.js';
 
 export type {

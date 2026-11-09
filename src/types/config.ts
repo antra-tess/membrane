@@ -228,7 +228,8 @@ export interface MembraneConfig {
 
   /**
    * Default for request.floatingCacheMarker when the request doesn't set it.
-   * Default: true. See NormalizedRequest.floatingCacheMarker.
+   * Left out: true under `cacheMarkers: 'membrane-system'`, false under
+   * `cm-owned`. See NormalizedRequest.floatingCacheMarker.
    */
   defaultFloatingCacheMarker?: boolean;
 
