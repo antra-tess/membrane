@@ -139,19 +139,45 @@ describe('AnthropicXmlFormatter: a tool result that answers no call', () => {
     ]);
   });
 
-  it('keeps a result only where the model reads it as its own call\'s answer: the k-th result after a calls block answers its k-th call', () => {
-    for (const results of [[result('b', 'zz-b')], [result('b', 'zz-b'), result('a', 'zz-a')]]) {
+  it('leaves out a result that would stand in another call\'s place: the k-th result after a calls block answers its k-th call', () => {
+    const { rendered, altered, events } = build([
+      { participant: 'User', content: [text('look')] },
+      { participant: 'Agent', content: [call('a'), call('b')] },
+      { participant: 'Tool', content: [result('b', 'zz-b')] },
+      { participant: 'Agent', content: [] },
+    ]);
+    expect(rendered).not.toContain('zz-b');
+    expect(altered).toEqual([2]);
+    expect(events).toEqual([{ kind: 'orphan_tool_result_dropped', toolUseId: 'b' }]);
+  });
+
+  it('moves results stored as their tools finished into their calls\' places, rendered from their fields, and reports the message', () => {
+    const raw = '<function_results>\n<result tool_use_id="b">zz-b</result>\n<result tool_use_id="a">zz-a</result>\n</function_results>';
+    for (const shared of [undefined, raw]) {
       const { rendered, altered, events } = build([
         { participant: 'User', content: [text('look')] },
         { participant: 'Agent', content: [call('a'), call('b')] },
-        { participant: 'Tool', content: results },
+        { participant: 'Tool', content: [result('b', 'zz-b', shared), result('a', 'zz-a', shared)] },
         { participant: 'Agent', content: [] },
       ]);
-      expect(rendered).not.toContain('zz-b');
-      expect(rendered.includes('zz-a')).toBe(results.length === 2);
+      expect(rendered.indexOf('zz-a')).toBeGreaterThan(-1);
+      expect(rendered.indexOf('zz-b')).toBeGreaterThan(rendered.indexOf('zz-a'));
+      expect(rendered).not.toContain('tool_use_id="b">zz-b');
       expect(altered).toEqual([2]);
-      expect(events).toEqual([{ kind: 'orphan_tool_result_dropped', toolUseId: 'b' }]);
+      expect(events).toEqual([]);
     }
+  });
+
+  it('keeps a sorted run only up to the first place nothing answers', () => {
+    const { rendered, events } = build([
+      { participant: 'User', content: [text('look')] },
+      { participant: 'Agent', content: [call('a'), call('b'), call('c')] },
+      { participant: 'Tool', content: [result('c', 'zz-c'), result('a', 'zz-a')] },
+      { participant: 'Agent', content: [] },
+    ]);
+    expect(rendered).toContain('zz-a');
+    expect(rendered).not.toContain('zz-c');
+    expect(events).toEqual([{ kind: 'orphan_tool_result_dropped', toolUseId: 'c' }]);
   });
 
   it('reads calls split by text, with no result between, as one block\'s calls', () => {

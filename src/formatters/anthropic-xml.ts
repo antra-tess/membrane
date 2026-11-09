@@ -70,21 +70,24 @@ export interface AnthropicXmlFormatterConfig extends FormatterConfig {
 }
 
 /**
- * The messages without the tool results the model wouldn't read as their own
- * call's answer. In the transcript a results block answers the calls block
- * before it by position, ids aside: the k-th result after the calls since the
- * last result answers the k-th of them. So a result is kept only where it
- * stands in its call's place. One whose id names a call in the request is
- * kept when that call's place is the next one to answer. One whose id names
- * no call is kept when the next place's call is in its own message and no
- * result names that call: a generation parsed back from its text gives its
- * calls fresh ids, and keeps its results beside them. A result left out
- * takes no place. One that isn't kept is never sent, as a result or as text,
- * since the model would read it as another call's result. A kept result that
- * shared a left-out one's `rawXml`, in any message, renders from its fields,
- * since the raw text holds the other result too. `onEvent` hears each result
- * left out, and `onAltered` each message changed, and whether nothing of it
- * is left.
+ * The messages with each tool result where the model reads it as its own
+ * call's answer, and without the ones it can't stand there. In the
+ * transcript a results block answers the calls block before it by position,
+ * ids aside: the k-th result after the calls since the last result answers
+ * the k-th of them. So within each run of results in a message, a result
+ * whose id names a call takes that call's place, and one whose id names no
+ * call takes the next place whose call is in its own message and that no
+ * result names: a generation parsed back from its text gives its calls fresh
+ * ids, and keeps its results beside them. The run is sorted by place, as a
+ * host that stores results as their tools finish needs, and a result is kept
+ * while its place is the next one to answer. One that isn't kept takes no
+ * place and is never sent, as a result or as text, since the model would
+ * read it as another call's result. Results don't move between messages. A
+ * kept result renders from its fields when its run was reordered, or when a
+ * left-out result in any message shared its `rawXml`, since the raw text
+ * holds the old order or the other result. `onEvent` hears each result left
+ * out, and `onAltered` each message changed, and whether nothing of it is
+ * left.
  */
 function withoutCalllessResults(
   messages: NormalizedMessage[],
@@ -117,42 +120,80 @@ function withoutCalllessResults(
   const answeredPlaces = groups.map(() => 0);
   const answered = new Set<string>();
   const released = new Set<string>();
-  const kept = messages.map((message, i) => message.content.map((block, j) => {
-    if (block.type !== 'tool_result') return true;
-    const g = groupOf[i]![j]!;
-    const group = groups[g];
-    const place = group?.calls[answeredPlaces[g]!];
-    const named = typeof block.toolUseId === 'string' && callIds.has(block.toolUseId) ? block.toolUseId : undefined;
-    const answers = place !== undefined && (named !== undefined
-      ? place.id === named
-      : place.message === i && !group!.named.has(place.id));
-    if (answers) {
-      answeredPlaces[g]!++;
-      answered.add(place!.id);
-      return true;
+  // Each message's blocks as they go out, by index: a run of results sorted
+  // by place, without the ones left out.
+  const orders = messages.map((message, i) => {
+    const order: number[] = [];
+    const content = message.content;
+    for (let j = 0; j < content.length;) {
+      if (content[j]!.type !== 'tool_result') {
+        order.push(j++);
+        continue;
+      }
+      const run: number[] = [];
+      while (j < content.length && content[j]!.type === 'tool_result') run.push(j++);
+      const g = groupOf[i]![run[0]!]!;
+      const group = groups[g];
+      const from = answeredPlaces[g] ?? 0;
+      const taken = new Set<number>();
+      const placeOf = new Map<number, number>();
+      const take = (at: number, fits: (call: { id: string; message: number }) => boolean): void => {
+        if (!group) return;
+        for (let k = from; k < group.calls.length; k++) {
+          if (taken.has(k) || !fits(group.calls[k]!)) continue;
+          taken.add(k);
+          placeOf.set(at, k);
+          return;
+        }
+      };
+      const namedOf = (at: number): string | undefined => {
+        const id = (content[at] as ToolResultContent).toolUseId;
+        return typeof id === 'string' && callIds.has(id) ? id : undefined;
+      };
+      for (const at of run) {
+        const named = namedOf(at);
+        if (named !== undefined) take(at, (call) => call.id === named);
+      }
+      for (const at of run) {
+        if (namedOf(at) === undefined) take(at, (call) => call.message === i && !group!.named.has(call.id));
+      }
+      const sorted = run.filter((at) => placeOf.has(at)).sort((a, b) => placeOf.get(a)! - placeOf.get(b)!);
+      const keptHere: number[] = [];
+      let next = from;
+      for (const at of sorted) {
+        if (placeOf.get(at) !== next) break;
+        keptHere.push(at);
+        answered.add(group!.calls[next]!.id);
+        next++;
+      }
+      if (group) answeredPlaces[g] = next;
+      const reordered = keptHere.some((at, k) => k > 0 && at < keptHere[k - 1]!);
+      for (const at of run) {
+        const block = content[at] as ToolResultContent;
+        if (keptHere.includes(at)) {
+          if (reordered && block.rawXml !== undefined) released.add(block.rawXml);
+          continue;
+        }
+        const named = namedOf(at);
+        onEvent(named !== undefined && answered.has(named)
+          ? { kind: 'stray_tool_result_dropped', toolUseId: named, reason: 'answered' }
+          : { kind: 'orphan_tool_result_dropped', toolUseId: typeof block.toolUseId === 'string' ? block.toolUseId : '<missing>' });
+        if (block.rawXml !== undefined) released.add(block.rawXml);
+      }
+      order.push(...keptHere);
     }
-    onEvent(named !== undefined && answered.has(named)
-      ? { kind: 'stray_tool_result_dropped', toolUseId: named, reason: 'answered' }
-      : { kind: 'orphan_tool_result_dropped', toolUseId: typeof block.toolUseId === 'string' ? block.toolUseId : '<missing>' });
-    if (block.rawXml !== undefined) released.add(block.rawXml);
-    return false;
-  }));
+    return order;
+  });
 
   return messages.map((message, index) => {
-    let changed = false;
-    const content: ContentBlock[] = [];
-    message.content.forEach((block, j) => {
-      if (!kept[index]![j]) {
-        changed = true;
-        return;
-      }
-      if (block.type !== 'tool_result' || block.rawXml === undefined || !released.has(block.rawXml)) {
-        content.push(block);
-        return;
-      }
+    const order = orders[index]!;
+    let changed = order.length !== message.content.length || order.some((at, k) => at !== k);
+    const content: ContentBlock[] = order.map((at) => {
+      const block = message.content[at]!;
+      if (block.type !== 'tool_result' || block.rawXml === undefined || !released.has(block.rawXml)) return block;
       const { rawXml: _raw, rawXmlImagesAt: _at, ...rendered } = block;
-      content.push(rendered);
       changed = true;
+      return rendered;
     });
     if (!changed) return message;
     onAltered(index, !holdsContent(content));
