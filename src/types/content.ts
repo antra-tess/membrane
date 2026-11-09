@@ -254,14 +254,18 @@ export interface RedactedThinkingContent {
  * or system text, it goes at its place: right after the turn holding the
  * last block of a message before it, so exactly there unless messages of one
  * role that membrane merges into one turn lie on both sides of it, when it
- * goes after that turn, which by the rule above governs the same reply. With
- * no message before it, it goes after any turn the formatter puts ahead of
- * every message (the leading user turn it adds, the context prefix), or
- * first. At the end after an assistant turn it would end the request on that
+ * goes after that turn, which by the rule above governs the same reply.
+ * Effort changes that land at one place go there first, in the caller's
+ * order among them and before any change of tools or system text there, so
+ * only the first sits directly after the turn. With no message before it,
+ * it goes after any turn the formatter puts ahead of every message (the
+ * leading user turn it adds, the context prefix), or first. At the end after an assistant turn it would end the request on that
  * turn, which the API reads as a prefill, so the request is refused before
- * sending. Its `cacheBreakpoint`, or a boundary at its place, having no
- * block of its own to hold, goes on the last block before it among the
- * request's messages that can hold one; with none, nothing is marked.
+ * sending; a prefill can carry its effort at the request's top level
+ * instead. Its `cacheBreakpoint`, or a boundary at its place, having no
+ * block of its own to hold, goes on the last block that can hold one and
+ * comes from a message before it, or from a turn the formatter puts ahead
+ * of every message; with none, nothing is marked.
  *
  * Through a formatter that doesn't render system changes or an adapter that
  * doesn't send them, Membrane refuses a request that carries a change before

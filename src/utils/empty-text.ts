@@ -33,17 +33,13 @@ export function stripEmptyTextBlocks<T>(blocks: readonly T[], onDropped?: (block
   return result;
 }
 
-/** A text block the cleanup drops: its text is empty or only whitespace. */
 function isEmptyTextBlock(block: unknown): boolean {
   const value = block as { type?: string; text?: unknown } | null;
   return value?.type === 'text' && !hasNonEmptyText(value.text);
 }
 
 /** A request that ends with an assistant message is a prefill to the
- * provider, so the final role can't change. An effort-only system message,
- * whose `output_config` is what it sends, stays with its content emptied
- * (`[]`, or `''` for a string), since the API refuses whitespace text in it,
- * and the final role is read past it (lastTurnRole). */
+ * provider, so the final role can't change. */
 export function stripEmptyTextMessages<T extends { content: unknown }>(
   messages: readonly T[],
   onDropped?: (block: unknown) => void,
@@ -68,9 +64,6 @@ export function stripEmptyTextMessages<T extends { content: unknown }>(
   return result;
 }
 
-/** A system message whose only payload is its `output_config`, as the effort-only message NativeFormatter
- * builds: its content is what the cleanup leaves empty (no blocks, text blocks holding only whitespace, or
- * a string holding only whitespace). The cleanup, the final-role reads and the floating marker all read it so. */
 export function isEffortOnlyMessage(message: unknown): boolean {
   if (message === null || typeof message !== 'object') return false;
   const { role, output_config, content } = message as { role?: unknown; output_config?: unknown; content?: unknown };
@@ -78,7 +71,6 @@ export function isEffortOnlyMessage(message: unknown): boolean {
   return role === 'system' && output_config != null && empty;
 }
 
-/** The role of the last message that isn't an effort-only system message: the turn the request ends on. */
 export function lastTurnRole(messages: readonly unknown[]): unknown {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i] as { role?: unknown } | undefined;

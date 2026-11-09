@@ -347,10 +347,8 @@ function placeFloatingMarker(
   }
   let callingTurn = messages.length - 1;
   while (callingTurn >= 0 && !(messages[callingTurn]?.role === 'assistant' && holdsToolUse(messages[callingTurn]?.content))) callingTurn--;
-  while (callingTurn > 0 && messages[callingTurn - 1]?.role === 'assistant') callingTurn--;
-  let beforeCall = callingTurn - 1;
-  while (beforeCall >= 0 && isEffortOnlyMessage(messages[beforeCall])) beforeCall--;
-  for (const block of [newest, callingTurn > 0 && beforeCall >= 0 ? unmarkedEnd(beforeCall) : undefined]) {
+  while (callingTurn > 0 && (messages[callingTurn - 1]?.role === 'assistant' || isEffortOnlyMessage(messages[callingTurn - 1]))) callingTurn--;
+  for (const block of [newest, callingTurn > 0 ? unmarkedEnd(callingTurn - 1) : undefined]) {
     if (!block || residuum <= 0) continue;
     const control = floatControlAt(request, block, cacheControl);
     if (!control) continue;

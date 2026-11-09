@@ -60,7 +60,6 @@ interface BuiltSystemChange {
   content: Array<Record<string, unknown>>;
   at: number;
   effort?: NonNullable<SystemChangeContent['effort']>;
-  /** An effort change's breakpoint, or a boundary at its place: marked once the request is placed. */
   breakpoint?: boolean;
 }
 
@@ -452,9 +451,11 @@ export class NativeFormatter implements PrefillFormatter {
    * end after a user turn, never after an assistant turn. It accepts
    * consecutive messages of one role, and an effort-only message anywhere in
    * `messages` (Anthropic's effort documentation), so an effort change goes
-   * right after the turn holding the last block of a message before it. At the
-   * end after an assistant turn it would end the request on that turn, which
-   * the API reads as a prefill.
+   * right after the turn holding the last block of a message before it, ahead
+   * of the other changes that land there, since the API applies an effort
+   * change directly after a user turn to the reply to that turn. At the end
+   * after an assistant turn it would end the request on that turn, which the
+   * API reads as a prefill.
    */
   private static placeSystemChanges(
     messages: ProviderTurnMessage[],
@@ -467,7 +468,6 @@ export class NativeFormatter implements PrefillFormatter {
       (block.type !== 'text' || hasNonEmptyText(block.text)) && !isUnsignedThinking(block);
     const efforts = changes.filter((change) => change.effort !== undefined);
     const others = changes.filter((change) => change.effort === undefined);
-    // A block membrane puts ahead of every message (the leading user turn, the context prefix) counts as before them all.
     let seen = false;
     const keys = messages.map((message) => (message.content as Block[]).map((block) => {
       const at = origin.get(block as object);
@@ -487,8 +487,6 @@ export class NativeFormatter implements PrefillFormatter {
       slots.set(change, slot);
     }
 
-    // Tool changes and system text: before an assistant turn that follows a user turn, at the first one whose
-    // earliest block comes after the change.
     const kept = (message: ProviderTurnMessage): boolean =>
       Array.isArray(message.content) && (message.content as Block[]).some(survives);
     type Turn = { role: ProviderTurnMessage['role']; first: number; earliest: number; after?: ProviderTurnMessage['role'] };
@@ -512,10 +510,10 @@ export class NativeFormatter implements PrefillFormatter {
       ? { role: 'system', content: [], output_config: { effort: change.effort } }
       : { role: 'system', content: change.content };
     const placed: ProviderMessage[] = [];
-    const marked: number[] = [];
+    const marked: Array<{ at: number; change: number }> = [];
     const emit = (group: BuiltSystemChange[]): void => {
-      for (const change of group.sort((a, b) => a.at - b.at)) {
-        if (change.breakpoint) marked.push(placed.length);
+      for (const change of group) {
+        if (change.breakpoint) marked.push({ at: placed.length, change: change.at });
         placed.push(sent(change));
       }
     };
@@ -533,8 +531,11 @@ export class NativeFormatter implements PrefillFormatter {
     const endsOnUser = turns[turns.length - 1]?.role === 'user';
     if (after.length > 0 && !endsOnUser) {
       throw systemChangeRefusedError(
-        `NativeFormatter: message ${after[0]!.at}, an effort change, would end the request with no user turn after the last assistant turn, ` +
-        'which the API reads as a prefill. End the request with a user turn after it.'
+        `NativeFormatter: message ${after[0]!.at}, an effort change, would end the request with no user turn after it` +
+        (turns.length > 0
+          ? ', on an assistant turn, which the API reads as a prefill. To send a prefill, set the effort at the request\'s top level instead; ' +
+            'otherwise end the request with a user turn after the change.'
+          : '. End the request with a user turn after the change.')
       );
     }
     if (next < others.length) {
@@ -549,15 +550,15 @@ export class NativeFormatter implements PrefillFormatter {
     }
     emit(after);
 
-    // An effort change's breakpoint, having no block of its own, goes on the last cacheable block before it.
     if (cacheControl) {
-      for (const at of marked) {
+      for (const { at, change } of marked) {
         search: for (let m = at - 1; m >= 0; m--) {
           const content = placed[m]!.content;
           if (!Array.isArray(content)) continue;
           for (let b = content.length - 1; b >= 0; b--) {
             const block = content[b] as Record<string, unknown>;
             if (block.type === 'thinking' || block.type === 'redacted_thinking' || !survives(block as Block)) continue;
+            if ((origin.get(block) ?? -1) >= change) continue;
             block.cache_control = cacheControl;
             break search;
           }

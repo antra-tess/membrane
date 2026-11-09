@@ -8,9 +8,13 @@
   documentation, "Change effort mid-conversation"). Unlike a change of tools or system text, it goes
   at its place, right after the turn holding the last block of a message before it: exactly there
   unless messages of one role that membrane merges into one turn lie on both sides of it, when it goes
-  after that turn, which governs the same reply. One that would end
-  the request after an assistant turn is refused before sending, flagged `systemChangeRefused`. Its
-  `cacheBreakpoint`, or a boundary at its place, goes on the last block before it among the request's messages that can hold one. The
+  after that turn, which governs the same reply. Effort changes that land at one place go there
+  first, in the caller's order among them and before any change of tools or system text there. One that would end
+  the request after an assistant turn is refused before sending, flagged `systemChangeRefused`: a
+  request ending on an assistant turn after an effort change, which earlier releases sent as a prefill
+  without the effort, is now refused, and a prefill can carry its effort at the top level instead. Its
+  `cacheBreakpoint`, or a boundary at its place, goes on the last block that can hold one and comes from
+  a message before it. The
   API's refusals of it, on a model without per-turn effort and on a thinking setting that fixes the
   effort, are marked `systemChangeRefused`, as is a request carrying it through a formatter that doesn't
   render system changes or an adapter that doesn't send them, Bedrock's included, before sending, unless
@@ -19,3 +23,6 @@
   `effort` that isn't one of the five levels, is refused as unsupported. The cache wire receipt hashes
   such a message's `output_config` into the prefixes after it. `SYSTEM_CHANGE_EFFORT` (`true`) tells a
   caller that its membrane carries `effort`: an earlier one leaves an effort-only block out as empty.
+  A custom formatter or adapter that declares `rendersSystemChanges` or `sendsSystemChanges` now
+  meets effort-only blocks too: it renders and sends `effort`, with the beta, or the caller's change
+  is lost or refused by the API.
