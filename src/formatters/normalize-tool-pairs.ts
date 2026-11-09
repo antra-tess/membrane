@@ -17,6 +17,7 @@ import type { ProviderTurnMessage as LooseProviderMessage } from './types.js';
 import type { NormalizeEvent } from './types.js';
 import { MembraneError } from '../types/errors.js';
 import { hasNonEmptyText } from '../utils/empty-text.js';
+import { sentOnTheWire } from '../utils/anthropic-wire-blocks.js';
 
 /**
  * Block shape used internally and exposed for callers that want to
@@ -157,14 +158,15 @@ export function normalizeToolPairs(
 
   // Anthropic rejects a text block that is only whitespace.
   const leadingText = options.leadingUserText?.trim() ? options.leadingUserText : '[continuing]';
-  // A drop that empties a user turn leaves the turn in place, holding the
-  // leading case's text: removing it would merge the assistant turns around
-  // it, or end the request on the assistant, which the API reads as a prefill.
+  // A drop that empties a user turn, or leaves it nothing the wire sends,
+  // leaves the turn in place, holding the leading case's text: removing it
+  // would merge the assistant turns around it, or end the request on the
+  // assistant, which the API reads as a prefill.
   // A turn the drops emptied that pending results then filled stands in the
   // last dropped block's place through the first of them.
   for (const [envelope, last] of droppedFrom) {
     if (envelope.role !== 'user') continue;
-    if (envelope.content.length > 0) {
+    if (envelope.content.some(sentOnTheWire)) {
       if (envelope.content.every((block) => synthesized.has(block))) options.onBlockReplaced?.(last, envelope.content[0]!);
       continue;
     }
@@ -593,7 +595,7 @@ function repairStrayResults(
           kept.push(block);
           continue;
         }
-        drop(envelopes, i, kept, block, { kind: 'stray_tool_result_dropped', toolUseId: id, fromEnvelope: i, reason: 'duplicate_in_cycle' });
+        drop(envelopes, i, kept, block, { kind: 'stray_tool_result_dropped', toolUseId: id !== '' ? id : '<missing>', fromEnvelope: i, reason: 'duplicate_in_cycle' });
         continue;
       }
       const calls = callEnvelopesOfId.get(id);
@@ -627,7 +629,7 @@ function repairStrayResults(
         continue;
       }
 
-      drop(envelopes, i, kept, block, { kind: 'stray_tool_result_dropped', toolUseId: id, fromEnvelope: i, reason: 'cycle_closed' });
+      drop(envelopes, i, kept, block, { kind: 'stray_tool_result_dropped', toolUseId: id !== '' ? id : '<missing>', fromEnvelope: i, reason: 'cycle_closed' });
     }
     env.content = kept;
   }
@@ -963,13 +965,12 @@ function removeFirstMatchingResult(
 }
 
 function syntheticToolResult(toolUseId: string): ProviderBlock {
-  const block: ProviderBlock = {
+  return {
     type: 'tool_result',
     tool_use_id: toolUseId,
     content: '[pending]',
     is_error: false,
   };
-  return block;
 }
 
 function toProviderMessage(env: Envelope): LooseProviderMessage {

@@ -206,7 +206,10 @@ describe('the subscription adapter\'s own conversion of messages in normalized f
     expect(items.map((item: any) => item.type)).toEqual(['message', 'function_call', 'function_call_output']);
     expect((items[2] as any).call_id).toBe('call_1');
     expect(JSON.stringify(items)).not.toContain('zz-');
-    expect(heard).toEqual([again, orphan, standalone]);
+    expect(heard).toHaveLength(3);
+    expect(heard[0]).toBe(again);
+    expect(heard[1]).toBe(orphan);
+    expect(heard[2]).toBe(standalone);
   });
 
   it('keeps the first of one output object handed in twice for its call, and leaves out one more than the calls that reuse an id', () => {
@@ -223,7 +226,8 @@ describe('the subscription adapter\'s own conversion of messages in normalized f
     ] as any, (block) => heard.push(block));
     expect(items.map((item: any) => item.type)).toEqual(['function_call', 'function_call_output', 'function_call', 'function_call_output', 'function_call', 'function_call_output']);
     expect(items.filter((item: any) => item.type === 'function_call_output').map((item: any) => item.output)).toEqual(['zz-standalone', 'zz-first', 'zz-second']);
-    expect(heard).toEqual([standalone]);
+    expect(heard).toHaveLength(1);
+    expect(heard[0]).toBe(standalone);
   });
 
   it('leaves out an output that names no call though a call names none either', () => {
@@ -312,6 +316,20 @@ describe('Responses: a local shell output, and a call id used again', () => {
       { participant: 'User', content: [], metadata: { openaiResponsesItems: [out('second')] } },
     ]);
     expect(items).toEqual([fc(1), out('first'), fc(2), out('second')]);
+    expect(events).toEqual([{ kind: 'stray_tool_result_dropped', toolUseId: 'x', reason: 'answered' }]);
+  });
+
+  it('counts an output stored ahead of a call against that call, so a second output before the id\'s next call is left out', () => {
+    const fc = (n: number) => ({ type: 'function_call', id: `fc_${n}`, call_id: 'x', name: 'read_file', arguments: '{}' });
+    const out = (output: string) => ({ type: 'function_call_output', call_id: 'x', output });
+    const { items, events } = build([
+      { participant: 'User', content: [], metadata: { openaiResponsesItems: [out('A')] } },
+      { participant: 'Agent', content: [], metadata: { openaiResponsesItems: [fc(1)] } },
+      { participant: 'User', content: [], metadata: { openaiResponsesItems: [out('B')] } },
+      { participant: 'Agent', content: [], metadata: { openaiResponsesItems: [fc(2)] } },
+      { participant: 'User', content: [], metadata: { openaiResponsesItems: [out('C')] } },
+    ]);
+    expect(items).toEqual([out('A'), fc(1), fc(2), out('C')]);
     expect(events).toEqual([{ kind: 'stray_tool_result_dropped', toolUseId: 'x', reason: 'answered' }]);
   });
 

@@ -89,10 +89,11 @@ export interface AnthropicXmlFormatterConfig extends FormatterConfig {
  * is never sent, as a result or as text, and a kept one that names a tool
  * other than its call's goes out without the name, so it reads back by
  * place, as it was kept. Results don't move between messages.
- * A kept result renders from its fields when its run was reordered, or when a
- * left-out result in any message shared its `rawXml`, since the raw text
- * holds the old order or the other result. `onEvent` hears each result left
- * out, and `onAltered` each message changed.
+ * A kept result renders from its fields when a result anywhere that shares
+ * its `rawXml` stood in a run that was reordered, was left out, or went
+ * without its name, since the raw text holds the old order, the other result
+ * or the name. `onEvent` hears each result left out, and `onAltered` each
+ * message changed.
  */
 function withoutCalllessResults(
   messages: NormalizedMessage[],
@@ -211,7 +212,7 @@ function withoutCalllessResults(
         }
         const named = namedOf(at);
         onEvent(named !== undefined && (carried.get(named) ?? 0) > 0 && answered.get(named) === carried.get(named)
-          ? { kind: 'stray_tool_result_dropped', toolUseId: named, reason: 'answered' }
+          ? { kind: 'stray_tool_result_dropped', toolUseId: named !== '' ? named : '<missing>', reason: 'answered' }
           : { kind: 'orphan_tool_result_dropped', toolUseId: typeof block.toolUseId === 'string' && block.toolUseId !== '' ? block.toolUseId : '<missing>' });
         if (block.rawXml !== undefined) released.add(block.rawXml);
       }
@@ -397,6 +398,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     const totalMessages = messages.length;
     const toolInjectionIndex = Math.max(0, totalMessages - this.config.toolInjectionPosition);
     let toolsInjected = false;
+    let leadingFiltered = 0;
     const hasToolsForConversation =
       toolMode === 'xml' &&
       this.config.toolInjectionMode === 'conversation' &&
@@ -548,12 +550,13 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         // A breakpoint on a message the filter left showing nothing marks the
         // conversation before it.
         if (filtered.has(i) && (hasCacheMarker?.(given[i]!, i) || (message.cacheBreakpoint && promptCaching))) partConversation();
+        if (filtered.has(i) && i === leadingFiltered) leadingFiltered++;
         continue;
       }
 
       if (hasCacheMarker && hasCacheMarker(given[i]!, i)) partConversation();
 
-      const shouldInjectHere = toolInjectionIndex > 0 ? i >= toolInjectionIndex : i === 0;
+      const shouldInjectHere = toolInjectionIndex > 0 ? i >= toolInjectionIndex : i === leadingFiltered;
       if (hasToolsForConversation && !toolsInjected && shouldInjectHere) {
         currentConversation.push(toolsText);
         toolsInjected = true;

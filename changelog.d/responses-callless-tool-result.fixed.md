@@ -14,4 +14,6 @@
   misses the prompt cache from there on.
   `OpenAIResponsesAPIAdapter` in subscription mode does the same for messages
   a host hands it in normalized form, and reports the block each output came
-  from through `onContentAltered`.
+  from through `onContentAltered`. With an API key it sends the native input
+  it is handed as given, as before. Within membrane, input the API accepts
+  comes from the Responses formatter, which has left such outputs out.

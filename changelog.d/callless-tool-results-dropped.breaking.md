@@ -18,10 +18,12 @@
     cache marker it carried moves to the last cacheable block before it in
     the messages, unless that block carries a marker of its own; with no
     such block it goes with the result, and none moves onto the system
-    prompt. A user turn the drop empties stays, holding the leading text
-    (`prefillUserMessage`, else `[continuing]`), so no request becomes a
-    prefill and no two assistant turns merge. A second result is left out
-    even when it, not the first, was the real output behind a placeholder.
+    prompt. A user turn the drop leaves holding nothing the API is sent (no
+    blocks, or only blank text or media without a source) stays, holding the
+    leading text (`prefillUserMessage`, else `[continuing]`), so no request
+    becomes a prefill and no two assistant turns merge. A second result is
+    left out even when it, not the first, was the real output behind a
+    placeholder.
     `AnthropicXmlFormatter` in XML tool mode sends a result only where the
     model reads it as its own call's answer, by our reading of how a model
     reads a transcript that carries no ids, which no run with a model has
@@ -43,7 +45,8 @@
     its call's place, naming its call's tool, sees no difference.
   - **Unchanged:** on the native path, the first result for a call in the
     request, wherever the normalizer moves it, and the `[pending]` result a
-    call without one gets.
+    call without one gets. A dropped second result's cache marker can move
+    onto the first, as onto any cacheable block before it.
   - **Siblings:** none of agent-framework, connectome-host and
     context-manager reads these events or options at runtime, so every
     release of each copes. context-manager's tests name the old kinds, so

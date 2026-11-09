@@ -12,8 +12,10 @@ import type { ContentBlock } from '../types/content.js';
  * An alteration is any non-empty consumer block not carried verbatim: a
  * placeholder substituted for an image, an image or block stripped, an
  * unsupported block left out, a tool carrier skipped, a tool_result left out
- * because its call is missing or already answered, nested tool-result media
- * rendered as a note, whitespace-only text removed by a cleanup policy. Removing an exactly empty text block ('') that
+ * because its call is missing or already answered, tool_results XML tool mode
+ * puts in their calls' order or renders from their fields in place of their
+ * raw text, nested tool-result media rendered as a note, whitespace-only text
+ * removed by a cleanup policy. Removing an exactly empty text block ('') that
  * holds no raw form carries nothing and is not an alteration; neither is the
  * faithful rendering of harness or attempt blocks, a block moved between
  * provider messages or within one, the participant-name prefix a multiuser

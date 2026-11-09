@@ -158,7 +158,8 @@ export interface ToolResultContent {
   toolUseId: string;
   /**
    * Tool name; XML replay renders it as the `<tool_name>` element, unless it
-   * names a tool other than its call's, when the result goes without it.
+   * names a tool other than its call's, when the result goes without it. An
+   * error result renders as `<error>`, which carries no name.
    */
   toolName?: string;
   content: string | ContentBlock[];
@@ -169,12 +170,13 @@ export interface ToolResultContent {
    * originally placed it in the document, shared by every result parsed
    * from that block. Replayed exactly on the prefill path, in
    * place of the block's other fields (`content`, `toolName`, `isError`),
-   * except where XML tool mode renders a kept result from its fields: when
-   * it moved the results run this text holds, or when a result sharing this
-   * text was left out or names a tool other than its call's: a
-   * consumer that changes the result (truncating it, say) must drop or
-   * replace `rawXml` too, or the change won't reach the provider, and round
-   * reports count the block as carried when its raw text is. Where
+   * except where XML tool mode renders each kept result that shares this text
+   * from its fields: when a result sharing it stood in a run XML tool mode
+   * reordered, or was left out, or, not being an error, names a tool other
+   * than its call's: a consumer that changes the result
+   * (truncating it, say) must drop or replace `rawXml` too, or the change
+   * won't reach the provider, and round reports count the block as carried
+   * when its raw text is. Where
    * `rawXmlImagesAt` is set, the replay can also send the images the turn
    * sent, from `content`, at that place (see there).
    */

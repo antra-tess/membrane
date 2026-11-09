@@ -290,6 +290,9 @@ export interface NormalizedRequest {
    * Defaults to '[Start]' in prefill construction (or a CLI-simulation command
    * when no system prompt is set) and to '[continuing]' in native construction,
    * which also uses '[continuing]' in place of text that is only whitespace.
+   * In native construction it is also the text of a user turn, anywhere in the
+   * conversation, that a left-out tool result leaves holding nothing the API
+   * is sent: no blocks, or only blank text or media without a source.
    */
   prefillUserMessage?: string;
 

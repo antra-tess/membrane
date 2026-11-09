@@ -724,6 +724,8 @@ describe('normalizeToolPairs', () => {
         expect(copies).toHaveLength(1);
         expect(copies[0]![1]).toBe(marked[0]);
         expect(copies[0]![0]).not.toHaveProperty('cache_control');
+        expect(input.flatMap((m) => m.content)).toContain(copies[0]![0]);
+        expect(JSON.stringify(copies[0]![0])).toContain(before);
         expect(input).toEqual(snapshot);
       });
 
@@ -1349,11 +1351,44 @@ describe('normalizeToolPairs: a pending result made earlier, and the missing id'
     const pending = first.messages[2]!.content[0]!;
     expect(pending).toMatchObject({ type: 'tool_result', content: '[pending]' });
     const replaced: Array<[ProviderBlock, ProviderBlock]> = [];
-    normalize(
+    const second = normalize(
       [...first.messages.slice(0, 2), user(pending, r('zz-orphan'))],
       { onBlockReplaced: (original, replacement) => replaced.push([original, replacement]) },
     );
     expect(replaced).toEqual([]);
+    expect(JSON.stringify(second.messages)).not.toContain('zz-orphan');
+    expect(second.messages.at(-1)!.content).toEqual([pending]);
+  });
+
+  it('puts the leading text in a user turn a drop leaves with only blank text, so the turn stays', () => {
+    const replaced: Array<[ProviderBlock, ProviderBlock]> = [];
+    const orphan = r('zz-orphan');
+    const out = normalize([user(t('go')), assistant(t('ok')), user(t('  '), orphan)], { onBlockReplaced: (original, replacement) => replaced.push([original, replacement]) });
+    expect(JSON.stringify(out.messages)).not.toContain('zz-orphan');
+    expect(out.messages).toHaveLength(3);
+    expect(out.messages[2]!.content).toContainEqual({ type: 'text', text: '[continuing]' });
+    expect(replaced).toHaveLength(1);
+    expect(replaced[0]![0]).toBe(orphan);
+  });
+
+  it('puts the leading text in a user turn a drop leaves with only media without a source, which the wire doesn\'t send', () => {
+    const out = normalize([user(t('go')), assistant(t('ok')), user({ type: 'image' } as ProviderBlock, r('zz-orphan'))]);
+    expect(JSON.stringify(out.messages)).not.toContain('zz-orphan');
+    expect(out.messages).toHaveLength(3);
+    expect(out.messages[2]!.content).toContainEqual({ type: 'text', text: '[continuing]' });
+  });
+
+  it('reports a second result with an empty id as missing one, in its cycle and after it', () => {
+    const inCycle = collectEvents();
+    normalize([user(t('go')), assistant(u('')), user(r(''), r(''))], { onEvent: inCycle.onEvent });
+    expect(inCycle.events.filter((e) => e.kind === 'stray_tool_result_dropped')).toEqual([
+      { kind: 'stray_tool_result_dropped', toolUseId: '<missing>', fromEnvelope: 2, reason: 'duplicate_in_cycle' },
+    ]);
+    const after = collectEvents();
+    normalize([user(t('go')), assistant(u('')), user(r('')), assistant(t('ok')), user(r(''))], { onEvent: after.onEvent });
+    expect(after.events.filter((e) => e.kind === 'stray_tool_result_dropped')).toEqual([
+      { kind: 'stray_tool_result_dropped', toolUseId: '<missing>', fromEnvelope: 4, reason: 'cycle_closed' },
+    ]);
   });
 
   it('reports a result with an empty id as missing one', () => {

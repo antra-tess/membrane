@@ -466,6 +466,17 @@ describe('AnthropicXmlFormatter: where a user turn starts, what a drop empties, 
     expect(events).toEqual([]);
   });
 
+  it('ends a group where the user turn starts, not where its message does, so a call before the text joins the calls before it', () => {
+    const { rendered, events } = build([
+      { participant: 'User', content: [text('look')] },
+      { participant: 'Agent', content: [call('a')] },
+      { participant: 'User', content: [call('c'), text('and this one'), result('a', 'zz-a')] },
+      { participant: 'Agent', content: [] },
+    ]);
+    expect(rendered).toContain('zz-a');
+    expect(events).toEqual([]);
+  });
+
   it('sends a result object without its name only where it names a tool other than its call\'s, though the same object answers another call too', () => {
     const shared = namedResult('a', 'search', 'zz-shared');
     const { rendered } = build([
@@ -478,6 +489,7 @@ describe('AnthropicXmlFormatter: where a user turn starts, what a drop empties, 
       { participant: 'Agent', content: [] },
     ]);
     expect(rendered.match(/<tool_name>search<\/tool_name>/g)).toHaveLength(1);
+    expect(rendered.match(/zz-shared/g)).toHaveLength(2);
   });
 
   for (const [kind, block] of [
@@ -495,6 +507,7 @@ describe('AnthropicXmlFormatter: where a user turn starts, what a drop empties, 
       ], true);
       const marked = built.messages.flatMap((m) => (Array.isArray(m.content) ? m.content : []))
         .filter((b: any) => b.cache_control);
+      expect(JSON.stringify(built.messages)).not.toContain('zz-ghost');
       expect(marked).toHaveLength(1);
       expect((marked[0] as any).text).toContain('zz-ok');
       expect((marked[0] as any).text).not.toContain('next');
@@ -510,6 +523,7 @@ describe('AnthropicXmlFormatter: where a user turn starts, what a drop empties, 
       { participant: 'User', content: [text('next')] },
       { participant: 'Agent', content: [] },
     ], { assistantParticipant: 'Agent', promptCaching: false, cacheMarkers: 'cm-owned', hasCacheMarker: marked } as any);
+    expect(JSON.stringify(built.messages)).not.toContain('zz-ghost');
     const holding = built.messages.find((m) => JSON.stringify(m.content).includes('zz-ok'))!;
     expect(JSON.stringify(holding.content)).not.toContain('next');
     expect(JSON.stringify(built.messages)).not.toContain('cache_control');
@@ -522,5 +536,51 @@ describe('AnthropicXmlFormatter: where a user turn starts, what a drop empties, 
       { participant: 'Agent', content: [] },
     ]);
     expect(events).toEqual([{ kind: 'orphan_tool_result_dropped', toolUseId: '<missing>' }]);
+  });
+
+  it('reports a second result with an empty id as missing one, though a call with that id answered the first', () => {
+    const { rendered, events } = build([
+      { participant: 'User', content: [text('look')] },
+      { participant: 'Agent', content: [call('')] },
+      { participant: 'Tool', content: [result('', 'zz-first'), result('', 'zz-again')] },
+      { participant: 'Agent', content: [] },
+    ]);
+    expect(rendered).toContain('zz-first');
+    expect(rendered).not.toContain('zz-again');
+    expect(events).toEqual([{ kind: 'stray_tool_result_dropped', toolUseId: '<missing>', reason: 'answered' }]);
+  });
+
+  it('puts the tool definitions before the conversation when the first message held only a result it left out', () => {
+    const tools = [{ name: 'read_file', description: 'Read a file.', inputSchema: { type: 'object', properties: {} } }];
+    const built = new AnthropicXmlFormatter().buildMessages([
+      { participant: 'Tool', content: [result('call_9', 'zz-ghost')] },
+      { participant: 'User', content: [text('zz-first')] },
+      { participant: 'Agent', content: [] },
+    ], { assistantParticipant: 'Agent', toolMode: 'xml', tools, fidelity: new FidelityNotes() } as any);
+    const rendered = built.messages.map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n');
+    expect(rendered).not.toContain('zz-ghost');
+    expect(rendered.indexOf('<available_tools>')).toBeGreaterThanOrEqual(0);
+    expect(rendered.indexOf('<available_tools>')).toBeLessThan(rendered.indexOf('zz-first'));
+  });
+
+  const toolsAfterLast = (first: NormalizedMessage) => {
+    const tools = [{ name: 'read_file', description: 'Read a file.', inputSchema: { type: 'object', properties: {} } }];
+    const built = new AnthropicXmlFormatter().buildMessages([
+      first,
+      { participant: 'Agent', content: [text('zz-seen')] },
+      { participant: 'User', content: [text('zz-next')] },
+      { participant: 'Agent', content: [] },
+    ], { assistantParticipant: 'Agent', toolMode: 'xml', tools, fidelity: new FidelityNotes() } as any);
+    const rendered = built.messages.map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n');
+    return rendered.indexOf('<available_tools>') > rendered.indexOf('zz-next');
+  };
+
+  it('leaves the tool definitions after the conversation, as before, when the first message holds an image', () => {
+    const image = { type: 'image', source: { type: 'base64', mediaType: 'image/png', data: 'iVBORw0KGgo=' } } as ContentBlock;
+    expect(toolsAfterLast({ participant: 'User', content: [text('zz-look'), image] })).toBe(true);
+  });
+
+  it('leaves the tool definitions after the conversation, as before, when the first message was empty as given', () => {
+    expect(toolsAfterLast({ participant: 'User', content: [] })).toBe(true);
   });
 });
