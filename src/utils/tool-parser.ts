@@ -211,46 +211,11 @@ function parseParamValue(
   return parsed;
 }
 
-function parseInvokeParameters(
-  invokeBody: string | undefined,
-  toolName: string,
-  tools?: ToolDefinition[]
-): Record<string, unknown> {
-  const input: Record<string, unknown> = {};
-  if (invokeBody === undefined) return input;
-
-  const schema = invokeSchemaFor(tools, toolName);
-  PARAMETER_REGEX.lastIndex = 0;
-  let paramMatch: RegExpExecArray | null;
-  while ((paramMatch = PARAMETER_REGEX.exec(invokeBody)) !== null) {
-    const paramName = paramMatch[2] ?? '';
-    input[paramName] = parseParamValue(paramMatch[3] ?? '', paramName, schema);
-  }
-  return input;
-}
-
-const INVOKE_REGEX =
-  /<(antml:)?invoke\s+name=(["'])((?:(?!\2).)+)\2\s*(?:\/>|>([\s\S]*?)<\/(antml:)?invoke>)/g;
-
-const INVOKE_NAME_GROUP = 3;
-const INVOKE_BODY_GROUP = 4;
-
 interface ParsedInvoke {
   name: string;
   input: Record<string, unknown>;
   unparseableInput?: string;
   unparseableReason?: string;
-}
-
-function collectInvokes(innerContent: string, tools?: ToolDefinition[]): ParsedInvoke[] {
-  const calls: ParsedInvoke[] = [];
-  INVOKE_REGEX.lastIndex = 0;
-  let invokeMatch: RegExpExecArray | null;
-  while ((invokeMatch = INVOKE_REGEX.exec(innerContent)) !== null) {
-    const name = invokeMatch[INVOKE_NAME_GROUP] ?? '';
-    calls.push({ name, input: parseInvokeParameters(invokeMatch[INVOKE_BODY_GROUP], name, tools) });
-  }
-  return calls;
 }
 
 export type ToolBlockDefectKind = 'unclosed-invoke' | 'tag-in-value' | 'repeated-parameter' | 'text-in-invoke' | 'stray-tag' | 'left-open-block';
@@ -267,7 +232,17 @@ const NAMELESS_INVOKE_OPENER_AT = /^<(?:antml:)?invoke\b/;
 
 const PLAIN_NAME = /^[\w.:-]{1,64}$/;
 
-function blockDefect(inner: string): { kind: ToolBlockDefectKind; reason: string } | undefined {
+type ToolBlockDefect = { kind: ToolBlockDefectKind; reason: string };
+
+interface BlockCall {
+  at: number;
+  name: string;
+  parameters: Array<[name: string, value: string]>;
+}
+
+function readBlock(inner: string): { defect: ToolBlockDefect } | { calls: BlockCall[] } {
+  const fail = (kind: ToolBlockDefectKind, reason: string) => ({ defect: { kind, reason } });
+  const calls: BlockCall[] = [];
   const at = (re: RegExp, pos: number): RegExpExecArray | null => {
     re.lastIndex = pos;
     return re.exec(inner);
@@ -286,16 +261,18 @@ function blockDefect(inner: string): { kind: ToolBlockDefectKind; reason: string
       const next = LOOSE_INVOKE_OPENER.exec(inner)?.index ?? inner.length;
       if (inner.slice(pos, next).includes('<')) {
         if (NAMELESS_INVOKE_OPENER_AT.test(inner.slice(pos))) {
-          return { kind: 'stray-tag', reason: `invoke ${invokes + 1}'s opening tag can't be read` };
+          return fail('stray-tag', `invoke ${invokes + 1}'s opening tag can't be read`);
         }
         const where = invokes === 0 ? 'before the first invoke' : `after invoke ${invokes}`;
-        return { kind: 'stray-tag', reason: `a less-than sign stands outside every invoke, ${where}` };
+        return fail('stray-tag', `a less-than sign stands outside every invoke, ${where}`);
       }
       pos = next;
       continue;
     }
     invokes++;
     const invoke = `invoke ${invokes}${PLAIN_NAME.test(opener[2]!) ? ` (${opener[2]})` : ''}`;
+    const call: BlockCall = { at: pos, name: opener[2]!, parameters: [] };
+    calls.push(call);
     pos += opener[0].length;
     if (opener[3] === '/') continue;
     const seen = new Set<string>();
@@ -308,11 +285,11 @@ function blockDefect(inner: string): { kind: ToolBlockDefectKind; reason: string
       }
       const parameter = at(PARAMETER_OPENER_AT, pos);
       if (!parameter) {
-        if (pos >= inner.length) return { kind: 'unclosed-invoke', reason: `${invoke} has no closing invoke tag` };
+        if (pos >= inner.length) return fail('unclosed-invoke', `${invoke} has no closing invoke tag`);
         if (at(INVOKE_OPENER_AT, pos)) {
-          return { kind: 'unclosed-invoke', reason: `${invoke} has no closing invoke tag before invoke ${invokes + 1} opens` };
+          return fail('unclosed-invoke', `${invoke} has no closing invoke tag before invoke ${invokes + 1} opens`);
         }
-        return { kind: 'text-in-invoke', reason: `${invoke} holds text outside its parameter elements` };
+        return fail('text-in-invoke', `${invoke} holds text outside its parameter elements`);
       }
       const name = parameter[1]!;
       const valueStart = pos + parameter[0].length;
@@ -321,18 +298,19 @@ function blockDefect(inner: string): { kind: ToolBlockDefectKind; reason: string
       const value = inner.slice(valueStart, close ? close.index : inner.length);
       const parameterShown = PLAIN_NAME.test(name) ? `parameter "${name}"` : 'a parameter';
       if (TAG_IN_VALUE.test(value)) {
-        return {
-          kind: 'tag-in-value',
-          reason: `${parameterShown} of ${invoke} holds a parameter's or an invoke's opening tag, or an invoke's closing tag, which a value can't hold, whether its closing parameter tag is missing before it or the value was meant to carry that text`,
-        };
+        return fail(
+          'tag-in-value',
+          `${parameterShown} of ${invoke} holds a parameter's or an invoke's opening tag, or an invoke's closing tag, which a value can't hold, whether its closing parameter tag is missing before it or the value was meant to carry that text`,
+        );
       }
-      if (!close) return { kind: 'unclosed-invoke', reason: `${invoke} has no closing invoke tag` };
-      if (seen.has(name)) return { kind: 'repeated-parameter', reason: `${parameterShown} is given twice in ${invoke}` };
+      if (!close) return fail('unclosed-invoke', `${invoke} has no closing invoke tag`);
+      if (seen.has(name)) return fail('repeated-parameter', `${parameterShown} is given twice in ${invoke}`);
       seen.add(name);
+      call.parameters.push([name, value]);
       pos = close.index + close[0].length;
     }
   }
-  return undefined;
+  return { calls };
 }
 
 const LEFT_OPEN = {
@@ -341,13 +319,24 @@ const LEFT_OPEN = {
 } as const;
 
 export interface ToolBlockVerdict {
-  defect?: { kind: ToolBlockDefectKind; reason: string };
+  defect?: ToolBlockDefect;
   raw: string;
+  calls: BlockCall[];
 }
 
 function verdictOf(block: ResolvedToolBlock): ToolBlockVerdict {
-  const defect = block.wasSpliced ? LEFT_OPEN : blockDefect(block.innerContent);
-  return { ...(defect ? { defect } : {}), raw: block.fullMatch };
+  const read = block.wasSpliced ? { defect: LEFT_OPEN } : readBlock(block.innerContent);
+  if ('calls' in read) return { raw: block.fullMatch, calls: read.calls };
+  const calls = [...block.innerContent.matchAll(NAMED_INVOKE_OPENER)].map((m) => ({ at: m.index, name: m[2]!, parameters: [] }));
+  return { defect: read.defect, raw: block.fullMatch, calls };
+}
+
+function inputOf(call: BlockCall, tools?: ToolDefinition[]): Record<string, unknown> {
+  const input: Record<string, unknown> = {};
+  if (call.parameters.length === 0) return input;
+  const schema = invokeSchemaFor(tools, call.name);
+  for (const [name, value] of call.parameters) input[name] = parseParamValue(value, name, schema);
+  return input;
 }
 
 function callsOfBlock(
@@ -355,11 +344,10 @@ function callsOfBlock(
   tools?: ToolDefinition[],
   given?: ToolBlockVerdict,
 ): { calls: ParsedInvoke[]; defect?: ToolBlockDefectKind } {
-  const { defect, raw } = given ?? verdictOf(block);
-  if (!defect) return { calls: collectInvokes(block.innerContent, tools) };
-  const names = [...block.innerContent.matchAll(NAMED_INVOKE_OPENER)].map((m) => m[2]!);
+  const { defect, raw, calls } = given ?? verdictOf(block);
+  if (!defect) return { calls: calls.map((call) => ({ name: call.name, input: inputOf(call, tools) })) };
   return {
-    calls: (names.length > 0 ? names : ['']).map((name) => ({
+    calls: (calls.length > 0 ? calls.map((call) => call.name) : ['']).map((name) => ({
       name,
       input: {},
       unparseableInput: raw,
@@ -374,8 +362,6 @@ export function invokeOpenerCount(text: string): number {
 }
 
 
-const PARAMETER_REGEX = /<(antml:)?parameter\s+name="([^"]+)">([\s\S]*?)<\/(antml:)?parameter>/g;
-
 const FUNCTION_CALLS_OPEN_REGEX = /<(antml:)?function_calls>/g;
 
 /**
@@ -385,6 +371,7 @@ const FUNCTION_CALLS_OPEN_REGEX = /<(antml:)?function_calls>/g;
 interface ResolvedToolBlock {
   start: number;
   end: number;
+  innerStart: number;
   innerContent: string;
   fullMatch: string;
   wasSpliced: boolean;
@@ -407,6 +394,7 @@ function resolveToolBlock(text: string, blockMatch: RegExpExecArray): ResolvedTo
     return {
       start: blockMatch.index,
       end,
+      innerStart,
       innerContent,
       fullMatch: blockMatch[0],
       wasSpliced: false,
@@ -418,6 +406,7 @@ function resolveToolBlock(text: string, blockMatch: RegExpExecArray): ResolvedTo
   return {
     start: reanchoredStart,
     end,
+    innerStart: reanchoredStart + innermostOpener[0].length,
     innerContent: innerContent.slice(innermostOpener.index + innermostOpener[0].length),
     fullMatch: text.slice(reanchoredStart, end),
     wasSpliced: true,
@@ -787,7 +776,9 @@ function collectCandidateSpans(text: string): CandidateSpan[] {
 
 export function verdictAcross(text: string, boundary: number): ToolBlockVerdict | undefined {
   const block = collectLiveToolBlocks(text).find((b) => b.outerStart < boundary && b.end > boundary);
-  return block ? verdictOf(block) : undefined;
+  if (!block) return undefined;
+  const verdict = verdictOf(block);
+  return { ...verdict, calls: verdict.calls.filter((call) => block.innerStart + call.at >= boundary) };
 }
 
 function collectLiveToolBlocks(text: string): ResolvedToolBlock[] {

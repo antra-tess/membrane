@@ -513,6 +513,18 @@ describe('the XML tool loops hand a refused block to the host as an ordinary rou
       expect(marksOf(received)).toEqual([['zz_write', { path: 'zz.txt' }, null, null]]);
       expect(usesOf(content)).toEqual(marksOf(received));
     });
+
+    it(`continuing a block whose earlier part holds a whole invoke, ${path} stores the calls opened after the prefill as dispatch read them`, async () => {
+      const { received, content } = await run(continuedTurn(`zz calling\n${OPEN}\n<invoke name="zz_a"/>\n`), [`<invoke name="zz_write"><parameter name="path">zz.txt</parameter></invoke>\n`]);
+      expect(marksOf(received)).toEqual([['zz_a', {}, null, null], ['zz_write', { path: 'zz.txt' }, null, null]]);
+      expect(usesOf(content)).toEqual(marksOf(received.filter((c) => c.name === 'zz_write')));
+    });
+
+    it(`continuing a block re-anchored at an opening tag before the prefill's end, ${path} stores the call as dispatch marked it`, async () => {
+      const { received, content } = await run(continuedTurn(`zz calling\n${OPEN}\n${OPEN}\n`), [`<invoke name="zz_write"><parameter name="path">zz.txt</parameter></invoke>\n`]);
+      expect(received.map((c) => [c.name, c.unparseableReason !== undefined])).toEqual([['zz_write', true]]);
+      expect(usesOf(content)).toEqual(marksOf(received));
+    });
   }
 
   it('after a turn cut inside an invoke, the refusal goes back to the model and its resend runs', async () => {
@@ -620,66 +632,5 @@ describe('stored turns replay as before', () => {
     const rendered = render(stored);
     expect(occurrences(rendered, text)).toBe(1);
     expect(rendered).toContain('zz ran');
-  });
-});
-
-describe('the strict walk and the invoke regexes read every block the walk accepts alike', () => {
-  const random = (seed: number) => () => {
-    seed = (seed + 0x6d2b79f5) | 0;
-    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-  const next = random(254);
-  const pick = <T,>(items: readonly T[]): T => items[Math.floor(next() * items.length)]!;
-  const some = (items: readonly string[], most: number): string => Array.from({ length: Math.floor(next() * (most + 1)) }, () => pick(items)).join('');
-  const nameParts = ['a', 'b', '_', '1', ' ', '-', '.', '/', '=', '"', "'", '<', '>', '\n', '\r', '\u2028', '\u2029', '\t'];
-  const valueParts = ['zz', ' ', '\n', 'a < b', '>', '"', "'", '<invoke name="zz_x">', '<invoke name="zz_y"/>', '</invoke>', '<parameter name="zz_q">', '</parameter>', '<invoke name="zz_z"/>', '<function_results>', '<br>'];
-  const proseParts = ['', '', '\n', ' zz note ', ' a < b ', '\n\n'];
-
-  it('a block the walk accepts gives the calls it was written with; a block it refuses gives only marked calls', () => {
-    let compared = 0;
-    let refused = 0;
-    for (let round = 0; round < 20000; round++) {
-      const written: Array<{ name: string; parameters: string[] }> = [];
-      let asWritten = true;
-      let inner = some(proseParts, 1);
-      const invokes = 1 + Math.floor(next() * 3);
-      for (let k = 0; k < invokes; k++) {
-        const quote = pick(['"', "'"]);
-        const prefix = pick(['', 'antml:']);
-        const name = `zz${some(nameParts, 2)}`;
-        if (name.includes(quote)) asWritten = false;
-        const parameters: string[] = [];
-        let body = '';
-        const count = Math.floor(next() * 3);
-        for (let j = 0; j < count; j++) {
-          const parameter = `p${some(nameParts, 2)}`;
-          if (parameter.includes('"')) asWritten = false;
-          parameters.push(parameter);
-          const value = some(valueParts, 3);
-          if (value.includes('</')) asWritten = false;
-          body += `<${prefix}parameter name="${parameter}">${value}</${prefix}parameter>${pick(['', '\n'])}`;
-        }
-        inner += count === 0 && next() < 0.5
-          ? `<${prefix}invoke name=${quote}${name}${quote}/>`
-          : `<${prefix}invoke name=${quote}${name}${quote}>${body}</${prefix}invoke>`;
-        inner += some(proseParts, 1);
-        written.push({ name, parameters });
-      }
-      const text = block(inner);
-      for (const calls of [parseToolCalls(text)?.calls ?? [], parseAccumulatedIntoBlocks(text).toolCalls]) {
-        if (calls.some((c) => c.unparseableInput !== undefined)) {
-          refused++;
-          expect(calls.every((c) => c.unparseableInput === text && c.unparseableReason !== undefined)).toBe(true);
-        } else {
-          if (!asWritten) continue;
-          compared++;
-          expect(calls.map((c) => [c.name, Object.keys(c.input)])).toEqual(written.map((w) => [w.name, w.parameters]));
-        }
-      }
-    }
-    expect(compared).toBeGreaterThan(2000);
-    expect(refused).toBeGreaterThan(2000);
   });
 });
