@@ -78,7 +78,7 @@ jobs:
         run: npm run build
 
       - name: Publish
-        run: npm publish --access public --provenance
+        run: npm publish --access public --provenance --tag release-0.8  # 0.8.x patches must not take `latest` from 0.10
 
   github-release:
     name: GitHub release notes
@@ -111,5 +111,5 @@ jobs:
             gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
           else
             gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" \
-              --notes-file notes.md --verify-tag
+              --notes-file notes.md --verify-tag --latest=false
           fi
