@@ -241,10 +241,17 @@ function withoutCalllessResults(
   });
 }
 
-/** Whether a block is something besides a tool call or result that a turn shows. */
+/**
+ * Whether a block is something besides a tool call or result that the wire
+ * shows: text that isn't blank (a raw item's carrier is empty), or an image
+ * with a base64 source, sent as an image or as a placeholder's text. A
+ * thinking block, an image with a url source, a document or audio shows
+ * nothing. This restates what extractContent puts on the wire, so the two
+ * change together.
+ */
 function holdsTurnContent(block: ContentBlock): boolean {
-  if (block.type === 'tool_use' || block.type === 'tool_result') return false;
-  return block.type !== 'text' || block.text.trim() !== '';
+  if (block.type === 'text') return block.text.trim() !== '';
+  return block.type === 'image' && block.source?.type === 'base64';
 }
 
 function toToolResult(block: ToolResultContent): ToolResult {
@@ -678,6 +685,11 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     return blocks;
   }
 
+  /**
+   * What a message puts on the wire. holdsTurnContent restates which blocks
+   * besides calls and results show here, to end a group of calls at a user
+   * turn the wire shows, so the two change together.
+   */
   private extractContent(
     content: ContentBlock[],
     participant: string,

@@ -363,6 +363,30 @@ describe('AnthropicXmlFormatter: a tool result that answers no call', () => {
     expect(events).toEqual([]);
   });
 
+  for (const [kind, block] of [
+    ['only a thinking block', { type: 'thinking', thinking: 'a thought' }],
+    ['only an image with a url source', { type: 'image', source: { type: 'url', url: 'https://example.com/a.png' } }],
+    ['only blank text', text(' \n')],
+  ] as Array<[string, ContentBlock]>) {
+    it(`ends no group at a user message the wire doesn't show, one holding ${kind}`, () => {
+      const { rendered, events } = build([
+        { participant: 'User', content: [text('look')] },
+        { participant: 'Agent', content: [call('a'), call('b')] },
+        { participant: 'Tool', content: [result('b', 'zz-b')] },
+        { participant: 'User', content: [block] },
+        { participant: 'Agent', content: [call('c')] },
+        { participant: 'Tool', content: [result('c', 'zz-c')] },
+        { participant: 'Agent', content: [] },
+      ]);
+      expect(rendered).not.toContain('zz-b');
+      expect(rendered).not.toContain('zz-c');
+      expect(events).toEqual([
+        { kind: 'orphan_tool_result_dropped', toolUseId: 'b' },
+        { kind: 'orphan_tool_result_dropped', toolUseId: 'c' },
+      ]);
+    });
+  }
+
   it('reports a result left out for its place as an orphan, though an earlier cycle answered its id', () => {
     const { rendered, events } = build([
       { participant: 'User', content: [text('look')] },
