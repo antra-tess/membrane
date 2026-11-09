@@ -16,8 +16,11 @@
 // length is processed and not cached.
 
 import { collectMarkedBlocks } from './utils/cache-marker-budget.js';
-import { createHash } from 'node:crypto';
-import { readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import {
+  closeSync, fsyncSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync,
+} from 'node:fs';
+import { dirname } from 'node:path';
 
 /** Vendor usage fields used by keepalive checks and spend observers. */
 export interface KeepaliveUsage {
@@ -74,7 +77,11 @@ export type KeepaliveEvent =
   | { type: 'restored'; key: string; lane: KeepaliveLane; idleMs: number }
   /** `statePath` couldn't be read or written. The keepalive carries on in
    *  memory; a failed read starts it empty. */
-  | { type: 'persist-error'; op: 'load' | 'save'; error: string };
+  | { type: 'persist-error'; op: 'load' | 'save'; error: string }
+  /** A lineage kept warm in memory but left out of `statePath`, because its
+   *  request holds what looks like a credential (e.g. an MCP server's
+   *  `authorization_token`). Emitted once per lineage. */
+  | { type: 'not-persisted'; key: string; reason: string };
 
 export interface CacheKeepaliveConfig {
   /** Master switch. Default true. */
@@ -107,14 +114,16 @@ export interface CacheKeepaliveConfig {
   /**
    * A file that keeps the tracked lineages across a restart of the process.
    * Each change to them is written there (atomically, mode 0600), and a new
-   * keepalive given the same path takes them back up, so a restart doesn't
-   * leave the cache to expire: the replay is the recorded request's own
-   * bytes, as before the restart. A lineage whose entry has gone untouched
-   * for the cache's one-hour lifetime or more, or past `maxIdleMs` since its
-   * last real request, isn't restored, since a replay of it would pay a
-   * write. The file holds full wire requests (the conversation), so it
-   * belongs with the agent's other private data; request headers other than
-   * `anthropic-*` aren't saved. Unset: in memory only.
+   * keepalive given the same path takes them back up and refreshes them when
+   * they're due, as the old process would have. A lineage whose cache entry
+   * was last touched an hour or more ago, or past `maxIdleMs` since its last
+   * real request, isn't restored, since a replay of it would pay a write.
+   * The file holds full wire requests (the conversation), so it belongs with
+   * the agent's other private data. Only the `anthropic-beta` and
+   * `anthropic-version` headers are saved, and a request holding what looks
+   * like a credential is kept in memory only (`not-persisted`). One
+   * keepalive per file: when another one writes it, the one that wrote it
+   * before stops saving (`persist-error`). Unset: in memory only.
    */
   statePath?: string;
   /** Each keepalive event as it happens. An error it throws is ignored. */
@@ -132,27 +141,89 @@ export interface CacheKeepaliveConfig {
 const ONE_HOUR_TTL_MS = 60 * 60 * 1000;
 
 /** The `statePath` file's shape. */
+interface PersistedLineage {
+  wire: Record<string, unknown>;
+  headers?: Record<string, string>;
+  lane: KeepaliveLane;
+  lastRealAt: number;
+  /** When the cache entry was last known to be read or written. */
+  touchedAt: number;
+  ineffective: number;
+}
 interface PersistedState {
   version: 1;
-  lineages: Array<{
-    wire: Record<string, unknown>;
-    headers?: Record<string, string>;
-    lane: KeepaliveLane;
-    lastRealAt: number;
-    refreshBaselineAt: number;
-    ineffective: number;
-  }>;
+  lineages: PersistedLineage[];
 }
 
-/** Only the API's own headers (`anthropic-beta`, `anthropic-version`, …) go
- *  to disk: anything else could be a credential. */
+/** The only headers that go to disk: anything else could be a credential. */
+const PERSISTED_HEADERS = new Set(['anthropic-beta', 'anthropic-version']);
+
 function persistableHeaders(headers: Record<string, string> | undefined): Record<string, string> | undefined {
   if (!headers) return undefined;
-  const kept = Object.entries(headers).filter(([name]) => {
-    const lower = name.toLowerCase();
-    return lower.startsWith('anthropic-') && lower !== 'anthropic-api-key';
-  });
+  const kept = Object.entries(headers).filter(([name]) => PERSISTED_HEADERS.has(name.toLowerCase()));
   return kept.length > 0 ? Object.fromEntries(kept) : undefined;
+}
+
+const CREDENTIAL_KEY = /(^|[_-])(token|secret|password|passwd|api[_-]?key|authorization|credentials?)$/i;
+
+/** The path of the first field outside the conversation (`system`, `tools`,
+ *  `messages`) whose name looks like a credential, or null. `request.extra`
+ *  reaches the wire as top-level fields, `mcp_servers[].authorization_token`
+ *  among them, and those mustn't land on disk. */
+export function credentialField(wire: Record<string, unknown>): string | null {
+  const walk = (value: unknown, path: string, depth: number): string | null => {
+    if (depth > 8 || value === null || typeof value !== 'object') return null;
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      const here = Array.isArray(value) ? `${path}[${k}]` : `${path}.${k}`;
+      if (!Array.isArray(value) && CREDENTIAL_KEY.test(k) && v !== undefined && v !== null && v !== '') return here;
+      const found = walk(v, here, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  };
+  for (const [k, v] of Object.entries(wire)) {
+    if (k === 'system' || k === 'tools' || k === 'messages') continue;
+    if (CREDENTIAL_KEY.test(k) && v !== undefined && v !== null && v !== '') return k;
+    const found = walk(v, k, 0);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** Write `data` to `path` atomically: a new private temp file (O_EXCL, so
+ *  never through a planted link), flushed, then renamed over `path`. */
+function writeFileAtomic(path: string, data: string): void {
+  const tmp = `${path}.${randomBytes(6).toString('hex')}.tmp`;
+  const fd = openSync(tmp, 'wx', 0o600);
+  try {
+    try {
+      writeSync(fd, data);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(tmp, path);
+  } catch (err) {
+    try { unlinkSync(tmp); } catch { /* already gone */ }
+    throw err;
+  }
+  try {
+    const dir = openSync(dirname(path), 'r');
+    try { fsyncSync(dir); } finally { closeSync(dir); }
+  } catch {
+    // Not every platform can fsync a directory (Windows); the rename stands.
+  }
+}
+
+/** Identity of the file now at `path` (each atomic write is a new inode), or
+ *  null when there is none. */
+function fileIdentity(path: string): string | null {
+  try {
+    const st = statSync(path);
+    return `${st.dev}:${st.ino}:${st.mtimeMs}:${st.size}`;
+  } catch {
+    return null;
+  }
 }
 
 interface Lineage {
@@ -160,7 +231,12 @@ interface Lineage {
   headers: Record<string, string> | undefined;
   lane: KeepaliveLane;
   lastRealAt: number;
+  /** When the next refresh is counted from: the last touch, or the last
+   *  attempt, so a failing refresh isn't retried at every check. */
   refreshBaselineAt: number;
+  /** When the cache entry was last known to be read or written. What a
+   *  restart judges the entry's age by. */
+  touchedAt: number;
   ineffective: number;
 }
 
@@ -260,7 +336,11 @@ export class CacheKeepalive {
   private readonly cfg: Required<Omit<CacheKeepaliveConfig, 'onEvent' | 'onCall' | 'statePath'>> &
     Pick<CacheKeepaliveConfig, 'onEvent' | 'onCall'>;
 
-  private readonly statePath: string | undefined;
+  private statePath: string | undefined;
+  /** The file this keepalive last saw at `statePath`, or wrote there. */
+  private fileSeen: string | null = null;
+  /** Lineages already reported as `not-persisted`. */
+  private readonly unsaved = new Set<string>();
 
   constructor(private readonly send: KeepaliveSend, config: CacheKeepaliveConfig = {}) {
     const { statePath, ...rest } = config;
@@ -272,6 +352,7 @@ export class CacheKeepalive {
 
   /** Take back up the lineages a previous process saved to `statePath`. */
   private restore(): void {
+    this.fileSeen = fileIdentity(this.statePath!);
     let state: PersistedState;
     try {
       state = JSON.parse(readFileSync(this.statePath!, 'utf8')) as PersistedState;
@@ -286,70 +367,114 @@ export class CacheKeepalive {
       return;
     }
     const now = Date.now();
+    const kept: Array<[string, Lineage]> = [];
+    let malformed = 0;
     for (const saved of state.lineages) {
-      if (!saved || typeof saved.wire !== 'object' || saved.wire === null) continue;
-      if (!this.cfg.lanes.includes(saved.lane)) continue;
-      const lastRealAt = Number(saved.lastRealAt);
-      const refreshBaselineAt = Number(saved.refreshBaselineAt);
-      if (!Number.isFinite(lastRealAt) || !Number.isFinite(refreshBaselineAt)) continue;
-      // The key is the wire's, not the file's word for it.
-      const key = lineageKey(saved.wire);
-      const reason = ineligibleReason(saved.wire);
-      if (reason) {
-        this.emit({ type: 'skipped', key, reason });
-        continue;
+      try {
+        const lineage = this.restoreOne(saved, now);
+        if (lineage === 'malformed') malformed++;
+        else if (lineage) kept.push(lineage);
+      } catch {
+        malformed++;
       }
-      if (now - lastRealAt >= this.cfg.maxIdleMs) {
-        this.emit({ type: 'expired', key, idleMs: now - lastRealAt });
-        continue;
-      }
-      if (now - refreshBaselineAt >= ONE_HOUR_TTL_MS) {
-        // The entry is gone: a replay would write the whole prefix.
-        this.emit({ type: 'skipped', key, reason: 'cache-expired-while-stopped' });
-        continue;
-      }
-      this.lineages.set(key, {
-        wire: saved.wire,
-        headers: saved.headers,
-        lane: saved.lane,
-        lastRealAt,
-        refreshBaselineAt,
-        ineffective: Number(saved.ineffective) || 0,
-      });
-      this.emit({ type: 'restored', key, lane: saved.lane, idleMs: now - refreshBaselineAt });
     }
-    while (this.lineages.size > this.cfg.maxLineages) {
-      const oldest = this.lineages.keys().next().value as string | undefined;
-      if (oldest === undefined) break;
-      this.lineages.delete(oldest);
+    if (malformed > 0) {
+      this.emit({ type: 'persist-error', op: 'load', error: `${malformed} malformed lineage(s) left out` });
+    }
+    // The file lists the oldest first; keep the newest when maxLineages shrank.
+    for (const [key, lineage] of kept.slice(-this.cfg.maxLineages)) {
+      this.lineages.delete(key);
+      this.lineages.set(key, lineage);
+    }
+    for (const [key, l] of this.lineages) {
+      this.emit({ type: 'restored', key, lane: l.lane, idleMs: now - l.touchedAt });
     }
     this.persist();
     if (this.lineages.size > 0) {
       this.ensureTimer();
-      // A restart can land late in an entry's hour: check now, not one
-      // checkIntervalMs from now, which could be past its expiry.
-      void this.tick();
+      // A restart can land late in an entry's hour: check at once, not one
+      // checkIntervalMs from now, which could be past its expiry. Not inside
+      // the constructor, though: whoever is building us isn't done yet.
+      queueMicrotask(() => { void this.tick(); });
     }
+  }
+
+  /** One saved lineage, checked; null when it's valid but not worth keeping. */
+  private restoreOne(saved: PersistedLineage, now: number): [string, Lineage] | null | 'malformed' {
+    if (!saved || typeof saved !== 'object') return 'malformed';
+    const { wire, headers, lane } = saved;
+    if (!wire || typeof wire !== 'object' || Array.isArray(wire)) return 'malformed';
+    if (typeof lane !== 'string') return 'malformed';
+    if (headers !== undefined && (typeof headers !== 'object' || headers === null
+      || Object.values(headers).some((v) => typeof v !== 'string'))) return 'malformed';
+    const lastRealAt = saved.lastRealAt;
+    const touchedAt = saved.touchedAt;
+    const ineffective = saved.ineffective ?? 0;
+    if (![lastRealAt, touchedAt, ineffective].every((n) => typeof n === 'number' && Number.isFinite(n))) {
+      return 'malformed';
+    }
+    if (!this.cfg.lanes.includes(lane)) return null;
+    // The key is the wire's, not the file's word for it.
+    const key = lineageKey(wire);
+    const reason = ineligibleReason(wire);
+    if (reason) {
+      this.emit({ type: 'skipped', key, reason });
+      return null;
+    }
+    // A clock that went back makes every age a guess: don't bet a write on it.
+    if (touchedAt > now || lastRealAt > now) {
+      this.emit({ type: 'skipped', key, reason: 'clock-went-back' });
+      return null;
+    }
+    if (now - lastRealAt >= this.cfg.maxIdleMs) {
+      this.emit({ type: 'expired', key, idleMs: now - lastRealAt });
+      return null;
+    }
+    if (now - touchedAt >= ONE_HOUR_TTL_MS) {
+      // The entry is gone: a replay would write the whole prefix.
+      this.emit({ type: 'skipped', key, reason: 'cache-expired-while-stopped' });
+      return null;
+    }
+    return [key, {
+      wire, headers, lane, lastRealAt, touchedAt, refreshBaselineAt: touchedAt,
+      ineffective: Math.max(0, Math.floor(ineffective)),
+    }];
   }
 
   /** Write the tracked lineages to `statePath`, when one is set. */
   private persist(): void {
-    if (!this.statePath) return;
-    const state: PersistedState = {
-      version: 1,
-      lineages: [...this.lineages.values()].map((l) => ({
+    if (!this.statePath || this.stopped) return;
+    const path = this.statePath;
+    const current = fileIdentity(path);
+    if (current !== this.fileSeen) {
+      // Another keepalive has written the file since we last did: it's the
+      // newer process's now, and two writers would lose each other's lineages.
+      this.statePath = undefined;
+      this.emit({ type: 'persist-error', op: 'save', error: `${path} was written by another keepalive; no longer saving there` });
+      return;
+    }
+    const lineages: PersistedLineage[] = [];
+    for (const [key, l] of this.lineages) {
+      const field = credentialField(l.wire);
+      if (field) {
+        if (!this.unsaved.has(key)) {
+          this.unsaved.add(key);
+          this.emit({ type: 'not-persisted', key, reason: `request holds ${field}` });
+        }
+        continue;
+      }
+      lineages.push({
         wire: l.wire,
         headers: persistableHeaders(l.headers),
         lane: l.lane,
         lastRealAt: l.lastRealAt,
-        refreshBaselineAt: l.refreshBaselineAt,
+        touchedAt: l.touchedAt,
         ineffective: l.ineffective,
-      })),
-    };
-    const tmp = `${this.statePath}.${process.pid}.tmp`;
+      });
+    }
     try {
-      writeFileSync(tmp, JSON.stringify(state), { mode: 0o600 });
-      renameSync(tmp, this.statePath);
+      writeFileAtomic(path, JSON.stringify({ version: 1, lineages } satisfies PersistedState));
+      this.fileSeen = fileIdentity(path);
     } catch (err) {
       this.emit({ type: 'persist-error', op: 'save', error: err instanceof Error ? err.message : String(err) });
     }
@@ -387,6 +512,9 @@ export class CacheKeepalive {
       headers,
       lane,
       lastRealAt: Math.max(sentAt, existing?.lastRealAt ?? sentAt),
+      // The snapshot is this request's, so its entry's touch is this send's,
+      // even when a later call on the lineage was recorded first.
+      touchedAt: sentAt,
       refreshBaselineAt: sentAt,
       ineffective: existing?.ineffective ?? 0,
     });
@@ -410,7 +538,6 @@ export class CacheKeepalive {
   private async tick(): Promise<void> {
     if (this.ticking || this.stopped) return;
     this.ticking = true;
-    let changed = false;
     try {
       const now = Date.now();
       for (const [key, lin] of [...this.lineages]) {
@@ -419,18 +546,18 @@ export class CacheKeepalive {
         if (now - lin.lastRealAt >= this.cfg.maxIdleMs) {
           this.lineages.delete(key);
           this.emit({ type: 'expired', key, idleMs: now - lin.lastRealAt });
-          changed = true;
+          this.persist();
           continue;
         }
         if (now - lin.refreshBaselineAt < this.cfg.refreshAfterMs) continue;
         await this.refresh(key, lin);
-        changed = true;
+        // Saved as each lineage changes, so a crash later in the tick keeps
+        // it. After a stop() persist() does nothing: the file stays the state
+        // the next process should take up, not the cleared one.
+        this.persist();
       }
     } finally {
       this.ticking = false;
-      // A stop() part-way leaves the file as it was: it's the state the next
-      // process should take up, not the cleared one.
-      if (changed && !this.stopped) this.persist();
     }
   }
 
@@ -468,6 +595,9 @@ export class CacheKeepalive {
           readTokens: read,
           writeTokens: wrote,
         });
+        // A write made a new entry; a reply that neither read nor wrote says
+        // nothing about the entry, so it isn't a touch.
+        if (wrote > 0) lin.touchedAt = Math.max(lin.touchedAt, startedAt);
         if (lin.ineffective >= this.cfg.maxIneffective) {
           if (this.lineages.get(key) === lin) this.lineages.delete(key);
         } else {
@@ -477,6 +607,7 @@ export class CacheKeepalive {
       }
 
       lin.ineffective = 0;
+      lin.touchedAt = Math.max(lin.touchedAt, startedAt);
       lin.refreshBaselineAt = startedAt;
       this.emit({ type: 'refreshed', key, lane: lin.lane, readTokens: read, idleMs });
     } catch (err) {
@@ -490,6 +621,8 @@ export class CacheKeepalive {
       this.consecutiveErrors += 1;
       this.emit({ type: 'error', key, error: message, consecutive: this.consecutiveErrors });
 
+      // Paces the next try only: a failed refresh touched nothing, so the
+      // saved last touch (touchedAt) stays where it was.
       lin.refreshBaselineAt = Date.now();
 
       if (this.consecutiveErrors >= this.cfg.maxConsecutiveErrors) {
