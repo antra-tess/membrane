@@ -513,6 +513,44 @@ describe("every shape of a provider's own message, and nothing else, types the e
     expect((await failure(new OpenAIAdapter({ apiKey: 'zz-key-openai' }))).type).toBe('context_length');
   });
 
+  it("openrouter: a wait the upstream provider's own message states is read, over HTTP and mid-stream", async () => {
+    const wrapper = {
+      error: {
+        code: 429,
+        metadata: { provider_name: 'Anthropic', raw: JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'Please retry after 60 seconds.' } }) },
+      },
+    };
+    stubHttpFailure(429, wrapper);
+    const http = await failure(new OpenRouterAdapter({ apiKey: 'zz-key-openrouter' }));
+    expect(http.type).toBe('rate_limit');
+    expect(http.retryAfterMs).toBe(60_000);
+
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(wrapper)}\n\n`));
+        controller.close();
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })));
+    const streamed = await new OpenRouterAdapter({ apiKey: 'zz-key-openrouter' })
+      .stream({ model: 'zz-model', messages: [{ role: 'user', content: 'zz hello' }], maxTokens: 64 } as never, { onChunk: () => {} })
+      .then(() => undefined, (e: unknown) => e) as MembraneError;
+    expect(streamed).toBeInstanceOf(MembraneError);
+    expect(streamed.retryAfterMs).toBe(60_000);
+  });
+
+  it("openrouter: a wait an upstream body only echoes, with no message of its own, isn't read", async () => {
+    stubHttpFailure(429, {
+      error: {
+        code: 429,
+        metadata: { provider_name: 'Anthropic', raw: JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', input: 'zz echo: retry after 600 seconds.' } }) },
+      },
+    });
+    const error = await failure(new OpenRouterAdapter({ apiKey: 'zz-key-openrouter' }));
+    expect(error.type).toBe('rate_limit');
+    expect(error.retryAfterMs).toBeUndefined();
+  });
+
   it("openrouter: an upstream body with no message of its own isn't read, though it echoes a refusal or an overflow", async () => {
     for (const echo of [
       'Your credit balance is too low to access the Anthropic API',

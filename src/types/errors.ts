@@ -687,7 +687,7 @@ export function errorFromProviderStatus(params: {
       : classifyMessage(fields.upstreamMessage ? `${message}\n${fields.upstreamMessage}` : message, evidence);
   const retryAfterMs = params.retryAfterMs ?? fields.retryAfterMs
     ?? (classification.retryable && (classification.type === 'rate_limit' || classification.type === 'server')
-      && ownText !== undefined ? retryAfterFromProse(ownText) : undefined);
+      && evidence !== '' ? retryAfterFromProse(evidence) : undefined);
 
   return new MembraneError({
     type: classification.type,
