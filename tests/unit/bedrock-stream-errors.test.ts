@@ -44,6 +44,23 @@ async function streamError(): Promise<MembraneError> {
   return error as MembraneError;
 }
 
+function errorFrame(headers: Record<string, string>): Uint8Array {
+  const header = (name: string, value: string) => {
+    const n = Buffer.from(name), v = Buffer.from(value);
+    const out = Buffer.alloc(1 + n.length + 1 + 2 + v.length);
+    out[0] = n.length; n.copy(out, 1);
+    out[1 + n.length] = 7;
+    out.writeUInt16BE(v.length, 2 + n.length);
+    v.copy(out, 4 + n.length);
+    return out;
+  };
+  const all = Buffer.concat([header(':message-type', 'error'), ...Object.entries(headers).map(([name, value]) => header(name, value))]);
+  const frame = Buffer.alloc(16 + all.length);
+  frame.writeUInt32BE(frame.length, 0); frame.writeUInt32BE(all.length, 4);
+  all.copy(frame, 12);
+  return frame;
+}
+
 async function adapterStreamError(): Promise<MembraneError> {
   const adapter = new BedrockAdapter({ accessKeyId: 'zz-key', secretAccessKey: 'zz-secret', region: 'us-east-1' });
   const error = await adapter.stream(
@@ -92,6 +109,30 @@ describe('an error inside a Bedrock stream keeps the provider\'s error on the ra
     const error = await adapterStreamError();
     expect(error.message).toContain('retry after 80 seconds');
     expect(error.retryAfterMs).toBeUndefined();
+  });
+
+  it("an error frame: its :error-code and :error-message, typed as an exception of that name is", async () => {
+    const throttled = 'Too many tokens, please wait before trying again.';
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true, status: 200,
+      body: streamBody([errorFrame({ ':error-code': 'ThrottlingException', ':error-message': throttled })]),
+    })));
+    const error = await adapterStreamError();
+    expect(error.message).toContain(`Bedrock stream error (ThrottlingException): ${throttled}`);
+    expect(error.type).toBe('rate_limit');
+    expect(error.httpStatus).toBe(429);
+    expect(error.providerErrorCode).toBe('ThrottlingException');
+    expect((error.rawError as { error?: unknown }).error).toEqual({ message: throttled });
+
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true, status: 200,
+      body: streamBody([errorFrame({ ':error-code': 'zzUnheardOfException' })]),
+    })));
+    const unknown = await adapterStreamError();
+    expect(unknown.message).toContain('Bedrock stream error (zzUnheardOfException)');
+    expect(unknown.type).toBe('server');
+    expect(unknown.retryable).toBe(true);
+    expect(unknown.providerErrorCode).toBe('zzUnheardOfException');
   });
 
   it('an error event: the event as it came', async () => {

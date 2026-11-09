@@ -657,6 +657,9 @@ export class BedrockAdapter implements ProviderAdapter {
 
           let eventType = '';
           let exceptionType = '';
+          let messageType = '';
+          let frameErrorCode = '';
+          let frameErrorMessage = '';
           let headerOffset = 12;
           const headerEnd = 12 + headersLength;
           while (headerOffset < headerEnd) {
@@ -677,10 +680,25 @@ export class BedrockAdapter implements ProviderAdapter {
                 eventType = value;
               } else if (name === ':exception-type') {
                 exceptionType = value;
+              } else if (name === ':message-type') {
+                messageType = value;
+              } else if (name === ':error-code') {
+                frameErrorCode = value;
+              } else if (name === ':error-message') {
+                frameErrorMessage = value;
               }
             } else {
               break;
             }
+          }
+
+          if (messageType === 'error') {
+            throw new BedrockError(
+              BEDROCK_STREAM_EXCEPTION_STATUS.get(frameErrorCode.toLowerCase()) ?? 500,
+              `Bedrock stream error (${frameErrorCode}): ${frameErrorMessage || frameErrorCode}`,
+              frameErrorCode || undefined,
+              frameErrorMessage ? { message: frameErrorMessage } : undefined,
+            );
           }
 
           if (exceptionType) {
