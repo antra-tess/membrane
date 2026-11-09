@@ -20,11 +20,14 @@
     or beyond (`wait-past-expiry`). An ineffective poke doesn't count as a
     read for that hour. So at the default `refreshAfterMs`, a lineage is
     dropped before a second ineffective poke, unless a real request is
-    recorded between them. A real request recorded after one sent later on its
-    lineage changes nothing, so the lineage keeps replaying its newest
-    request. Before, it replaced the snapshot and set the lineage's touch
-    from its own send, and one in a shape that isn't kept warm dropped the
-    lineage.
+    recorded between them. A lineage dropped at `maxIneffective` now gets a
+    `skipped` event, reason `ineffective-cap`, where it got none. While a
+    lineage is tracked, a real request recorded after one sent later on it
+    changes nothing, so the lineage keeps replaying its newest request.
+    Before, it replaced the snapshot and set the lineage's touch from its own
+    send, and one in a shape that isn't kept warm dropped the lineage. Once a
+    lineage is dropped, any real request recorded starts it again, as
+    before.
   - **Unchanged:** the replay's bytes and headers, lanes, `maxLineages`,
     `maxIdleMs`, one receipt per send, and `stop()` and
     `enabled: false`.

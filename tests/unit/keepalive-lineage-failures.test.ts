@@ -60,7 +60,6 @@ function setup(
   return { ka, sent, events };
 }
 
-/** One lineage's events, as `error N` or `TYPE REASON`. */
 function trail(events: KeepaliveEvent[], wireOf: Record<string, unknown>): string[] {
   const key = lineageKey(wireOf);
   return events
@@ -172,16 +171,17 @@ describe("a provider's stated wait holds the model's optional pokes", () => {
   });
 
   it.each([
-    ["holds the model for the retryAfterMs a plain error from a host's own sender states", 15 * MIN, 25 * MIN],
-    ['holds nothing for a retryAfterMs that is a string', String(15 * MIN), 10 * MIN],
-  ] as const)('%s', async (_title, retryAfterMs, a2At) => {
+    ["holds the model for the retryAfterMs a plain error from a host's own sender states", () => Object.assign(new Error('Busy'), { retryAfterMs: 15 * MIN }), 25 * MIN],
+    ['holds nothing for a retryAfterMs that is a string', () => Object.assign(new Error('Busy'), { retryAfterMs: String(15 * MIN) }), 10 * MIN],
+    ['holds the model for the retryAfterMs an error that is not retryable states', () => failure(15 * MIN, false), 25 * MIN],
+  ] as const)('%s', async (_title, thrown, a2At) => {
     let a1Failed = false;
     const a1 = wire('claude-m', 'A1');
     const a2 = wire('claude-m', 'A2');
     const { ka, sent } = setup((payload) => {
       if (systemOf(payload) === 'A1' && !a1Failed) {
         a1Failed = true;
-        throw Object.assign(new Error('Busy'), { retryAfterMs });
+        throw thrown();
       }
       return hit;
     }, { refreshAfterMs: 10 * MIN, checkIntervalMs: MIN, maxConsecutiveErrors: 3 });
@@ -243,6 +243,18 @@ describe('the confirmed-warm fence', () => {
 
     expect(sent.map((s) => `${s.at / MIN} ${s.model}`)).toEqual(['50 claude-a', '50 claude-b', '100 claude-b']);
     expect(trail(events, a)).toEqual(['ineffective no-cache-read', 'skipped cache-expired']);
+  });
+
+  it('at the default refresh, a real request between two ineffective pokes keeps their count, so the second reaches maxIneffective', async () => {
+    const a = wire('claude-a');
+    const { ka, sent, events } = setup(() => miss, { checkIntervalMs: 5 * MIN });
+    ka.record(a, undefined, 'stream', START);
+    await vi.advanceTimersByTimeAsync(50 * MIN);
+    ka.record(a, undefined, 'stream', START + 50 * MIN);
+    await vi.advanceTimersByTimeAsync(100 * MIN);
+
+    expect(sent.map((s) => s.at / MIN)).toEqual([45, 95]);
+    expect(trail(events, a)).toEqual(['ineffective no-cache-read', 'ineffective no-cache-read', 'skipped ineffective-cap']);
   });
 
   it('checks the fence against the time of each send, not the start of a delayed tick', async () => {

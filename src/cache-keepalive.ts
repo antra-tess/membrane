@@ -71,9 +71,11 @@ export type KeepaliveEvent =
   | { type: 'ineffective'; key: string; reason: string; readTokens: number; writeTokens: number }
   /** A lineage is dropped: its request stopped being warmable (an
    *  `ineligibleReason`), `failure-cap` (`maxConsecutiveErrors` failed pokes in
-   *  a row), `cache-expired` (an hour since its last confirmed cache read or
+   *  a row), `ineffective-cap` (`maxIneffective` pokes in a row without a cache
+   *  read), `cache-expired` (an hour since its last confirmed cache read or
    *  real request, so a poke would write the entry rather than read it), or
-   *  `wait-past-expiry` (a provider's wait for its model ends after that hour). */
+   *  `wait-past-expiry` (a provider's wait for its model ends at or after that
+   *  hour). */
   | { type: 'skipped'; key: string; reason: string }
   /** A poke failed; `consecutive` counts its lineage's failed pokes in a row. */
   | { type: 'error'; key: string; error: string; consecutive: number }
@@ -110,7 +112,8 @@ export interface CacheKeepaliveConfig {
   maxConsecutiveErrors?: number;
   /**
    * The number of pokes of a lineage in a row coming back without a cache read
-   * (no read, or a write) at which the lineage is dropped. Default 2. An
+   * (no read, or a write) at which the lineage is dropped (a `skipped` event,
+   * reason `ineffective-cap`). Default 2. An
    * ineffective poke doesn't count as a cache read. So at the default
    * `refreshAfterMs`, the poke after an ineffective one falls more than an hour
    * after the last real request or cache-reading poke, and the lineage is
@@ -123,7 +126,7 @@ export interface CacheKeepaliveConfig {
   /** Report background calls to the same ledger as foreground inference.
    * Invoked once on success (including ineffective responses) or failure.
    * Observer errors are isolated, and returned promises never delay the loop.
-   * Skipped, expired, and disabled lineages do not make calls or receipts.
+   * Skipped and expired lineages do not make calls or receipts.
    * Poke serialization failures are reported through onEvent before any sender invocation. */
   onCall?: (call: KeepaliveCall) => void | Promise<void>;
 }
@@ -218,7 +221,8 @@ export function messagesForRefresh(messages: readonly unknown[]): unknown[] {
 /**
  * Identity of a cache lineage: model, system and tools, the root of the cached
  * prefix. Requests that share all three share a lineage, whatever their lane
- * or messages, and the one recorded later replaces the other's snapshot.
+ * or messages, and while it's tracked, the one sent later replaces the
+ * other's snapshot (`CacheKeepalive.record()`).
  */
 export function lineageKey(wire: Record<string, unknown>): string {
   const h = createHash('sha256');
@@ -248,10 +252,11 @@ export class CacheKeepalive {
    *  it has processed the request's prefix. `sentAt` is when the request was
    *  sent, where the cache entry's clock starts: the lineage's touch and its
    *  window count from it. Left out, both count from now. Call it once per
-   *  call that gets that far. A request sent before the lineage's newest
-   *  recorded one changes nothing, so the lineage replays its newest request.
-   *  Otherwise it clears the lineage's failed-poke count, and leaves a
-   *  provider's wait for its model in place. */
+   *  call that gets that far. While the lineage is tracked, a request sent
+   *  before its newest recorded one changes nothing, so the lineage replays
+   *  its newest request; once the lineage is dropped, any request recorded
+   *  starts it again. Otherwise it clears the lineage's failed-poke count,
+   *  and leaves a provider's wait for its model in place. */
   record(
     wire: Record<string, unknown>,
     headers: Record<string, string> | undefined,
@@ -365,7 +370,7 @@ export class CacheKeepalive {
           writeTokens: wrote,
         });
         if (lin.ineffective >= this.cfg.maxIneffective) {
-          if (this.lineages.get(key) === lin) this.lineages.delete(key);
+          this.retire(key, lin, 'ineffective-cap');
         } else {
           lin.refreshBaselineAt = startedAt;
         }

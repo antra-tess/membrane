@@ -338,6 +338,7 @@ describe('CacheKeepalive', () => {
     const bad = events.filter((e) => e.type === 'ineffective');
     expect(bad.length).toBe(2);
     expect((bad[0] as { reason: string }).reason).toBe('wrote-instead-of-read');
+    expect(events.filter((e) => e.type === 'skipped')).toEqual([{ type: 'skipped', key: expect.any(String), reason: 'ineffective-cap' }]);
 
     const after = send.mock.calls.length;
     await vi.advanceTimersByTimeAsync(4 * 60 * 60_000);
