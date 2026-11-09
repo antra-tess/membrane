@@ -83,11 +83,13 @@ export class MembraneError extends Error {
   /**
    * The request's input token count, where a `context_length` refusal states
    * one: Anthropic's "prompt is too long: N tokens > M maximum" and "input
-   * length and `max_tokens` exceed context limit: N + K > M", and Gemini's
-   * "The input token count (N) exceeds ...". It's the whole prompt, cache
-   * reads and writes included, unlike a response's `inputTokens`. Unset where
-   * the refusal states no count, as OpenAI's, the Responses API's and
-   * Bedrock's don't. Only the number is kept; the text stays in `rawError`.
+   * length and `max_tokens` exceed context limit: N + K > M", Gemini's "The
+   * input token count (N) exceeds ...", and OpenAI's long form, "... However,
+   * your messages resulted in N tokens.". It's the whole prompt, cache reads
+   * and writes included, unlike a response's `inputTokens`. Unset where the
+   * refusal states no count, as OpenAI's shorter and current forms, the
+   * Responses API's and Bedrock's don't. Only the number is kept; the text
+   * stays in `rawError`.
    * From a provider's body, it's read from the body's own message fields, as
    * the error's type is, never from a part that can echo the request.
    */
@@ -725,12 +727,15 @@ export function errorFromProviderStatus(params: {
 }
 
 /** The forms a provider's length refusal states the request's input count in, N in each: Anthropic's "prompt is
- *  too long: N tokens > M maximum" and "input length and `max_tokens` exceed context limit: N + K > M", and
- *  Gemini's "The input token count (N) exceeds ...". */
+ *  too long: N tokens > M maximum" and "input length and `max_tokens` exceed context limit: N + K > M",
+ *  Gemini's "The input token count (N) exceeds ...", and OpenAI's long form, "... However, your messages resulted
+ *  in N tokens.". Its older "you requested N tokens (... in the messages, ... in the completion)" counts the
+ *  completion in N, so it isn't among them. */
 const STATED_PROMPT_TOKENS = [
   /prompt is too long: (\d+) tokens > \d+ maximum/i,
   /input length and `max_tokens` exceed context limit: (\d+) \+ \d+ > \d+/i,
   /the input token count \((\d+)\) exceeds/i,
+  /your messages resulted in (\d+) tokens/i,
 ];
 
 function statedPromptTokens(text: string | undefined): number | undefined {
