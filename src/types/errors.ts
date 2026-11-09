@@ -58,6 +58,10 @@ export interface ErrorInfo {
   /** Provider-specific error code */
   providerErrorCode?: string;
 
+  /** See {@link MembraneError.promptTokens}. Given, even as undefined, it's
+   * taken as is, and the message isn't read for it. */
+  promptTokens?: number;
+
   /** Raw error object */
   rawError: unknown;
 
@@ -76,6 +80,18 @@ export class MembraneError extends Error {
   readonly providerErrorCode?: string;
   readonly rawError?: unknown;
   readonly rawRequest?: unknown;
+  /**
+   * The request's input token count, where a `context_length` refusal states
+   * one: Anthropic's "prompt is too long: N tokens > M maximum" and "input
+   * length and `max_tokens` exceed context limit: N + K > M", and Gemini's
+   * "The input token count (N) exceeds ...". It's the whole prompt, cache
+   * reads and writes included, unlike a response's `inputTokens`. Unset where
+   * the refusal states no count, as OpenAI's, the Responses API's and
+   * Bedrock's don't. Only the number is kept; the text stays in `rawError`.
+   * From a provider's body, it's read from the body's own message fields, as
+   * the error's type is, never from a part that can echo the request.
+   */
+  readonly promptTokens?: number;
   /**
    * True when the request was refused for the system change it carried (a
    * `system_change` block, SystemChangeContent): by the API, on a model
@@ -109,6 +125,10 @@ export class MembraneError extends Error {
     this.rawError = serializeError(info.rawError);
     this.rawRequest = info.rawRequest;
     if (info.systemChangeRefused) this.systemChangeRefused = true;
+    if (info.type === 'context_length') {
+      const stated = 'promptTokens' in info ? info.promptTokens : statedPromptTokens(info.message);
+      if (stated !== undefined) this.promptTokens = stated;
+    }
   }
 
   toErrorInfo(): ErrorInfo {
@@ -122,6 +142,7 @@ export class MembraneError extends Error {
       rawError: this.rawError,
       rawRequest: this.rawRequest,
       ...(this.systemChangeRefused ? { systemChangeRefused: true } : {}),
+      ...(this.type === 'context_length' ? { promptTokens: this.promptTokens } : {}),
     };
   }
 }
@@ -698,7 +719,29 @@ export function errorFromProviderStatus(params: {
     providerErrorCode: code,
     rawError: params.rawError ?? params.body,
     rawRequest: params.rawRequest,
+    // Read from the same text as the type, for the same reason: with a body, its own message fields only.
+    ...(classification.type === 'context_length' ? { promptTokens: statedPromptTokens(evidence) } : {}),
   });
+}
+
+/** The forms a provider's length refusal states the request's input count in, N in each: Anthropic's "prompt is
+ *  too long: N tokens > M maximum" and "input length and `max_tokens` exceed context limit: N + K > M", and
+ *  Gemini's "The input token count (N) exceeds ...". */
+const STATED_PROMPT_TOKENS = [
+  /prompt is too long: (\d+) tokens > \d+ maximum/i,
+  /input length and `max_tokens` exceed context limit: (\d+) \+ \d+ > \d+/i,
+  /the input token count \((\d+)\) exceeds/i,
+];
+
+function statedPromptTokens(text: string | undefined): number | undefined {
+  if (!text) return undefined;
+  for (const form of STATED_PROMPT_TOKENS) {
+    const digits = form.exec(text)?.[1];
+    if (digits === undefined) continue;
+    const count = Number(digits);
+    return Number.isSafeInteger(count) && count > 0 ? count : undefined;
+  }
+  return undefined;
 }
 
 export function errorFromHttpResponse(
