@@ -85,18 +85,28 @@ function flattenWireBlocks(rawRequest: unknown): ReceiptUnit[] {
       }
       const record = message as Record<string, unknown>;
       const content = (message as Record<string, unknown>).content;
-      if (Array.isArray(content)) {
+      if (Array.isArray(content) && content.length === 0 && record.output_config != null) {
+        out.push({
+          identity: { surface: 'message', messageIndex, role: record.role, output_config: record.output_config },
+          marked: false,
+          estimatedChars: stableStringify(message).length,
+        });
+      } else if (Array.isArray(content)) {
         content.forEach((block, blockIndex) => out.push({
           identity: {
             surface: 'message-block', messageIndex, blockIndex,
             role: record.role, block,
+            ...(record.output_config != null ? { output_config: record.output_config } : {}),
           },
           marked: hasCacheControl(block),
           estimatedChars: stableStringify({ role: record.role, content: [block] }).length,
         }));
       } else {
         out.push({
-          identity: { surface: 'message', messageIndex, role: record.role, content },
+          identity: {
+            surface: 'message', messageIndex, role: record.role, content,
+            ...(record.output_config != null ? { output_config: record.output_config } : {}),
+          },
           marked: hasCacheControl(message),
           estimatedChars: stableStringify(message).length,
         });

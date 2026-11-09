@@ -79,14 +79,20 @@ export class MembraneError extends Error {
   /**
    * True when the request was refused for the system change it carried (a
    * `system_change` block, SystemChangeContent): by the API, on a model
-   * without mid-conversation system messages or tool changes, or by membrane
-   * before sending, when the formatter or adapter can't send one or no point
-   * in the conversation takes it. The same request with the change applied to
-   * `tools` and `system` instead would not meet this refusal. Through
-   * NativeFormatter and AnthropicAdapter, a change refused as malformed (mixed
-   * with other blocks in its message, or a definition whose wire name another
-   * tool holds) isn't marked. Through anything else the formatter or adapter
-   * refusal comes first, and is marked, unless the formatter can't carry the
+   * without mid-conversation system messages, tool changes or per-turn effort,
+   * or, for an effort change, on a thinking setting that fixes the effort; or
+   * by membrane before sending, when the formatter or adapter can't send one
+   * or no point in the conversation takes it. The same request with the change
+   * applied to `tools` and `system` instead, or an effort change to the
+   * request's top-level `output_config.effort`, would not meet this refusal,
+   * though a model or its thinking setting can refuse a top-level effort too,
+   * unflagged.
+   * Through NativeFormatter and AnthropicAdapter, a change refused as malformed
+   * (mixed with other blocks in its message, carrying `effort` beside another
+   * change or an `effort` that isn't one of the five levels, or a definition
+   * whose wire name another tool holds) isn't marked.
+   * Through anything else the formatter or adapter refusal comes first, and is
+   * marked, unless the formatter can't carry the
    * request's tools at all (`tools` as the request's changes leave them): that
    * refusal comes before it, unmarked.
    */
