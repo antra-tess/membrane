@@ -18,9 +18,9 @@
     last real request or cache-reading poke is dropped instead of sent
     (`cache-expired`), and so is one whose model's wait lasts to that hour
     or beyond (`wait-past-expiry`). An ineffective poke doesn't count as a
-    read for that hour, so at the default `refreshAfterMs` a lineage is
-    dropped before a second ineffective poke, and `maxIneffective` above 1
-    has no effect there. A real request recorded after one sent later on its
+    read for that hour. So at the default `refreshAfterMs`, a lineage is
+    dropped before a second ineffective poke, unless a real request is
+    recorded between them. A real request recorded after one sent later on its
     lineage changes nothing, so the lineage keeps replaying its newest
     request. Before, it replaced the snapshot and set the lineage's touch
     from its own send, and one in a shape that isn't kept warm dropped the
