@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { getDefaultModelLimits } from '../../src/index.js';
 
-const ONE_M = ['claude-opus-4-6', 'claude-opus-4-7', 'claude-opus-4-8', 'claude-sonnet-4-6', 'claude-opus-5', 'claude-opus-5-5', 'claude-sonnet-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-mythos-5', 'claude-mythos-5-1', 'claude-mythos-preview', 'claude-fable-5', 'claude-fable-5-1'];
+const ONE_M = ['claude-opus-4-6', 'claude-opus-4-7', 'claude-opus-4-8', 'claude-sonnet-4-6', 'claude-opus-5', 'claude-opus-5-5', 'claude-sonnet-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-mythos-5', 'claude-mythos-5-1', 'claude-mythos-preview', 'claude-fable-5', 'claude-fable-5-1', 'claude-fable-5-2', 'claude-mythos-5-2'];
 const TWO_HUNDRED_K = ['claude-opus-4-5', 'claude-sonnet-4-5', 'claude-haiku-4-5'];
 
 describe('getDefaultModelLimits', () => {
