@@ -1,0 +1,1 @@
+- A Bedrock stream error that carried no words of the provider's, such as a stream exception or `error` frame with no message, or "Bedrock returned empty response", is no longer classified from membrane's own rendering of it: a wait that rendering happened to state isn't read as the provider's. Its status and code classify it as before, and its message is unchanged.

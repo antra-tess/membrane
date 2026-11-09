@@ -985,7 +985,7 @@ export class BedrockAdapter implements ProviderAdapter {
         status: error.status,
         fallbackStatus: 500,
         code: error.code,
-        body: error.error,
+        body: error.error ?? {},
         message: error.message,
         rawError: error,
         rawRequest,

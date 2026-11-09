@@ -92,6 +92,24 @@ describe('an error inside a Bedrock stream keeps the provider\'s error on the ra
     expect((error.rawError as { error?: unknown }).error).toBeUndefined();
   });
 
+  it("with nothing saved from the stream, membrane's rendering isn't read as the provider's words", async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(new ReadableStream({
+      start(controller) { controller.enqueue(exceptionFrame('retry after 600 seconds', {})); controller.close(); },
+    }), { status: 200 })));
+    const exception = await streamError();
+    expect(exception.message).toContain('Bedrock stream error (retry after 600 seconds): retry after 600 seconds');
+    expect(exception.type).toBe('server');
+    expect(exception.retryAfterMs).toBeUndefined();
+
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true, status: 200,
+      body: streamBody([errorFrame({ ':error-code': 'retry after 600 seconds' })]),
+    })));
+    const frame = await adapterStreamError();
+    expect(frame.message).toContain('Bedrock stream error (retry after 600 seconds): retry after 600 seconds');
+    expect(frame.retryAfterMs).toBeUndefined();
+  });
+
   it('an error event: its own code and wait are read from the event, not from its rendering', async () => {
     const event = { type: 'error', error: { type: 'overloaded_error', message: 'Busy', retry_after_ms: 17_000 } };
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, body: streamBody([chunkFrame(event)]) })));
