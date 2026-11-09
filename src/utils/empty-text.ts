@@ -45,8 +45,8 @@ export function stripEmptyTextMessages<T extends { content: unknown }>(
   for (const message of messages) {
     if (Array.isArray(message.content)) {
       const content = stripEmptyTextBlocks(message.content, onDropped);
-      if (content.length > 0 || carriesOutputConfig(message)) result.push({ ...message, content });
-    } else if (typeof message.content !== 'string' || hasNonEmptyText(message.content) || carriesOutputConfig(message)) {
+      if (content.length > 0 || isEffortOnlyMessage(message)) result.push({ ...message, content });
+    } else if (typeof message.content !== 'string' || hasNonEmptyText(message.content) || isEffortOnlyMessage(message)) {
       result.push(message);
     } else if (message.content !== '') {
       onDropped?.(undefined);
@@ -60,16 +60,19 @@ export function stripEmptyTextMessages<T extends { content: unknown }>(
   return result;
 }
 
-function carriesOutputConfig(message: unknown): boolean {
-  const { role, output_config } = message as { role?: unknown; output_config?: unknown };
-  return role === 'system' && output_config != null;
+/** A system message whose only payload is its `output_config`: the effort-only message NativeFormatter builds. */
+export function isEffortOnlyMessage(message: unknown): boolean {
+  if (message === null || typeof message !== 'object') return false;
+  const { role, output_config, content } = message as { role?: unknown; output_config?: unknown; content?: unknown };
+  const empty = Array.isArray(content) ? content.length === 0 : typeof content === 'string' && !hasNonEmptyText(content);
+  return role === 'system' && output_config != null && empty;
 }
 
 /** The role of the last message that isn't an effort-only system message: the turn the request ends on. */
 export function lastTurnRole(messages: readonly unknown[]): unknown {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i] as { role?: unknown } | undefined;
-    if (!carriesOutputConfig(message)) return message?.role;
+    if (!isEffortOnlyMessage(message)) return message?.role;
   }
   return undefined;
 }

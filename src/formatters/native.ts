@@ -534,7 +534,7 @@ export class NativeFormatter implements PrefillFormatter {
     if (after.length > 0 && !endsOnUser) {
       throw systemChangeRefusedError(
         `NativeFormatter: message ${after[0]!.at}, an effort change, would end the request with no user turn after the last assistant turn, ` +
-        'which the API reads as a prefill. Put the change before that assistant turn, or end the request with a user turn after it.'
+        'which the API reads as a prefill. End the request with a user turn after it.'
       );
     }
     if (next < others.length) {

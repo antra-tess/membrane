@@ -84,7 +84,9 @@ export class MembraneError extends Error {
    * by membrane before sending, when the formatter or adapter can't send one
    * or no point in the conversation takes it. The same request with the change
    * applied to `tools` and `system` instead, or an effort change to the
-   * request's top-level `output_config.effort`, would not meet this refusal.
+   * request's top-level `output_config.effort`, would not meet this refusal,
+   * though a model or its thinking setting can refuse a top-level effort too,
+   * unflagged.
    * Through NativeFormatter and AnthropicAdapter, a change refused as malformed
    * (mixed with other blocks in its message, carrying `effort` beside another
    * change or an `effort` that isn't one of the five levels, or a definition

@@ -193,8 +193,8 @@ describe('NativeFormatter: an effort-only system change', () => {
       thrown = error;
     }
     expect(thrown).toMatchObject({ systemChangeRefused: true, retryable: false });
-    expect((thrown as Error).message).toMatch(/before that assistant turn/);
-    expect((thrown as Error).message).not.toMatch(/top level/);
+    expect((thrown as Error).message).toMatch(/end the request with a user turn after it/i);
+    expect((thrown as Error).message).not.toMatch(/top level|before that assistant turn/);
   });
 
   it('keeps its place beside a tool change: each goes where its own rule puts it, and two that land together keep their order', () => {
@@ -311,6 +311,11 @@ describe('the cache wire receipt and an effort-only system message', () => {
       messages: [raw(level).messages[0], { role: 'system', content: '', output_config: { effort: level } }, raw(level).messages[2]],
     });
     expect(stringForm('low').markers[0]!.prefixHash).not.toBe(stringForm('high').markers[0]!.prefixHash);
+    const withText = (level: string) => computeCacheWireReceipt({
+      ...raw(level),
+      messages: [raw(level).messages[0], { role: 'system', content: [{ type: 'text', text: 's' }], output_config: { effort: level } }, raw(level).messages[2]],
+    });
+    expect(withText('low').markers[0]!.prefixHash).not.toBe(withText('high').markers[0]!.prefixHash);
   });
 });
 
@@ -497,10 +502,22 @@ describe('refusals around an effort-only system message', () => {
     expect(() => assertMessagePrefillSupported('claude-opus-5-5', messages, undefined, 'anthropic', {})).toThrow(/prefill/);
   });
 
+  it('a system message with content as well as output_config is a turn the request ends on, not an effort-only one', () => {
+    const messages = [
+      { role: 'user', content: 'u0' }, { role: 'assistant', content: 'a1' },
+      { role: 'system', content: [{ type: 'text', text: 's' }], output_config: { effort: 'low' } },
+    ];
+    expect(() => assertMessagePrefillSupported('claude-opus-5-5', messages, undefined, 'anthropic', {})).not.toThrow();
+  });
+
+  it('a request whose last message is missing reads no final role, as before', () => {
+    expect(() => assertMessagePrefillSupported('claude-opus-5-5', [{ role: 'user', content: 'u0' }, null], undefined, 'anthropic', {})).not.toThrow();
+  });
+
   it('a refusal for the formatter or adapter names the top-level effort for an effort change', async () => {
     const adapter = new RecordingAdapter(false);
     const refused = new Membrane(adapter, { formatter: new NativeFormatter() }).complete(request([user('u0'), reply(text('a1')), effort('low'), user('u3')]));
-    await expect(refused).rejects.toThrow(/output_config\.effort in its providerParams/);
+    await expect(refused).rejects.toThrow(/Anthropic's output_config\.effort, in providerParams/);
   });
 
   it('BedrockAdapter refuses a message carrying output_config before sending, flagged', async () => {
@@ -515,6 +532,56 @@ describe('refusals around an effort-only system message', () => {
     const emptied = { ...raw, messages: [raw.messages[0], { role: 'assistant', content: [{ type: 'text', text: '' }] }, marker('low')] };
     await expect(adapter.complete(emptied as any)).rejects.toMatchObject({ systemChangeRefused: true });
     expect(send).not.toHaveBeenCalled();
+  });
+});
+
+describe('the tool loop\'s floating cache marker and an effort-only system message', () => {
+  const scripted = () => {
+    const requests: any[] = [];
+    const respond = (n: number, request: ProviderRequest): ProviderResponse => ({
+      content: n < 1 ? [{ type: 'tool_use', id: `call-${n + 1}`, name: 'get_time', input: { city: 'Paris' } }] : [{ type: 'text', text: 'done' }],
+      stopReason: n < 1 ? 'tool_use' : 'end_turn',
+      usage: { inputTokens: 1, outputTokens: 1 },
+      model: 'claude-opus-5-5',
+      rawRequest: request,
+      raw: {},
+    } as ProviderResponse);
+    const adapter = {
+      name: 'anthropic',
+      sendsCacheMarkersOn: true,
+      sendsSystemChanges: true,
+      supportsModel: () => true,
+      async complete(request: ProviderRequest) { requests.push(request); return respond(requests.length - 1, request); },
+      async stream(request: ProviderRequest, callbacks: StreamCallbacks) {
+        requests.push(request);
+        const n = requests.length - 1;
+        if (n >= 1) callbacks.onChunk('done');
+        return respond(n, request);
+      },
+    } as unknown as ProviderAdapter;
+    return { adapter, requests };
+  };
+  const loop = (messages: NormalizedMessage[], extra: Partial<NormalizedRequest> = {}): NormalizedRequest => ({
+    ...request(messages), promptCaching: true, cacheTtl: '1h', cacheMarkers: 'cm-owned', floatingCacheMarker: true, assistantParticipant: 'Claude', ...extra,
+  } as NormalizedRequest);
+  const markedAt = (sent: any): number[] => sent.messages.flatMap((m: any, mi: number) =>
+    (Array.isArray(m.content) ? m.content : []).some((b: any) => b.cache_control) ? [mi] : []);
+
+  it('a later call marks the user turn before the change that precedes the calling turn', async () => {
+    const { adapter, requests } = scripted();
+    await new Membrane(adapter, { formatter: new NativeFormatter() })
+      .stream(loop([user('u0'), reply(text('a1')), user('u2'), effort('low')]), { onToolCalls: async (calls) => calls.map((c) => ({ toolUseId: c.id, content: 'ok', isError: false })) });
+    expect(requests[1].messages.map((m: any) => m.role)).toEqual(['user', 'assistant', 'user', 'system', 'assistant', 'user']);
+    expect(markedAt(requests[1])).toEqual([2, 5]);
+  });
+
+  it('a later call marks its newest turn past an effort-only message a hook appends', async () => {
+    const { adapter, requests } = scripted();
+    const beforeRequest = (_normalized: unknown, provider: any) => ({ ...provider, messages: [...provider.messages, marker('low')] });
+    await new Membrane(adapter, { formatter: new NativeFormatter(), hooks: { beforeRequest } })
+      .stream(loop([user('u0'), reply(text('a1')), user('u2')]), { onToolCalls: async (calls) => calls.map((c) => ({ toolUseId: c.id, content: 'ok', isError: false })) });
+    expect(requests[1].messages.map((m: any) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant', 'user', 'system']);
+    expect(markedAt(requests[1])).toEqual([2, 4]);
   });
 });
 

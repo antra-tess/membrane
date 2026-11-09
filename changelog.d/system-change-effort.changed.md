@@ -10,7 +10,7 @@
   unless messages of one role that membrane merges into one turn lie on both sides of it, when it goes
   after that turn, which governs the same reply. One that would end
   the request after an assistant turn is refused before sending, flagged `systemChangeRefused`. Its
-  `cacheBreakpoint`, or a boundary at its place, goes on the last block before it that can hold one. The
+  `cacheBreakpoint`, or a boundary at its place, goes on the last block before it among the request's messages that can hold one. The
   API's refusals of it, on a model without per-turn effort and on a thinking setting that fixes the
   effort, are marked `systemChangeRefused`, as is a request carrying it through a formatter that doesn't
   render system changes or an adapter that doesn't send them, Bedrock's included, before sending, unless

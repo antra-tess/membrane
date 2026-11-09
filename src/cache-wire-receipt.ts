@@ -96,6 +96,7 @@ function flattenWireBlocks(rawRequest: unknown): ReceiptUnit[] {
           identity: {
             surface: 'message-block', messageIndex, blockIndex,
             role: record.role, block,
+            ...(record.output_config != null ? { output_config: record.output_config } : {}),
           },
           marked: hasCacheControl(block),
           estimatedChars: stableStringify({ role: record.role, content: [block] }).length,
