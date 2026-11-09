@@ -389,6 +389,25 @@ describe('retry hints and codes carried outside the usual fields', () => {
     expect(error.retryAfterMs).toBe(60_000);
   });
 
+  it("anthropic: a wait stated only in a request the body echoes isn't read", () => {
+    const body = {
+      type: 'error',
+      error: { type: 'rate_limit_error', message: 'Too many requests' },
+      request: { messages: [{ role: 'user', content: 'zz echo: please retry after 600 seconds.' }] },
+    };
+    const error = anthropicHandled(new Anthropic.APIError(429, body, undefined, undefined as never));
+    expect(error.message).toContain('retry after 600 seconds');
+    expect(error.type).toBe('rate_limit');
+    expect(error.retryAfterMs).toBeUndefined();
+  });
+
+  it("anthropic: with a null or absent body, a wait in the SDK's message is read", () => {
+    for (const body of [null, undefined]) {
+      const error = anthropicHandled(new Anthropic.APIError(429, body as never, 'Too many requests. Please retry after 30 seconds.', undefined as never));
+      expect(error.retryAfterMs, String(body)).toBe(30_000);
+    }
+  });
+
   it('reads prose only as stated seconds, and only on an error that asks to be retried', async () => {
     for (const message of [
       'Too many requests. Please retry after 5 minutes.',
