@@ -1,6 +1,7 @@
 import { NativeFormatter } from './native.js';
 import type {
   NormalizedMessage,
+  Base64Source,
   ContentBlock,
   ToolDefinition,
   ToolCall,
@@ -244,16 +245,24 @@ function withoutCalllessResults(
 }
 
 /**
- * Whether a block is something besides a tool call or result that the wire
- * shows: text that isn't blank (a raw item's carrier is empty), or an image
- * with a base64 source, sent as an image or as a placeholder's text. A
- * thinking block, an image with a url source, a document or audio shows
- * nothing. This restates what extractContent puts on the wire, so the two
- * change together.
+ * What extractContent sends for a block besides a tool call or result: its
+ * text, unless it carries a raw item, or an image with a base64 source, as
+ * the image or a placeholder's text. Any other block sends nothing.
+ */
+function sentContent(block: ContentBlock): { text: string } | { image: Base64Source } | undefined {
+  if (block.type === 'text') return isRawItemCarrier(block) ? undefined : { text: block.text };
+  if (block.type === 'image' && block.source?.type === 'base64') return { image: block.source };
+  return undefined;
+}
+
+/**
+ * Whether a block besides a tool call or result shows on the wire: what
+ * extractContent sends for it, unless that is blank text, which isEmpty reads
+ * as nothing.
  */
 function holdsTurnContent(block: ContentBlock): boolean {
-  if (block.type === 'text') return block.text.trim() !== '';
-  return block.type === 'image' && block.source?.type === 'base64';
+  const sent = sentContent(block);
+  return sent !== undefined && (!('text' in sent) || sent.text.trim() !== '');
 }
 
 function toToolResult(block: ToolResultContent): ToolResult {
@@ -694,11 +703,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     return blocks;
   }
 
-  /**
-   * What a message puts on the wire. holdsTurnContent restates which blocks
-   * besides calls and results show here, to end a group of calls at a user
-   * turn the wire shows, so the two change together.
-   */
+  /** What a message puts on the wire. */
   private extractContent(
     content: ContentBlock[],
     participant: string,
@@ -712,15 +717,15 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
 
     for (let i = 0; i < content.length; i++) {
       const block = content[i]!;
-      if (block.type === 'text') {
-        if (isRawItemCarrier(block)) {
+      if (block.type !== 'tool_use' && block.type !== 'tool_result') {
+        const sent = sentContent(block);
+        if (sent === undefined) {
+          if (block.type === 'document' || block.type === 'audio') hasUnsupportedMedia = true;
           onAltered?.();
-          continue;
-        }
-        parts.push(block.text);
-      } else if (block.type === 'image') {
-        if (block.source?.type === 'base64') {
-          const { mediaType, placeholder } = imageForRequest(block.source.data, block.source.mediaType);
+        } else if ('text' in sent) {
+          parts.push(sent.text);
+        } else {
+          const { mediaType, placeholder } = imageForRequest(sent.image.data, sent.image.mediaType);
           if (placeholder) {
             parts.push(placeholder.text);
             onAltered?.();
@@ -730,12 +735,10 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
               source: {
                 type: 'base64',
                 media_type: mediaType,
-                data: block.source.data,
+                data: sent.image.data,
               },
             });
           }
-        } else {
-          onAltered?.();
         }
       } else if (block.type === 'tool_use') {
         const run: ToolUseContent[] = [];
@@ -762,11 +765,6 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
             parts = [piece.after];
           }
         }
-      } else if (block.type === 'document' || block.type === 'audio') {
-        hasUnsupportedMedia = true;
-        onAltered?.();
-      } else {
-        onAltered?.();
       }
     }
 

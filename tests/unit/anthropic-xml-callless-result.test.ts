@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { AnthropicXmlFormatter } from '../../src/formatters/anthropic-xml.js';
 import { FidelityNotes } from '../../src/utils/fidelity.js';
 import { parseAccumulatedIntoBlocks } from '../../src/utils/tool-parser.js';
@@ -582,5 +582,62 @@ describe('AnthropicXmlFormatter: where a user turn starts, what a drop empties, 
 
   it('leaves the tool definitions after the conversation, as before, when the first message was empty as given', () => {
     expect(toolsAfterLast({ participant: 'User', content: [] })).toBe(true);
+  });
+});
+
+describe('AnthropicXmlFormatter: a block ends a group of calls exactly where the request shows it', () => {
+  const formatter = () => new AnthropicXmlFormatter({ unsupportedMedia: 'strip', warnOnStrip: false } as any);
+  const built = (messages: NormalizedMessage[]) =>
+    JSON.stringify(formatter().buildMessages(messages, { assistantParticipant: 'Agent' } as any).messages);
+  const look: NormalizedMessage = { participant: 'User', content: [text('look')] };
+  const end: NormalizedMessage = { participant: 'Agent', content: [] };
+
+  for (const [kind, block, shows] of [
+    ['a raw item\'s carrier', { type: 'text', text: '', rawItem: { type: 'reasoning' } }, false],
+    ['blank text', text(' \n'), false],
+    ['text', text('zz-k'), true],
+    ['an image with a base64 source', { type: 'image', source: { type: 'base64', mediaType: 'image/png', data: 'iVBORw0KGgo=' } }, true],
+    ['an image with a url source', { type: 'image', source: { type: 'url', url: 'https://example.com/a.png' } }, false],
+    ['a document', { type: 'document', source: { type: 'base64', mediaType: 'application/pdf', data: 'JVBERi0=' } }, false],
+    ['audio', { type: 'audio', source: { type: 'base64', mediaType: 'audio/wav', data: 'UklGRg==' } }, false],
+    ['a thinking block', { type: 'thinking', thinking: 'a thought' }, false],
+  ] as Array<[string, ContentBlock, boolean]>) {
+    it(`agrees for a message holding only ${kind}`, () => {
+      const sent = built([look, { participant: 'Zed', content: [block] }, end]) !== built([look, end]);
+      const ends = built([
+        look,
+        { participant: 'Agent', content: [call('a'), call('b')] },
+        { participant: 'Tool', content: [result('b', 'zz-b')] },
+        { participant: 'Zed', content: [block] },
+        { participant: 'Agent', content: [call('c')] },
+        { participant: 'Tool', content: [result('c', 'zz-c')] },
+        end,
+      ]).includes('zz-c');
+      expect(sent).toBe(shows);
+      expect(ends).toBe(sent);
+    });
+  }
+
+  for (const [kind, block] of [
+    ['a document', { type: 'document', source: { type: 'base64', mediaType: 'application/pdf', data: 'JVBERi0=' } }],
+    ['audio', { type: 'audio', source: { type: 'base64', mediaType: 'audio/wav', data: 'UklGRg==' } }],
+  ] as Array<[string, ContentBlock]>) {
+    it(`warns that it stripped unsupported media from a message holding ${kind}`, () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        new AnthropicXmlFormatter({ unsupportedMedia: 'strip', warnOnStrip: true } as any)
+          .buildMessages([look, { participant: 'Zed', content: [text('see'), block] }, end], { assistantParticipant: 'Agent' } as any);
+        expect(warn.mock.calls.filter(([line]) => String(line).includes('Stripped unsupported media'))).toHaveLength(1);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+  }
+
+  it('refuses a message holding a document when unsupportedMedia is error', () => {
+    const document = { type: 'document', source: { type: 'base64', mediaType: 'application/pdf', data: 'JVBERi0=' } } as ContentBlock;
+    expect(() => new AnthropicXmlFormatter({ unsupportedMedia: 'error' } as any)
+      .buildMessages([look, { participant: 'Zed', content: [text('see'), document] }, end], { assistantParticipant: 'Agent' } as any))
+      .toThrow('AnthropicXmlFormatter does not support media in message from Zed');
   });
 });
