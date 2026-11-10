@@ -39,6 +39,15 @@ describe('default pricing rows match the published price pages (2026-08-25)', ()
     expect(pricing?.outputPerMillion).toBe(5);
   });
 
+  it('prices gpt-6.1-sol at its published rate, apart from gpt-6-astra', () => {
+    const sol = getDefaultPricing('gpt-6.1-sol');
+    expect(sol?.inputPerMillion).toBe(2);
+    expect(sol?.outputPerMillion).toBe(10);
+    expect(sol?.cacheReadPerMillion).toBe(0.10);
+    const astra = getDefaultPricing('gpt-6-astra');
+    expect(astra?.inputPerMillion).toBe(10);
+  });
+
   it('prices gemini-2.5-flash at its real rate', () => {
     const pricing = getDefaultPricing('gemini-2.5-flash');
     expect(pricing?.inputPerMillion).toBe(0.30);
