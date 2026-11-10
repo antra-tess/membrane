@@ -12,6 +12,15 @@ Releases up to and including 0.5.75 predate this file; for their contents see
 
 ## Unreleased
 
+## 0.8.2 — 2026-11-10
+
+### Changed
+
+- `refusalRetries` no longer re-issues a refusal the provider reports as
+  `reasoning_extraction`: it stands on the first attempt, in `complete()` and
+  in streams. Other categories, and refusals with no category, are re-issued
+  as before.
+
 ## 0.8.1 — 2026-11-09
 
 ### Added
