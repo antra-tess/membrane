@@ -144,8 +144,36 @@ export interface ToolUseContent {
    * trusting a plausible `{}`. The call's ToolCall carries it too. A
    * request sends `input` as stored, so round reports don't count a marked
    * call as altered: this field records the replacement.
+   * In XML tool mode it is also set on every call of a function_calls block
+   * refused whole, holding the block's raw text, with `input` `{}`: none of
+   * the block's calls is taken as the model's. A block is refused whole when
+   * its tags break the format (an invoke with no closing tag; a value holding
+   * an opening tag the block itself reads as a parameter's or an invoke's,
+   * or an invoke's closing tag; a parameter given twice; text inside an
+   * invoke outside its parameter elements; or a stray tag outside every
+   * invoke, an invoke opener whose name can't be read included), or when its
+   * opening tag comes while an earlier function_calls opening tag is still
+   * unclosed: an earlier block was cut off, one of its values held the tag,
+   * or text before the block named it. Its calls are then the named invoke
+   * openers after that tag, and its raw text starts there. In a stream that
+   * earlier tag may be in an earlier turn, a user's message included, but
+   * only in the text the stream parses: the request's assistant prefill,
+   * which holds the conversation after the last cache breakpoint, with prompt
+   * caching on, the default, and after the last image the request sends.
+   * `complete()` reads only its own output, so it refuses only when the
+   * earlier tag is in that output.
    */
   unparseableInput?: string;
+
+  /**
+   * Present only with `unparseableInput`: why `input` isn't the model's
+   * arguments, as a sentence an executor can give the model. Membrane's own,
+   * on a refused XML block, locates what broke by invoke position where it
+   * can, names a tool or parameter only where that name is a plain
+   * identifier, names tags in words, and quotes none of the call's values. A
+   * sentence an adapter gives with a call it marks itself is kept as given.
+   */
+  unparseableReason?: string;
 
   /** See {@link TextContent.rawItem}. */
   rawItem?: unknown;

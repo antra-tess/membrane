@@ -41,12 +41,13 @@ describe('F8 · invoke tag spelling tolerance', () => {
     expect(parsed?.calls[0]?.input).toEqual({});
   });
 
-  it('refuses a nameless invoke rather than dispatching an empty tool name', () => {
+  it('refuses a nameless invoke: the one call standing for its block has no name and is marked, never dispatched unmarked', () => {
     const text = toolBlock(`<invoke name=""/>`);
 
     const parsed = parseToolCalls(text);
 
-    expect(parsed?.calls).toEqual([]);
+    expect(parsed?.calls.map((c) => [c.name, c.input, c.unparseableInput])).toEqual([['', {}, text]]);
+    expect(parsed?.calls[0]?.unparseableReason).toBe("invoke 1's opening tag can't be read");
   });
 
   it('keeps an apostrophe inside a double-quoted invoke name', () => {
@@ -67,19 +68,54 @@ describe('F3 · a truncated block spliced with a later round closer', () => {
   );
   const splicedTurn = `zz_bot: calling now\n${truncatedHalf}${interveningTurn}${realCall}`;
 
-  it('re-anchors to the innermost opener so the real call still runs', () => {
+  it('refuses the live block once when the cut came inside an invoke: its calls are marked, with {} for input', () => {
     const parsed = parseToolCalls(splicedTurn);
 
-    expect(parsed?.calls.map((c) => c.name)).toEqual(['zz_real_tool']);
-    expect(parsed?.calls[0]?.input).toEqual({ fld2: 'real value' });
+    expect(parsed?.calls.map((c) => [c.name, c.input])).toEqual([['zz_real_tool', {}]]);
+    expect(parsed?.calls[0]?.unparseableReason).toContain('an earlier block was cut off, a value held the tag, or text before the block named it');
+    expect(parsed?.calls[0]?.unparseableInput).toBe(realCall);
     expect(parsed?.beforeText).toContain('zz_truncated_tool');
   });
 
-  it('re-anchors on the block-parsing path too', () => {
-    const { blocks, toolCalls } = parseAccumulatedIntoBlocks(splicedTurn);
+  it('refuses it on the block-parsing path too, and reports the block', () => {
+    const { blocks, toolCalls, malformedToolBlocks } = parseAccumulatedIntoBlocks(splicedTurn);
 
     expect(toolCalls.map((c) => c.name)).toEqual(['zz_real_tool']);
+    expect(toolCalls.every((c) => c.unparseableReason !== undefined && Object.keys(c.input).length === 0)).toBe(true);
     expect(blocks.filter((b) => b.type === 'tool_use')).toHaveLength(1);
+    expect(malformedToolBlocks).toEqual(['left-open-block']);
+  });
+
+  it('the resend after that refusal runs, since its span starts after the refused block', () => {
+    const text =
+      `${splicedTurn}\n` +
+      resultsBlock(`<result tool_use_id="ite1"><error>zz refused</error></result>`) +
+      '\nzz_bot: again\n' +
+      realCall;
+
+    const parsed = parseToolCalls(text);
+
+    expect(parsed?.calls.map((c) => [c.name, c.input])).toEqual([['zz_real_tool', { fld2: 'real value' }]]);
+    expect(parsed?.calls[0]?.unparseableReason).toBeUndefined();
+  });
+
+  it('a cut after an invoke had closed, before the block\'s own closing tag, is refused once too', () => {
+    const cutBetweenInvokes = `zz_bot: calling now\n${FUNCTION_CALLS_OPEN}\n<invoke name="zz_done_tool"/>\n${interveningTurn}${realCall}`;
+
+    for (const calls of [parseToolCalls(cutBetweenInvokes)!.calls, parseAccumulatedIntoBlocks(cutBetweenInvokes).toolCalls]) {
+      expect(calls.map((c) => [c.name, c.input])).toEqual([['zz_real_tool', {}]]);
+      expect(calls[0]?.unparseableReason).toContain('an earlier block was cut off, a value held the tag, or text before the block named it');
+    }
+  });
+
+  it('a cut right after the function_calls opener is refused once too, as every re-anchored block is', () => {
+    const cutAtOpener = `zz_bot: calling now\n${FUNCTION_CALLS_OPEN}\n${interveningTurn}${realCall}`;
+
+    for (const calls of [parseToolCalls(cutAtOpener)!.calls, parseAccumulatedIntoBlocks(cutAtOpener).toolCalls]) {
+      expect(calls.map((c) => [c.name, c.input])).toEqual([['zz_real_tool', {}]]);
+      expect(calls[0]?.unparseableReason).toContain('an earlier block was cut off, a value held the tag, or text before the block named it');
+    }
+    expect(parseAccumulatedIntoBlocks(cutAtOpener).splicedToolBlocks).toBe(1);
   });
 
   it('reports the repair rather than making it silently', () => {
@@ -101,6 +137,7 @@ describe('F3 · a truncated block spliced with a later round closer', () => {
     const parsed = parseToolCalls(text);
 
     expect(parsed?.calls.map((c) => c.name)).toEqual(['zz_real_tool']);
+    expect(parsed?.calls[0]?.unparseableReason).toContain('an earlier block was cut off, a value held the tag, or text before the block named it');
   });
 });
 
@@ -366,37 +403,41 @@ describe('greptile#52-1 · an unclosed invoke head absorbs the next call', () =>
       `<invoke name="zz_inner_tool"><parameter name="fld2">2</parameter></invoke>`
   );
 
-  it('dispatches the inner invoke with its own parameters only', () => {
+  it('refuses the whole block: the head and the call it swallowed are both marked, with {} for input', () => {
     const parsed = parseToolCalls(absorbingBlock);
 
-    expect(parsed?.calls.map((c) => c.name)).toEqual(['zz_inner_tool']);
-    expect(parsed?.calls[0]?.input).toEqual({ fld2: 2 });
+    expect(parsed?.calls.map((c) => c.name)).toEqual(['zz_head_tool', 'zz_inner_tool']);
+    for (const call of parsed!.calls) {
+      expect(call.input).toEqual({});
+      expect(call.unparseableInput).toBe(absorbingBlock);
+      expect(call.unparseableReason).toContain('no closing invoke tag');
+    }
   });
 
-  it('re-anchors on the block-parsing path too', () => {
+  it('marks both on the block-parsing path too', () => {
     const { blocks, toolCalls } = parseAccumulatedIntoBlocks(absorbingBlock);
 
-    expect(toolCalls.map((c) => c.name)).toEqual(['zz_inner_tool']);
-    expect(toolCalls[0]?.input).toEqual({ fld2: 2 });
-    expect(blocks.filter((b) => b.type === 'tool_use')).toHaveLength(1);
+    expect(toolCalls.map((c) => c.name)).toEqual(['zz_head_tool', 'zz_inner_tool']);
+    expect(toolCalls.every((c) => c.unparseableReason !== undefined && Object.keys(c.input).length === 0)).toBe(true);
+    expect(blocks.filter((b) => b.type === 'tool_use')).toHaveLength(2);
   });
 
-  it('reports the refused head instead of dropping it silently', () => {
-    expect(parseAccumulatedIntoBlocks(absorbingBlock).unclosedInvokeHeads).toBe(1);
+  it('reports the malformed block instead of dropping its head silently', () => {
+    expect(parseAccumulatedIntoBlocks(absorbingBlock).malformedToolBlocks).toEqual(['unclosed-invoke']);
   });
 
-  it('counts every head an absorbing match swallowed', () => {
+  it('marks every head an absorbing match swallowed', () => {
     const twoHeads = toolBlock(
       `<invoke name="zz_head_tool"><parameter name="fld1">1</parameter>\n` +
         `<invoke name="zz_second_head"><parameter name="fld2">2</parameter>\n` +
         `<invoke name="zz_inner_tool"><parameter name="fld3">3</parameter></invoke>`
     );
 
-    const { toolCalls, unclosedInvokeHeads } = parseAccumulatedIntoBlocks(twoHeads);
+    const { toolCalls, malformedToolBlocks } = parseAccumulatedIntoBlocks(twoHeads);
 
-    expect(toolCalls.map((c) => c.name)).toEqual(['zz_inner_tool']);
-    expect(toolCalls[0]?.input).toEqual({ fld3: 3 });
-    expect(unclosedInvokeHeads).toBe(2);
+    expect(toolCalls.map((c) => c.name)).toEqual(['zz_head_tool', 'zz_second_head', 'zz_inner_tool']);
+    expect(toolCalls.every((c) => c.unparseableReason !== undefined && Object.keys(c.input).length === 0)).toBe(true);
+    expect(malformedToolBlocks).toEqual(['unclosed-invoke']);
   });
 
   it('leaves legitimate sequential full-form invokes alone', () => {
@@ -406,11 +447,11 @@ describe('greptile#52-1 · an unclosed invoke head absorbs the next call', () =>
     );
 
     const parsed = parseToolCalls(sequential);
-    const { unclosedInvokeHeads } = parseAccumulatedIntoBlocks(sequential);
+    const { malformedToolBlocks } = parseAccumulatedIntoBlocks(sequential);
 
     expect(parsed?.calls.map((c) => c.name)).toEqual(['zz_first', 'zz_second']);
     expect(parsed?.calls.map((c) => c.input)).toEqual([{ fld1: 'v1' }, { fld2: 'v2' }]);
-    expect(unclosedInvokeHeads).toBe(0);
+    expect(malformedToolBlocks).toEqual([]);
   });
 
   it('leaves mixed full and self-closing order alone', () => {
@@ -420,13 +461,13 @@ describe('greptile#52-1 · an unclosed invoke head absorbs the next call', () =>
         `<invoke name="zz_third"/>`
     );
 
-    const { toolCalls, unclosedInvokeHeads } = parseAccumulatedIntoBlocks(mixed);
+    const { toolCalls, malformedToolBlocks } = parseAccumulatedIntoBlocks(mixed);
 
     expect(toolCalls.map((c) => c.name)).toEqual(['zz_first', 'zz_second', 'zz_third']);
-    expect(unclosedInvokeHeads).toBe(0);
+    expect(malformedToolBlocks).toEqual([]);
   });
 
-  it('re-anchors to a self-closing invoke swallowed by an open head', () => {
+  it('refuses a self-closing invoke swallowed by an open head, with the head', () => {
     const swallowedSelfClosing = toolBlock(
       `<invoke name="zz_head_tool"><parameter name="fld1">1</parameter>\n` +
         `<invoke name="zz_inner_tool"/></invoke>`
@@ -434,8 +475,8 @@ describe('greptile#52-1 · an unclosed invoke head absorbs the next call', () =>
 
     const parsed = parseToolCalls(swallowedSelfClosing);
 
-    expect(parsed?.calls.map((c) => c.name)).toEqual(['zz_inner_tool']);
-    expect(parsed?.calls[0]?.input).toEqual({});
+    expect(parsed?.calls.map((c) => c.name)).toEqual(['zz_head_tool', 'zz_inner_tool']);
+    expect(parsed?.calls.every((c) => c.unparseableReason !== undefined && Object.keys(c.input).length === 0)).toBe(true);
   });
 });
 
