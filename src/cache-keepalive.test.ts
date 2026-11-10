@@ -578,12 +578,55 @@ describe('CacheKeepalive statePath (across restarts)', () => {
     ka.stop();
   });
 
-  it('credentialField looks outside the conversation only', () => {
+  it('credentialField: outside the conversation, any credential-like name, in any spelling', () => {
     expect(credentialField(wire())).toBeNull();
-    expect(credentialField(wire({ messages: [{ role: 'user', content: [{ type: 'text', text: 'my api_key', api_key: 'x' }] }] }))).toBeNull();
     expect(credentialField(wire({ metadata: { user_id: 'u' } }))).toBeNull();
     expect(credentialField(wire({ metadata: { session_token: 't' } }))).toBe('metadata.session_token');
     expect(credentialField(wire({ apiKey: 'k' }))).toBe('apiKey');
+    expect(credentialField(wire({ extra_field: { accessToken: 's' } }))).toBe('extra_field.accessToken');
+    expect(credentialField(wire({ extra_field: { 'Client-Secret': 's' } }))).toBe("extra_field.Client-Secret");
+    expect(credentialField(wire({ mcp_servers: [{ type: 'url', url: 'https://mcp.example/sse', authorization_token: 'secret' }] })))
+      .toBe('mcp_servers[0].authorization_token');
+    // Names that only end in "tokens" aren't credentials.
+    expect(credentialField(wire({ max_tokens: 100, thinking: { type: 'enabled', budget_tokens: 50 } }))).toBeNull();
+  });
+
+  it('credentialField: outside the conversation, a URL carrying a credential', () => {
+    expect(credentialField(wire({ mcp_servers: [{ type: 'url', url: 'https://mcp.example/sse?token=secret' }] })))
+      .toBe('mcp_servers[0].url');
+    expect(credentialField(wire({ mcp_servers: [{ type: 'url', url: 'https://user:secret@mcp.example/sse' }] })))
+      .toBe('mcp_servers[0].url');
+    expect(credentialField(wire({ mcp_servers: [{ type: 'url', url: 'https://mcp.example/sse?client=me' }] }))).toBeNull();
+  });
+
+  it('credentialField: inside the conversation, a string under a credential-like name', () => {
+    // A tool call's input holding a key is caught...
+    expect(credentialField(wire({ messages: [{ role: 'assistant', content: [
+      { type: 'tool_use', id: 't', name: 'fetch', input: { apiKey: 'secret' } },
+    ] }] }))).toBe('messages[0].content[0].input.apiKey');
+    // ...a tool schema property named password, and a quoted URL, aren't.
+    expect(credentialField(wire({ tools: [{ name: 'login', input_schema: { type: 'object', properties: { password: { type: 'string' } } } }] })))
+      .toBeNull();
+    expect(credentialField(wire({ messages: [{ role: 'user', content: [{ type: 'text', text: 'see https://x.example/?token=abc' }] }] })))
+      .toBeNull();
+  });
+
+  it('credentialField: checks every level, and refuses what is too deep to check', () => {
+    let deep: Record<string, unknown> = { authorization_token: 'secret' };
+    for (let i = 0; i < 20; i++) deep = { inner: deep };
+    expect(credentialField(wire({ extra_field: deep }))).toMatch(/authorization_token$/);
+    let deeper: Record<string, unknown> = { leaf: 'x' };
+    for (let i = 0; i < 100; i++) deeper = { inner: deeper };
+    expect(credentialField(wire({ extra_field: deeper }))).toMatch(/nested too deep to check/);
+  });
+
+  it('what is saved is checked as JSON sends it: a toJSON that yields a credential keeps the request off disk', () => {
+    const { ka, events } = make(vi.fn().mockResolvedValue(hit));
+    const sneaky = { toJSON: () => ({ authorization_token: 'secret' }) };
+    ka.record(wire({ extra_field: sneaky }), undefined, 'stream');
+    expect(events).toContainEqual(expect.objectContaining({ type: 'not-persisted' }));
+    expect(readFileSync(statePath, 'utf8')).not.toContain('secret');
+    ka.stop();
   });
 
   it('a failed refresh does not move the saved last touch', async () => {
@@ -638,6 +681,116 @@ describe('CacheKeepalive statePath (across restarts)', () => {
     second.ka.stop();
   });
 
+  it('of two keepalives started before either saved, the later one has the file', () => {
+    // Both start with no file. Before, the earlier one's first save won and
+    // the later one, the newer process, stopped saving.
+    const first = make(vi.fn().mockResolvedValue(hit));
+    const second = make(vi.fn().mockResolvedValue(hit));
+    first.ka.record(wire(), undefined, 'stream');
+    expect(first.events).toContainEqual(expect.objectContaining({ type: 'persist-error', op: 'save' }));
+    second.ka.record(wire({ system: [{ type: 'text', text: 'b', cache_control: { type: 'ephemeral', ttl: '1h' } }] }), undefined, 'stream');
+    expect(second.events.some((e) => e.type === 'persist-error')).toBe(false);
+    expect(second.ka.persistPath).toBe(statePath);
+    expect(first.ka.persistPath).toBeUndefined();
+    expect(JSON.parse(readFileSync(statePath, 'utf8')).lineages).toHaveLength(1);
+    expect(readFileSync(statePath, 'utf8')).toContain('"text":"b"');
+    first.ka.stop();
+    second.ka.stop();
+  });
+
+  it('persistPath turns undefined as soon as another keepalive takes the file', () => {
+    const first = make(vi.fn().mockResolvedValue(hit));
+    first.ka.record(wire(), undefined, 'stream');
+    expect(first.ka.persistPath).toBe(statePath);
+    const second = make(vi.fn().mockResolvedValue(hit));
+    // No save of first's since: it still knows from the file.
+    expect(first.ka.persistPath).toBeUndefined();
+    expect(second.ka.persistPath).toBe(statePath);
+    first.ka.stop();
+    second.ka.stop();
+  });
+
+  it('a lock left by a process that died is taken over; one held by a live process is waited out', () => {
+    // A pid that can't be alive.
+    writeFileSync(`${statePath}.lock`, '2147483646');
+    const { ka, events } = make(vi.fn().mockResolvedValue(hit));
+    ka.record(wire(), undefined, 'stream');
+    expect(events.some((e) => e.type === 'persist-error')).toBe(false);
+    expect(JSON.parse(readFileSync(statePath, 'utf8')).lineages).toHaveLength(1);
+    expect(existsSync(`${statePath}.lock`)).toBe(false);
+    ka.stop();
+    // Held by a live process (pid 1) all along: the start says so, and the
+    // keepalive carries on in memory without touching the file.
+    writeFileSync(`${statePath}.lock`, '1');
+    const before = readFileSync(statePath, 'utf8');
+    const held = make(vi.fn().mockResolvedValue(hit));
+    expect(held.events).toContainEqual(expect.objectContaining({ type: 'persist-error', op: 'load' }));
+    held.ka.record(wire({ system: [{ type: 'text', text: 'c', cache_control: { type: 'ephemeral', ttl: '1h' } }] }), undefined, 'stream');
+    expect(readFileSync(statePath, 'utf8')).toBe(before);
+    expect(held.ka.getStatus()).toHaveLength(1);
+    held.ka.stop();
+  });
+
+  it('removes temp files a process that died mid-write left beside the file', () => {
+    const stale = `${statePath}.0123456789ab.tmp`;
+    const other = join(dir, 'unrelated.0123456789ab.tmp');
+    writeFileSync(stale, '{"partial');
+    writeFileSync(other, 'keep me');
+    const { ka } = make(vi.fn().mockResolvedValue(hit));
+    expect(existsSync(stale)).toBe(false);
+    expect(existsSync(other)).toBe(true);
+    ka.stop();
+  });
+
+  it('maxLineages 0 keeps none, on restore as on record', () => {
+    const first = make(vi.fn().mockResolvedValue(hit));
+    first.ka.record(wire(), undefined, 'stream');
+    first.ka.stop();
+    const { ka } = make(vi.fn().mockResolvedValue(hit), { maxLineages: 0 });
+    expect(ka.getStatus()).toHaveLength(0);
+    ka.stop();
+  });
+
+  it('a saved lineage of a lane this process does not keep is reported, not dropped silently', () => {
+    const first = make(vi.fn().mockResolvedValue(hit), { lanes: ['stream', 'complete'] });
+    first.ka.record(wire(), undefined, 'complete');
+    first.ka.stop();
+    const { ka, events } = make(vi.fn().mockResolvedValue(hit));
+    expect(events).toContainEqual(expect.objectContaining({ type: 'skipped', reason: 'lane-not-kept:complete' }));
+    ka.stop();
+  });
+
+  it('a request kept off disk is reported again if it comes back after leaving', () => {
+    const { ka, events } = make(vi.fn().mockResolvedValue(hit), { maxLineages: 1 });
+    const secret = wire({ mcp_servers: [{ type: 'url', url: 'https://m.example', authorization_token: 's' }] });
+    ka.record(secret, undefined, 'stream');
+    ka.record(wire({ system: [{ type: 'text', text: 'other', cache_control: { type: 'ephemeral', ttl: '1h' } }] }), undefined, 'stream');
+    ka.record(secret, undefined, 'stream');
+    expect(events.filter((e) => e.type === 'not-persisted')).toHaveLength(2);
+    ka.stop();
+  });
+
+  it('a refresh that writes the entry again moves the saved last touch; one that neither reads nor writes does not', async () => {
+    const wrote = { usage: { cache_read_input_tokens: 0, cache_creation_input_tokens: 494_000 } };
+    const { ka } = make(vi.fn().mockResolvedValue(wrote), { maxIneffective: 5 });
+    ka.record(wire(), undefined, 'stream');
+    const before = JSON.parse(readFileSync(statePath, 'utf8')).lineages[0].touchedAt;
+    await vi.advanceTimersByTimeAsync(50 * 60_000);
+    const after = JSON.parse(readFileSync(statePath, 'utf8')).lineages[0].touchedAt;
+    expect(after).toBeGreaterThan(before);
+    ka.stop();
+
+    rmSync(statePath);
+    const nothing = { usage: { cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } };
+    const quiet = make(vi.fn().mockResolvedValue(nothing), { maxIneffective: 5 });
+    quiet.ka.record(wire(), undefined, 'stream');
+    const start = JSON.parse(readFileSync(statePath, 'utf8')).lineages[0].touchedAt;
+    await vi.advanceTimersByTimeAsync(50 * 60_000);
+    expect(quiet.ka.getStatus()).toHaveLength(1);
+    expect(JSON.parse(readFileSync(statePath, 'utf8')).lineages[0].touchedAt).toBe(start);
+    quiet.ka.stop();
+  });
+
   it('restores from a hand-written file: checks each entry and keeps the newest maxLineages', () => {
     const now = Date.now();
     const sys = (text: string) => [{ type: 'text', text, cache_control: { type: 'ephemeral', ttl: '1h' } }];
@@ -682,12 +835,13 @@ describe('CacheKeepalive statePath (across restarts)', () => {
     expect(readFileSync(statePath, 'utf8')).toBe(before);
   });
 
-  it('reports a failed save and carries on in memory', async () => {
+  it('reports a file it cannot use and carries on in memory', async () => {
     statePath = join(dir, 'no-such-dir', 'cache-keepalive.json');
     const send = vi.fn().mockResolvedValue(hit);
     const { ka, events } = make(send);
     ka.record(wire(), undefined, 'stream');
-    expect(events).toContainEqual(expect.objectContaining({ type: 'persist-error', op: 'save' }));
+    expect(events).toContainEqual(expect.objectContaining({ type: 'persist-error', op: 'load' }));
+    expect(ka.persistPath).toBeUndefined();
     await vi.advanceTimersByTimeAsync(50 * 60_000);
     expect(send).toHaveBeenCalledTimes(1);
     ka.stop();
