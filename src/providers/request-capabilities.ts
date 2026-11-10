@@ -1,6 +1,7 @@
 import type { ProviderRequest, ProviderRequestOptions } from '../types/index.js';
 import { unsupportedError } from '../types/errors.js';
 import { supportsAssistantPrefill } from '../registry/model-capabilities.js';
+import { lastTurnRole } from '../utils/empty-text.js';
 
 export function assertMessagePrefillSupported(
   model: unknown,
@@ -10,7 +11,7 @@ export function assertMessagePrefillSupported(
   rawRequest: unknown,
 ): void {
   const context = options?.requestContext;
-  const assistantEnded = Array.isArray(messages) && messages.at(-1)?.role === 'assistant';
+  const assistantEnded = Array.isArray(messages) && lastTurnRole(messages) === 'assistant';
   if (!(assistantEnded || context?.requiresAssistantPrefill) || typeof model !== 'string') return;
   if (supportsAssistantPrefill(model)) return;
   const source = context ? 'Formatter "' + context.formatterName + '"' : 'Direct provider input';

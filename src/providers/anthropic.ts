@@ -49,8 +49,11 @@ import { CacheKeepalive, type CacheKeepaliveConfig } from '../cache-keepalive.js
  *   - Haiku 5.5, Opus 5, Opus 5.5, Fable 5.1 and Sonnet 5.5: measured; each
  *     refuses `temperature` 0.2, `top_k` 40 and `top_p` 0.9 with a 400, and
  *     takes a `top_p` of 0.99.
- *   - Mythos 5.1: not measured. The Fable and Mythos family always thinks,
- *     and with thinking on the API takes no custom `temperature` or `top_k`.
+ *   - Fable 5.2: measured on 2026-11-09; it refuses `temperature` 0.2,
+ *     `top_k` 40 and `top_p` 0.9 with a 400, and takes a `top_p` of 0.99.
+ *   - Mythos 5.1 and Mythos 5.2: not measured. The Fable and Mythos family
+ *     always thinks, and with thinking on the API takes no custom
+ *     `temperature` or `top_k`.
  */
 const NO_TEMPERATURE_MODELS = [
   'claude-opus-4-7',
@@ -62,8 +65,10 @@ const NO_TEMPERATURE_MODELS = [
   'claude-haiku-5-5',
   'claude-fable-5',
   'claude-fable-5-1',
+  'claude-fable-5-2',
   'claude-mythos-5',
   'claude-mythos-5-1',
+  'claude-mythos-5-2',
   'claude-mythos-preview',
 ];
 
@@ -146,6 +151,16 @@ export function sendsDisplayUpdates(params: { thinking?: unknown }): boolean {
  *  included. System text there needs none. */
 export const INLINE_TOOLS_BETA = 'inline-tools-2026-09-15';
 
+/** Beta flag for an effort-only `role: 'system'` message (`output_config` on a
+ *  message, SystemChangeContent's `effort`). Without it the API refuses the
+ *  field as an extra input. */
+export const MID_CONVERSATION_OUTPUT_CONFIG_BETA = 'mid-conversation-output-config-2026-07-01';
+
+export function sendsEffortChanges(params: { messages?: unknown }): boolean {
+  return Array.isArray(params.messages) && params.messages.some((message: { role?: unknown; output_config?: unknown }) =>
+    message?.role === 'system' && message.output_config != null);
+}
+
 export function sendsToolChanges(params: { messages?: unknown }): boolean {
   return Array.isArray(params.messages) && params.messages.some((message: { role?: unknown; content?: unknown }) =>
     message?.role === 'system' && Array.isArray(message.content) &&
@@ -153,11 +168,14 @@ export function sendsToolChanges(params: { messages?: unknown }): boolean {
 }
 
 /** The API's wordings, in a 400, for a model that takes no mid-conversation
- *  system message or no tool change in one. */
+ *  system message, no tool change in one, no per-turn effort, or no change of
+ *  effort under the request's thinking setting. */
 const SYSTEM_CHANGE_REFUSALS = [
   "role 'system' is not supported on this model",
   'tool_addition/tool_removal requires a model that supports mid-conversation system content',
   'tool_addition/tool_removal is not supported on this model',
+  'output_config.effort requires a model that supports per-turn effort',
+  'effort cannot change when thinking is disabled on this model',
 ];
 
 export function isSystemChangeRefusal(body: unknown): boolean {
@@ -945,6 +963,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     if (sendsBlockBinding(built)) needed.push(THINKING_BINDING_BETA);
     if (sendsDisplayUpdates(built)) needed.push(THINKING_DISPLAY_UPDATES_BETA);
     if (sendsToolChanges(built)) needed.push(INLINE_TOOLS_BETA);
+    if (sendsEffortChanges(built)) needed.push(MID_CONVERSATION_OUTPUT_CONFIG_BETA);
     if (needed.length === 0) return undefined;
     const betas = new Set(
       (this.defaultBeta ?? '').split(',').map((b) => b.trim()).filter(Boolean),

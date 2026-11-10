@@ -12,6 +12,184 @@ Releases up to and including 0.5.75 predate this file; for their contents see
 
 ## Unreleased
 
+## 0.10.2 — 2026-11-09
+
+### Added
+
+- Claude Fable 5.2 and Claude Mythos 5.2 (`claude-fable-5-2`, `claude-mythos-5-2`):
+  default pricing at $8 input, $40 output, $10 for a 5-minute cache write and
+  $0.20 for a cache read per million tokens, where each was priced at Fable 5's
+  or Mythos 5's row; a 1,000,000-token window and 128,000 tokens of output from
+  `getDefaultModelLimits`, where each had none; and `temperature`, `top_p` and
+  `top_k` left out of their requests, as for the rest of the family.
+  `ANTHROPIC_PRICING_LAST_VERIFIED` is now `2026-11-09`; `claude-3-5-haiku`,
+  not on that day's price page, keeps `2026-10-19`.
+
+### Changed
+
+- `getDefaultPricing` still takes the longest prefix that names an id, but a
+  prefix no longer names an id that goes on from it with a digit, unless the
+  prefix ends in `-`. Before, a prefix named every id that began with it. So a
+  dated Fable 5 or Mythos 5 snapshot, such as `claude-fable-5-20260301`, keeps
+  Fable 5's or Mythos 5's row rather than taking the 5.2 row its id begins
+  with.
+
+## 0.10.1 — 2026-11-09
+
+### Fixed
+
+- A tool call's integer past `Number.MAX_SAFE_INTEGER` written as plain digits, such as a Discord id a model writes
+  unquoted, now reaches the tool as those digits, a string, where `JSON.parse` could round it to another number.
+  Every integer past that bound is kept this way, even one a number would hold exactly, except in input nested
+  thousands of levels deep, which parses as before. This holds for native calls on Bedrock's streamed path, on
+  Anthropic's where a client tool's call streams its arguments as `input_json_delta` fragments, and on every OpenAI-style adapter, including
+  a gateway whose response body, or Responses stream item, carries a call's arguments as an object; for Bedrock's
+  non-streamed responses; and for XML mode's parameters at any depth, a negative one included. A parameter declared
+  `number` or `integer` gets such a value as digit text, as XML mode already gave it. Where the SDK parses
+  Anthropic's response (its non-streamed body, and arguments a stream's block start carries), in a server tool's
+  or MCP tool's call, and on Gemini, nothing changes.
+
+## 0.10.0 — 2026-11-09
+
+### Added
+
+- **`cacheMarkers: 'cm-owned'` callers:** a caller can now ask for the
+  floating cache marker with `floatingCacheMarker: true`, on the request or as
+  the config's `defaultFloatingCacheMarker`. Left unset, a `cm-owned` request
+  carries only the markers its caller placed, as before. When
+  asked for, the native tool loop's later requests carry the float on their
+  newest message, and on the message before the round's calling turn when two
+  or more slots are free and its block can carry one. It is placed after the
+  `beforeRequest` hook, once the caller's markers have passed the check a
+  first request's markers get. Without it, each later call of a tool turn pays
+  every earlier round of the turn again as uncached input. When the caller's
+  markers already occupy all four slots, the float takes the earliest message
+  marker's slot, through an adapter that declares which blocks it sends a
+  marker on (below); through one that doesn't, it takes none, and membrane
+  warns that the float was withheld, naming the missing declaration when a
+  caller's message marker was there to take. Within one tool loop membrane
+  changes no message content before the turn's opening, so that marker's
+  content lies inside the newest marker's prefix, though its block no longer
+  carries `cache_control` on the wire. A system or tools marker is never
+  taken, so a request whose four markers all sit there gets no float, and
+  membrane warns that it was withheld. No float is placed on a call whose
+  normalization repair rewrote the prefix, when prompt caching is off, or on a
+  block of a type the adapter sends no marker on: through OpenRouter's
+  adapter, which sends a marker only on text, a tool loop's newest round, a
+  tool result, gets none and no withheld warning, and only the message before
+  the round's calling turn can be marked, when it ends in text. Where the
+  float is placed, each later call then pays to write the part of its request
+  it can't read: its newest round, once the turn's opening is cached. A later
+  read of that write needs a marker whose backward search
+  reaches it, within that TTL and with the prefix up to there unchanged: on
+  the Claude API, the turn's next call can reach it across one round of tool
+  calls, since the backward search checks 20 positions and counts a run of
+  `tool_use` blocks, or of `tool_result` blocks, as one
+  (https://platform.claude.com/docs/en/build-with-claude/prompt-caching), and
+  the next turn's first call from a marker the caller places at that turn's
+  opening.
+  When each call reads the write before it and nothing reads the turn's last
+  write, the turn costs more than before by at most the write premium on what
+  its last call writes, plus, at a one-hour TTL, the read price of what the
+  call before it wrote. A call that can't read an earlier write, because its
+  TTL has passed or the search doesn't reach it, writes that part again at the
+  premium. When the last call's float is at 1h, which needs a one-hour
+  `cacheTtl` and every marker before it at 1h, a prompt-cache keepalive after
+  such a turn refreshes through that float, so it keeps the turn's rounds warm
+  too. A caller on context-manager's kv-unified strategy should ask for it
+  only with context-manager 0.25.0 or later, whose cache receipts leave a tool
+  loop's later calls out of its cache reference. With an older one, a floated call
+  whose marker count differs from the compile's clears kv-unified's cache
+  reference, so its next compile weighs no cache costs, and one whose count
+  matches sets the reference again from the compile's layout, as the first
+  call did, and records its own wire receipt with it.
+- **Provider adapters:** `ProviderAdapter.sendsCacheMarkersOn` says which
+  content blocks an adapter sends a `cache_control` marker on. A list of types
+  narrows both where a float goes and the take to blocks of those types:
+  `OpenRouterAdapter` declares `['text']`, since its image, audio, tool-use
+  and tool-result parts carry none. `true`, a marker on any block membrane
+  would place one on, leaves a float free to go on any such block, and allows
+  the take: `AnthropicAdapter` and `BedrockAdapter` declare it. Left out, a
+  float may still go on any such block, but no caller's marker is taken, since
+  membrane can't tell whether the float it would place is sent. A decorator
+  should forward it; one that doesn't leaves it out, so under `cm-owned` a
+  caller's marker is never taken for a float the wrapped adapter may not send.
+
+- `emitToolInputDeltas` (streamYielding, default off): a native tool call's
+  argument JSON streams as `tokens` events (`meta.type: 'tool_call'`,
+  `toolCallPart: 'input'`, with `toolId` and `toolName`) as the API sends
+  it, for consumers that act before the call completes, such as speech.
+  Providers report fragments through the new `StreamCallbacks.onToolInputDelta`
+  (Anthropic). The finished call in `tool-calls` stays authoritative. With
+  Anthropic's fine-grained tool streaming on, the API sends input
+  unvalidated, and when the Anthropic SDK can't parse a call's streamed
+  input, the stream ends with an `error` event.
+
+### Changed
+
+- **`cm-owned` callers whose config sets `defaultFloatingCacheMarker: true`,**
+  as 0.9.0 documented its default: their native tool loop's later requests
+  now carry the floating cache marker, as described under Added, where before
+  they carried only the markers their caller placed. Through an adapter that
+  declares `sendsCacheMarkersOn` (under Added), when the caller's markers hold
+  all four slots, the float can take the earliest message marker's slot.
+
+- System changes can change the effort: a `system_change` block may carry `effort`
+  (`'low' | 'medium' | 'high' | 'xhigh' | 'max'`), alone in its block and its message.
+  `NativeFormatter` and `AnthropicAdapter` send it as a `role: 'system'` message with empty
+  content and `output_config: { effort }`, with the beta `mid-conversation-output-config-2026-07-01`,
+  so a caller changes effort without changing the request's top-level `output_config.effort`, which
+  can rewrite the cached prompt. Placed directly after a user turn with new input, it sets the effort
+  for the reply to that turn; anywhere else, from the next user turn with new input (Anthropic's effort
+  documentation, "Change effort mid-conversation"). Unlike a change of tools or system text, it goes
+  at its place, right after the turn holding the last block of a message before it: exactly there
+  unless messages of one role that membrane merges into one turn lie on both sides of it, when it goes
+  after that turn, which governs the same reply. Effort changes that land at one place go there
+  first, in the caller's order among them and before any change of tools or system text there. One that would end
+  the request after an assistant turn is refused before sending, flagged `systemChangeRefused`: a
+  request ending on an assistant turn after an effort change, which earlier releases sent as a prefill
+  without the effort, is now refused, and a prefill can carry its effort at the top level instead. Its
+  `cacheBreakpoint`, or a boundary at its place, goes on the last block that can hold one and comes from
+  a message before it, or from a turn the formatter puts ahead of every message. The
+  API's refusals of it, on a model without per-turn effort and on a thinking setting that fixes the
+  effort, are marked `systemChangeRefused`, as is a request carrying it through a formatter that doesn't
+  render system changes or an adapter that doesn't send them, Bedrock's included, before sending, unless
+  the formatter can't carry the request's tools at all, which is refused first, unflagged. `BedrockAdapter`
+  refuses one given to it directly the same way, before its own cleanup. A block with `effort` beside another change, or with an
+  `effort` that isn't one of the five levels, is refused as unsupported. The cache wire receipt hashes
+  such a message's `output_config` into the prefixes after it. `SYSTEM_CHANGE_EFFORT` (`true`) tells a
+  caller that its membrane carries `effort`: an earlier one leaves an effort-only block out as empty.
+  A custom formatter or adapter that declares `rendersSystemChanges` or `sendsSystemChanges` now
+  meets effort-only blocks too: it renders and sends `effort`, with the beta, or the caller's change
+  is lost or refused by the API.
+
+### Fixed
+
+- **Floating cache marker:** a longer TTL may not follow a shorter one, so the
+  float no longer goes at 1h after a marker at 5m or with no `ttl` (a content
+  block's own `cache_control`): each float goes at 1h only when `cacheTtl` is
+  1h and every marker before it is 1h, otherwise at 5m, and none is placed
+  where a 1h marker after it would then follow a 5m one. Under
+  `membrane-system` the float is placed before the `beforeRequest` hook, so
+  this reads the markers the request carries then; a marker the hook adds is
+  the hook's to order. On Anthropic this changes only requests the API refused
+  before: one carrying, before the float, a marker shorter than its
+  `cacheTtl`, or, after it, a 1h marker when its `cacheTtl` is 5m. On an
+  adapter that drops `ttl`, such as Bedrock's, the rule still judges the
+  markers as membrane builds them, so a float can be skipped where the API
+  would have taken it. Through an adapter that sends a marker only on some
+  block types (`sendsCacheMarkersOn`), as OpenRouter's sends one only on text,
+  the float no longer goes onto a block of another type, such as a tool
+  result, an image or audio, which that adapter sends without it, so the
+  request's cache receipt no longer lists a float that isn't sent. Through
+  OpenRouter, with one free slot, that slot can now go to the message before
+  the round's calling turn, when it ends in unmarked text and the TTL order
+  allows a float there, where it is sent, instead of the newest round's tool
+  result, where it wasn't. A float now passes over whitespace-only text and
+  media with no source, which the Anthropic and Bedrock builders drop, to the
+  block before it, and a message with no block they send gets none; before, it
+  was placed on the dropped block and not sent.
+
 ## 0.9.0 — 2026-10-30
 
 ### Breaking

@@ -63,12 +63,15 @@ describe('default pricing rows match the published price pages (2026-08-25)', ()
   });
 });
 
-describe('Anthropic 5.x rows match the published price page (2026-10-19)', () => {
+describe('Anthropic 5.x rows match the published price page (2026-11-09)', () => {
   const usd = (input: number, output: number, cacheWrite: number, cacheRead: number) => ({
     inputPerMillion: input, outputPerMillion: output, cacheWritePerMillion: cacheWrite,
     cacheReadPerMillion: cacheRead, currency: 'USD', asOf: ANTHROPIC_PRICING_LAST_VERIFIED,
   });
   const rows: Array<[string, ReturnType<typeof usd>]> = [
+    ['claude-fable-5-2', usd(8, 40, 10, 0.20)],
+    ['claude-mythos-5-2', usd(8, 40, 10, 0.20)],
+    ['claude-fable-5-2-20261109', usd(8, 40, 10, 0.20)],
     ['claude-opus-5-5', usd(4, 20, 5, 0.20)],
     ['claude-sonnet-5-5', usd(2, 10, 2.50, 0.10)],
     ['claude-fable-5-1', usd(10, 50, 12.50, 0.25)],
@@ -85,6 +88,12 @@ describe('Anthropic 5.x rows match the published price page (2026-10-19)', () =>
       expect(getDefaultPricing(id)).toEqual(pricing);
     });
   }
+
+  it('prices a dated Fable 5 or Mythos 5 snapshot as its own model, not as the 5.2 its id begins with', () => {
+    expect(getDefaultPricing('claude-fable-5-20260301')).toEqual(usd(10, 50, 12.50, 1));
+    expect(getDefaultPricing('claude-mythos-5-20260301')).toEqual(usd(10, 50, 12.50, 1));
+    expect(getDefaultPricing('claude-fable-5-1-20261001')).toEqual(usd(10, 50, 12.50, 0.25));
+  });
 });
 
 describe('pricing freshness is machine-readable', () => {
@@ -99,10 +108,12 @@ describe('pricing freshness is machine-readable', () => {
     expect(getDefaultPricing('gpt-4o-mini')?.asOf).toBe(DEFAULT_PRICING_LAST_VERIFIED);
   });
 
-  it('dates every Anthropic row the page lists to the Anthropic reading, and the retired one to its last publication', () => {
+  it('dates every Anthropic row the page lists to the Anthropic reading, and each retired one to the last date that confirmed it', () => {
+    const retired: Record<string, string> = { 'claude-3-5-sonnet': '2025-07-01', 'claude-3-5-haiku': '2026-10-19' };
     const anthropic = PRICING_TABLE.filter((row) => row.prefix.startsWith('claude-') && row.pricing !== null);
+    expect(ANTHROPIC_PRICING_LAST_VERIFIED).toBe('2026-11-09');
     for (const row of anthropic) {
-      const expected = row.prefix === 'claude-3-5-sonnet' ? '2025-07-01' : ANTHROPIC_PRICING_LAST_VERIFIED;
+      const expected = retired[row.prefix] ?? ANTHROPIC_PRICING_LAST_VERIFIED;
       expect(`${row.prefix}: ${row.pricing?.asOf}`).toBe(`${row.prefix}: ${expected}`);
     }
     expect(anthropic).not.toEqual([]);

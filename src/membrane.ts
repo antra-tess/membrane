@@ -113,6 +113,7 @@ import {
   shedImagesToFitByteBudget, assertWithinByteBudget,
 } from './utils/image-media.js';
 import { convertMcpMedia } from './utils/mcp-media.js';
+import { isEffortOnlyMessage } from './utils/empty-text.js';
 import { getDefaultPricing } from './registry/default-pricing.js';
 import { FidelityNotes, isRawItemCarrier, requestFingerprint, type MessageOrigin } from './utils/fidelity.js';
 
@@ -328,7 +329,9 @@ function placeFloatingMarker(
     if (markableBlockTypes && !markableBlockTypes.includes(String(block.type))) return undefined;
     return block.cache_control ? undefined : block;
   };
-  const newestEnd = unmarkedEnd(messages.length - 1);
+  let newestAt = messages.length - 1;
+  while (newestAt >= 0 && isEffortOnlyMessage(messages[newestAt])) newestAt--;
+  const newestEnd = unmarkedEnd(newestAt);
   const newest = newestEnd && floatControlAt(request, newestEnd, cacheControl) ? newestEnd : undefined;
   if (newest && residuum <= 0 && takeEarliest) {
     const earliest = collectMarkedBlocks({ messages })[0];
@@ -344,7 +347,7 @@ function placeFloatingMarker(
   }
   let callingTurn = messages.length - 1;
   while (callingTurn >= 0 && !(messages[callingTurn]?.role === 'assistant' && holdsToolUse(messages[callingTurn]?.content))) callingTurn--;
-  while (callingTurn > 0 && messages[callingTurn - 1]?.role === 'assistant') callingTurn--;
+  while (callingTurn > 0 && (messages[callingTurn - 1]?.role === 'assistant' || isEffortOnlyMessage(messages[callingTurn - 1]))) callingTurn--;
   for (const block of [newest, callingTurn > 0 ? unmarkedEnd(callingTurn - 1) : undefined]) {
     if (!block || residuum <= 0) continue;
     const control = floatControlAt(request, block, cacheControl);
@@ -1873,7 +1876,7 @@ export class Membrane {
       throw systemChangeRefusedError(
         `A system_change block goes only through a formatter that renders it (NativeFormatter) and an adapter that sends it (AnthropicAdapter); ` +
         `this request has formatter "${activeFormatter.name}" and adapter "${this.adapter.name}". ` +
-        'Send it through those two, or make the change in the request\'s tools and system instead.'
+        'Send it through those two, or make the change in the request\'s tools and system, or an effort change as the provider\'s top-level effort (Anthropic\'s output_config.effort, in providerParams), instead.'
       );
     }
     const additionalStopSequences = Array.isArray(request.stopSequences)
