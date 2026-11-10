@@ -35,7 +35,7 @@ each request a call makes, since membrane is the one layer that retries those.
 The refresh's resend is part of that attempt, `retry: false` included. A 401
 that still fails after the refresh, with `x-should-retry: true`, is retried
 under membrane's `retry` config as a new attempt, with a refresh of its own,
-unless the call passes `retry: false`. Only a cache-keepalive replay keeps the SDK's own retries. Resolver failures are
+unless the call passes `retry: false`. A cache-keepalive replay is one SDK attempt too, its refresh's resend included. Resolver failures are
 separate: they abort that SDK operation before connection retries can run and
 surface the original MembraneError (or an auth error for an untyped failure),
 unless the caller's signal has fired by the time the error is handled, which

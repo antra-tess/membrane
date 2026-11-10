@@ -405,9 +405,15 @@ export class AnthropicAdapter implements ProviderAdapter {
       : new CacheKeepalive(
           // The already-built wire request goes as it is: a rebuild risks a byte diff,
           // which turns a cache read into a cache write.
-          async (wire, headers) => this.createMessage(
-            wire as unknown as Anthropic.MessageCreateParamsNonStreaming, headers,
-          ),
+          async (wire, headers) => {
+            try {
+              return await this.createMessage(
+                wire as unknown as Anthropic.MessageCreateParamsNonStreaming, headers, undefined, { maxRetries: 0 },
+              );
+            } catch (error) {
+              throw this.handleError(error, wire);
+            }
+          },
           config.cacheKeepalive ?? {},
         );
   }
