@@ -404,7 +404,9 @@ export interface YieldingStreamOptions {
    * Re-issue an attempt that ends with `stop_reason: 'refusal'`, up to this
    * many times. Default 0 (off); a value that isn't a finite number of at
    * least 0 asks for none. Native tool mode only: in XML tool mode it's
-   * ignored, with a warning, and the refusal stands.
+   * ignored, with a warning, and the refusal stands. A refusal the provider
+   * reports as `reasoning_extraction` is never re-issued: it stands on the
+   * first attempt, with no `RetryingEvent`.
    *
    * Enabling it means the stream can emit `RetryingEvent` — **consumers MUST
    * handle it and discard what the refused attempt emitted** (its round's
