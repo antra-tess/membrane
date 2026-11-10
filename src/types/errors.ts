@@ -58,6 +58,10 @@ export interface ErrorInfo {
   /** Provider-specific error code */
   providerErrorCode?: string;
 
+  /** See {@link MembraneError.promptTokens}. Set where the error's type is
+   * classified, and carried as is: nothing reads the message for it again. */
+  promptTokens?: number;
+
   /** Raw error object */
   rawError: unknown;
 
@@ -76,6 +80,27 @@ export class MembraneError extends Error {
   readonly providerErrorCode?: string;
   readonly rawError?: unknown;
   readonly rawRequest?: unknown;
+  /**
+   * The request's input token count, where a `context_length` refusal states
+   * one: Anthropic's "prompt is too long: N tokens > M maximum" and "input
+   * length and `max_tokens` exceed context limit: N + K > M", Gemini's "The
+   * input token count (N) exceeds ...", and OpenAI's long form, "... However,
+   * your messages resulted in N tokens.". It's the whole prompt, cache reads
+   * and writes included. Unset where the refusal states no count, as OpenAI's
+   * shorter and current forms, the Responses API's and Bedrock's don't. Only
+   * the number is kept; the text stays in the error's message or its
+   * `rawError`. It's read once, from the text the error's type is classified
+   * from: from a provider's body, the message fields membrane extracts from
+   * it, so an echo of the request beside those fields can't supply one. That
+   * text can hold more than the provider's message, and an echo in it does
+   * supply the count: a body that doesn't parse as JSON, or a string `error`,
+   * is taken whole as the message; and for a status-less Anthropic error
+   * whose body membrane doesn't recognise, or a Bedrock stream error with no
+   * message, the type and the count are read from a rendering of the body.
+   * A copy, through `toErrorInfo` or JSON, carries the number or nothing, and
+   * never reads the message again.
+   */
+  readonly promptTokens?: number;
   /**
    * True when the request was refused for the system change it carried (a
    * `system_change` block, SystemChangeContent): by the API, on a model
@@ -109,6 +134,7 @@ export class MembraneError extends Error {
     this.rawError = serializeError(info.rawError);
     this.rawRequest = info.rawRequest;
     if (info.systemChangeRefused) this.systemChangeRefused = true;
+    if (info.type === 'context_length' && info.promptTokens !== undefined) this.promptTokens = info.promptTokens;
   }
 
   toErrorInfo(): ErrorInfo {
@@ -122,6 +148,7 @@ export class MembraneError extends Error {
       rawError: this.rawError,
       rawRequest: this.rawRequest,
       ...(this.systemChangeRefused ? { systemChangeRefused: true } : {}),
+      ...(this.promptTokens !== undefined ? { promptTokens: this.promptTokens } : {}),
     };
   }
 }
@@ -173,6 +200,7 @@ export function contextLengthError(message: string, raw?: unknown, rawRequest?: 
     httpStatus: 400,
     rawError: raw,
     rawRequest,
+    promptTokens: statedPromptTokens(message),
   });
 }
 
@@ -698,7 +726,32 @@ export function errorFromProviderStatus(params: {
     providerErrorCode: code,
     rawError: params.rawError ?? params.body,
     rawRequest: params.rawRequest,
+    // Read from the same text as the type, for the same reason: with a body, its own message fields only.
+    promptTokens: classification.type === 'context_length' ? statedPromptTokens(evidence) : undefined,
   });
+}
+
+/** The forms a provider's length refusal states the request's input count in, N in each: Anthropic's "prompt is
+ *  too long: N tokens > M maximum" and "input length and `max_tokens` exceed context limit: N + K > M",
+ *  Gemini's "The input token count (N) exceeds ...", and OpenAI's long form, "... However, your messages resulted
+ *  in N tokens.". Its older "you requested N tokens (... in the messages, ... in the completion)" counts the
+ *  completion in N, so it isn't among them. */
+const STATED_PROMPT_TOKENS = [
+  /prompt is too long: (\d+) tokens > \d+ maximum/i,
+  /input length and `max_tokens` exceed context limit: (\d+) \+ \d+ > \d+/i,
+  /the input token count \((\d+)\) exceeds/i,
+  /your messages resulted in (\d+) tokens/i,
+];
+
+function statedPromptTokens(text: string | undefined): number | undefined {
+  if (!text) return undefined;
+  for (const form of STATED_PROMPT_TOKENS) {
+    const digits = form.exec(text)?.[1];
+    if (digits === undefined) continue;
+    const count = Number(digits);
+    return Number.isSafeInteger(count) && count > 0 ? count : undefined;
+  }
+  return undefined;
 }
 
 export function errorFromHttpResponse(
@@ -1018,6 +1071,7 @@ export function classifyError(error: unknown): ErrorInfo {
         retryable: classification.retryable,
         httpStatus: classification.httpStatus,
         rawError: serializedError,
+        ...(classification.type === 'context_length' ? { promptTokens: statedPromptTokens(error.message) } : {}),
       };
     }
   }
