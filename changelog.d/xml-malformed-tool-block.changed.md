@@ -35,8 +35,10 @@
   what broke and quotes none of the call's values. A block with no named
   invoke gives one such call, named `""`. A well-formed block parses
   as before, and a stored turn replays as before, except calls stored side
-  by side from byte-identical blocks that each held a swallowed invoke or an
-  invoke opener whose name can't be read, which now replay as one block.
+  by side from byte-identical blocks, each with more `<invoke name=` openers
+  in its text, values included, than calls stored from it, such as a
+  swallowed invoke or a last invoke left open: such a run can now replay as
+  fewer blocks.
   - **Executors:** one that ignores `unparseableInput` runs each such call
     with `{}`, as it runs a native marked call.
   - **`complete()`:** its tool parse reads the output only through the
