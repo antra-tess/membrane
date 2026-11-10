@@ -433,6 +433,17 @@ function refusalBudget(asked: number | undefined): number {
   return typeof asked === 'number' && Number.isFinite(asked) ? Math.max(0, asked) : 0;
 }
 
+/**
+ * Refusal categories a re-issue is never spent on. A `reasoning_extraction`
+ * refusal rarely flips on the same request, and each refused re-issue is one
+ * more refusal on the account that served it.
+ */
+const UNRETRIED_REFUSAL_CATEGORIES: ReadonlySet<string> = new Set(['reasoning_extraction']);
+
+function refusalIsRetried(category: unknown): boolean {
+  return !(typeof category === 'string' && UNRETRIED_REFUSAL_CATEGORIES.has(category));
+}
+
 function persistImageSplit(prefillResult: BuildResult, messages: BuildResult['messages'], seam: number): void {
   prefillResult.messages = messages;
   prefillResult.accumulatedBaseOffset = seam;
@@ -552,6 +563,7 @@ export class Membrane {
 
         if (
           response.stopReason === 'refusal' &&
+          refusalIsRetried(providerResponse.refusalCategory) &&
           refusalRetriesUsed < refusalBudget(options.refusalRetries)
         ) {
           refusalRetriesUsed++;
@@ -2180,7 +2192,7 @@ export class Membrane {
         providerStopReason: this.providerReasonFor(attemptResult!),
         usage: normalizeUsageToCacheExcluded(afterLocalStops.usage, this.adapter.name, this.adapter.usageCacheConvention),
       };
-      if (result.stopReason !== 'refusal' || retried >= maxAttempts) {
+      if (result.stopReason !== 'refusal' || retried >= maxAttempts || !refusalIsRetried(result.refusalCategory)) {
         for (const block of attemptAlterations) fidelity?.alterBlock(block);
         return {
           ...result,
