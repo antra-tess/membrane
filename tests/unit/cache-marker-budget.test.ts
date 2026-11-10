@@ -340,7 +340,7 @@ describe('float stand-down covers every prefix-rewriting normalizer repair', () 
     expect(countWireCacheMarkers(providerRequest)).toBe(1);
   });
 
-  it('stands down when an orphan tool_result was textified', () => {
+  it('stands down when an orphan tool_result was dropped', () => {
     const orphan: NormalizedMessage = {
       participant: 'zzOperator',
       content: [{ type: 'tool_result' as const, toolUseId: 'zz-never-called', content: 'zz stray' }],

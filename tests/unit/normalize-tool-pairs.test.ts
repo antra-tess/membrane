@@ -8,6 +8,7 @@ import {
   type ProviderBlock,
 } from '../../src/formatters/normalize-tool-pairs.js';
 import type { NormalizeEvent } from '../../src/formatters/types.js';
+import { lastCacheableBlockIndex } from '../../src/formatters/native.js';
 
 type ProviderMessage = { role: 'user' | 'assistant'; content: ProviderBlock[] };
 
@@ -196,7 +197,7 @@ describe('normalizeToolPairs', () => {
   });
 
   describe('#6 — orphan tool_result with no preceding tool_use', () => {
-    it('textifies the orphan and fires telemetry', () => {
+    it('leaves the orphan out, as a result and as text, and fires telemetry', () => {
       const input: ProviderMessage[] = [
         user(r('GHOST', 'something')),
         assistant(t('ok')),
@@ -204,12 +205,9 @@ describe('normalizeToolPairs', () => {
       const { events, onEvent } = collectEvents();
       const out = normalize(input, { onEvent });
 
-      const firstUser = out.messages.find((m) => m.role === 'user')!;
-      const carriesPayload = firstUser.content.some(
-        (b) => b.type === 'text' && ((b as ProviderBlock & { text?: string }).text ?? '').includes('something'),
-      );
-      expect(carriesPayload).toBe(true);
-      expect(events.some((e) => e.kind === 'orphan_tool_result_textified')).toBe(true);
+      expect(JSON.stringify(out.messages)).not.toContain('something');
+      expect(out.messages.flatMap((m) => m.content).some((b) => b.type === 'tool_result')).toBe(false);
+      expect(events).toContainEqual({ kind: 'orphan_tool_result_dropped', toolUseId: 'GHOST' });
     });
   });
 
@@ -371,7 +369,7 @@ describe('normalizeToolPairs', () => {
       expect(resultIds(out.messages[4]!.content)).toEqual(['B']);
 
       expect(events.some((e) => e.kind === 'synthetic_pending_result')).toBe(false);
-      expect(events.some((e) => e.kind === 'orphan_tool_result_textified')).toBe(false);
+      expect(events.some((e) => e.kind === 'orphan_tool_result_dropped')).toBe(false);
 
       const ev = events.find((e) => e.kind === 'leading_user_synthesized') as
         | { originalFirstRole: string }
@@ -674,180 +672,118 @@ describe('normalizeToolPairs', () => {
     });
   });
 
-  describe('orphan textification preserves array-form content', () => {
-    const arrayResult = (id: string): ProviderBlock => ({
-      type: 'tool_result',
-      tool_use_id: id,
-      content: [
-        { type: 'text', text: 'zz-screenshot of the failing chart' },
-        {
-          type: 'image',
-          source: { type: 'base64', media_type: 'image/png', data: 'zzzz'.repeat(512) },
-        },
-      ],
-      is_error: false,
-    });
-
-    function orphanText(out: { messages: ProviderMessage[] }): string {
-      for (const msg of out.messages) {
-        for (const block of msg.content) {
-          const text = (block as ProviderBlock & { text?: string }).text ?? '';
-          if (block.type === 'text' && text.startsWith('[orphan tool_result')) return text;
-        }
-      }
-      throw new Error('no orphan textification found in output');
-    }
-
-    it('flattens text parts and image placeholders instead of emptying the payload', () => {
-      const input: ProviderMessage[] = [user(arrayResult('ite1')), assistant(t('ok'))];
-      const out = normalize(input);
-
-      const text = orphanText(out);
-      expect(text).toContain('zz-screenshot of the failing chart');
-      expect(text).toContain('[Image: image/png, ~2KB, not shown to you]');
-    });
-
-    it('reports the recovered length on the event so a drop can never be silent', () => {
-      const input: ProviderMessage[] = [user(arrayResult('ite1')), assistant(t('ok'))];
-      const { events, onEvent } = collectEvents();
-      normalize(input, { onEvent });
-
-      const ev = events.find((e) => e.kind === 'orphan_tool_result_textified') as
-        | { toolUseId: string; recoveredChars: number }
-        | undefined;
-      expect(ev).toBeDefined();
-      expect(ev!.toolUseId).toBe('ite1');
-      expect(ev!.recoveredChars).toBeGreaterThan('zz-screenshot of the failing chart'.length);
-    });
-
-    it('keeps the string-content path intact (control)', () => {
-      const input: ProviderMessage[] = [
-        user(r('ite2', 'zz-plain string payload')),
-        assistant(t('ok')),
-      ];
-      const { events, onEvent } = collectEvents();
-      const out = normalize(input, { onEvent });
-
-      expect(orphanText(out)).toContain('zz-plain string payload');
-      const ev = events.find((e) => e.kind === 'orphan_tool_result_textified') as
-        | { recoveredChars: number }
-        | undefined;
-      expect(ev!.recoveredChars).toBe('zz-plain string payload'.length);
-    });
-  });
-
-  describe('textification keeps what text can carry', () => {
+  describe('a result without its call, or a second for an answered call, is left out', () => {
     const marker = { type: 'ephemeral', ttl: '1h' };
-    const orphanOf = (result: ProviderBlock): ProviderMessage[] => [user(result), assistant(t('ok'))];
-    const duplicateOf = (result: ProviderBlock): ProviderMessage[] => [
-      user(t('go')),
-      assistant(u('ite1')),
-      user(r('ite1', 'first'), result),
-    ];
-    const shapes = [
-      { label: 'an orphan', build: orphanOf, prefix: '[orphan tool_result for ite1' },
-      { label: 'a duplicate', build: duplicateOf, prefix: '[duplicate tool_result for ite1' },
-    ];
     const resultWith = (fields: Record<string, unknown>): ProviderBlock => ({
       type: 'tool_result',
       tool_use_id: 'ite1',
       is_error: false,
       ...fields,
     });
+    const shapes = [
+      {
+        label: 'an orphan',
+        build: (result: ProviderBlock): ProviderMessage[] => [user(t('see'), result), assistant(t('ok'))],
+        event: { kind: 'orphan_tool_result_dropped', toolUseId: 'ite1' },
+        before: 'see',
+      },
+      {
+        label: 'a duplicate',
+        build: (result: ProviderBlock): ProviderMessage[] => [user(t('go')), assistant(u('ite1')), user(r('ite1', 'first'), result)],
+        event: { kind: 'stray_tool_result_dropped', toolUseId: 'ite1', fromEnvelope: 2, reason: 'duplicate_in_cycle' },
+        before: 'first',
+      },
+    ];
 
-    function textified(messages: ProviderMessage[], prefix: string): ProviderBlock {
-      const found = messages
-        .flatMap((m) => m.content)
-        .find((b) => b.type === 'text' && String((b as { text?: unknown }).text).startsWith(prefix));
-      if (!found) throw new Error(`no ${prefix} block in the output`);
-      return found;
-    }
-
-    describe.each(shapes)('$label', ({ build, prefix }) => {
-      it('keeps the result marker, TTL included', () => {
-        const input = build(resultWith({ content: 'payload', cache_control: marker }));
-        const before = structuredClone(input);
-        const out = normalize(input);
-        expect(textified(out.messages, prefix)).toEqual({
-          type: 'text',
-          text: `${prefix}]: payload`,
-          cache_control: marker,
-        });
-        expect(input).toEqual(before);
+    describe.each(shapes)('$label', ({ build, event, before }) => {
+      it('goes whole, whatever its content, with nothing of it left as text, and the input unchanged', () => {
+        for (const content of ['zz-payload', [{ type: 'text', text: 'zz-payload' }, { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'zzzz' } }], { zz: 'payload' }, null]) {
+          const result = resultWith({ content, is_error: true });
+          const input = build(result);
+          const snapshot = structuredClone(input);
+          const { events, onEvent } = collectEvents();
+          const dropped: ProviderBlock[] = [];
+          const out = normalize(input, { onEvent, onBlockDropped: (block) => dropped.push(block) });
+          expect(JSON.stringify(out.messages)).not.toContain('zz');
+          expect(events.filter((e) => e.kind.endsWith('_dropped'))).toEqual([event]);
+          expect(dropped).toHaveLength(1);
+          expect(dropped[0]).toBe(result);
+          expect(input).toEqual(snapshot);
+        }
       });
 
-      it('carries a marker from inside the content when the result has none', () => {
+      it('hands its marker to the last cacheable block before it, as a copy the caller hears of', () => {
+        const input = build(resultWith({ content: 'payload', cache_control: marker }));
+        const snapshot = structuredClone(input);
+        const copies: Array<[ProviderBlock, ProviderBlock]> = [];
+        const out = normalize(input, { onBlockReplaced: (original, copy) => copies.push([original, copy]) });
+        const marked = out.messages.flatMap((m) => m.content).filter((b) => b.cache_control);
+        expect(marked).toHaveLength(1);
+        expect(marked[0]).toMatchObject({ cache_control: marker });
+        expect(JSON.stringify(marked[0])).toContain(before);
+        expect(copies).toHaveLength(1);
+        expect(copies[0]![1]).toBe(marked[0]);
+        expect(copies[0]![0]).not.toHaveProperty('cache_control');
+        expect(input.flatMap((m) => m.content)).toContain(copies[0]![0]);
+        expect(JSON.stringify(copies[0]![0])).toContain(before);
+        expect(input).toEqual(snapshot);
+      });
+
+      it('hands on a marker from inside its content when it has none of its own', () => {
         const input = build(resultWith({
           content: [
             { type: 'text', text: 'one', cache_control: { type: 'ephemeral' } },
             { type: 'text', text: 'two', cache_control: marker },
           ],
         }));
-        const block = textified(normalize(input).messages, prefix);
-        expect(block.cache_control).toEqual(marker);
-        expect(block.text).toBe(`${prefix}]: one\ntwo`);
+        const marked = normalize(input).messages.flatMap((m) => m.content).filter((b) => b.cache_control);
+        expect(marked).toHaveLength(1);
+        expect(marked[0]!.cache_control).toEqual(marker);
+        expect(JSON.stringify(marked[0])).toContain(before);
       });
+    });
 
-      it('says when the result was an error', () => {
-        const input = build(resultWith({ content: 'it failed', is_error: true }));
-        expect(textified(normalize(input).messages, prefix).text).toBe(`${prefix}, an error]: it failed`);
-      });
+    it('hands a marker on from a turn of its own to the turn before it, past a thinking block', () => {
+      const orphan = { ...r('ite9', 'payload'), cache_control: marker };
+      const input: ProviderMessage[] = [user(t('go')), assistant(think('mulling')), user(orphan)];
+      const out = normalize(input);
+      const marked = out.messages.flatMap((m) => m.content).filter((b) => b.cache_control);
+      expect(marked).toEqual([{ type: 'text', text: 'go', cache_control: marker }]);
+    });
 
-      it.each([
-        {
-          part: 'a url image',
-          content: [{ type: 'image', source: { type: 'url', url: 'https://zz.example/chart.png' } }],
-          expected: JSON.stringify({ type: 'image', source: { type: 'url', url: 'https://zz.example/chart.png' } }),
-        },
-        {
-          part: 'a base64 document',
-          content: [{ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: 'zzzz'.repeat(1024) } }],
-          expected: '[Document: application/pdf, ~3KB, not shown to you]',
-        },
-        {
-          part: 'a text document',
-          content: [{ type: 'document', source: { type: 'text', media_type: 'text/plain', data: 'zz-the text' } }],
-          expected: JSON.stringify({ type: 'document', source: { type: 'text', media_type: 'text/plain', data: 'zz-the text' } }),
-        },
-        {
-          part: 'an MCP-style image',
-          content: [{ type: 'image', data: 'zzzz'.repeat(1024), mimeType: 'image/jpeg' }],
-          expected: '[Image: image/jpeg, ~3KB, not shown to you]',
-        },
-        {
-          part: 'a generated image',
-          content: [{ type: 'generated_image', data: 'zzzz'.repeat(1024), mimeType: 'image/png' }],
-          expected: '[Image: image/png, ~3KB, not shown to you]',
-        },
-        {
-          part: 'base64 audio',
-          content: [{ type: 'audio', source: { type: 'base64', mediaType: 'audio/mpeg', data: 'zzzz'.repeat(1024) } }],
-          expected: '[Audio: audio/mpeg, ~3KB, not shown to you]',
-        },
-        {
-          part: 'base64 video',
-          content: [{ type: 'video', source: { type: 'base64', mediaType: 'video/mp4', data: 'zzzz'.repeat(1024) } }],
-          expected: '[Video: video/mp4, ~3KB, not shown to you]',
-        },
-        {
-          part: 'a part type the module does not know',
-          content: [{ type: 'search_result', title: 'zz-title', source: 'zz-source' }],
-          expected: JSON.stringify({ type: 'search_result', title: 'zz-title', source: 'zz-source' }),
-        },
-        {
-          part: 'object content',
-          content: { rows: 2, ok: true },
-          expected: JSON.stringify({ rows: 2, ok: true }),
-        },
-        { part: 'numeric content', content: 42, expected: '42' },
-        { part: 'null content', content: null, expected: '' },
-      ])('renders $part without losing its payload', ({ content, expected }) => {
-        const { events, onEvent } = collectEvents();
-        const out = normalize(build(resultWith({ content })), { onEvent });
-        expect(textified(out.messages, prefix).text).toBe(`${prefix}]: ${expected}`);
-        const event = events.find((e) => 'recoveredChars' in e) as { recoveredChars: number };
-        expect(event.recoveredChars).toBe(expected.length);
-      });
+    it('lets the marker go when the block before it already carries one, or nothing before it can', () => {
+      const earlier = { type: 'ephemeral' };
+      const taken = normalize([user({ ...t('go'), cache_control: earlier }, { ...r('ite9'), cache_control: marker }), assistant(t('ok'))]);
+      expect(taken.messages.flatMap((m) => m.content).filter((b) => b.cache_control)).toEqual([{ type: 'text', text: 'go', cache_control: earlier }]);
+      const first = normalize([user({ ...r('ite9'), cache_control: marker }), assistant(t('ok'))]);
+      expect(first.messages.flatMap((m) => m.content).some((b) => b.cache_control)).toBe(false);
+    });
+
+    it('hands a marker past whitespace-only text, which the wire drops, to the text before it', () => {
+      const out = normalize([user(t('go'), t('   '), { ...r('ite9'), cache_control: marker }), assistant(t('ok'))]);
+      expect(out.messages.flatMap((m) => m.content).filter((b) => b.cache_control)).toEqual([{ type: 'text', text: 'go', cache_control: marker }]);
+    });
+
+    it('moves the marker onto the block before it though that block carries one inside its content, which the wire doesn\'t send', () => {
+      const earlier = { type: 'ephemeral' };
+      const kept = { ...r('ite1'), content: [{ type: 'text', text: 'payload', cache_control: earlier }] } as ProviderBlock;
+      const out = normalize([user(t('go')), assistant(u('ite1')), user(kept, { ...r('ite1', 'again'), cache_control: marker })]);
+      expect(out.messages.at(-1)!.content).toEqual([{ ...kept, cache_control: marker }]);
+    });
+
+    it('reads a missing block as cacheable, as the floating marker did before', () => {
+      expect(lastCacheableBlockIndex([{ type: 'text', text: 'a' }, null as unknown as Record<string, unknown>])).toBe(1);
+    });
+
+    it('leaves a user turn it empties in place, holding the leading text, so no request becomes a prefill and no two assistant turns merge', () => {
+      const last: ProviderMessage[] = [user(t('go')), assistant(u('ite1')), user(r('ite1')), assistant(t('done')), user(r('ite9', 'late'))];
+      expect(normalize(last).messages.at(-1)).toEqual({ role: 'user', content: [{ type: 'text', text: '[continuing]' }] });
+      expect(normalize(last, { leadingUserText: 'resume' }).messages.at(-1)).toEqual({ role: 'user', content: [{ type: 'text', text: 'resume' }] });
+      const between = normalize([user(t('go')), assistant(t('a1')), user(r('ite9', 'late')), assistant(t('a3'))]);
+      expect(between.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'user', 'assistant']);
+      expect(between.messages[2]).toEqual({ role: 'user', content: [{ type: 'text', text: '[continuing]' }] });
+      const kept = normalize([user(t('go'), r('ite9')), assistant(t('done'))]);
+      expect(kept.messages).toEqual([user(t('go')), assistant(t('done'))]);
     });
   });
 
@@ -953,7 +889,7 @@ describe('normalizeToolPairs', () => {
       expect(contents).toContain('zz-leading payload');
     });
 
-    it('shape C — duplicate result re-appended after a later turn: textified, not dropped', () => {
+    it('shape C — duplicate result re-appended after a later turn: dropped, its turn kept so the request ends on the user', () => {
       const input: ProviderMessage[] = [
         user(t('go')),
         assistant(u('ite1')),
@@ -965,16 +901,9 @@ describe('normalizeToolPairs', () => {
       const out = normalize(input, { onEvent });
 
       expect(converseViolations(out.messages)).toEqual([]);
-      const allText = out.messages
-        .flatMap((m) => m.content)
-        .map((b) => (b as ProviderBlock & { text?: string }).text ?? '')
-        .join('\n');
-      expect(allText).toContain('zz-duplicate payload');
-      const textified = events.find((e) => e.kind === 'stray_tool_result_textified') as {
-        reason: string;
-      };
-      expect(textified).toBeDefined();
-      expect(textified.reason).toBe('cycle_closed');
+      expect(JSON.stringify(out.messages)).not.toContain('zz-duplicate payload');
+      expect(events).toContainEqual({ kind: 'stray_tool_result_dropped', toolUseId: 'ite1', fromEnvelope: 4, reason: 'cycle_closed' });
+      expect(out.messages.at(-1)).toEqual({ role: 'user', content: [{ type: 'text', text: '[continuing]' }] });
     });
 
     it('relocates two strays into the cycle in CALL order, not reversed', () => {
@@ -1042,7 +971,7 @@ describe('normalizeToolPairs', () => {
   // A provider either rejects a message holding two results for one call or picks one of them by its own rules.
 
   describe('duplicate results for one call', () => {
-    it('pairs the first result and textifies the second with provenance', () => {
+    it('pairs the first result and leaves the second out', () => {
       const input: ProviderMessage[] = [
         user(t('go')),
         assistant(u('ite1')),
@@ -1057,19 +986,8 @@ describe('normalizeToolPairs', () => {
         content?: unknown;
       };
       expect(survivor.content).toBe('zz-real payload');
-      const cycleText = cycle.content
-        .map((b) => (b as ProviderBlock & { text?: string }).text ?? '')
-        .join('\n');
-      expect(cycleText).toContain('[duplicate tool_result for ite1]: zz-duplicate payload');
-      const textified = events.find((e) => e.kind === 'stray_tool_result_textified') as {
-        toolUseId: string;
-        reason: string;
-        recoveredChars: number;
-      };
-      expect(textified.toolUseId).toBe('ite1');
-      expect(textified.reason).toBe('duplicate_in_cycle');
-      expect(textified.recoveredChars).toBe('zz-duplicate payload'.length);
-      expect(events.some((e) => e.kind === 'synthetic_pending_result')).toBe(false);
+      expect(cycle.content).toHaveLength(1);
+      expect(events).toEqual([{ kind: 'stray_tool_result_dropped', toolUseId: 'ite1', fromEnvelope: 2, reason: 'duplicate_in_cycle' }]);
     });
 
     it('consumes per id: a second envelope-mate for another call is untouched', () => {
@@ -1085,7 +1003,7 @@ describe('normalizeToolPairs', () => {
       expect(events).toEqual([]);
     });
 
-    it('textifies every copy after the first when a call is answered three times', () => {
+    it('leaves out every copy after the first when a call is answered three times', () => {
       const input: ProviderMessage[] = [
         user(t('go')),
         assistant(u('ite1')),
@@ -1100,12 +1018,8 @@ describe('normalizeToolPairs', () => {
 
       const cycle = out.messages[2]!;
       expect(resultIds(cycle.content)).toEqual(['ite1']);
-      const cycleText = cycle.content
-        .map((b) => (b as ProviderBlock & { text?: string }).text ?? '')
-        .join('\n');
-      expect(cycleText).toContain('zz-duplicate payload');
-      expect(cycleText).toContain('zz-third payload');
-      expect(events.filter((e) => e.kind === 'stray_tool_result_textified')).toHaveLength(2);
+      expect(cycle.content).toHaveLength(1);
+      expect(events.filter((e) => e.kind === 'stray_tool_result_dropped')).toHaveLength(2);
     });
   });
 
@@ -1300,11 +1214,11 @@ describe('normalizeToolPairs', () => {
       const { events, onEvent } = collectEvents();
       const out = normalize(input, { onEvent });
 
-      expect(resultText(out, 4)).toEqual(['text:[duplicate tool_result for ite1]: a copy of the first']);
+      expect(JSON.stringify(out.messages)).not.toContain('a copy of the first');
       expect(events).toContainEqual(
-        expect.objectContaining({ kind: 'stray_tool_result_textified', reason: 'cycle_closed' }),
+        expect.objectContaining({ kind: 'stray_tool_result_dropped', reason: 'cycle_closed' }),
       );
-      expect(resultText(out, 6)).toEqual(['result:[pending]', 'text:waiting']);
+      expect(resultText(out, out.messages.length - 1)).toEqual(['result:[pending]', 'text:waiting']);
     });
 
     it('a result written before every call with its id answers the first of them', () => {
@@ -1424,9 +1338,62 @@ describe('normalizeToolPairs', () => {
 describe('PREFIX_REWRITING_NORMALIZE_EVENT_KINDS', () => {
   it('holds exactly the repairs that rewrite prefix bytes', () => {
     expect([...PREFIX_REWRITING_NORMALIZE_EVENT_KINDS].sort()).toEqual([
-      'orphan_tool_result_textified',
-      'stray_tool_result_textified',
+      'orphan_tool_result_dropped',
+      'stray_tool_result_dropped',
       'synthetic_pending_result',
     ]);
+  });
+});
+
+describe('normalizeToolPairs: a pending result made earlier, and the missing id', () => {
+  it('reports no replacement for a dropped block by a [pending] result an earlier normalization made, which is an input block now', () => {
+    const first = normalize([user(t('go')), assistant(u('m1'))]);
+    const pending = first.messages[2]!.content[0]!;
+    expect(pending).toMatchObject({ type: 'tool_result', content: '[pending]' });
+    const replaced: Array<[ProviderBlock, ProviderBlock]> = [];
+    const second = normalize(
+      [...first.messages.slice(0, 2), user(pending, r('zz-orphan'))],
+      { onBlockReplaced: (original, replacement) => replaced.push([original, replacement]) },
+    );
+    expect(replaced).toEqual([]);
+    expect(JSON.stringify(second.messages)).not.toContain('zz-orphan');
+    expect(second.messages.at(-1)!.content).toEqual([pending]);
+  });
+
+  it('puts the leading text in a user turn a drop leaves with only blank text, so the turn stays', () => {
+    const replaced: Array<[ProviderBlock, ProviderBlock]> = [];
+    const orphan = r('zz-orphan');
+    const out = normalize([user(t('go')), assistant(t('ok')), user(t('  '), orphan)], { onBlockReplaced: (original, replacement) => replaced.push([original, replacement]) });
+    expect(JSON.stringify(out.messages)).not.toContain('zz-orphan');
+    expect(out.messages).toHaveLength(3);
+    expect(out.messages[2]!.content).toContainEqual({ type: 'text', text: '[continuing]' });
+    expect(replaced).toHaveLength(1);
+    expect(replaced[0]![0]).toBe(orphan);
+  });
+
+  it('puts the leading text in a user turn a drop leaves with only media without a source, which the wire doesn\'t send', () => {
+    const out = normalize([user(t('go')), assistant(t('ok')), user({ type: 'image' } as ProviderBlock, r('zz-orphan'))]);
+    expect(JSON.stringify(out.messages)).not.toContain('zz-orphan');
+    expect(out.messages).toHaveLength(3);
+    expect(out.messages[2]!.content).toContainEqual({ type: 'text', text: '[continuing]' });
+  });
+
+  it('reports a second result with an empty id as missing one, in its cycle and after it', () => {
+    const inCycle = collectEvents();
+    normalize([user(t('go')), assistant(u('')), user(r(''), r(''))], { onEvent: inCycle.onEvent });
+    expect(inCycle.events.filter((e) => e.kind === 'stray_tool_result_dropped')).toEqual([
+      { kind: 'stray_tool_result_dropped', toolUseId: '<missing>', fromEnvelope: 2, reason: 'duplicate_in_cycle' },
+    ]);
+    const after = collectEvents();
+    normalize([user(t('go')), assistant(u('')), user(r('')), assistant(t('ok')), user(r(''))], { onEvent: after.onEvent });
+    expect(after.events.filter((e) => e.kind === 'stray_tool_result_dropped')).toEqual([
+      { kind: 'stray_tool_result_dropped', toolUseId: '<missing>', fromEnvelope: 4, reason: 'cycle_closed' },
+    ]);
+  });
+
+  it('reports a result with an empty id as missing one', () => {
+    const { events, onEvent } = collectEvents();
+    normalize([user(t('go')), assistant(t('ok')), user(r(''))], { onEvent });
+    expect(events.filter((e) => e.kind === 'orphan_tool_result_dropped')).toEqual([{ kind: 'orphan_tool_result_dropped', toolUseId: '<missing>' }]);
   });
 });

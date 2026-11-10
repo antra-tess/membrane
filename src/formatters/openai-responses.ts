@@ -13,7 +13,7 @@ import type {
   StreamEmission,
   StreamParser,
 } from './types.js';
-import { responsesToolOutput } from '../providers/responses-input.js';
+import { responsesToolOutput, toolOutputCallId, unansweredToolOutputs } from '../providers/responses-input.js';
 
 import { imageForRequest, urlImageForRequest } from '../utils/image-media.js';
 import { convertMcpMedia } from '../utils/mcp-media.js';
@@ -84,7 +84,12 @@ export function responsesRawItemKey(rawItem: { type?: unknown; id?: unknown }): 
  * carried when its items are. Within a message, blocks whose items share a
  * type and id are one item, sent once; a block whose item differs under the
  * same key isn't carried. Everything else is converted to Responses input
- * items in its place, and native items are never rewritten.
+ * items in its place, and native items are never rewritten. A tool output,
+ * native or converted, whose call no input item carries is left out, and its
+ * message reported altered: a result without its call is never sent, alone
+ * or as text. So is one past as many outputs for a call id as there are
+ * calls before it that carry it: the first outputs for a call are the ones
+ * sent (unansweredToolOutputs).
  */
 export class OpenAIResponsesFormatter implements PrefillFormatter {
   readonly name = 'openai-responses';
@@ -97,6 +102,15 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
   buildMessages(messages: NormalizedMessage[], options: BuildOptions): BuildResult {
     messages = convertMcpMedia(messages);
     const items: NativeItem[] = [];
+    // The message each item came from, by position, so a left-out output
+    // reports its own.
+    const from: number[] = [];
+    const push = (index: number, pushed: readonly NativeItem[]) => {
+      for (const item of pushed) {
+        from.push(index);
+        items.push(item);
+      }
+    };
     let hasImportedItems = false;
 
     for (let index = 0; index < messages.length; index++) {
@@ -104,7 +118,7 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
       const onAltered = options.fidelity ? () => options.fidelity!.alter(index) : undefined;
       const nativeItems = message.metadata?.[OPENAI_RESPONSES_ITEMS_METADATA_KEY];
       if (Array.isArray(nativeItems)) {
-        items.push(...nativeItems as NativeItem[]);
+        push(index, nativeItems as NativeItem[]);
         hasImportedItems = true;
         continue;
       }
@@ -113,7 +127,7 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
       let pendingParts: ContentBlock[] = [];
       const flushPending = () => {
         if (pendingParts.length === 0) return;
-        items.push(...this.convertBlocks(message, pendingParts, options.assistantParticipant, onAltered));
+        push(index, this.convertBlocks(message, pendingParts, options.assistantParticipant, onAltered));
         pendingParts = [];
       };
 
@@ -133,7 +147,7 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
         const key = responsesRawItemKey(rawItem);
         const sent = seenRawItems.get(key);
         if (!sent) {
-          items.push(rawItem);
+          push(index, [rawItem]);
           seenRawItems.set(key, rawItem);
         } else if (sent !== rawItem && JSON.stringify(sent) !== JSON.stringify(rawItem)) {
           onAltered?.();
@@ -142,16 +156,28 @@ export class OpenAIResponsesFormatter implements PrefillFormatter {
       flushPending();
     }
 
+    const unanswered = unansweredToolOutputs(items);
+    const sent = items.filter((item, index) => {
+      const drop = unanswered.get(index);
+      if (drop === undefined) return true;
+      const id = toolOutputCallId(item);
+      options.onNormalize?.(drop === 'stray'
+        ? { kind: 'stray_tool_result_dropped', toolUseId: id!, reason: 'answered' }
+        : { kind: 'orphan_tool_result_dropped', toolUseId: id ?? '<missing>' });
+      options.fidelity?.alter(from[index]!);
+      return false;
+    });
+
     // `instructions` is a request field apart from the input items, so sending
     // it again doesn't change the input prefix or its caching.
     const hasImportedSystemItem = hasImportedItems ||
-      items.some(item =>
+      sent.some(item =>
         (item.type === 'message' || item.type === undefined) &&
         ((item as { role?: unknown }).role === 'developer' ||
           (item as { role?: unknown }).role === 'system'));
 
     return {
-      messages: items as unknown as BuildResult['messages'],
+      messages: sent as unknown as BuildResult['messages'],
       systemContent: hasImportedSystemItem ? undefined : options.systemPrompt,
       stopSequences: options.additionalStopSequences ?? [],
       nativeTools: options.tools?.map(tool => ({

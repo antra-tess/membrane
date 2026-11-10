@@ -142,16 +142,24 @@ describe('NativeFormatter: an effort-only system change', () => {
     ]);
   });
 
-  it('goes after a result that pairing turns into text, and before one after it', () => {
+  it('goes after a turn whose result pairing leaves out, and before one after it, the turn kept', () => {
     const orphan = (id: string): NormalizedMessage => ({ participant: 'User', content: [result(id)] });
     const before = build([user('u0'), reply(text('a1')), orphan('t9'), effort('low'), reply(text('a4'))]);
     expect(roles(before)).toEqual(['user', 'assistant', 'user', 'system', 'assistant']);
     expect(before.messages[3]).toEqual(marker('low'));
-    expect(JSON.stringify(before.messages[2])).toContain('t9');
+    expect(before.messages[2]).toEqual({ role: 'user', content: [{ type: 'text', text: '[continuing]' }] });
     const after = build([user('u0'), reply(text('a1')), effort('low'), orphan('t9'), reply(text('a4'))]);
     expect(roles(after)).toEqual(['user', 'assistant', 'system', 'user', 'assistant']);
     expect(after.messages[2]).toEqual(marker('low'));
-    expect(JSON.stringify(after.messages[3])).toContain('t9');
+    expect(after.messages[3]).toEqual({ role: 'user', content: [{ type: 'text', text: '[continuing]' }] });
+  });
+
+  it('goes after a turn whose result pairing leaves out and a pending result for an earlier call fills', () => {
+    const orphan: NormalizedMessage = { participant: 'User', content: [result('t9')] };
+    const built = build([user('u0'), reply(call('t1')), orphan, effort('low'), reply(text('a4'))]);
+    expect(roles(built)).toEqual(['user', 'assistant', 'user', 'system', 'assistant']);
+    expect(built.messages[3]).toEqual(marker('low'));
+    expect((built.messages[2]!.content as Array<{ type: string }>).map((block) => block.type)).toEqual(['tool_result']);
   });
 
   it('after the whole user turn where a cut would part a tool result from its call', () => {
