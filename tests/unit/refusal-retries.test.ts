@@ -87,6 +87,13 @@ describe('refusalRetries — complete()', () => {
     expect(response.stopReason).toBe('refusal');
     expect(adapter.calls).toBe(3);
   });
+
+  it('does not re-issue a reasoning_extraction refusal, whatever the budget', async () => {
+    const adapter = new RefusingAdapter(1, 'PARTIAL-REFUSED', 'GOOD', 'reasoning_extraction');
+    const response = await new Membrane(adapter).complete(createRequest(), { refusalRetries: 2 });
+    expect(response.stopReason).toBe('refusal');
+    expect(adapter.calls).toBe(1);
+  });
 });
 
 describe('refusalRetries — streamYielding()', () => {
@@ -118,6 +125,17 @@ describe('refusalRetries — streamYielding()', () => {
     const text = JSON.stringify((complete as { response: unknown }).response);
     expect(text).toContain('GOOD');
     expect(text).not.toContain('PARTIAL-REFUSED');
+  });
+
+  it('does not re-issue a reasoning_extraction refusal: no retrying event, one call', async () => {
+    const adapter = new RefusingAdapter(1, 'PARTIAL-REFUSED', 'GOOD', 'reasoning_extraction');
+    const events = await collect(
+      new Membrane(adapter).streamYielding(createRequest(), { refusalRetries: 2 }),
+    );
+    expect(events.some((e) => e.type === 'retrying')).toBe(false);
+    expect(adapter.calls).toBe(1);
+    const complete = events.find((e) => e.type === 'complete');
+    expect((complete as { response: { stopReason: string } }).response.stopReason).toBe('refusal');
   });
 
   it('announces no category when the adapter reports none, whatever its raw response holds', async () => {
