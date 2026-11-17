@@ -5,7 +5,9 @@
   to `begin`/`prefix`/`finish`, and senders must return raw `stop_reason` alongside
   usage. Missing or unknown refresh terminals retire the snapshot with a
   `skipped` event with reason `unknown-refresh-terminal` rather than repeatedly resending it. `KeepaliveAttempt` is an
-  opaque issuer-specific handle exposing only a read-only key.
+  opaque issuer-specific handle exposing only a read-only key, exported from the
+  package root. `KeepaliveSend` accepts an optional `stop_reason: unknown` field;
+  pre-existing custom senders remain assignable without opting in.
 - Direct adapter callers enabling suppression must declare cache-warming prefill
   or other maintenance with `ProviderRequestOptions.keepalivePurpose: 'maintenance'`.
   Ordinary assistant-prefill continuations remain normal foreground inference by

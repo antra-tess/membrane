@@ -1,6 +1,6 @@
 /**
- * The real SDK fails a refused or undelivered stream at its iterator's first
- * event, after messages.stream() has returned. The provider's cache clock
+ * The real SDK surfaces request rejection or transport failure at its iterator's
+ * first event (distinct from a later semantic refusal), after messages.stream() has returned. The provider's cache clock
  * starts at a request's send.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -169,6 +169,27 @@ it('legacy resolved refusal continues scheduling by default', async () => {
   expect(replays()).toHaveLength(1);
 });
 
+for (const lane of ['complete', 'stream'] as const) {
+  for (const suppression of [{}, { suppressOnRefusal: false }]) {
+    it(`default-off ${lane} isolates record failure (${JSON.stringify(suppression)})`, async () => {
+      const { a, client } = adapter({ ...suppression, lanes: [lane] }, () => answer,
+        () => sdkStream([messageStart, ...rest]));
+      const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const record = vi.spyOn(a.cacheKeepalive!, 'record').mockImplementation(() => {
+        throw new Error('record bookkeeping');
+      });
+      const result = lane === 'complete' ? await a.complete(request('record-error'))
+        : await a.stream(request('record-error'), noCallbacks);
+      expect(result.stopReason).toBe('end_turn');
+      expect(result.content).toEqual([{ type: 'text', text: 'ok' }]);
+      expect(record).toHaveBeenCalledTimes(1);
+      expect(record.mock.calls[0][2]).toBe(lane);
+      expect(lane === 'complete' ? client.messages.create : client.messages.stream).toHaveBeenCalledTimes(1);
+      expect(warning).toHaveBeenCalledTimes(1);
+    });
+  }
+}
+
 it('bookkeeping exceptions do not break foreground results', async () => {
   const { a } = adapter({ suppressOnRefusal: true, lanes: ['complete'] }, () => answer);
   const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -176,7 +197,7 @@ it('bookkeeping exceptions do not break foreground results', async () => {
   vi.spyOn(a.cacheKeepalive!, 'finish').mockImplementation((...args) => { finish(...args); throw new Error('observer'); });
   expect((await a.complete(request('safe'))).stopReason).toBe('end_turn');
   expect(a.cacheKeepalive!.getStatus()).toHaveLength(1); // State changed before the throw.
-  expect(warning).toHaveBeenCalledWith('[membrane] Keepalive bookkeeping failed; state may be partially updated and refusal suppression may be incomplete. Check custom request serialization; disable cacheKeepalive if failures persist.');
+  expect(warning).toHaveBeenCalledWith('[membrane] Keepalive bookkeeping failed; state may be partially updated. Check custom request serialization; disable cacheKeepalive if failures persist.');
   warning.mockRestore();
 });
 
@@ -239,7 +260,7 @@ it('opt-in complete deadline still aborts the SDK and cannot rearm', async () =>
   client.messages.create.mockImplementation((_wire: any, options: any) => new Promise((_resolve, reject) => {
     options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
   }));
-  const result = settle(a.complete(request('deadline'), { timeoutMs: 20, keepalivePurpose: 'maintenance' }));
+  const result = settle(a.complete(request('deadline'), { timeoutMs: 20 }));
   await vi.advanceTimersByTimeAsync(20);
   expect((await result as any).type).toBe('timeout');
   expect(a.cacheKeepalive!.getStatus()).toEqual([]);
@@ -299,7 +320,12 @@ for (const lane of ['complete', 'stream'] as const) {
       reason = mode === 'maintenance' ? 'max_tokens' : undefined;
       await run('A', options); // Retained-barrier control.
       expect(a.cacheKeepalive!.getStatus()).toEqual([]);
+      const aKey = lineageKey({ model: request('A').model, system: request('A').system });
+      const bKey = lineageKey({ model: request('B').model, system: request('B').system });
+      expect((a.cacheKeepalive as any).outcomes.has(aKey)).toBe(true);
       reason = undefined; await run('B'); // Evict A with no known-normal success.
+      expect([...(a.cacheKeepalive as any).outcomes.keys()]).toEqual([bKey]);
+      expect(events).toContainEqual({ type: 'skipped', key: aKey, reason: 'outcome-lru-eviction' });
       reason = mode === 'maintenance' ? 'max_tokens' : undefined;
       await run('A', options);
       await vi.advanceTimersByTimeAsync(100);

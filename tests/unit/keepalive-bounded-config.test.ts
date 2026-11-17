@@ -2,11 +2,11 @@ import { spawn } from 'node:child_process';
 import { expect, it } from 'vitest';
 
 function runChild(script: string, executionMs = 5_000) {
-  return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+  return new Promise<{ code: number | null; stdout: string; stderr: string; signal: string | null; elapsedMs: number }>((resolve, reject) => {
     const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], {
       cwd: new URL('../../', import.meta.url), stdio: ['ignore', 'pipe', 'pipe'],
     });
-    let stdout = '', stderr = '', ready = false;
+    let stdout = '', stderr = '', ready = false, readyAt = 0;
     // Import/startup has its own generous watchdog. The bounded-loop deadline
     // starts only after the child confirms that its imports have completed.
     let timer = setTimeout(() => child.kill('SIGKILL'), 60_000);
@@ -14,13 +14,14 @@ function runChild(script: string, executionMs = 5_000) {
       stdout += chunk;
       if (!ready && stdout.includes('ready\n')) {
         ready = true;
+        readyAt = Date.now();
         clearTimeout(timer);
         timer = setTimeout(() => child.kill('SIGKILL'), executionMs);
       }
     });
     child.stderr.on('data', chunk => { stderr += chunk; });
     child.on('error', error => { clearTimeout(timer); reject(error); });
-    child.on('close', code => { clearTimeout(timer); resolve({ code, stdout, stderr }); });
+    child.on('close', (code, signal) => { clearTimeout(timer); resolve({ code, stdout, stderr, signal, elapsedMs: Date.now() - readyAt }); });
   });
 }
 
@@ -40,10 +41,10 @@ it.each([-1, -0.5, 0, 0.5, 1])('maxLineages %s returns before SDK send and keeps
       stop_reason:'end_turn',usage:{input_tokens:1,output_tokens:0}
     };}}};
     client.withOptions=()=>client;a.client=client;
-    await a.complete({model:'claude-opus-4-1',maxTokens:1,
-      system:[{type:'text',text:'system',cache_control:{type:'ephemeral',ttl:'1h'}}],
+    for (const system of ['first', 'second']) await a.complete({model:'claude-opus-4-1',maxTokens:1,
+      system:[{type:'text',text:system,cache_control:{type:'ephemeral',ttl:'1h'}}],
       messages:[{role:'user',content:[{type:'text',text:'hi'}]}]});
-    assert.equal(sends,1);
+    assert.equal(sends,2);
     assert.equal(a.cacheKeepalive.outcomes.size,${cap >= 1 ? 1 : 0});
     assert.equal(a.cacheKeepalive.getStatus().length,${cap >= 1 ? 1 : 0});
     a.cacheKeepalive.stop();console.log('returned');
@@ -65,5 +66,30 @@ it('bounded-loop watchdog excludes child startup but still kills a stuck loop', 
   expect(slowStart.stdout).toContain('returned');
   const stuck = await runChild(`console.log('ready'); while (true) {}`, 50);
   expect(stuck.code).toBeNull();
+  expect(stuck.signal).toBe('SIGKILL');
+  expect(stuck.elapsedMs).toBeLessThan(5_000);
   expect(stuck.stdout).toContain('ready');
 }, 140_000);
+
+for (const suppression of ['{}', '{suppressOnRefusal:false}']) {
+  it.each(['-Infinity', '-1', '-0.5'])(`default-off negative cap %s is killably bounded (${suppression})`, async cap => {
+    const result = await runChild(`
+      import assert from 'node:assert/strict';
+      import { CacheKeepalive } from './src/cache-keepalive.ts';
+      console.log('ready');
+      let sends = 0;
+      const k = new CacheKeepalive(async () => { sends++; return {}; }, {
+        ...${suppression}, maxLineages:${cap}, refreshAfterMs:0
+      });
+      for (let i=0;i<8;i++) k.record({model:String(i), system:[{
+        type:'text',text:'system',cache_control:{type:'ephemeral',ttl:'1h'}
+      }],messages:[]}, undefined, 'stream');
+      assert.equal(k.getStatus().length,0);
+      await k.tick();
+      assert.equal(sends,0);
+      k.stop();console.log('returned');
+    `);
+    expect(result.code, result.stderr).toBe(0);
+    expect(result.stdout).toContain('returned');
+  }, 70_000);
+}

@@ -37,7 +37,7 @@ export interface KeepaliveUsage {
 export type KeepaliveSend = (
   wire: Record<string, unknown>,
   headers: Record<string, string> | undefined,
-) => Promise<{ usage?: KeepaliveUsage; stop_reason?: string | null }>;
+) => Promise<{ usage?: KeepaliveUsage; stop_reason?: unknown }>;
 
 export type KeepaliveLane = 'stream' | 'complete';
 
@@ -439,10 +439,10 @@ export class CacheKeepalive {
       // Preserve main's legacy processing (including errors) when opted out.
       const res = this.cfg.suppressOnRefusal ? resolved ?? {} : resolved;
       const response = { ...res };
-      reported = true;
       // Install the refusal barrier before receipt observers can replace the
       // snapshot. A result already stale at resolution still cannot suppress.
       const refused = this.cfg.suppressOnRefusal && res.stop_reason === 'refusal';
+      reported = true;
       if (refused && !this.stopped && this.lineages.get(key) === lin &&
           this.outcomes.get(key) === state && state) this.suppress(key, state, 'refresh');
       this.reportCall({
@@ -501,6 +501,9 @@ export class CacheKeepalive {
       // Transport failures are global, even when the invoked snapshot is stale.
       if (this.cfg.suppressOnRefusal && (this.stopped || (!invoked &&
           (this.lineages.get(key) !== lin || this.outcomes.get(key) !== state)))) return;
+      // A preparation failure cannot improve by retrying the same snapshot.
+      // Keep outcome identity so a later qualified prefix can replace it.
+      if (this.cfg.suppressOnRefusal && !invoked) this.lineages.delete(key);
       // Preparation failures are observable, but are not failed sends.
       if (!this.cfg.suppressOnRefusal || invoked) this.consecutiveErrors += 1;
       this.emit({ type: 'error', key, error: message, consecutive: this.consecutiveErrors });

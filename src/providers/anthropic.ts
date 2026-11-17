@@ -4,8 +4,8 @@ function keepaliveObservation<T>(observe: () => T, onFailure?: () => void): T | 
     try { onFailure?.(); } catch {}
     // No request, response, or exception payload: these can contain secrets.
     try { console.warn(onFailure
-      ? '[membrane] Keepalive begin bookkeeping failed; keepalive is now permanently stopped for this adapter. Check custom request serialization.'
-      : '[membrane] Keepalive bookkeeping failed; state may be partially updated and refusal suppression may be incomplete. Check custom request serialization; disable cacheKeepalive if failures persist.'); } catch {}
+      ? '[membrane] Keepalive begin bookkeeping failed; keepalive is now permanently stopped for this adapter. Check custom request serialization; create a new adapter to restart keepalive.'
+      : '[membrane] Keepalive bookkeeping failed; state may be partially updated. Check custom request serialization; disable cacheKeepalive if failures persist.'); } catch {}
     return undefined;
   }
 }

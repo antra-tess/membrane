@@ -31,15 +31,19 @@ This is retirement, not a new retry/backoff policy; an unknown refresh is never
 resent on every timer check. Any resolved sender resets consecutive transport
 errors, including refusals, empty responses and unknown terminals. Replay serialization
 failures emit `error` without incrementing that send-failure counter or delivering
-a call receipt, since the sender was not invoked.
+a call receipt, since the sender was not invoked. They retire only the failed
+replay snapshot (retaining outcome identity), so it is not retried every timer
+check; a later qualified foreground prefix can install a new snapshot.
 
 Initial eligibility (including after eviction or idle/ineffective retirement)
 requires a known-normal
 foreground completion too; a prefix alone never qualifies a fresh opt-in identity.
 Only a normal foreground request **begun after the accepted refusal** can rearm,
 and only with raw terminal `end_turn`, `stop_sequence`, `tool_use`, `max_tokens`
-or `pause_turn`. Missing/null/unknown terminal, parse error, transport error,
-cancellation, timer replay and declared maintenance do not rearm. Terminal
+or `pause_turn`. Missing/null/unknown terminal, transport error, cancellation,
+timer replay and declared maintenance do not rearm. Complete-response parse
+errors do not rearm; stream qualification precedes final response assembly
+(see the boundary below). Terminal
 parse fallbacks are not used. Begin order and refusal barriers use monotonic
 identities, not timestamps: equal clock readings and older in-flight successes
 cannot cross the barrier. A late foreground refusal is conservatively accepted
@@ -52,8 +56,10 @@ stopped identities cannot be resurrected by their outstanding completions.
 ## Purpose boundary
 
 `AnthropicAdapter.complete/stream` are normal foreground SDK entrypoints by
-default. Qualification is at the adapter boundary after its parsing/callbacks,
-not after downstream Membrane processing or application observers. A downstream
+default. Complete qualification follows response parsing. Stream qualification
+follows the observed provider terminal and stream callbacks, but precedes final
+response assembly and transformation-path parsing; an error there does not undo
+qualification. Neither lane waits for downstream Membrane processing or application observers. A downstream
 callback failure does not undo a successful provider outcome. A caller using these same entrypoints for cache-warming prefill or other
 maintenance **must**
 pass `ProviderRequestOptions.keepalivePurpose: 'maintenance'`. This trusted,
@@ -111,10 +117,10 @@ in both modes. This observer safety and adapter bookkeeping exception isolation
 are shared changes; default-off equivalence refers to scheduling and cap handling,
 not exception propagation.
 Adapter bookkeeping errors never replace foreground results (in either mode); a
-payload-free warning reports potentially partial state and incomplete suppression,
+payload-free warning reports potentially partial state,
 and recommends checking custom serialization or disabling keepalive if failures
 persist. A failed begin stops the keeper permanently for this adapter and emits
-`disabled` with a payload-free reason; its warning explicitly discloses that stop,
+`disabled` with a payload-free reason; its warning explicitly discloses that stop and directs callers to create a new adapter to restart,
 since its attempt identity cannot safely observe a subsequent refusal. Other failed bookkeeping is not a
 guarantee that suppression was applied.
 Finite nonpositive `maxLineages` retains no identities or snapshots (fractional caps round

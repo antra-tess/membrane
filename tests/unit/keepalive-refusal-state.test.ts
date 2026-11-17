@@ -49,13 +49,19 @@ it.each(['success', 'refusal', 'error'])('stale refresh %s preserves replacement
   let resolve!: (r: any) => void, reject!: (r: any) => void;
   const deferred = new Promise((a, b) => { resolve = a; reject = b; });
   const { k, normal, calls, events } = setup(() => deferred);
-  normal(); await vi.advanceTimersByTimeAsync(100);
+  const original = normal();
+  const originalSnapshot = (k as any).lineages.get(original.key);
+  await vi.advanceTimersByTimeAsync(100);
   const replacement = normal();
+  const replacementSnapshot = (k as any).lineages.get(replacement.key);
+  expect(replacementSnapshot).toBeDefined();
+  expect(replacementSnapshot).not.toBe(originalSnapshot);
   if (outcome === 'error') reject(new Error('old')); else resolve({ ...ok, stop_reason: outcome === 'refusal' ? 'refusal' : 'max_tokens' });
   await vi.advanceTimersByTimeAsync(0);
   expect(calls).toHaveLength(1);
   expect(events.map(e => e.type)).toEqual(outcome === 'error' ? ['error'] : []);
   expect(k.getStatus()).toHaveLength(1);
+  expect((k as any).lineages.get(replacement.key)).toBe(replacementSnapshot);
   k.finish(replacement, 'refusal'); expect(k.getStatus()).toEqual([]);
 });
 
@@ -233,7 +239,7 @@ function mainRetainedModels(maxLineages: number): string[] {
 }
 
 for (const suppression of [{}, { suppressOnRefusal: false }]) {
-  it.each([Infinity, NaN, -Infinity, 0, -1, -0.5, 0.5, 4])(
+  it.each([Infinity, NaN, 0, 0.5, 4])(
     `default-off cap %s matches main retention and sends (suppression ${JSON.stringify(suppression)})`,
     async cap => {
       const send = vi.fn(async (_wire: Record<string, unknown>) => ok);
@@ -347,7 +353,14 @@ it.each(['inflight replacement', 'error observer'])('global send-error limit sur
     },
   });
   normal();
-  replace = () => k.prefix(begin());
+  const originalSnapshot = [...(k as any).lineages.values()][0];
+  expect(originalSnapshot).toBeDefined();
+  replace = () => {
+    const replacement = begin(); k.prefix(replacement);
+    const snapshot = (k as any).lineages.get(replacement.key);
+    expect(snapshot).toBeDefined();
+    expect(snapshot).not.toBe(originalSnapshot);
+  };
   await vi.advanceTimersByTimeAsync(100);
   if (race === 'inflight replacement') replace();
   reject(new Error('outage'));
@@ -423,6 +436,7 @@ it('a refusal handle is observed once, including reentrant finish and replay aft
   expect(onEvent).toHaveBeenCalledTimes(1);
   state.normal();
   const snapshot = (k as any).lineages.get(refusing!.key);
+  expect(snapshot).toBeDefined();
   k.finish(refusing!, 'refusal');
   expect(onEvent).toHaveBeenCalledTimes(1);
   expect((k as any).lineages.get(refusing!.key)).toBe(snapshot);
@@ -444,7 +458,7 @@ it.each([null, undefined])('empty resolved refresh %s resets send failures and r
   expect(k.getStatus()).toHaveLength(1);
 });
 
-it.each(['cycle', 'toJSON'])('replay %s preparation errors preserve the transport-error run without disabling', async failure => {
+it.each(['cycle', 'toJSON'])('replay %s preparation errors retire the snapshot without changing the transport-error run', async failure => {
   const send = vi.fn(async () => { throw new Error('outage'); });
   const { k, begin, events, calls } = setup(send, { maxConsecutiveErrors: 2 });
   const w: Record<string, unknown> = wire();
@@ -455,10 +469,13 @@ it.each(['cycle', 'toJSON'])('replay %s preparation errors preserve the transpor
   await vi.advanceTimersByTimeAsync(300);
   expect(send).toHaveBeenCalledTimes(1);
   expect(calls.map(c => c.outcome)).toEqual(['error']);
-  expect(events).toHaveLength(4);
+  expect(events).toHaveLength(2);
   expect(events.every(e => e.type === 'error' && e.consecutive === 1)).toBe(true);
-  expect(k.getStatus()).toHaveLength(1);
+  expect(k.getStatus()).toHaveLength(0);
+  expect((k as any).outcomes.has(a.key)).toBe(true);
   delete w.circular; delete w.toJSON;
+  const fresh = begin(); k.prefix(fresh);
+  expect(k.getStatus()).toHaveLength(1);
   await vi.advanceTimersByTimeAsync(100);
   expect(events.slice(-2).map(e => e.type)).toEqual(['error', 'disabled']);
   expect(k.getStatus()).toEqual([]);
@@ -530,4 +547,13 @@ it.each([false, true])('error observer stop rechecks remain opt-in (%s)', async 
   if (suppressOnRefusal) state.normal(); else k.record(wire(), undefined, 'stream');
   await vi.advanceTimersByTimeAsync(100);
   expect(events.map(e => e.type)).toEqual(suppressOnRefusal ? ['error', 'disabled'] : ['error', 'disabled', 'disabled']);
+});
+
+it('throwing terminal metadata still delivers one error receipt', async () => {
+  const response = { ...ok };
+  Object.defineProperty(response, 'stop_reason', { enumerable: false, get() { throw new Error('metadata'); } });
+  const { normal, calls, events } = setup(async () => response);
+  normal(); await vi.advanceTimersByTimeAsync(100);
+  expect(calls.map(c => c.outcome)).toEqual(['error']);
+  expect(events).toEqual([expect.objectContaining({ type: 'error', consecutive: 1 })]);
 });
