@@ -603,3 +603,125 @@ it.each(['prefix', 'finish'])('eligibility accessor refusal cannot install a sna
   expect(k.getStatus()).toEqual([]);
   k.finish(attempt, 'end_turn'); expect(k.getStatus()).toEqual([]);
 });
+
+it('refusal suppresses before an unrelated response accessor throws', async () => {
+  const response = { stop_reason: 'refusal', get usage() { throw new Error('usage'); } };
+  const { k, normal, begin, calls, events } = setup(async () => response);
+  normal(); const pending = begin();
+  await vi.advanceTimersByTimeAsync(300);
+  expect(events.map(e => e.type)).toEqual(['suppressed', 'error']);
+  expect(calls.map(c => c.outcome)).toEqual(['error']);
+  k.finish(pending, 'end_turn');
+  expect(k.getStatus()).toEqual([]);
+});
+
+it('terminal metadata is read once for classification before checking snapshot identity', async () => {
+  let normal!: () => unknown, reads = 0;
+  const response = { usage: ok.usage };
+  Object.defineProperty(response, 'stop_reason', { get() {
+    reads++;
+    normal();
+    return 'future_stop';
+  } });
+  const state = setup(async () => response); normal = state.normal;
+  normal();
+  await vi.advanceTimersByTimeAsync(100);
+  expect(reads).toBe(1);
+  expect(state.k.getStatus()).toHaveLength(1);
+  expect(state.events).toEqual([]);
+});
+
+it.each(['stop', 'refusal', 'replace'])('usage accessor %s prevents stale refresh events', async action => {
+  let act!: () => void;
+  const response = { stop_reason: 'max_tokens' };
+  Object.defineProperty(response, 'usage', { get() { act(); return ok.usage; } });
+  const { k, begin, normal, events } = setup(async () => response);
+  normal();
+  let once = false;
+  act = () => {
+    if (once) return; once = true;
+    if (action === 'stop') k.stop();
+    if (action === 'refusal') k.finish(begin(), 'refusal');
+    if (action === 'replace') normal();
+  };
+  await vi.advanceTimersByTimeAsync(100);
+  expect(events.map(e => e.type)).toEqual(action === 'refusal' ? ['suppressed'] : []);
+  expect(k.getStatus()).toHaveLength(action === 'replace' ? 1 : 0);
+});
+
+it.each(['prefix', 'finish'])('eligibility accessor eviction/recreation invalidates %s', operation => {
+  const { k, begin, normal } = setup(undefined, { maxLineages: 1 }); normal();
+  const w = wire(), attempt = begin('normal', w);
+  let replacement: unknown;
+  Object.defineProperty(w, 'tool_choice', { get() {
+    begin('normal', wire('other'));
+    const fresh = begin(); k.finish(fresh, 'end_turn');
+    replacement = (k as any).lineages.get(fresh.key);
+    return undefined;
+  } });
+  if (operation === 'prefix') k.prefix(attempt); else k.finish(attempt, 'end_turn');
+  expect(replacement).toBeDefined();
+  expect((k as any).lineages.get(attempt.key)).toBe(replacement);
+});
+
+it.each(['prefix', 'finish'])('eligibility accessor stop invalidates %s', operation => {
+  const { k, begin, normal } = setup(); normal();
+  const w = wire(), attempt = begin('normal', w);
+  Object.defineProperty(w, 'tool_choice', { get() { k.stop(); return undefined; } });
+  if (operation === 'prefix') k.prefix(attempt); else k.finish(attempt, 'end_turn');
+  expect(k.getStatus()).toEqual([]);
+});
+
+it('eligibility accessor newer prefix cannot be overwritten by the outer prefix', () => {
+  const { k, begin, normal } = setup(); normal();
+  const w = wire(), attempt = begin('normal', w), freshWire = wire();
+  Object.defineProperty(w, 'tool_choice', { get() {
+    const fresh = begin('normal', freshWire); k.prefix(fresh);
+    return undefined;
+  } });
+  k.prefix(attempt);
+  expect((k as any).lineages.get(attempt.key).wire).toBe(freshWire);
+});
+
+it.each(['replace', 'refusal', 'stop'])('successful replay serialization %s prevents obsolete send', async action => {
+  const send = vi.fn(async () => ok);
+  const { k, begin, normal, calls } = setup(send);
+  const w: Record<string, unknown> = wire();
+  k.finish(begin('normal', w as ReturnType<typeof wire>), 'end_turn');
+  w.toJSON = () => {
+    if (action === 'replace') normal();
+    if (action === 'refusal') k.finish(begin(), 'refusal');
+    if (action === 'stop') k.stop();
+    return wire();
+  };
+  await vi.advanceTimersByTimeAsync(100);
+  expect(send).not.toHaveBeenCalled();
+  expect(calls).toEqual([]);
+  expect(k.getStatus()).toHaveLength(action === 'replace' ? 1 : 0);
+});
+
+it.each(['end_turn', 'stop_sequence', 'tool_use', 'max_tokens', 'pause_turn'])(
+  'known terminal %s qualifies foreground and refresh', async reason => {
+    const { k, begin, events, calls } = setup(async () => ({ ...ok, stop_reason: reason }));
+    k.finish(begin(), reason);
+    expect(k.getStatus()).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(events.map(e => e.type)).toEqual(['refreshed']);
+    expect(calls.map(c => c.outcome)).toEqual(['success']);
+  },
+);
+
+it.each([{}, { suppressOnRefusal: false }])('default-off refusal never uses suppression channel (%j)', async config => {
+  const onSuppressed = vi.fn();
+  // Construct directly so the first case genuinely omits the flag.
+  const k = new CacheKeepalive(async () => ({ ...ok, stop_reason: 'refusal' }), {
+    ...config, onSuppressed, refreshAfterMs: 100, checkIntervalMs: 100, maxIdleMs: 1000,
+  });
+  keepers.push(k);
+  const attempt = k.begin(wire(), undefined, 'stream');
+  expect(attempt).toBeUndefined();
+  k.record(wire(), undefined, 'stream');
+  await vi.advanceTimersByTimeAsync(300);
+  expect(onSuppressed).not.toHaveBeenCalled();
+  expect(k.getStatus()).toHaveLength(1);
+});

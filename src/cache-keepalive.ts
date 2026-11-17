@@ -213,7 +213,8 @@ export function messagesForRefresh(messages: readonly unknown[]): unknown[] {
 /**
  * Identity of a cache lineage: model, system and tools, the root of the cached
  * prefix. Requests that share all three share a lineage, whatever their lane
- * or messages, and the one recorded later replaces the other's snapshot.
+ * or messages. Legacy mode uses record order; suppression mode orders snapshots
+ * by request begin, ignoring older prefixes after a newer snapshot is installed.
  */
 export function lineageKey(wire: Record<string, unknown>): string {
   const h = createHash('sha256');
@@ -455,14 +456,15 @@ export class CacheKeepalive {
       // A resolved sender is a transport success even without a response body.
       // Preserve main's legacy processing (including errors) when opted out.
       const res = this.cfg.suppressOnRefusal ? resolved ?? {} : resolved;
-      const response = { ...res };
       // Install the refusal barrier before receipt observers can replace the
       // snapshot. Refusals apply to the currently retained key, even if the
       // snapshot or outcome identity was replaced during the sender await.
-      const refused = this.cfg.suppressOnRefusal && res.stop_reason === 'refusal';
-      reported = true;
+      const stopReason = this.cfg.suppressOnRefusal ? res.stop_reason : undefined;
+      const refused = this.cfg.suppressOnRefusal && stopReason === 'refusal';
       const currentState = this.outcomes.get(key);
       if (refused && !this.stopped && currentState) this.suppress(key, currentState, 'refresh');
+      const response = { ...res };
+      reported = true;
       this.reportCall({
         key, lane: lin.lane, startedAt, durationMs: Date.now() - startedAt,
         request: payload, outcome: 'success', response,
@@ -473,7 +475,7 @@ export class CacheKeepalive {
       if (refused) return;
       if (this.cfg.suppressOnRefusal) {
         if (this.stopped || this.lineages.get(key) !== lin || this.outcomes.get(key) !== state) return;
-        if (!knownTerminal(res.stop_reason)) {
+        if (!knownTerminal(stopReason)) {
           // Retire only the replay snapshot, not the retained refusal identity.
           // Do not invent a retry/backoff policy for an unqualified refresh.
           this.lineages.delete(key);
@@ -483,6 +485,9 @@ export class CacheKeepalive {
       }
       const read = res.usage?.cache_read_input_tokens ?? 0;
       const wrote = res.usage?.cache_creation_input_tokens ?? 0;
+      // Usage accessors, like receipt observers, may replace or stop this key.
+      if (this.cfg.suppressOnRefusal &&
+          (this.stopped || this.lineages.get(key) !== lin || this.outcomes.get(key) !== state)) return;
 
       if (read <= 0 || wrote > 0) {
         lin.ineffective += 1;

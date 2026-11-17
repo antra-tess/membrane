@@ -21,12 +21,15 @@ notification naming foreground or refresh. The existing `KeepaliveEvent` union
 and `onEvent` channel are unchanged; suppression notifications never go to
 `onEvent`. Register `onSuppressed` only when enabling suppression. Its throws
 and rejected promises are isolated. A stale non-refusal resolution only receives
-its transport receipt, not semantic state events. A stale refusal removes even a
+its transport receipt, not semantic state events. The guarantee that stale outcomes
+do not mutate a replacement applies only to non-refusals. A stale refusal removes even a
 replacement installed during the await and bars all attempts begun before observation. Rejected sender invocations still count toward the global consecutive
 transport-error limit and can emit `error`/`disabled`, even after snapshot replacement.
 `onCall.outcome: 'success'` means **the sender resolved and initial response
 metadata was readable**, not semantic success. A throwing response accessor can
-instead produce an error receipt and increment the failure count after resolution. With `onCall` configured and cloneable request/response values, each
+instead produce an error receipt and increment the failure count after resolution.
+Refusal metadata is inspected and suppression applied before copying other response
+properties, so an unrelated throwing accessor cannot bypass the refusal barrier. With `onCall` configured and cloneable request/response values, each
 actual sender invocation delivers one receipt, including refused, unknown, stale
 and failed sends. Receipt delivery is best-effort: clone failures or observer
 failures are isolated, not retried. Without `onCall`, no receipts are delivered.
