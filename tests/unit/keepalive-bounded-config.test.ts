@@ -1,12 +1,36 @@
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { expect, it } from 'vitest';
+
+function runChild(script: string, executionMs = 5_000) {
+  return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+    const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], {
+      cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '', stderr = '', ready = false;
+    // Import/startup has its own generous watchdog. The bounded-loop deadline
+    // starts only after the child confirms that its imports have completed.
+    let timer = setTimeout(() => child.kill('SIGKILL'), 60_000);
+    child.stdout.on('data', chunk => {
+      stdout += chunk;
+      if (!ready && stdout.includes('ready\n')) {
+        ready = true;
+        clearTimeout(timer);
+        timer = setTimeout(() => child.kill('SIGKILL'), executionMs);
+      }
+    });
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    child.on('error', error => { clearTimeout(timer); reject(error); });
+    child.on('close', code => { clearTimeout(timer); resolve({ code, stdout, stderr }); });
+  });
+}
 
 // Run in a killable child: a synchronous eviction-loop regression must never
 // block Vitest's event loop (its own timeout cannot interrupt JavaScript).
-it.each([-1, -0.5, 0, 0.5, 1])('maxLineages %s returns before SDK send and keeps a bounded map', cap => {
+it.each([-1, -0.5, 0, 0.5, 1])('maxLineages %s returns before SDK send and keeps a bounded map', async cap => {
   const script = `
     import assert from 'node:assert/strict';
     import { AnthropicAdapter } from './src/providers/anthropic.ts';
+    console.log('ready');
     const a = new AnthropicAdapter({apiKey:'sk-test',cacheKeepalive:{
       suppressOnRefusal:true,lanes:['complete'],maxLineages:${cap}
     }});
@@ -24,10 +48,22 @@ it.each([-1, -0.5, 0, 0.5, 1])('maxLineages %s returns before SDK send and keeps
     assert.equal(a.cacheKeepalive.getStatus().length,${cap >= 1 ? 1 : 0});
     a.cacheKeepalive.stop();console.log('returned');
   `;
-  const child = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], {
-    cwd: process.cwd(), timeout: 3000, killSignal: 'SIGKILL', encoding: 'utf8',
-  });
-  expect(child.error, child.stderr).toBeUndefined();
-  expect(child.status, child.stderr).toBe(0);
-  expect(child.stdout).toContain('returned');
-}, 10_000);
+  const result = await runChild(script);
+  expect(result.code, result.stderr).toBe(0);
+  expect(result.stdout).toContain('ready\n');
+  expect(result.stdout).toContain('returned');
+}, 70_000);
+
+
+it('bounded-loop watchdog excludes child startup but still kills a stuck loop', async () => {
+  const slowStart = await runChild(`
+    await new Promise(resolve => setTimeout(resolve, 5_100));
+    console.log('ready');
+    console.log('returned');
+  `);
+  expect(slowStart.code, slowStart.stderr).toBe(0);
+  expect(slowStart.stdout).toContain('returned');
+  const stuck = await runChild(`console.log('ready'); while (true) {}`, 50);
+  expect(stuck.code).toBeNull();
+  expect(stuck.stdout).toContain('ready');
+}, 70_000);

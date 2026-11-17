@@ -1,6 +1,8 @@
 # Opt-in Anthropic keepalive refusal suppression
 
 ```ts
+import { AnthropicAdapter } from '@animalabs/membrane';
+
 new AnthropicAdapter({ cacheKeepalive: { suppressOnRefusal: true } });
 ```
 
@@ -14,13 +16,21 @@ current refresh suppresses its key and removes its replay snapshot, even with
 positive cache-read counters. A `suppressed` event names foreground or refresh.
 A stale refresh's result only receives its transport receipt, not state events.
 `onCall.outcome: 'success'` still means **the sender resolved**, not semantic
-success. Each actual sender invocation retains one receipt, including refused,
-unknown, stale and failed sends. A refresh with missing/null/unrecognized raw
-terminal reason never emits `refreshed` or advances its refresh timestamp;
-usage alone isn't evidence of a known terminal outcome. It remains due for the
-next ordinary timer check (no new retry/backoff policy).
+success. With `onCall` configured and cloneable request/response values, each
+actual sender invocation delivers one receipt, including refused, unknown, stale
+and failed sends. Receipt delivery is best-effort: clone failures or observer
+failures are isolated, not retried. Without `onCall`, no receipts are delivered.
+A refresh with missing/null/unrecognized raw terminal reason never emits `refreshed` or advances its refresh timestamp;
+usage alone isn't evidence of a known terminal outcome. It removes the replay
+snapshot and emits `skipped` with reason
+`unknown-refresh-terminal`, while retaining outcome identity/barrier state. A later
+foreground prefix may register a new snapshot if the identity is still qualified.
+This is retirement, not a new retry/backoff policy; an unknown refresh is never
+resent on every timer check. Any resolved sender resets consecutive transport
+errors, including refusals and unknown terminals.
 
-Initial eligibility (including after eviction or retirement) requires a known-normal
+Initial eligibility (including after eviction or idle/ineffective retirement)
+requires a known-normal
 foreground completion too; a prefix alone never qualifies a fresh opt-in identity.
 Only a normal foreground request **begun after the accepted refusal** can rearm,
 and only with raw terminal `end_turn`, `stop_sequence`, `tool_use`, `max_tokens`
@@ -60,29 +70,46 @@ prefix accounting but cannot clear suppression.
 
 State is process-local. At most `maxLineages` outcome identities (default four)
 are retained, including suppressed keys, separately from at most that many full
-wire snapshots. Request begin touches the outcome LRU. Suppression has no time
+wire snapshots. Every request begin touches the outcome LRU, including excluded
+lanes and
+ineligible/unknown requests. Unrelated traffic can therefore evict an active
+snapshot even though legacy scheduling would retain it; increase `maxLineages`
+if needed. Removing a snapshot through outcome eviction emits `skipped` with
+reason `outcome-lru-eviction`. We retain this shared bound so that refused and
+in-flight keys from all lanes remain observable without unbounded state.
+Suppression has no time
 expiry while retained; it holds no wire snapshot. LRU eviction forgets both
 identity and suppression; a *new* begin after eviction is a fresh lineage, but
 old in-flight handles remain invalid. Fresh identities must qualify through a
 known-normal foreground completion, so forgetting cannot let maintenance or unknown
 outcomes restore eligibility. Stop clears everything permanently.
 Idle expiry and ineffective retirement drop both snapshot and identity.
-An ineligible prefix removes replay eligibility, without clearing a retained
-refusal barrier. There is no persistence or durable tombstone format.
+An ineligible prefix in a configured lane removes its replay snapshot and emits
+`skipped` when one existed, without deleting the outcome identity or a retained
+refusal barrier. Excluded lanes cannot remove snapshots by prefix ineligibility.
+There is no persistence or durable tombstone format.
 Low-level keeper clients must use `begin`, `prefix`, `finish` to observe outcomes;
 `record` alone is the legacy prefix-accounting API and cannot rearm suppression.
 Raw stream refusal is observed before progress callbacks or terminal parsing; a
 callback error still fails the foreground and closes the SDK iterator normally.
-Observer errors and adapter bookkeeping errors never replace foreground results.
+Synchronous throws and rejected promises from event/call observers are isolated.
+Adapter bookkeeping errors never replace foreground results (in either mode); a
+payload-free warning reports a lost observation. This is not a guarantee that
+failed bookkeeping applied suppression.
 Nonpositive `maxLineages` retains no identities or snapshots (fractional caps round
-down by eviction); negative caps do not block the foreground.
+down by eviction); negative caps do not block the foreground. NaN and infinities
+use the default cap.
+`KeepaliveAttempt` is an opaque, issuer-specific handle with a read-only key;
+pass it back to the issuing keeper without accessing internal outcome state.
+Custom senders opting in must return raw `stop_reason`, not only usage counters.
 
 ## Composition / exclusions
 
 This is based on main `9d4dc61`, not open PR #252 (`d8cb179`). It does not copy
 #252's per-key failure/backoff/expiry changes. Future composition must keep its
 failure accounting separate from semantic suppression: known positive reads on
-refusal/unknown must not warm-stamp; retirement must invalidate outcome identity;
+refusal/unknown must not warm-stamp; idle/ineffective retirement must invalidate
+outcome identity (unknown-terminal retirement removes only the replay snapshot);
 after every await and observer callback, check both current snapshot and state.
 Transport receipts must survive those guards. #252 expectations permitting old
 requests to restart after retirement or refreshed events after stop need explicit

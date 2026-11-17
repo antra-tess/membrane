@@ -1,6 +1,10 @@
 // Maintenance bookkeeping must never change foreground delivery.
 function keepaliveObservation<T>(observe: () => T): T | undefined {
-  try { return observe(); } catch { return undefined; }
+  try { return observe(); } catch {
+    // No request, response, or exception payload: these can contain secrets.
+    try { console.warn('[membrane] Keepalive bookkeeping failed; observation was not applied.'); } catch {}
+    return undefined;
+  }
 }
 
 import { unreportedUsage } from '../utils/usage.js';
@@ -509,10 +513,12 @@ export class AnthropicAdapter implements ProviderAdapter {
         fullRequest as unknown as Record<string, unknown>, headers, 'complete', options?.keepalivePurpose, sentAt,
       ));
       const response = await this.createMessage(fullRequest, live, callSignal, { maxRetries: 0 });
+      if (attempt && response.stop_reason === 'refusal') {
+        keepaliveObservation(() => this.cacheKeepalive?.finish(attempt, 'refusal'));
+      }
       keepaliveObservation(() => {
         if (attempt) {
           this.cacheKeepalive?.prefix(attempt);
-          if (response.stop_reason === 'refusal') this.cacheKeepalive?.finish(attempt, 'refusal');
         } else this.cacheKeepalive?.record(fullRequest as unknown as Record<string, unknown>, headers, 'complete', sentAt);
       });
 
@@ -883,7 +889,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       try { stream.controller.abort(); } catch { }
 
       assertTerminalEventObserved(sawTerminalEvent, 'Anthropic', fullRequest);
-      if (attempt && providerStopReason !== 'refusal' && !callSignal?.aborted) {
+      if (attempt && providerStopReason !== 'refusal' && !callSignal?.aborted && !options?.signal?.aborted) {
         keepaliveObservation(() => this.cacheKeepalive?.finish(attempt, providerStopReason));
       }
 

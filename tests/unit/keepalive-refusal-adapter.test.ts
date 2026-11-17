@@ -167,8 +167,11 @@ it('legacy resolved refusal continues scheduling by default', async () => {
 
 it('bookkeeping exceptions do not break foreground results', async () => {
   const { a } = adapter({ suppressOnRefusal: true, lanes: ['complete'] }, () => answer);
+  const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
   vi.spyOn(a.cacheKeepalive!, 'finish').mockImplementation(() => { throw new Error('observer'); });
   expect((await a.complete(request('safe'))).stopReason).toBe('end_turn');
+  expect(warning).toHaveBeenCalledWith('[membrane] Keepalive bookkeeping failed; observation was not applied.');
+  warning.mockRestore();
 });
 
 for (const lane of ['complete', 'stream'] as const) {
@@ -331,4 +334,34 @@ it('raw stream refusal survives throwing progress with real generator cleanup an
   expect(closed).toBe(5);
   await vi.advanceTimersByTimeAsync(100);
   expect(replays()).toHaveLength(1);
+});
+
+
+it('complete refusal is observed even if prefix bookkeeping throws', async () => {
+  let reason = 'end_turn';
+  const { a, events } = adapter({ suppressOnRefusal: true, lanes: ['complete'] }, () => ({ ...answer, stop_reason: reason }));
+  await a.complete(request('prefix-error'));
+  const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  vi.spyOn(a.cacheKeepalive!, 'prefix').mockImplementation(() => { throw new Error('prefix'); });
+  reason = 'refusal';
+  expect((await a.complete(request('prefix-error'))).stopReason).toBe('refusal');
+  expect(events.map(e => e.type)).toContain('suppressed');
+  expect(a.cacheKeepalive!.getStatus()).toEqual([]);
+  warning.mockRestore();
+});
+
+it('abort in final open content callback cannot qualify a stream with combined signal', async () => {
+  const { a } = adapter({ suppressOnRefusal: true }, () => answer,
+    () => sdkStream([messageStart,
+      { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial' } },
+      { type: 'message_delta', delta: { stop_reason: 'max_tokens' }, usage: readUsage },
+    ]));
+  const abort = new AbortController();
+  let blocks = 0;
+  const onContentBlock = vi.fn(() => { if (++blocks === 2) abort.abort(); });
+  await a.stream(request('late-abort'), { ...noCallbacks, onContentBlock }, { signal: abort.signal, timeoutMs: 1000 });
+  expect(onContentBlock).toHaveBeenCalledTimes(2);
+  expect(abort.signal.aborted).toBe(true);
+  expect(a.cacheKeepalive!.getStatus()).toEqual([]);
 });

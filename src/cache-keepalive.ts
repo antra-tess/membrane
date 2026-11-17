@@ -41,7 +41,8 @@ export type KeepaliveSend = (
 
 export type KeepaliveLane = 'stream' | 'complete';
 
-/** One terminal receipt per KeepaliveSend invocation, not per HTTP attempt.
+/** A terminal receipt per KeepaliveSend invocation, not per HTTP attempt.
+ * Delivery is best-effort when onCall is configured and values are cloneable.
  * SDK-internal retries belong to that invocation. A success carries the full
  * vendor response and its terminal usage, including ineffective cache writes.
  * Request and response objects are observer-owned copies; recorded request
@@ -94,7 +95,7 @@ export interface CacheKeepaliveConfig {
   /** Which lanes to keep warm. Default ['stream'], the primary lane. */
   lanes?: KeepaliveLane[];
   /** LRU cap on tracked lineages, to bound memory: each holds a full wire
-   *  request. Default 4. Nonpositive caps retain nothing. */
+   *  request. Default 4. Nonpositive caps retain nothing; nonfinite caps use the default. */
   maxLineages?: number;
   /** Consecutive send failures before the whole keepalive disables itself. Default 3. */
   maxConsecutiveErrors?: number;
@@ -103,10 +104,11 @@ export interface CacheKeepaliveConfig {
    * (no read, or a write) at which the lineage is dropped. Default 2.
    */
   maxIneffective?: number;
-  /** Each keepalive event as it happens. An error it throws is ignored. */
+  /** Each keepalive event as it happens. Throws and rejected promises are ignored. */
   onEvent?: (event: KeepaliveEvent) => void;
   /** Report background calls to the same ledger as foreground inference.
-   * Invoked once on success (including ineffective responses) or failure.
+   * Invoked once on success (including ineffective responses) or failure when
+   * the receipt values can be cloned; clone failures drop the receipt.
    * Observer errors are isolated, and returned promises never delay the loop.
    * Skipped, expired, and disabled lineages do not make calls or receipts.
    * Poke serialization failures are reported through onEvent before any sender invocation. */
@@ -214,6 +216,11 @@ interface OutcomeState { barrier: number; latest: number; qualified: boolean; }
 /** Request-begin identity; treat as opaque and return only to its issuing keeper. */
 export interface KeepaliveAttempt {
   readonly key: string;
+  readonly _keepaliveAttempt: unique symbol;
+}
+
+interface AttemptData {
+  readonly key: string;
   readonly sequence: number;
   readonly state: OutcomeState;
   readonly wire: Record<string, unknown>;
@@ -231,6 +238,7 @@ function knownTerminal(reason: unknown): boolean {
 export class CacheKeepalive {
   private outcomes = new Map<string, OutcomeState>();
   private sequence = 0;
+  private attempts = new WeakMap<KeepaliveAttempt, AttemptData>();
   private lineages = new Map<string, Lineage>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private ticking = false;
@@ -241,6 +249,7 @@ export class CacheKeepalive {
 
   constructor(private readonly send: KeepaliveSend, config: CacheKeepaliveConfig = {}) {
     this.cfg = { ...DEFAULTS, ...config };
+    if (this.cfg.suppressOnRefusal && !Number.isFinite(this.cfg.maxLineages)) this.cfg.maxLineages = DEFAULTS.maxLineages;
     if (!this.cfg.enabled) this.stopped = true;
   }
 
@@ -258,29 +267,35 @@ export class CacheKeepalive {
       const oldest = this.outcomes.keys().next().value;
       if (oldest === undefined) break;
       this.outcomes.delete(oldest);
-      this.lineages.delete(oldest);
+      if (this.lineages.delete(oldest)) this.emit({ type: 'skipped', key: oldest, reason: 'outcome-lru-eviction' });
     }
-    return { key, state, sequence: ++this.sequence, wire, headers, lane, purpose, sentAt };
+    const handle = Object.freeze({ key }) as KeepaliveAttempt;
+    this.attempts.set(handle, { key, state, sequence: ++this.sequence, wire, headers, lane, purpose, sentAt });
+    return handle;
   }
 
-  private current(attempt: KeepaliveAttempt): boolean {
+  private current(attempt: AttemptData): boolean {
     return !this.stopped && this.outcomes.get(attempt.key) === attempt.state;
   }
 
   /** Prefix observation orders snapshots, but cannot initially qualify an identity. */
-  prefix(attempt: KeepaliveAttempt): void {
-    if (!this.current(attempt) || attempt.state.barrier || attempt.sequence < attempt.state.latest) return;
+  prefix(handle: KeepaliveAttempt): void {
+    const attempt = this.attempts.get(handle);
+    if (!attempt || !this.current(attempt) || attempt.state.barrier || attempt.sequence < attempt.state.latest) return;
     attempt.state.latest = attempt.sequence;
-    if (ineligibleReason(attempt.wire)) {
-      this.lineages.delete(attempt.key);
+    if (!this.cfg.lanes.includes(attempt.lane)) return;
+    const reason = ineligibleReason(attempt.wire);
+    if (reason) {
+      if (this.lineages.delete(attempt.key)) this.emit({ type: 'skipped', key: attempt.key, reason });
       return;
     }
     if (attempt.state.qualified) this.record(attempt.wire, attempt.headers, attempt.lane, attempt.sentAt);
   }
 
   /** Observe raw terminal metadata. Errors/cancellation must not call this as success. */
-  finish(attempt: KeepaliveAttempt, reason: unknown): void {
-    if (!this.current(attempt)) return;
+  finish(handle: KeepaliveAttempt, reason: unknown): void {
+    const attempt = this.attempts.get(handle);
+    if (!attempt || !this.current(attempt)) return;
     if (reason === 'refusal') {
       this.suppress(attempt.key, attempt.state, 'foreground');
       return;
@@ -320,7 +335,6 @@ export class CacheKeepalive {
     const key = lineageKey(wire);
     if (this.cfg.suppressOnRefusal && (!this.outcomes.get(key)?.qualified || this.outcomes.get(key)!.barrier)) return;
     if (reason) {
-      if (this.cfg.suppressOnRefusal) this.outcomes.delete(key);
       if (this.lineages.delete(key)) this.emit({ type: 'skipped', key, reason });
       return;
     }
@@ -402,16 +416,23 @@ export class CacheKeepalive {
         key, lane: lin.lane, startedAt, durationMs: Date.now() - startedAt,
         request: payload, outcome: 'success', response,
       });
+      // Any resolved send breaks a run of transport failures, even when its
+      // semantic outcome cannot refresh the cache (or its snapshot is stale).
+      this.consecutiveErrors = 0;
       if (this.cfg.suppressOnRefusal) {
         if (this.stopped || this.lineages.get(key) !== lin || this.outcomes.get(key) !== state) return;
         if (res.stop_reason === 'refusal' && state) {
           this.suppress(key, state, 'refresh');
           return;
         }
-        if (!knownTerminal(res.stop_reason)) return;
+        if (!knownTerminal(res.stop_reason)) {
+          // Retire only the replay snapshot, not the retained refusal identity.
+          // Do not invent a retry/backoff policy for an unqualified refresh.
+          this.lineages.delete(key);
+          this.emit({ type: 'skipped', key, reason: 'unknown-refresh-terminal' });
+          return;
+        }
       }
-      this.consecutiveErrors = 0;
-
       const read = res.usage?.cache_read_input_tokens ?? 0;
       const wrote = res.usage?.cache_creation_input_tokens ?? 0;
 
@@ -480,7 +501,7 @@ export class CacheKeepalive {
 
   private emit(event: KeepaliveEvent): void {
     try {
-      this.cfg.onEvent?.(event);
+      void Promise.resolve(this.cfg.onEvent?.(event)).catch(() => {});
     } catch {
     }
   }
