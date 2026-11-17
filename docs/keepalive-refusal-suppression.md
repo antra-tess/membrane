@@ -29,7 +29,9 @@ snapshot and emits `skipped` with reason
 foreground prefix may register a new snapshot if the identity is still qualified.
 This is retirement, not a new retry/backoff policy; an unknown refresh is never
 resent on every timer check. Any resolved sender resets consecutive transport
-errors, including refusals and unknown terminals.
+errors, including refusals, empty responses and unknown terminals. Replay serialization
+failures emit `error` without incrementing that send-failure counter or delivering
+a call receipt, since the sender was not invoked.
 
 Initial eligibility (including after eviction or idle/ineffective retirement)
 requires a known-normal
@@ -89,7 +91,9 @@ in-flight keys from all lanes remain observable without unbounded state.
 Suppression has no time
 expiry while retained; it holds no wire snapshot. LRU eviction forgets both
 identity and suppression; a *new* begin after eviction is a fresh lineage, but
-old in-flight handles remain invalid. Fresh identities must qualify through a
+old in-flight handles remain invalid for prefix/success updates. A late refusal
+from an evicted handle still suppresses a newly retained identity for that key,
+without recreating forgotten keys or growing the map. Fresh identities must qualify through a
 known-normal foreground completion, so forgetting cannot let maintenance or unknown
 outcomes restore eligibility. Stop clears everything permanently.
 Idle expiry and ineffective retirement drop both snapshot and identity.

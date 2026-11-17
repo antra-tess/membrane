@@ -427,3 +427,107 @@ it('a refusal handle is observed once, including reentrant finish and replay aft
   expect(onEvent).toHaveBeenCalledTimes(1);
   expect((k as any).lineages.get(refusing!.key)).toBe(snapshot);
 });
+
+it.each([null, undefined])('empty resolved refresh %s resets send failures and reports success once', async response => {
+  const send = vi.fn().mockRejectedValueOnce(new Error('outage')).mockResolvedValue(response);
+  const { k, normal, calls, events } = setup(send, { maxConsecutiveErrors: 2 });
+  normal();
+  await vi.advanceTimersByTimeAsync(200);
+  expect(calls.map(c => c.outcome)).toEqual(['error', 'success']);
+  expect(events.map(e => e.type)).toEqual(['error', 'skipped']);
+  expect(k.getStatus()).toEqual([]);
+  // A new failed send must start a fresh run, not disable the keeper.
+  send.mockRejectedValue(new Error('new outage'));
+  normal();
+  await vi.advanceTimersByTimeAsync(100);
+  expect(events.at(-1)).toMatchObject({ type: 'error', consecutive: 1 });
+  expect(k.getStatus()).toHaveLength(1);
+});
+
+it.each(['cycle', 'toJSON'])('replay %s preparation errors preserve the transport-error run without disabling', async failure => {
+  const send = vi.fn(async () => { throw new Error('outage'); });
+  const { k, begin, events, calls } = setup(send, { maxConsecutiveErrors: 2 });
+  const w: Record<string, unknown> = wire();
+  const a = begin('normal', w as ReturnType<typeof wire>); k.finish(a, 'end_turn');
+  await vi.advanceTimersByTimeAsync(100);
+  if (failure === 'cycle') w.circular = w;
+  else w.toJSON = () => { throw new Error('cannot serialize'); };
+  await vi.advanceTimersByTimeAsync(300);
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(calls.map(c => c.outcome)).toEqual(['error']);
+  expect(events).toHaveLength(4);
+  expect(events.every(e => e.type === 'error' && e.consecutive === 1)).toBe(true);
+  expect(k.getStatus()).toHaveLength(1);
+  delete w.circular; delete w.toJSON;
+  await vi.advanceTimersByTimeAsync(100);
+  expect(events.slice(-2).map(e => e.type)).toEqual(['error', 'disabled']);
+  expect(k.getStatus()).toEqual([]);
+});
+
+it('an evicted refusal suppresses a newly retained identity and bars its pending success', () => {
+  const { k, begin, normal, events } = setup(undefined, { maxLineages: 1 });
+  const old = begin();
+  begin('normal', wire('other'));
+  const pending = begin();
+  k.finish(old, 'refusal');
+  expect(events.at(-1)).toEqual({ type: 'suppressed', key: old.key, source: 'foreground' });
+  k.prefix(pending); k.finish(pending, 'end_turn');
+  expect(k.getStatus()).toEqual([]);
+  normal();
+  expect(k.getStatus()).toHaveLength(1);
+  k.finish(old, 'refusal'); // Duplicate observation must not suppress the rearm.
+  expect(k.getStatus()).toHaveLength(1);
+  expect((k as any).outcomes.size).toBe(1);
+});
+
+it('an evicted refusal does not recreate a forgotten identity', () => {
+  const { k, begin, events } = setup(undefined, { maxLineages: 1 });
+  const old = begin();
+  const other = begin('normal', wire('other'));
+  k.finish(other, 'end_turn');
+  k.finish(old, 'refusal');
+  expect(events.filter(e => e.type === 'suppressed')).toEqual([]);
+  expect(k.getStatus().map(s => s.key)).toEqual([other.key]);
+  expect((k as any).outcomes.size).toBe(1);
+});
+
+it.each([null, undefined])('default-off preserves main double receipts for empty response %s', async response => {
+  const { k, calls, events } = setup(async () => response, { suppressOnRefusal: false });
+  k.record(wire(), undefined, 'stream');
+  await vi.advanceTimersByTimeAsync(100);
+  expect(calls.map(c => c.outcome)).toEqual(['success', 'error']);
+  expect(events).toEqual([expect.objectContaining({ type: 'error', consecutive: 1 })]);
+});
+
+it('default-off preserves main serialization-failure disable behavior', async () => {
+  const send = vi.fn();
+  const { k, events, calls } = setup(send, { suppressOnRefusal: false, maxConsecutiveErrors: 1 });
+  const w: Record<string, unknown> = wire();
+  k.record(w, undefined, 'stream'); w.circular = w;
+  await vi.advanceTimersByTimeAsync(100);
+  expect(send).not.toHaveBeenCalled(); expect(calls).toEqual([]);
+  expect(events.map(e => e.type)).toEqual(['error', 'disabled']);
+});
+
+it.each([false, true])('receipt stop rechecks remain opt-in (%s)', async suppressOnRefusal => {
+  let k!: CacheKeepalive;
+  const state = setup(undefined, { suppressOnRefusal, onCall: () => k.stop('shutdown') });
+  k = state.k;
+  if (suppressOnRefusal) state.normal(); else k.record(wire(), undefined, 'stream');
+  await vi.advanceTimersByTimeAsync(100);
+  expect(state.events.map(e => e.type)).toEqual(suppressOnRefusal ? ['disabled'] : ['disabled', 'refreshed']);
+});
+
+it.each([false, true])('error observer stop rechecks remain opt-in (%s)', async suppressOnRefusal => {
+  let k!: CacheKeepalive;
+  const events: KeepaliveEvent[] = [];
+  const state = setup(async () => { throw new Error('outage'); }, {
+    suppressOnRefusal, maxConsecutiveErrors: 1, onEvent: (e: KeepaliveEvent) => {
+      events.push(e); if (e.type === 'error') k.stop('operator stop');
+    },
+  });
+  k = state.k;
+  if (suppressOnRefusal) state.normal(); else k.record(wire(), undefined, 'stream');
+  await vi.advanceTimersByTimeAsync(100);
+  expect(events.map(e => e.type)).toEqual(suppressOnRefusal ? ['error', 'disabled'] : ['error', 'disabled', 'disabled']);
+});

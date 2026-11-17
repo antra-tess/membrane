@@ -310,14 +310,17 @@ export class CacheKeepalive {
   /** Observe raw terminal metadata. Errors/cancellation must not call this as success. */
   finish(handle: KeepaliveAttempt, reason: unknown): void {
     const attempt = this.attempts.get(handle);
-    if (!attempt || !this.current(attempt)) return;
+    if (!attempt || this.stopped) return;
     if (reason === 'refusal') {
       if (attempt.refusalObserved) return;
       attempt.refusalObserved = true; // Before observers can reenter finish.
-      this.suppress(attempt.key, attempt.state, 'foreground');
+      // Eviction invalidates successes, not a refusal for a retained key.
+      // Do not recreate forgotten identities or enlarge the bounded map.
+      const state = this.outcomes.get(attempt.key);
+      if (state) this.suppress(attempt.key, state, 'foreground');
       return;
     }
-    if (attempt.purpose !== 'normal' || !knownTerminal(reason) ||
+    if (!this.current(attempt) || attempt.purpose !== 'normal' || !knownTerminal(reason) ||
         attempt.sequence <= attempt.state.barrier) return;
     attempt.state.qualified = true;
     // Keep the last refusal sequence after rearm: an older handle stays barred.
@@ -431,7 +434,10 @@ export class CacheKeepalive {
       if (this.cfg.suppressOnRefusal &&
           (this.stopped || this.lineages.get(key) !== lin || this.outcomes.get(key) !== state)) return;
       invoked = true;
-      const res = await this.send(payload, lin.headers);
+      const resolved = await this.send(payload, lin.headers);
+      // A resolved sender is a transport success even without a response body.
+      // Preserve main's legacy processing (including errors) when opted out.
+      const res = this.cfg.suppressOnRefusal ? resolved ?? {} : resolved;
       const response = { ...res };
       reported = true;
       // Install the refusal barrier before receipt observers can replace the
@@ -495,14 +501,15 @@ export class CacheKeepalive {
       // Transport failures are global, even when the invoked snapshot is stale.
       if (this.cfg.suppressOnRefusal && (this.stopped || (!invoked &&
           (this.lineages.get(key) !== lin || this.outcomes.get(key) !== state)))) return;
-      this.consecutiveErrors += 1;
+      // Preparation failures are observable, but are not failed sends.
+      if (!this.cfg.suppressOnRefusal || invoked) this.consecutiveErrors += 1;
       this.emit({ type: 'error', key, error: message, consecutive: this.consecutiveErrors });
       if (this.cfg.suppressOnRefusal && this.stopped) return;
 
       if (!this.cfg.suppressOnRefusal ||
           (this.lineages.get(key) === lin && this.outcomes.get(key) === state)) lin.refreshBaselineAt = Date.now();
 
-      if (this.consecutiveErrors >= this.cfg.maxConsecutiveErrors) {
+      if ((!this.cfg.suppressOnRefusal || invoked) && this.consecutiveErrors >= this.cfg.maxConsecutiveErrors) {
         this.stop();
         this.emit({
           type: 'disabled',

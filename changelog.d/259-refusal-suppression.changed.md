@@ -10,3 +10,7 @@
 - In opt-in mode, stale failed sender invocations and reentrant error observers
   cannot bypass the existing global consecutive transport-error limit. This is
   not per-key backoff, retry, or expiry policy.
+- In opt-in mode, empty resolved refresh responses are transport successes,
+  replay serialization failures do not count toward the send-failure limit, and
+  a foreground refusal from an evicted handle still suppresses a currently
+  retained identity for its key. Default-off behavior is unchanged.
