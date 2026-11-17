@@ -5,7 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
-import type { CacheKeepaliveConfig, KeepaliveEvent } from '../../src/cache-keepalive.js';
+import { lineageKey, type CacheKeepaliveConfig, type KeepaliveEvent } from '../../src/cache-keepalive.js';
 
 const START = Date.parse('2026-10-19T00:00:00Z');
 const timing = { refreshAfterMs: 100, checkIntervalMs: 100, maxIdleMs: 10_000 };
@@ -97,6 +97,7 @@ const noCallbacks = { onChunk: () => {} } as any;
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(START); });
 afterEach(() => {
   for (const a of adapters.splice(0)) a.cacheKeepalive?.stop();
+  vi.restoreAllMocks();
   vi.useRealTimers();
 });
 
@@ -220,8 +221,9 @@ for (const lane of ['complete', 'stream'] as const) {
 
 it('complete parse failure after a barrier cannot rearm, but refusal survives parse failure', async () => {
   let response: any = { ...answer, stop_reason: 'refusal' };
-  const { a } = adapter({ suppressOnRefusal: true, lanes: ['complete'] }, () => response);
+  const { a, events } = adapter({ suppressOnRefusal: true, lanes: ['complete'] }, () => response);
   await a.complete(request('parse'));
+  expect(events.map(e => e.type)).toEqual(['suppressed']);
   response = { ...answer, usage: undefined };
   expect(await settle(a.complete(request('parse')))).toBeDefined();
   expect(a.cacheKeepalive!.getStatus()).toEqual([]);
@@ -264,6 +266,9 @@ for (const lane of ['complete', 'stream'] as const) {
       if (action === 'stop') a.cacheKeepalive!.stop();
       if (action === 'evict') await run('other');
       const retainedKeys = a.cacheKeepalive!.getStatus().map(s => s.key);
+      if (action === 'evict') expect(retainedKeys).toEqual([lineageKey({
+        model: request('other').model, system: request('other').system,
+      })]);
       if (action === 'replace') await run('retire', 2);
       if (action === 'drop') await vi.advanceTimersByTimeAsync(100);
       gate.release(answer); await old;
@@ -383,7 +388,7 @@ it('abort in final open content callback cannot qualify a stream with combined s
 for (const lane of ['complete', 'stream'] as const) {
   it(`${lane}: failed begin stops keepalive rather than losing a later refusal`, async () => {
     let reason = 'end_turn';
-    const { a, replays } = adapter({ suppressOnRefusal: true, lanes: [lane] },
+    const { a, replays, events } = adapter({ suppressOnRefusal: true, lanes: [lane] },
       w => { JSON.stringify(w); return { ...answer, stop_reason: reason }; },
       w => { JSON.stringify(w); return sdkStream([messageStart, { type: 'message_delta', delta: { stop_reason: reason }, usage: readUsage }]); });
     const run = (options?: any) => lane === 'complete' ? a.complete(request('begin-error'), options)
@@ -400,9 +405,15 @@ for (const lane of ['complete', 'stream'] as const) {
       } };
     } });
     expect(result.stopReason).toBe('refusal');
-    expect(warning).toHaveBeenCalledWith(expect.stringContaining('state may be partially updated'));
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining('keepalive is now permanently stopped for this adapter'));
+    expect(events).toEqual([{ type: 'disabled', reason: 'keepalive begin bookkeeping failed' }]);
     expect(a.cacheKeepalive!.getStatus()).toEqual([]);
+    reason = 'end_turn';
+    await run(); // Later successful foreground calls cannot restart this keeper.
     await vi.advanceTimersByTimeAsync(100);
+    expect(a.cacheKeepalive!.getStatus()).toEqual([]);
+    expect(events).toHaveLength(1);
+    expect(warning).toHaveBeenCalledTimes(1);
     expect(replays()).toHaveLength(0);
     warning.mockRestore();
   });

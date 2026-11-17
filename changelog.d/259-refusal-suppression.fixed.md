@@ -1,9 +1,12 @@
 - Isolate Anthropic keepalive bookkeeping failures from foreground results in
   both modes, with a payload-free warning about potentially partial state and
-  corrective action. A failed begin stops keepalive rather than scheduling with
-  an unobservable refusal. This changes exception propagation, not the default
-  legacy scheduling policy. Observe complete refusals before prefix bookkeeping
-  and do not qualify streams cancelled in final callbacks.
+  corrective action. A failed begin permanently stops keepalive for that adapter,
+  emits `disabled` with a reason, and explicitly warns of the permanent stop. This changes exception propagation, not the default
+  legacy scheduling policy.
+- With opt-in suppression only, observe complete refusals before prefix bookkeeping
+  and do not qualify streams cancelled in final callbacks. Install refresh refusal
+  barriers before receipt observers, ignore identity-free `record()` calls, and
+  observe each foreground refusal handle only once.
 - Isolate asynchronous event observer rejections in both modes, like synchronous
   throws; this shared safety change does not alter default-off scheduling.
 - With opt-in refusal suppression, nonfinite lineage caps use the bounded default.

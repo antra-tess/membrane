@@ -50,7 +50,9 @@ stopped identities cannot be resurrected by their outstanding completions.
 ## Purpose boundary
 
 `AnthropicAdapter.complete/stream` are normal foreground SDK entrypoints by
-default. A caller using these same entrypoints for cache-warming prefill or other
+default. Qualification is at the adapter boundary after its parsing/callbacks,
+not after downstream Membrane processing or application observers. A downstream
+callback failure does not undo a successful provider outcome. A caller using these same entrypoints for cache-warming prefill or other
 maintenance **must**
 pass `ProviderRequestOptions.keepalivePurpose: 'maintenance'`. This trusted,
 non-wire declaration only affects initial eligibility and rearm permission. It does not modify the
@@ -96,7 +98,8 @@ An ineligible prefix in a configured lane removes its replay snapshot and emits
 refusal barrier. Excluded lanes cannot remove snapshots by prefix ineligibility.
 There is no persistence or durable tombstone format.
 Low-level keeper clients must use `begin`, `prefix`, `finish` to observe outcomes;
-`record` alone is the legacy prefix-accounting API and cannot rearm suppression.
+`record` is the legacy prefix-accounting API and is ignored entirely with suppression enabled,
+even for qualified keys; it cannot carry begin identity or ordering.
 Raw stream refusal is observed before progress callbacks or terminal parsing; a
 callback error still fails the foreground and closes the SDK iterator normally.
 Synchronous throws and rejected promises from event/call observers are isolated
@@ -106,10 +109,11 @@ not exception propagation.
 Adapter bookkeeping errors never replace foreground results (in either mode); a
 payload-free warning reports potentially partial state and incomplete suppression,
 and recommends checking custom serialization or disabling keepalive if failures
-persist. A failed begin stops the keeper conservatively, since its attempt identity
-cannot safely observe a subsequent refusal. Other failed bookkeeping is not a
+persist. A failed begin stops the keeper permanently for this adapter and emits
+`disabled` with a payload-free reason; its warning explicitly discloses that stop,
+since its attempt identity cannot safely observe a subsequent refusal. Other failed bookkeeping is not a
 guarantee that suppression was applied.
-Nonpositive `maxLineages` retains no identities or snapshots (fractional caps round
+Finite nonpositive `maxLineages` retains no identities or snapshots (fractional caps round
 down by eviction); negative caps do not block the foreground. Only with `suppressOnRefusal: true`, NaN and either infinity
 are normalized to the default cap. With suppression unset or false, cap handling
 matches main: NaN and positive Infinity are unbounded; negative Infinity retains

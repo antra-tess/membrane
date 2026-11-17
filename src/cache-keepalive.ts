@@ -97,7 +97,8 @@ export interface CacheKeepaliveConfig {
   /** LRU cap on tracked lineages, to bound memory: each holds a full wire
    *  request. Default 4. Only with suppressOnRefusal, nonfinite caps use the
    *  default. Default-off cap handling matches main (NaN/Infinity are unbounded).
-   *  Nonpositive caps retain nothing in either mode. */
+   *  Finite nonpositive caps retain nothing in either mode; default-off
+   *  negative Infinity also retains nothing. */
   maxLineages?: number;
   /** Consecutive send failures before the whole keepalive disables itself. Default 3. */
   maxConsecutiveErrors?: number;
@@ -232,6 +233,7 @@ interface AttemptData {
   readonly sentAt: number;
   readonly purpose: 'normal' | 'maintenance';
   registered?: boolean;
+  refusalObserved?: boolean;
 }
 
 /** Raw SDK terminal allowlist, never parse fallbacks or usage inference. */
@@ -300,7 +302,7 @@ export class CacheKeepalive {
     // A pending prefix with no snapshot must not starve completed requests.
     if (attempt.state.qualified && !attempt.registered) {
       attempt.state.latest = attempt.sequence;
-      this.record(attempt.wire, attempt.headers, attempt.lane, attempt.sentAt);
+      this.installSnapshot(attempt.wire, attempt.headers, attempt.lane, attempt.sentAt, attempt.key, null);
       attempt.registered = true;
     }
   }
@@ -310,6 +312,8 @@ export class CacheKeepalive {
     const attempt = this.attempts.get(handle);
     if (!attempt || !this.current(attempt)) return;
     if (reason === 'refusal') {
+      if (attempt.refusalObserved) return;
+      attempt.refusalObserved = true; // Before observers can reenter finish.
       this.suppress(attempt.key, attempt.state, 'foreground');
       return;
     }
@@ -319,7 +323,7 @@ export class CacheKeepalive {
     // Keep the last refusal sequence after rearm: an older handle stays barred.
     if (!this.cfg.lanes.includes(attempt.lane) || attempt.sequence < attempt.state.latest || attempt.registered) return;
     attempt.state.latest = attempt.sequence;
-    this.record(attempt.wire, attempt.headers, attempt.lane, attempt.sentAt);
+    this.installSnapshot(attempt.wire, attempt.headers, attempt.lane, attempt.sentAt, attempt.key, ineligibleReason(attempt.wire));
     attempt.registered = true;
   }
 
@@ -336,19 +340,23 @@ export class CacheKeepalive {
    *  from it, and its window from it or a later real call the lineage already
    *  has. Left out, both count from now. Call it once per call that gets that
    *  far. With suppression enabled, use begin/prefix/finish instead: record
-   *  alone cannot create an outcome identity or clear a refusal barrier. */
+   *  alone is ignored, even for an already-qualified identity. */
   record(
     wire: Record<string, unknown>,
     headers: Record<string, string> | undefined,
     lane: KeepaliveLane,
     sentAt: number = Date.now(),
   ): void {
-    if (this.stopped) return;
+    if (this.stopped || this.cfg.suppressOnRefusal) return;
     if (!this.cfg.lanes.includes(lane)) return;
 
     const reason = ineligibleReason(wire);
     const key = lineageKey(wire);
-    if (this.cfg.suppressOnRefusal && !this.outcomes.get(key)?.qualified) return;
+    this.installSnapshot(wire, headers, lane, sentAt, key, reason);
+  }
+
+  private installSnapshot(wire: Record<string, unknown>, headers: Record<string, string> | undefined,
+    lane: KeepaliveLane, sentAt: number, key: string, reason: string | null): void {
     if (reason) {
       if (this.lineages.delete(key)) this.emit({ type: 'skipped', key, reason });
       return;
@@ -369,7 +377,6 @@ export class CacheKeepalive {
       const oldest = this.lineages.keys().next().value as string | undefined;
       if (oldest === undefined) break;
       this.lineages.delete(oldest);
-      if (this.cfg.suppressOnRefusal) this.outcomes.delete(oldest);
     }
 
     this.ensureTimer();
@@ -427,6 +434,11 @@ export class CacheKeepalive {
       const res = await this.send(payload, lin.headers);
       const response = { ...res };
       reported = true;
+      // Install the refusal barrier before receipt observers can replace the
+      // snapshot. A result already stale at resolution still cannot suppress.
+      const refused = this.cfg.suppressOnRefusal && res.stop_reason === 'refusal';
+      if (refused && !this.stopped && this.lineages.get(key) === lin &&
+          this.outcomes.get(key) === state && state) this.suppress(key, state, 'refresh');
       this.reportCall({
         key, lane: lin.lane, startedAt, durationMs: Date.now() - startedAt,
         request: payload, outcome: 'success', response,
@@ -434,12 +446,9 @@ export class CacheKeepalive {
       // Any resolved send breaks a run of transport failures, even when its
       // semantic outcome cannot refresh the cache (or its snapshot is stale).
       this.consecutiveErrors = 0;
+      if (refused) return;
       if (this.cfg.suppressOnRefusal) {
         if (this.stopped || this.lineages.get(key) !== lin || this.outcomes.get(key) !== state) return;
-        if (res.stop_reason === 'refusal' && state) {
-          this.suppress(key, state, 'refresh');
-          return;
-        }
         if (!knownTerminal(res.stop_reason)) {
           // Retire only the replay snapshot, not the retained refusal identity.
           // Do not invent a retry/backoff policy for an unqualified refresh.
@@ -533,7 +542,8 @@ export class CacheKeepalive {
     }));
   }
 
-  stop(): void {
+  stop(reason?: string): void {
+    const wasStopped = this.stopped;
     this.stopped = true;
     if (this.timer) {
       clearInterval(this.timer);
@@ -541,5 +551,6 @@ export class CacheKeepalive {
     }
     this.lineages.clear();
     this.outcomes.clear();
+    if (reason && !wasStopped) this.emit({ type: 'disabled', reason });
   }
 }

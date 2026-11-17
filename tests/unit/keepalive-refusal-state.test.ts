@@ -128,9 +128,12 @@ it('fresh identities require known-normal completion, not pending-prefix order',
   expect(k.getStatus()).toEqual([]);
   k.prefix(begin()); // Failed/cancelled attempt with no successful finish.
   expect(k.getStatus()).toEqual([]);
-  const old = begin(); const newer = begin(); k.prefix(newer);
-  k.finish(old, 'end_turn'); expect(k.getStatus()).toHaveLength(1);
-  k.finish(newer, 'end_turn'); expect(k.getStatus()).toHaveLength(1);
+  const oldWire = wire(), newerWire = wire();
+  const old = begin('normal', oldWire), newer = begin('normal', newerWire); k.prefix(newer);
+  k.finish(old, 'end_turn');
+  expect((k as any).lineages.get(old.key).wire).toBe(oldWire);
+  k.finish(newer, 'end_turn');
+  expect((k as any).lineages.get(newer.key).wire).toBe(newerWire);
 });
 
 it.each(['refusal', null, 'future_stop'])('resolved %s refresh breaks consecutive transport failures', async reason => {
@@ -374,4 +377,53 @@ it('excluded-lane rearm does not unblock a pre-refusal stream handle', () => {
   expect(k.getStatus()).toEqual([]);
   const fresh = begin(); k.finish(fresh, 'end_turn');
   expect(k.getStatus()).toHaveLength(1);
+});
+
+
+it('refresh refusal installs the barrier before a reentrant receipt prefix', async () => {
+  let k!: CacheKeepalive, pending!: ReturnType<CacheKeepalive['begin']>;
+  const onCall = vi.fn(() => {
+    pending = k.begin(wire(), undefined, 'stream');
+    k.prefix(pending!); // Never completes: must not inherit pre-refusal eligibility.
+  });
+  const state = setup(async () => ({ ...ok, stop_reason: 'refusal' }), { onCall });
+  k = state.k; state.normal();
+  await vi.advanceTimersByTimeAsync(100);
+  expect(onCall).toHaveBeenCalledTimes(1);
+  expect(state.events).toEqual([{ type: 'suppressed', key: pending!.key, source: 'refresh' }]);
+  expect(k.getStatus()).toEqual([]);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(onCall).toHaveBeenCalledTimes(1);
+  k.finish(pending!, 'end_turn');
+  expect(k.getStatus()).toHaveLength(1);
+});
+
+it('record-only pre-refusal wire cannot replace a qualified post-barrier snapshot', async () => {
+  const send = vi.fn(async (_wire: Record<string, unknown>) => ok);
+  const { k, begin } = setup(send);
+  const oldWire = { ...wire(), messages: [{ role: 'user', content: 'old' }] };
+  k.finish(begin(), 'refusal');
+  const freshWire = { ...wire(), messages: [{ role: 'user', content: 'fresh' }] };
+  const fresh = begin('normal', freshWire); k.finish(fresh, 'end_turn');
+  k.record(oldWire, undefined, 'stream');
+  // Nor may a record-only ineligible request delete the qualified snapshot.
+  k.record({ ...oldWire, thinking: { type: 'enabled' } }, undefined, 'stream');
+  expect((k as any).lineages.get(fresh.key).wire).toBe(freshWire);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(send.mock.calls[0][0].messages).toEqual(freshWire.messages);
+});
+
+it('a refusal handle is observed once, including reentrant finish and replay after rearm', () => {
+  let k!: CacheKeepalive, refusing!: ReturnType<CacheKeepalive['begin']>;
+  const onEvent = vi.fn((e: KeepaliveEvent) => {
+    if (e.type === 'suppressed') k.finish(refusing!, 'refusal');
+  });
+  const state = setup(undefined, { onEvent }); k = state.k;
+  refusing = state.begin(); k.finish(refusing!, 'refusal');
+  expect(onEvent).toHaveBeenCalledTimes(1);
+  state.normal();
+  const snapshot = (k as any).lineages.get(refusing!.key);
+  k.finish(refusing!, 'refusal');
+  expect(onEvent).toHaveBeenCalledTimes(1);
+  expect((k as any).lineages.get(refusing!.key)).toBe(snapshot);
 });

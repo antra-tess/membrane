@@ -4,7 +4,7 @@ import { expect, it } from 'vitest';
 function runChild(script: string, executionMs = 5_000) {
   return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
     const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], {
-      cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'],
+      cwd: new URL('../../', import.meta.url), stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '', stderr = '', ready = false;
     // Import/startup has its own generous watchdog. The bounded-loop deadline
