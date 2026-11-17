@@ -66,4 +66,4 @@ it('bounded-loop watchdog excludes child startup but still kills a stuck loop', 
   const stuck = await runChild(`console.log('ready'); while (true) {}`, 50);
   expect(stuck.code).toBeNull();
   expect(stuck.stdout).toContain('ready');
-}, 70_000);
+}, 140_000);

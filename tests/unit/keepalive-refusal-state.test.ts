@@ -45,7 +45,7 @@ it('error, unknown, cancellation (no finish), and maintenance cannot rearm a bar
   normal(); expect(k.getStatus()).toHaveLength(1);
 });
 
-it.each(['success', 'refusal', 'error'])('stale refresh %s after replacement has receipt but no state effects', async outcome => {
+it.each(['success', 'refusal', 'error'])('stale refresh %s preserves replacement; errors still count globally', async outcome => {
   let resolve!: (r: any) => void, reject!: (r: any) => void;
   const deferred = new Promise((a, b) => { resolve = a; reject = b; });
   const { k, normal, calls, events } = setup(() => deferred);
@@ -53,7 +53,8 @@ it.each(['success', 'refusal', 'error'])('stale refresh %s after replacement has
   const replacement = normal();
   if (outcome === 'error') reject(new Error('old')); else resolve({ ...ok, stop_reason: outcome === 'refusal' ? 'refusal' : 'max_tokens' });
   await vi.advanceTimersByTimeAsync(0);
-  expect(calls).toHaveLength(1); expect(events).toEqual([]);
+  expect(calls).toHaveLength(1);
+  expect(events.map(e => e.type)).toEqual(outcome === 'error' ? ['error'] : []);
   expect(k.getStatus()).toHaveLength(1);
   k.finish(replacement, 'refusal'); expect(k.getStatus()).toEqual([]);
 });
@@ -94,7 +95,7 @@ it('older success cannot replace a newer snapshot even without refusal', () => {
   expect((k as any).lineages.get(old.key).wire).toBe(newerWire);
 });
 
-it('retained suppression is bounded and survives an ineligible prefix', () => {
+it('retained suppression is bounded and blocks an ineligible prefix', () => {
   const { k, begin } = setup(undefined, { maxLineages: 1 });
   const a = begin(); k.finish(a, 'refusal');
   const ineligible = k.begin({ ...wire(), thinking: { type: 'enabled' } }, undefined, 'stream')!;
@@ -119,7 +120,7 @@ it('legacy record alone cannot bypass suppression or outcome identity', () => {
 });
 
 
-it('fresh identities require known-normal completion, and newer prefix orders initial qualification', () => {
+it('fresh identities require known-normal completion, not pending-prefix order', () => {
   const { k, begin } = setup();
   const maintenance = begin('maintenance'); k.prefix(maintenance); k.finish(maintenance, 'max_tokens');
   const unknown = begin(); k.prefix(unknown); k.finish(unknown, undefined);
@@ -128,7 +129,7 @@ it('fresh identities require known-normal completion, and newer prefix orders in
   k.prefix(begin()); // Failed/cancelled attempt with no successful finish.
   expect(k.getStatus()).toEqual([]);
   const old = begin(); const newer = begin(); k.prefix(newer);
-  k.finish(old, 'end_turn'); expect(k.getStatus()).toEqual([]);
+  k.finish(old, 'end_turn'); expect(k.getStatus()).toHaveLength(1);
   k.finish(newer, 'end_turn'); expect(k.getStatus()).toHaveLength(1);
 });
 
@@ -177,8 +178,10 @@ it.each([{ tool_choice: { type: 'any' } }, { system: [{ type: 'text', text: 'sys
 it('ineligible completion preserves identity for an older in-flight refusal and its barrier', () => {
   const { k, normal, begin, events } = setup(); normal();
   const refusing = begin();
+  const identity = (k as any).outcomes.get(refusing.key);
   const ineligible = begin('normal', { ...wire(), thinking: { type: 'enabled' } } as any);
-  k.prefix(ineligible); k.finish(ineligible, 'end_turn');
+  k.prefix(ineligible);
+  expect((k as any).outcomes.get(refusing.key)).toBe(identity); k.finish(ineligible, 'end_turn');
   const beforeRefusal = begin();
   k.finish(refusing, 'refusal');
   k.prefix(beforeRefusal); k.finish(beforeRefusal, 'end_turn');
@@ -256,10 +259,15 @@ it('attempt handles do not expose mutable state and are issuer-specific', () => 
   k.finish(a, 'end_turn'); expect(k.getStatus()).toHaveLength(1);
 });
 
-it('async event rejection is isolated and never delays foreground observation', async () => {
+it.each([true, false])('async event rejection is isolated with suppression %s', async suppressOnRefusal => {
   const onEvent = vi.fn(async () => { throw new Error('observer'); });
-  const { k, begin } = setup(undefined, { onEvent });
-  k.finish(begin(), 'refusal');
+  const { k, begin } = setup(undefined, { onEvent, suppressOnRefusal });
+  if (suppressOnRefusal) k.finish(begin(), 'refusal');
+  else {
+    k.record({ ...wire(), thinking: { type: 'enabled' } }, undefined, 'stream');
+    k.record(wire(), undefined, 'stream');
+    k.record({ ...wire(), thinking: { type: 'enabled' } }, undefined, 'stream');
+  }
   expect(onEvent).toHaveBeenCalledTimes(1);
   await vi.advanceTimersByTimeAsync(0); // Vitest also fails on unhandled rejections.
   expect(k.getStatus()).toEqual([]);
@@ -270,4 +278,100 @@ it('uncloneable custom response drops its receipt without losing refresh process
   normal(); await vi.advanceTimersByTimeAsync(100);
   expect(calls).toEqual([]);
   expect(events.map(e => e.type)).toEqual(['refreshed']);
+});
+
+
+it('excluded-lane completion cannot starve a fresh stream snapshot', () => {
+  const { k, begin } = setup();
+  const stream = begin(); k.prefix(stream);
+  const complete = k.begin(wire(), undefined, 'complete')!;
+  k.prefix(complete); k.finish(complete, 'end_turn');
+  expect(k.getStatus()).toEqual([]);
+  k.finish(stream, 'end_turn');
+  expect(k.getStatus().map(s => s.lane)).toEqual(['stream']);
+});
+
+it.each(['refusal', 'success'])('finish preserves prefix snapshot during %s refresh', async result => {
+  let resolve!: (r: any) => void;
+  const { k, normal, begin, events } = setup(() => new Promise(r => { resolve = r; }));
+  normal();
+  const stream = begin(); k.prefix(stream);
+  const snapshot = (k as any).lineages.get(stream.key);
+  await vi.advanceTimersByTimeAsync(100);
+  k.finish(stream, 'end_turn');
+  expect((k as any).lineages.get(stream.key)).toBe(snapshot);
+  resolve(result === 'refusal' ? { ...ok, stop_reason: 'refusal' } : ok);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(events.map(e => e.type)).toEqual([result === 'refusal' ? 'suppressed' : 'refreshed']);
+});
+
+it('finish after a resolved refresh preserves the refreshed baseline', async () => {
+  const { k, normal, begin } = setup(); normal();
+  const stream = begin(); k.prefix(stream);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(k.getStatus()[0].idleMs).toBe(0);
+  k.finish(stream, 'end_turn');
+  expect(k.getStatus()[0].idleMs).toBe(0);
+});
+
+it('reentrant eviction refusal bars the outer begin', () => {
+  let k!: CacheKeepalive, nested = false;
+  const state = setup(undefined, { maxLineages: 1, onEvent: (e: KeepaliveEvent) => {
+    if (e.type === 'skipped' && !nested) {
+      nested = true;
+      const a = k.begin(wire('B'), undefined, 'stream')!;
+      k.finish(a, 'refusal');
+    }
+  } }); k = state.k;
+  state.normal();
+  const outer = k.begin(wire('B'), undefined, 'stream')!;
+  k.prefix(outer); k.finish(outer, 'end_turn');
+  expect(nested).toBe(true);
+  expect(k.getStatus()).toEqual([]);
+  const after = k.begin(wire('B'), undefined, 'stream')!;
+  k.finish(after, 'end_turn'); expect(k.getStatus()).toHaveLength(1);
+});
+
+it.each(['inflight replacement', 'error observer'])('global send-error limit survives %s', async race => {
+  let reject!: (e: Error) => void;
+  let replace!: () => void;
+  const events: KeepaliveEvent[] = [];
+  const { k, normal, begin, calls } = setup(() => new Promise((_r, j) => { reject = j; }), {
+    maxConsecutiveErrors: 1,
+    onEvent: (e: KeepaliveEvent) => {
+      events.push(e);
+      if (race === 'error observer' && e.type === 'error') replace();
+    },
+  });
+  normal();
+  replace = () => k.prefix(begin());
+  await vi.advanceTimersByTimeAsync(100);
+  if (race === 'inflight replacement') replace();
+  reject(new Error('outage'));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(calls.map(c => c.outcome)).toEqual(['error']);
+  expect(events.map(e => e.type)).toEqual(['error', 'disabled']);
+  expect(k.getStatus()).toEqual([]);
+});
+
+it('eviction of pending outcome identities is visible and invalidates old handles', () => {
+  const { k, begin, events } = setup(undefined, { maxLineages: 1 });
+  const old = begin();
+  const other = begin('normal', wire('other'));
+  expect(events).toEqual([{ type: 'skipped', key: old.key, reason: 'outcome-lru-eviction' }]);
+  k.finish(old, 'end_turn'); expect(k.getStatus()).toEqual([]);
+  k.finish(other, 'end_turn'); expect(k.getStatus()[0].key).toBe(other.key);
+});
+
+
+it('excluded-lane rearm does not unblock a pre-refusal stream handle', () => {
+  const { k, begin } = setup();
+  const old = begin(); k.prefix(old);
+  k.finish(begin(), 'refusal');
+  const complete = k.begin(wire(), undefined, 'complete')!;
+  k.finish(complete, 'end_turn');
+  k.prefix(old); k.finish(old, 'end_turn');
+  expect(k.getStatus()).toEqual([]);
+  const fresh = begin(); k.finish(fresh, 'end_turn');
+  expect(k.getStatus()).toHaveLength(1);
 });

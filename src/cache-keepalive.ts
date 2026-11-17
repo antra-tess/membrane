@@ -95,7 +95,9 @@ export interface CacheKeepaliveConfig {
   /** Which lanes to keep warm. Default ['stream'], the primary lane. */
   lanes?: KeepaliveLane[];
   /** LRU cap on tracked lineages, to bound memory: each holds a full wire
-   *  request. Default 4. Nonpositive caps retain nothing; nonfinite caps use the default. */
+   *  request. Default 4. Only with suppressOnRefusal, nonfinite caps use the
+   *  default. Default-off cap handling matches main (NaN/Infinity are unbounded).
+   *  Nonpositive caps retain nothing in either mode. */
   maxLineages?: number;
   /** Consecutive send failures before the whole keepalive disables itself. Default 3. */
   maxConsecutiveErrors?: number;
@@ -110,7 +112,8 @@ export interface CacheKeepaliveConfig {
    * Invoked once on success (including ineffective responses) or failure when
    * the receipt values can be cloned; clone failures drop the receipt.
    * Observer errors are isolated, and returned promises never delay the loop.
-   * Skipped, expired, and disabled lineages do not make calls or receipts.
+   * Skipped, expired, and disabled entries initiate no new calls; a sender already
+   * in flight still delivers its receipt after snapshot removal or stop.
    * Poke serialization failures are reported through onEvent before any sender invocation. */
   onCall?: (call: KeepaliveCall) => void | Promise<void>;
 }
@@ -228,6 +231,7 @@ interface AttemptData {
   readonly lane: KeepaliveLane;
   readonly sentAt: number;
   readonly purpose: 'normal' | 'maintenance';
+  registered?: boolean;
 }
 
 /** Raw SDK terminal allowlist, never parse fallbacks or usage inference. */
@@ -259,6 +263,8 @@ export class CacheKeepalive {
     lane: KeepaliveLane, purpose: 'normal' | 'maintenance' = 'normal', sentAt = Date.now()): KeepaliveAttempt | undefined {
     if (!this.cfg.suppressOnRefusal || this.stopped) return undefined;
     const key = lineageKey(wire);
+    // Reserve begin order before eviction observers can reenter.
+    const sequence = ++this.sequence;
     let state = this.outcomes.get(key);
     if (!state) state = { barrier: 0, latest: 0, qualified: false };
     this.outcomes.delete(key);
@@ -267,10 +273,11 @@ export class CacheKeepalive {
       const oldest = this.outcomes.keys().next().value;
       if (oldest === undefined) break;
       this.outcomes.delete(oldest);
-      if (this.lineages.delete(oldest)) this.emit({ type: 'skipped', key: oldest, reason: 'outcome-lru-eviction' });
+      this.lineages.delete(oldest);
+      this.emit({ type: 'skipped', key: oldest, reason: 'outcome-lru-eviction' });
     }
     const handle = Object.freeze({ key }) as KeepaliveAttempt;
-    this.attempts.set(handle, { key, state, sequence: ++this.sequence, wire, headers, lane, purpose, sentAt });
+    this.attempts.set(handle, { key, state, sequence, wire, headers, lane, purpose, sentAt });
     return handle;
   }
 
@@ -281,15 +288,21 @@ export class CacheKeepalive {
   /** Prefix observation orders snapshots, but cannot initially qualify an identity. */
   prefix(handle: KeepaliveAttempt): void {
     const attempt = this.attempts.get(handle);
-    if (!attempt || !this.current(attempt) || attempt.state.barrier || attempt.sequence < attempt.state.latest) return;
-    attempt.state.latest = attempt.sequence;
+    if (!attempt || !this.current(attempt) || (!attempt.state.qualified && attempt.state.barrier) ||
+        attempt.sequence <= attempt.state.barrier || attempt.sequence < attempt.state.latest) return;
     if (!this.cfg.lanes.includes(attempt.lane)) return;
     const reason = ineligibleReason(attempt.wire);
     if (reason) {
+      attempt.state.latest = attempt.sequence;
       if (this.lineages.delete(attempt.key)) this.emit({ type: 'skipped', key: attempt.key, reason });
       return;
     }
-    if (attempt.state.qualified) this.record(attempt.wire, attempt.headers, attempt.lane, attempt.sentAt);
+    // A pending prefix with no snapshot must not starve completed requests.
+    if (attempt.state.qualified && !attempt.registered) {
+      attempt.state.latest = attempt.sequence;
+      this.record(attempt.wire, attempt.headers, attempt.lane, attempt.sentAt);
+      attempt.registered = true;
+    }
   }
 
   /** Observe raw terminal metadata. Errors/cancellation must not call this as success. */
@@ -301,11 +314,13 @@ export class CacheKeepalive {
       return;
     }
     if (attempt.purpose !== 'normal' || !knownTerminal(reason) ||
-        attempt.sequence <= attempt.state.barrier || attempt.sequence < attempt.state.latest) return;
+        attempt.sequence <= attempt.state.barrier) return;
     attempt.state.qualified = true;
-    attempt.state.barrier = 0;
+    // Keep the last refusal sequence after rearm: an older handle stays barred.
+    if (!this.cfg.lanes.includes(attempt.lane) || attempt.sequence < attempt.state.latest || attempt.registered) return;
     attempt.state.latest = attempt.sequence;
     this.record(attempt.wire, attempt.headers, attempt.lane, attempt.sentAt);
+    attempt.registered = true;
   }
 
   private suppress(key: string, state: OutcomeState, source: 'foreground' | 'refresh'): void {
@@ -333,7 +348,7 @@ export class CacheKeepalive {
 
     const reason = ineligibleReason(wire);
     const key = lineageKey(wire);
-    if (this.cfg.suppressOnRefusal && (!this.outcomes.get(key)?.qualified || this.outcomes.get(key)!.barrier)) return;
+    if (this.cfg.suppressOnRefusal && !this.outcomes.get(key)?.qualified) return;
     if (reason) {
       if (this.lineages.delete(key)) this.emit({ type: 'skipped', key, reason });
       return;
@@ -468,14 +483,15 @@ export class CacheKeepalive {
           request: payload, outcome: 'error', error: err,
         });
       }
-      if (this.cfg.suppressOnRefusal &&
-          (this.stopped || this.lineages.get(key) !== lin || this.outcomes.get(key) !== state)) return;
+      // Transport failures are global, even when the invoked snapshot is stale.
+      if (this.cfg.suppressOnRefusal && (this.stopped || (!invoked &&
+          (this.lineages.get(key) !== lin || this.outcomes.get(key) !== state)))) return;
       this.consecutiveErrors += 1;
       this.emit({ type: 'error', key, error: message, consecutive: this.consecutiveErrors });
-      if (this.cfg.suppressOnRefusal &&
-          (this.stopped || this.lineages.get(key) !== lin || this.outcomes.get(key) !== state)) return;
+      if (this.cfg.suppressOnRefusal && this.stopped) return;
 
-      lin.refreshBaselineAt = Date.now();
+      if (!this.cfg.suppressOnRefusal ||
+          (this.lineages.get(key) === lin && this.outcomes.get(key) === state)) lin.refreshBaselineAt = Date.now();
 
       if (this.consecutiveErrors >= this.cfg.maxConsecutiveErrors) {
         this.stop();

@@ -1,8 +1,9 @@
 // Maintenance bookkeeping must never change foreground delivery.
-function keepaliveObservation<T>(observe: () => T): T | undefined {
+function keepaliveObservation<T>(observe: () => T, onFailure?: () => void): T | undefined {
   try { return observe(); } catch {
+    try { onFailure?.(); } catch {}
     // No request, response, or exception payload: these can contain secrets.
-    try { console.warn('[membrane] Keepalive bookkeeping failed; observation was not applied.'); } catch {}
+    try { console.warn('[membrane] Keepalive bookkeeping failed; state may be partially updated and refusal suppression may be incomplete. Check custom request serialization; disable cacheKeepalive if failures persist.'); } catch {}
     return undefined;
   }
 }
@@ -511,7 +512,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       const sentAt = Date.now();
       const attempt = keepaliveObservation(() => this.cacheKeepalive?.begin(
         fullRequest as unknown as Record<string, unknown>, headers, 'complete', options?.keepalivePurpose, sentAt,
-      ));
+      ), () => this.cacheKeepalive?.stop());
       const response = await this.createMessage(fullRequest, live, callSignal, { maxRetries: 0 });
       if (attempt && response.stop_reason === 'refusal') {
         keepaliveObservation(() => this.cacheKeepalive?.finish(attempt, 'refusal'));
@@ -607,7 +608,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       const sentAt = Date.now();
       const attempt = keepaliveObservation(() => this.cacheKeepalive?.begin(
         fullRequest as unknown as Record<string, unknown>, headers, 'stream', options?.keepalivePurpose, sentAt,
-      ));
+      ), () => this.cacheKeepalive?.stop());
       const stream = await session.client.messages.stream(anthropicRequest, {
         signal: session.signal,
         headers: live,

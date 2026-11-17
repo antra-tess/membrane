@@ -14,7 +14,9 @@ HTTP failures keep the existing error policy; they are not semantic refusals.
 With the option enabled, raw SDK `stop_reason: 'refusal'` from foreground or a
 current refresh suppresses its key and removes its replay snapshot, even with
 positive cache-read counters. A `suppressed` event names foreground or refresh.
-A stale refresh's result only receives its transport receipt, not state events.
+A stale refresh's resolved result only receives its transport receipt, not semantic
+state events. Rejected sender invocations still count toward the global consecutive
+transport-error limit and can emit `error`/`disabled`, even after snapshot replacement.
 `onCall.outcome: 'success'` still means **the sender resolved**, not semantic
 success. With `onCall` configured and cloneable request/response values, each
 actual sender invocation delivers one receipt, including refused, unknown, stale
@@ -40,13 +42,16 @@ parse fallbacks are not used. Begin order and refusal barriers use monotonic
 identities, not timestamps: equal clock readings and older in-flight successes
 cannot cross the barrier. A late foreground refusal is conservatively accepted
 for its still-retained key, even if another request began more recently. An
-older success cannot replace a newer prefix snapshot. Dropped, evicted or
+older success cannot replace a newer installed snapshot or undo a newer ineligible
+prefix. Excluded-lane prefixes and pending eligible prefixes on fresh identities
+do not block an older successful stream from installing the first snapshot. Dropped, evicted or
 stopped identities cannot be resurrected by their outstanding completions.
 
 ## Purpose boundary
 
 `AnthropicAdapter.complete/stream` are normal foreground SDK entrypoints by
-default. A caller using these same entrypoints for prefill or maintenance **must**
+default. A caller using these same entrypoints for cache-warming prefill or other
+maintenance **must**
 pass `ProviderRequestOptions.keepalivePurpose: 'maintenance'`. This trusted,
 non-wire declaration only affects initial eligibility and rearm permission. It does not modify the
 request body, headers, timeout, signal or foreground result. Token counts and
@@ -74,8 +79,10 @@ wire snapshots. Every request begin touches the outcome LRU, including excluded
 lanes and
 ineligible/unknown requests. Unrelated traffic can therefore evict an active
 snapshot even though legacy scheduling would retain it; increase `maxLineages`
-if needed. Removing a snapshot through outcome eviction emits `skipped` with
-reason `outcome-lru-eviction`. We retain this shared bound so that refused and
+if needed. Every outcome eviction emits `skipped` with reason `outcome-lru-eviction`,
+even when no snapshot existed. More distinct in-flight keys than the cap can
+evict attempts before they finish; sustained round-robin overload can prevent
+qualification. Increase the cap or reduce concurrency if these events recur. We retain this shared bound so that refused and
 in-flight keys from all lanes remain observable without unbounded state.
 Suppression has no time
 expiry while retained; it holds no wire snapshot. LRU eviction forgets both
@@ -92,13 +99,21 @@ Low-level keeper clients must use `begin`, `prefix`, `finish` to observe outcome
 `record` alone is the legacy prefix-accounting API and cannot rearm suppression.
 Raw stream refusal is observed before progress callbacks or terminal parsing; a
 callback error still fails the foreground and closes the SDK iterator normally.
-Synchronous throws and rejected promises from event/call observers are isolated.
+Synchronous throws and rejected promises from event/call observers are isolated
+in both modes. This observer safety and adapter bookkeeping exception isolation
+are shared changes; default-off equivalence refers to scheduling and cap handling,
+not exception propagation.
 Adapter bookkeeping errors never replace foreground results (in either mode); a
-payload-free warning reports a lost observation. This is not a guarantee that
-failed bookkeeping applied suppression.
+payload-free warning reports potentially partial state and incomplete suppression,
+and recommends checking custom serialization or disabling keepalive if failures
+persist. A failed begin stops the keeper conservatively, since its attempt identity
+cannot safely observe a subsequent refusal. Other failed bookkeeping is not a
+guarantee that suppression was applied.
 Nonpositive `maxLineages` retains no identities or snapshots (fractional caps round
-down by eviction); negative caps do not block the foreground. NaN and infinities
-use the default cap.
+down by eviction); negative caps do not block the foreground. Only with `suppressOnRefusal: true`, NaN and either infinity
+are normalized to the default cap. With suppression unset or false, cap handling
+matches main: NaN and positive Infinity are unbounded; negative Infinity retains
+nothing. Normalization is not applied in default-off mode.
 `KeepaliveAttempt` is an opaque, issuer-specific handle with a read-only key;
 pass it back to the issuing keeper without accessing internal outcome state.
 Custom senders opting in must return raw `stop_reason`, not only usage counters.

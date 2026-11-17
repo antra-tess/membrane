@@ -104,13 +104,16 @@ afterEach(() => {
 for (const lane of ['complete', 'stream'] as const) {
   describe(`opt-in ${lane} raw refusal observation`, () => {
     it('suppresses positive-read refusal, ignores unknown/maintenance, then rearms normal', async () => {
-      let reason: any = 'refusal';
-      const { a, replays } = adapter({ suppressOnRefusal: true, lanes: [lane] },
+      let reason: any = 'end_turn';
+      const { a, replays, events } = adapter({ suppressOnRefusal: true, lanes: [lane] },
         wire => ({ ...answer, stop_reason: wire.max_tokens === 0 ? 'max_tokens' : reason }),
         () => sdkStream([messageStart, { type: 'message_delta', delta: { stop_reason: reason }, usage: readUsage }]));
       const run = (options?: any) => lane === 'complete' ? a.complete(request('same'), options)
         : a.stream(request('same'), noCallbacks, options);
+      await run(); expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
+      reason = 'refusal';
       expect((await run()).stopReason).toBe('refusal');
+      expect(events.map(e => e.type)).toContain('suppressed');
       expect(a.cacheKeepalive!.getStatus()).toHaveLength(0);
       await vi.advanceTimersByTimeAsync(100);
       expect(replays()).toHaveLength(0);
@@ -168,9 +171,11 @@ it('legacy resolved refusal continues scheduling by default', async () => {
 it('bookkeeping exceptions do not break foreground results', async () => {
   const { a } = adapter({ suppressOnRefusal: true, lanes: ['complete'] }, () => answer);
   const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
-  vi.spyOn(a.cacheKeepalive!, 'finish').mockImplementation(() => { throw new Error('observer'); });
+  const finish = a.cacheKeepalive!.finish.bind(a.cacheKeepalive!);
+  vi.spyOn(a.cacheKeepalive!, 'finish').mockImplementation((...args) => { finish(...args); throw new Error('observer'); });
   expect((await a.complete(request('safe'))).stopReason).toBe('end_turn');
-  expect(warning).toHaveBeenCalledWith('[membrane] Keepalive bookkeeping failed; observation was not applied.');
+  expect(a.cacheKeepalive!.getStatus()).toHaveLength(1); // State changed before the throw.
+  expect(warning).toHaveBeenCalledWith('[membrane] Keepalive bookkeeping failed; state may be partially updated and refusal suppression may be incomplete. Check custom request serialization; disable cacheKeepalive if failures persist.');
   warning.mockRestore();
 });
 
@@ -190,13 +195,16 @@ for (const lane of ['complete', 'stream'] as const) {
   });
 
   it(`${lane}: actual errors/caller cancellation after refusal cannot rearm or lose signal`, async () => {
-    let mode = 'refusal';
-    const { a, client } = adapter({ suppressOnRefusal: true, lanes: [lane] },
+    let mode = 'end_turn';
+    const { a, client, events } = adapter({ suppressOnRefusal: true, lanes: [lane] },
       () => { if (mode === 'error') throw unreachable(); return { ...answer, stop_reason: mode }; },
       () => mode === 'error' ? sdkStream([messageStart], unreachable())
         : sdkStream([messageStart, { type: 'message_delta', delta: { stop_reason: mode }, usage: readUsage }]));
     const run = (options?: any) => lane === 'complete' ? a.complete(request('errors'), options) : a.stream(request('errors'), noCallbacks, options);
-    await run(); mode = 'error';
+    await run(); expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
+    mode = 'refusal'; await run();
+    expect(events.map(e => e.type)).toContain('suppressed');
+    mode = 'error';
     expect(await settle(run())).toBeDefined();
     expect(a.cacheKeepalive!.getStatus()).toEqual([]);
     mode = 'end_turn';
@@ -255,10 +263,12 @@ for (const lane of ['complete', 'stream'] as const) {
       const old = run();
       if (action === 'stop') a.cacheKeepalive!.stop();
       if (action === 'evict') await run('other');
+      const retainedKeys = a.cacheKeepalive!.getStatus().map(s => s.key);
       if (action === 'replace') await run('retire', 2);
       if (action === 'drop') await vi.advanceTimersByTimeAsync(100);
       gate.release(answer); await old;
       expect(a.cacheKeepalive!.getStatus()).toHaveLength(action === 'replace' || action === 'evict' ? 1 : 0);
+      if (action === 'evict') expect(a.cacheKeepalive!.getStatus().map(s => s.key)).toEqual(retainedKeys);
       if (action === 'replace') {
         await vi.advanceTimersByTimeAsync(100);
         expect(replays()[0].messages).toHaveLength(2);
@@ -271,13 +281,16 @@ for (const lane of ['complete', 'stream'] as const) {
   for (const mode of ['maintenance', 'unknown'] as const) {
     it(`${lane}: ${mode} cannot qualify evicted identity; normal default can`, async () => {
       let reason: any = mode === 'maintenance' ? 'max_tokens' : undefined;
-      const { a, replays } = adapter({ suppressOnRefusal: true, lanes: ['complete', 'stream'], maxLineages: 1 },
+      const { a, replays, events } = adapter({ suppressOnRefusal: true, lanes: ['complete', 'stream'], maxLineages: 1 },
         w => ({ ...answer, stop_reason: w.max_tokens === 0 ? 'max_tokens' : reason }),
         () => sdkStream([messageStart, { type: 'message_delta', delta: { stop_reason: reason }, usage: readUsage }]));
       const run = (key: string, options?: any) => lane === 'complete' ? a.complete(request(key), options)
         : a.stream(request(key), noCallbacks, options);
       const options = mode === 'maintenance' ? { keepalivePurpose: 'maintenance' } : undefined;
+      reason = 'end_turn'; await run('A');
+      expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
       reason = 'refusal'; await run('A');
+      expect(events.map(e => e.type)).toContain('suppressed');
       reason = mode === 'maintenance' ? 'max_tokens' : undefined;
       await run('A', options); // Retained-barrier control.
       expect(a.cacheKeepalive!.getStatus()).toEqual([]);
@@ -365,3 +378,32 @@ it('abort in final open content callback cannot qualify a stream with combined s
   expect(abort.signal.aborted).toBe(true);
   expect(a.cacheKeepalive!.getStatus()).toEqual([]);
 });
+
+
+for (const lane of ['complete', 'stream'] as const) {
+  it(`${lane}: failed begin stops keepalive rather than losing a later refusal`, async () => {
+    let reason = 'end_turn';
+    const { a, replays } = adapter({ suppressOnRefusal: true, lanes: [lane] },
+      w => { JSON.stringify(w); return { ...answer, stop_reason: reason }; },
+      w => { JSON.stringify(w); return sdkStream([messageStart, { type: 'message_delta', delta: { stop_reason: reason }, usage: readUsage }]); });
+    const run = (options?: any) => lane === 'complete' ? a.complete(request('begin-error'), options)
+      : a.stream(request('begin-error'), noCallbacks, options);
+    await run(); expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    reason = 'refusal';
+    let serializations = 0;
+    const result = await run({ onRequest: (w: any) => {
+      const original = w.system;
+      w.system = { toJSON() {
+        if (++serializations === 1) throw new Error('custom serialization');
+        return original;
+      } };
+    } });
+    expect(result.stopReason).toBe('refusal');
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining('state may be partially updated'));
+    expect(a.cacheKeepalive!.getStatus()).toEqual([]);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(replays()).toHaveLength(0);
+    warning.mockRestore();
+  });
+}
