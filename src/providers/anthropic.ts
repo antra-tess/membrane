@@ -1,3 +1,8 @@
+// Maintenance bookkeeping must never change foreground delivery.
+function keepaliveObservation<T>(observe: () => T): T | undefined {
+  try { return observe(); } catch { return undefined; }
+}
+
 import { unreportedUsage } from '../utils/usage.js';
 import { assertMessagePrefillSupported } from './request-capabilities.js';
 
@@ -500,12 +505,22 @@ export class AnthropicAdapter implements ProviderAdapter {
     const { signal: callSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
     try {
       const sentAt = Date.now();
+      const attempt = keepaliveObservation(() => this.cacheKeepalive?.begin(
+        fullRequest as unknown as Record<string, unknown>, headers, 'complete', options?.keepalivePurpose, sentAt,
+      ));
       const response = await this.createMessage(fullRequest, live, callSignal, { maxRetries: 0 });
-      this.cacheKeepalive?.record(
-        fullRequest as unknown as Record<string, unknown>, headers, 'complete', sentAt,
-      );
+      keepaliveObservation(() => {
+        if (attempt) {
+          this.cacheKeepalive?.prefix(attempt);
+          if (response.stop_reason === 'refusal') this.cacheKeepalive?.finish(attempt, 'refusal');
+        } else this.cacheKeepalive?.record(fullRequest as unknown as Record<string, unknown>, headers, 'complete', sentAt);
+      });
 
-      return this.parseResponse(response, fullRequest);
+      const parsed = this.parseResponse(response, fullRequest);
+      if (attempt && response.stop_reason !== 'refusal' && !callSignal?.aborted) {
+        keepaliveObservation(() => this.cacheKeepalive?.finish(attempt, response.stop_reason));
+      }
+      return parsed;
     } catch (error) {
       const aborted = callerAbort(options?.signal, error, fullRequest);
       if (aborted) throw aborted;
@@ -584,6 +599,9 @@ export class AnthropicAdapter implements ProviderAdapter {
       session = this.credentialSession(idleAbort.signal, onTransportActivity);
       // The cache's clock starts with the request, not at message_start.
       const sentAt = Date.now();
+      const attempt = keepaliveObservation(() => this.cacheKeepalive?.begin(
+        fullRequest as unknown as Record<string, unknown>, headers, 'stream', options?.keepalivePurpose, sentAt,
+      ));
       const stream = await session.client.messages.stream(anthropicRequest, {
         signal: session.signal,
         headers: live,
@@ -702,11 +720,18 @@ export class AnthropicAdapter implements ProviderAdapter {
       };
 
       for await (const event of stream) {
+        // Raw refusal is authoritative even if progress/terminal processing throws.
+        if (attempt && event.type === 'message_delta' && event.delta.stop_reason === 'refusal') {
+          keepaliveObservation(() => this.cacheKeepalive?.finish(attempt, 'refusal'));
+        }
         sawEvent = true;
         resetIdleTimer();
         // From message_start on, the provider has processed the request's prefix.
         if (event.type === 'message_start') {
-          this.cacheKeepalive?.record(fullRequest as unknown as Record<string, unknown>, headers, 'stream', sentAt);
+          keepaliveObservation(() => {
+            if (attempt) this.cacheKeepalive?.prefix(attempt);
+            else this.cacheKeepalive?.record(fullRequest as unknown as Record<string, unknown>, headers, 'stream', sentAt);
+          });
         }
         // Every SDK event is progress; the SDK drops pings before this loop.
         options?.onProgress?.(progressOfAnthropicEvent(event, summarized));
@@ -858,6 +883,9 @@ export class AnthropicAdapter implements ProviderAdapter {
       try { stream.controller.abort(); } catch { }
 
       assertTerminalEventObserved(sawTerminalEvent, 'Anthropic', fullRequest);
+      if (attempt && providerStopReason !== 'refusal' && !callSignal?.aborted) {
+        keepaliveObservation(() => this.cacheKeepalive?.finish(attempt, providerStopReason));
+      }
 
       // The SDK's MessageStream records the request-id header on connect,
       // before its first event.

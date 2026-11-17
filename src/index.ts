@@ -24,6 +24,7 @@ export type {
   KeepaliveUsage,
   KeepaliveLane,
   KeepaliveSend,
+  KeepaliveAttempt,
 } from './cache-keepalive.js';
 
 export { getDefaultModelLimits, type ModelLimits } from './registry/model-limits.js';

@@ -343,6 +343,10 @@ export interface SendReport {
 }
 
 export interface ProviderRequestOptions {
+  /** Trusted caller declaration for Anthropic keepalive only; never provider JSON.
+   * Default normal means this SDK entrypoint is foreground inference. Callers
+   * doing prefill/maintenance through it must override to maintenance. */
+  keepalivePurpose?: 'normal' | 'maintenance';
   /** Build/protocol facts for validation against the adapter's final model/body.
    * Not provider JSON. Decorators forward this context with the other options. */
   requestContext?: ProviderRequestContext;
