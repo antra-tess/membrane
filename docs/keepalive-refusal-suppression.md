@@ -3,7 +3,10 @@
 ```ts
 import { AnthropicAdapter } from '@animalabs/membrane';
 
-new AnthropicAdapter({ cacheKeepalive: { suppressOnRefusal: true } });
+new AnthropicAdapter({ cacheKeepalive: {
+  suppressOnRefusal: true,
+  onSuppressed: event => console.log(event.key, event.source),
+} });
 ```
 
 Default is **false**: legacy prefix registration and usage-based refresh behavior
@@ -12,13 +15,18 @@ Anthropic adapter/keeper, not a generic provider refusal or retry policy. Thrown
 HTTP failures keep the existing error policy; they are not semantic refusals.
 
 With the option enabled, raw SDK `stop_reason: 'refusal'` from foreground or a
-current refresh suppresses its key and removes its replay snapshot, even with
-positive cache-read counters. A `suppressed` event names foreground or refresh.
-A stale refresh's resolved result only receives its transport receipt, not semantic
-state events. Rejected sender invocations still count toward the global consecutive
+refresh (including a stale one) suppresses its currently retained key and removes its replay snapshot, even with
+positive cache-read counters. The separate opt-in `onSuppressed` callback receives a `KeepaliveSuppression`
+notification naming foreground or refresh. The existing `KeepaliveEvent` union
+and `onEvent` channel are unchanged; suppression notifications never go to
+`onEvent`. Register `onSuppressed` only when enabling suppression. Its throws
+and rejected promises are isolated. A stale non-refusal resolution only receives
+its transport receipt, not semantic state events. A stale refusal removes even a
+replacement installed during the await and bars all attempts begun before observation. Rejected sender invocations still count toward the global consecutive
 transport-error limit and can emit `error`/`disabled`, even after snapshot replacement.
-`onCall.outcome: 'success'` still means **the sender resolved**, not semantic
-success. With `onCall` configured and cloneable request/response values, each
+`onCall.outcome: 'success'` means **the sender resolved and initial response
+metadata was readable**, not semantic success. A throwing response accessor can
+instead produce an error receipt and increment the failure count after resolution. With `onCall` configured and cloneable request/response values, each
 actual sender invocation delivers one receipt, including refused, unknown, stale
 and failed sends. Receipt delivery is best-effort: clone failures or observer
 failures are isolated, not retried. Without `onCall`, no receipts are delivered.
@@ -28,8 +36,9 @@ snapshot and emits `skipped` with reason
 `unknown-refresh-terminal`, while retaining outcome identity/barrier state. A later
 foreground prefix may register a new snapshot if the identity is still qualified.
 This is retirement, not a new retry/backoff policy; an unknown refresh is never
-resent on every timer check. Any resolved sender resets consecutive transport
-errors, including refusals, empty responses and unknown terminals. Replay serialization
+resent on every timer check. Resolutions whose initial metadata processing succeeds reset consecutive
+send/response-processing errors, including refusals, empty responses and unknown
+terminals in suppression mode. Replay serialization
 failures emit `error` without incrementing that send-failure counter or delivering
 a call receipt, since the sender was not invoked. They retire only the failed
 replay snapshot (retaining outcome identity), so it is not retried every timer
@@ -130,6 +139,10 @@ matches main: NaN and positive Infinity are unbounded; negative Infinity retains
 nothing. Normalization is not applied in default-off mode.
 `KeepaliveAttempt` is an opaque, issuer-specific handle with a read-only key;
 pass it back to the issuing keeper without accessing internal outcome state.
+Default-off preserves legacy malformed-sender behavior: null/undefined responses
+can emit success then error receipts, and preparation failures count toward
+`maxConsecutiveErrors`. Do not count such malformed-response receipts as unique
+invocations.
 Custom senders opting in must return raw `stop_reason`, not only usage counters.
 
 ## Composition / exclusions

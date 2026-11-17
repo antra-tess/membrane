@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { CacheKeepalive, lineageKey, type KeepaliveCall, type KeepaliveEvent } from '../../src/cache-keepalive.js';
+import { CacheKeepalive, lineageKey, type KeepaliveCall, type KeepaliveEvent, type KeepaliveSuppression } from '../../src/cache-keepalive.js';
 const wire = (model = 'claude-test') => ({ model, system: [{ type: 'text', text: 'system', cache_control: { type: 'ephemeral', ttl: '1h' } }], messages: [{ role: 'user', content: 'hi' }] });
 const ok = { stop_reason: 'max_tokens', usage: { cache_read_input_tokens: 100, cache_creation_input_tokens: 0 } };
 const keepers: CacheKeepalive[] = [];
 function setup(send: any = async () => ok, extra: any = {}) {
-  const calls: KeepaliveCall[] = [], events: KeepaliveEvent[] = [];
-  const k = new CacheKeepalive(send, { suppressOnRefusal: true, refreshAfterMs: 100, checkIntervalMs: 100, maxIdleMs: 1000, onCall: c => { calls.push(c); }, onEvent: e => { events.push(e); }, ...extra });
+  const calls: KeepaliveCall[] = [], events: (KeepaliveEvent | KeepaliveSuppression)[] = [];
+  const k = new CacheKeepalive(send, { suppressOnRefusal: true, refreshAfterMs: 100, checkIntervalMs: 100, maxIdleMs: 1000, onCall: c => { calls.push(c); }, onSuppressed: e => { events.push(e); }, onEvent: e => { events.push(e); }, ...extra });
   keepers.push(k);
   const begin = (purpose: 'normal' | 'maintenance' = 'normal', w = wire()) => k.begin(w, undefined, 'stream', purpose)!;
   const normal = () => { const a = begin(); k.prefix(a); k.finish(a, 'end_turn'); return a; };
@@ -45,7 +45,7 @@ it('error, unknown, cancellation (no finish), and maintenance cannot rearm a bar
   normal(); expect(k.getStatus()).toHaveLength(1);
 });
 
-it.each(['success', 'refusal', 'error'])('stale refresh %s preserves replacement; errors still count globally', async outcome => {
+it.each(['success', 'refusal', 'error'])('stale refresh %s: refusal removes replacement; errors still count globally', async outcome => {
   let resolve!: (r: any) => void, reject!: (r: any) => void;
   const deferred = new Promise((a, b) => { resolve = a; reject = b; });
   const { k, normal, calls, events } = setup(() => deferred);
@@ -59,16 +59,18 @@ it.each(['success', 'refusal', 'error'])('stale refresh %s preserves replacement
   if (outcome === 'error') reject(new Error('old')); else resolve({ ...ok, stop_reason: outcome === 'refusal' ? 'refusal' : 'max_tokens' });
   await vi.advanceTimersByTimeAsync(0);
   expect(calls).toHaveLength(1);
-  expect(events.map(e => e.type)).toEqual(outcome === 'error' ? ['error'] : []);
-  expect(k.getStatus()).toHaveLength(1);
-  expect((k as any).lineages.get(replacement.key)).toBe(replacementSnapshot);
+  expect(events.map(e => e.type)).toEqual(outcome === 'error' ? ['error'] : outcome === 'refusal' ? ['suppressed'] : []);
+  expect(k.getStatus()).toHaveLength(outcome === 'refusal' ? 0 : 1);
+  expect((k as any).lineages.get(replacement.key)).toBe(outcome === 'refusal' ? undefined : replacementSnapshot);
   k.finish(replacement, 'refusal'); expect(k.getStatus()).toEqual([]);
 });
 
 it.each(['stop', 'evict', 'drop'])('old foreground and refresh cannot resurrect after %s', async action => {
   let resolve!: (r: any) => void;
   const { k, normal, begin, calls, events } = setup(() => new Promise(r => { resolve = r; }), { maxLineages: 1, maxIneffective: 1 });
-  const old = normal(); await vi.advanceTimersByTimeAsync(100);
+  normal();
+  const old = begin(); // Unregistered in-flight attempt must lose its identity.
+  await vi.advanceTimersByTimeAsync(100);
   if (action === 'stop') k.stop();
   if (action === 'evict') begin('normal', wire('other'));
   resolve(action === 'drop' ? { stop_reason: 'max_tokens', usage: {} } : ok);
@@ -270,7 +272,7 @@ it('attempt handles do not expose mutable state and are issuer-specific', () => 
 
 it.each([true, false])('async event rejection is isolated with suppression %s', async suppressOnRefusal => {
   const onEvent = vi.fn(async () => { throw new Error('observer'); });
-  const { k, begin } = setup(undefined, { onEvent, suppressOnRefusal });
+  const { k, begin } = setup(undefined, { onEvent, onSuppressed: onEvent, suppressOnRefusal });
   if (suppressOnRefusal) k.finish(begin(), 'refusal');
   else {
     k.record({ ...wire(), thinking: { type: 'enabled' } }, undefined, 'stream');
@@ -344,7 +346,8 @@ it('reentrant eviction refusal bars the outer begin', () => {
 it.each(['inflight replacement', 'error observer'])('global send-error limit survives %s', async race => {
   let reject!: (e: Error) => void;
   let replace!: () => void;
-  const events: KeepaliveEvent[] = [];
+  let replacementSnapshot: unknown;
+  const events: (KeepaliveEvent | KeepaliveSuppression)[] = [];
   const { k, normal, begin, calls } = setup(() => new Promise((_r, j) => { reject = j; }), {
     maxConsecutiveErrors: 1,
     onEvent: (e: KeepaliveEvent) => {
@@ -357,14 +360,14 @@ it.each(['inflight replacement', 'error observer'])('global send-error limit sur
   expect(originalSnapshot).toBeDefined();
   replace = () => {
     const replacement = begin(); k.prefix(replacement);
-    const snapshot = (k as any).lineages.get(replacement.key);
-    expect(snapshot).toBeDefined();
-    expect(snapshot).not.toBe(originalSnapshot);
+    replacementSnapshot = (k as any).lineages.get(replacement.key);
   };
   await vi.advanceTimersByTimeAsync(100);
   if (race === 'inflight replacement') replace();
   reject(new Error('outage'));
   await vi.advanceTimersByTimeAsync(0);
+  expect(replacementSnapshot).toBeDefined();
+  expect(replacementSnapshot).not.toBe(originalSnapshot);
   expect(calls.map(c => c.outcome)).toEqual(['error']);
   expect(events.map(e => e.type)).toEqual(['error', 'disabled']);
   expect(k.getStatus()).toEqual([]);
@@ -428,17 +431,17 @@ it('record-only pre-refusal wire cannot replace a qualified post-barrier snapsho
 
 it('a refusal handle is observed once, including reentrant finish and replay after rearm', () => {
   let k!: CacheKeepalive, refusing!: ReturnType<CacheKeepalive['begin']>;
-  const onEvent = vi.fn((e: KeepaliveEvent) => {
+  const onSuppressed = vi.fn((e: KeepaliveSuppression) => {
     if (e.type === 'suppressed') k.finish(refusing!, 'refusal');
   });
-  const state = setup(undefined, { onEvent }); k = state.k;
+  const state = setup(undefined, { onSuppressed }); k = state.k;
   refusing = state.begin(); k.finish(refusing!, 'refusal');
-  expect(onEvent).toHaveBeenCalledTimes(1);
+  expect(onSuppressed).toHaveBeenCalledTimes(1);
   state.normal();
   const snapshot = (k as any).lineages.get(refusing!.key);
   expect(snapshot).toBeDefined();
   k.finish(refusing!, 'refusal');
-  expect(onEvent).toHaveBeenCalledTimes(1);
+  expect(onSuppressed).toHaveBeenCalledTimes(1);
   expect((k as any).lineages.get(refusing!.key)).toBe(snapshot);
 });
 
@@ -537,7 +540,7 @@ it.each([false, true])('receipt stop rechecks remain opt-in (%s)', async suppres
 
 it.each([false, true])('error observer stop rechecks remain opt-in (%s)', async suppressOnRefusal => {
   let k!: CacheKeepalive;
-  const events: KeepaliveEvent[] = [];
+  const events: (KeepaliveEvent | KeepaliveSuppression)[] = [];
   const state = setup(async () => { throw new Error('outage'); }, {
     suppressOnRefusal, maxConsecutiveErrors: 1, onEvent: (e: KeepaliveEvent) => {
       events.push(e); if (e.type === 'error') k.stop('operator stop');
@@ -556,4 +559,47 @@ it('throwing terminal metadata still delivers one error receipt', async () => {
   normal(); await vi.advanceTimersByTimeAsync(100);
   expect(calls.map(c => c.outcome)).toEqual(['error']);
   expect(events).toEqual([expect.objectContaining({ type: 'error', consecutive: 1 })]);
+});
+
+it.each([false, true])('suppression uses only its dedicated channel (enabled %s)', suppressOnRefusal => {
+  const onEvent = vi.fn(), onSuppressed = vi.fn();
+  const { k, begin } = setup(undefined, { suppressOnRefusal, onEvent, onSuppressed });
+  if (suppressOnRefusal) k.finish(begin(), 'refusal');
+  else k.record(wire(), undefined, 'stream');
+  expect(onEvent).not.toHaveBeenCalled();
+  expect(onSuppressed).toHaveBeenCalledTimes(suppressOnRefusal ? 1 : 0);
+});
+
+it.each(['same identity', 'recreated identity'])('stale refresh refusal bars pre-observation attempts: %s', async identity => {
+  let resolve!: (r: any) => void;
+  const { k, normal, begin, events, calls } = setup(() => new Promise(r => { resolve = r; }), { maxLineages: 1 });
+  normal();
+  await vi.advanceTimersByTimeAsync(100);
+  if (identity === 'recreated identity') begin('normal', wire('other'));
+  const replacement = normal();
+  const pending = begin();
+  expect(k.getStatus()).toHaveLength(1);
+  resolve({ ...ok, stop_reason: 'refusal' });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(events.at(-1)).toEqual({ type: 'suppressed', key: replacement.key, source: 'refresh' });
+  expect(k.getStatus()).toEqual([]);
+  k.prefix(pending); k.finish(pending, 'end_turn');
+  k.prefix(replacement); k.finish(replacement, 'end_turn');
+  expect(k.getStatus()).toEqual([]);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(calls).toHaveLength(1);
+  normal(); expect(k.getStatus()).toHaveLength(1);
+});
+
+it.each(['prefix', 'finish'])('eligibility accessor refusal cannot install a snapshot from %s', operation => {
+  const { k, normal, begin, events } = setup(); normal();
+  const refusing = begin();
+  const w = wire();
+  const attempt = begin('normal', w);
+  Object.defineProperty(w, 'tool_choice', { get() { k.finish(refusing, 'refusal'); return undefined; } });
+  if (operation === 'prefix') k.prefix(attempt);
+  else k.finish(attempt, 'end_turn');
+  expect(events.at(-1)?.type).toBe('suppressed');
+  expect(k.getStatus()).toEqual([]);
+  k.finish(attempt, 'end_turn'); expect(k.getStatus()).toEqual([]);
 });

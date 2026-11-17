@@ -3,12 +3,5 @@
   corrective action. A failed begin permanently stops keepalive for that adapter,
   emits `disabled` with a reason, and explicitly warns of the permanent stop. This changes exception propagation, not the default
   legacy scheduling policy.
-- With opt-in suppression only, observe complete refusals before prefix bookkeeping
-  and do not qualify streams cancelled in final callbacks. Install refresh refusal
-  barriers before receipt observers, ignore identity-free `record()` calls, and
-  observe each foreground refusal handle only once.
 - Isolate asynchronous event observer rejections in both modes, like synchronous
   throws; this shared safety change does not alter default-off scheduling.
-- With opt-in refusal suppression, nonfinite lineage caps use the bounded default.
-  With suppression unset or false, cap handling matches main without normalization
-  (NaN and positive Infinity are unbounded; negative Infinity retains nothing).

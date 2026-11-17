@@ -1,11 +1,12 @@
 /**
- * The real SDK surfaces request rejection or transport failure at its iterator's
- * first event (distinct from a later semantic refusal), after messages.stream() has returned. The provider's cache clock
+ * The real SDK can surface request rejection at the first iterator event, or
+ * transport failure after earlier events (distinct from semantic refusal),
+ * after messages.stream() has returned. The provider's cache clock
  * starts at a request's send.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
-import { lineageKey, type CacheKeepaliveConfig, type KeepaliveEvent } from '../../src/cache-keepalive.js';
+import { lineageKey, type CacheKeepaliveConfig, type KeepaliveEvent, type KeepaliveSuppression } from '../../src/cache-keepalive.js';
 
 const START = Date.parse('2026-10-19T00:00:00Z');
 const timing = { refreshAfterMs: 100, checkIntervalMs: 100, maxIdleMs: 10_000 };
@@ -75,8 +76,8 @@ function heldStream(gate: Promise<unknown>, events: unknown[]) {
 
 const adapters: AnthropicAdapter[] = [];
 function adapter(config: CacheKeepaliveConfig, create: (wire: any) => unknown, stream?: (wire: any) => unknown) {
-  const events: KeepaliveEvent[] = [];
-  const a = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { ...timing, ...config, onEvent: e => { events.push(e); } } });
+  const events: (KeepaliveEvent | KeepaliveSuppression)[] = [];
+  const a = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { ...timing, ...config, onSuppressed: e => { events.push(e); }, onEvent: e => { events.push(e); } } });
   adapters.push(a);
   const sent: any[] = [];
   const client: any = {
@@ -444,3 +445,15 @@ for (const lane of ['complete', 'stream'] as const) {
     warning.mockRestore();
   });
 }
+
+it('complete qualification checks caller abort even if combined-signal propagation is blocked', async () => {
+  const abort = new AbortController();
+  abort.signal.addEventListener('abort', e => e.stopImmediatePropagation());
+  const { a } = adapter({ suppressOnRefusal: true, lanes: ['complete'] }, () => {
+    abort.abort();
+    return answer;
+  });
+  await settle(a.complete(request('blocked-abort'), { signal: abort.signal, timeoutMs: 1000 }));
+  expect(abort.signal.aborted).toBe(true);
+  expect(a.cacheKeepalive!.getStatus()).toEqual([]);
+});

@@ -1,6 +1,7 @@
 /**
- * The real SDK surfaces request rejection or transport failure at its iterator's
- * first event (distinct from a later semantic refusal), after messages.stream() has returned. The provider's cache clock
+ * The real SDK can surface request rejection at the first iterator event, or
+ * transport failure after earlier events (distinct from semantic refusal),
+ * after messages.stream() has returned. The provider's cache clock
  * starts at a request's send.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';

@@ -526,7 +526,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       });
 
       const parsed = this.parseResponse(response, fullRequest);
-      if (attempt && response.stop_reason !== 'refusal' && !callSignal?.aborted) {
+      if (attempt && response.stop_reason !== 'refusal' && !callSignal?.aborted && !options?.signal?.aborted) {
         keepaliveObservation(() => this.cacheKeepalive?.finish(attempt, response.stop_reason));
       }
       return parsed;

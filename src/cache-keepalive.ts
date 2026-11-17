@@ -41,10 +41,13 @@ export type KeepaliveSend = (
 
 export type KeepaliveLane = 'stream' | 'complete';
 
-/** A terminal receipt per KeepaliveSend invocation, not per HTTP attempt.
+/** With suppression enabled, one terminal receipt per KeepaliveSend invocation,
+ * not per HTTP attempt. Legacy malformed null/undefined responses can deliver
+ * success then error receipts during response processing.
  * Delivery is best-effort when onCall is configured and values are cloneable.
  * SDK-internal retries belong to that invocation. A success carries the full
  * vendor response and its terminal usage, including ineffective cache writes.
+ * Resolved responses with throwing metadata accessors can instead report errors.
  * Request and response objects are observer-owned copies; recorded request
  * headers are excluded. */
 export type KeepaliveCall = {
@@ -63,8 +66,9 @@ export type KeepaliveCall = {
   | { outcome: 'error'; error: unknown }
 );
 
+export type KeepaliveSuppression = { type: 'suppressed'; key: string; source: 'foreground' | 'refresh' };
+
 export type KeepaliveEvent =
-  | { type: 'suppressed'; key: string; source: 'foreground' | 'refresh' }
   | { type: 'refreshed'; key: string; lane: KeepaliveLane; readTokens: number; idleMs: number }
   | { type: 'ineffective'; key: string; reason: string; readTokens: number; writeTokens: number }
   | { type: 'skipped'; key: string; reason: string }
@@ -77,6 +81,9 @@ export interface CacheKeepaliveConfig {
    * Initial eligibility requires a known normal foreground completion; only one
    * begun after refusal can rearm. */
   suppressOnRefusal?: boolean;
+  /** Separate opt-in suppression notifications; never delivered to onEvent.
+   * Used only with suppressOnRefusal. Observer failures are isolated. */
+  onSuppressed?: (event: KeepaliveSuppression) => void | Promise<void>;
   /** Master switch. Default true. */
   enabled?: boolean;
   /**
@@ -100,7 +107,8 @@ export interface CacheKeepaliveConfig {
    *  Finite nonpositive caps retain nothing in either mode; default-off
    *  negative Infinity also retains nothing. */
   maxLineages?: number;
-  /** Consecutive send failures before the whole keepalive disables itself. Default 3. */
+  /** Consecutive send/response-processing failures before disabling. Default 3.
+   * Default-off also counts replay preparation failures; suppression mode does not. */
   maxConsecutiveErrors?: number;
   /**
    * The number of pokes of a lineage in a row coming back without a cache read
@@ -110,8 +118,9 @@ export interface CacheKeepaliveConfig {
   /** Each keepalive event as it happens. Throws and rejected promises are ignored. */
   onEvent?: (event: KeepaliveEvent) => void;
   /** Report background calls to the same ledger as foreground inference.
-   * Invoked once on success (including ineffective responses) or failure when
-   * the receipt values can be cloned; clone failures drop the receipt.
+   * In suppression mode, invoked once on success (including ineffective responses)
+   * or failure; legacy malformed empty responses may emit success then error.
+   * Delivery requires cloneable receipt values; clone failures drop the receipt.
    * Observer errors are isolated, and returned promises never delay the loop.
    * Skipped, expired, and disabled entries initiate no new calls; a sender already
    * in flight still delivers its receipt after snapshot removal or stop.
@@ -250,8 +259,8 @@ export class CacheKeepalive {
   private ticking = false;
   private consecutiveErrors = 0;
   private stopped = false;
-  private readonly cfg: Required<Omit<CacheKeepaliveConfig, 'onEvent' | 'onCall'>> &
-    Pick<CacheKeepaliveConfig, 'onEvent' | 'onCall'>;
+  private readonly cfg: Required<Omit<CacheKeepaliveConfig, 'onEvent' | 'onCall' | 'onSuppressed'>> &
+    Pick<CacheKeepaliveConfig, 'onEvent' | 'onCall' | 'onSuppressed'>;
 
   constructor(private readonly send: KeepaliveSend, config: CacheKeepaliveConfig = {}) {
     this.cfg = { ...DEFAULTS, ...config };
@@ -294,6 +303,9 @@ export class CacheKeepalive {
         attempt.sequence <= attempt.state.barrier || attempt.sequence < attempt.state.latest) return;
     if (!this.cfg.lanes.includes(attempt.lane)) return;
     const reason = ineligibleReason(attempt.wire);
+    // Caller-owned eligibility accessors may reenter and observe a refusal.
+    if (!this.current(attempt) || attempt.sequence <= attempt.state.barrier ||
+        attempt.sequence < attempt.state.latest) return;
     if (reason) {
       attempt.state.latest = attempt.sequence;
       if (this.lineages.delete(attempt.key)) this.emit({ type: 'skipped', key: attempt.key, reason });
@@ -322,11 +334,13 @@ export class CacheKeepalive {
     }
     if (!this.current(attempt) || attempt.purpose !== 'normal' || !knownTerminal(reason) ||
         attempt.sequence <= attempt.state.barrier) return;
+    const eligibility = ineligibleReason(attempt.wire);
+    if (!this.current(attempt) || attempt.sequence <= attempt.state.barrier) return;
     attempt.state.qualified = true;
     // Keep the last refusal sequence after rearm: an older handle stays barred.
     if (!this.cfg.lanes.includes(attempt.lane) || attempt.sequence < attempt.state.latest || attempt.registered) return;
     attempt.state.latest = attempt.sequence;
-    this.installSnapshot(attempt.wire, attempt.headers, attempt.lane, attempt.sentAt, attempt.key, ineligibleReason(attempt.wire));
+    this.installSnapshot(attempt.wire, attempt.headers, attempt.lane, attempt.sentAt, attempt.key, eligibility);
     attempt.registered = true;
   }
 
@@ -334,7 +348,10 @@ export class CacheKeepalive {
     state.qualified = false;
     state.barrier = ++this.sequence;
     this.lineages.delete(key);
-    this.emit({ type: 'suppressed', key, source });
+    try {
+      void Promise.resolve(this.cfg.onSuppressed?.({ type: 'suppressed', key, source })).catch(() => {});
+    } catch {
+    }
   }
 
   /** Record a real request the provider is known to have begun answering, so
@@ -440,16 +457,17 @@ export class CacheKeepalive {
       const res = this.cfg.suppressOnRefusal ? resolved ?? {} : resolved;
       const response = { ...res };
       // Install the refusal barrier before receipt observers can replace the
-      // snapshot. A result already stale at resolution still cannot suppress.
+      // snapshot. Refusals apply to the currently retained key, even if the
+      // snapshot or outcome identity was replaced during the sender await.
       const refused = this.cfg.suppressOnRefusal && res.stop_reason === 'refusal';
       reported = true;
-      if (refused && !this.stopped && this.lineages.get(key) === lin &&
-          this.outcomes.get(key) === state && state) this.suppress(key, state, 'refresh');
+      const currentState = this.outcomes.get(key);
+      if (refused && !this.stopped && currentState) this.suppress(key, currentState, 'refresh');
       this.reportCall({
         key, lane: lin.lane, startedAt, durationMs: Date.now() - startedAt,
         request: payload, outcome: 'success', response,
       });
-      // Any resolved send breaks a run of transport failures, even when its
+      // Successfully processed resolutions break a run of failures, even when the
       // semantic outcome cannot refresh the cache (or its snapshot is stale).
       this.consecutiveErrors = 0;
       if (refused) return;

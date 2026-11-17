@@ -15,3 +15,31 @@
 - `CacheKeepalive.stop(reason)` accepts an optional reason and emits one
   `disabled` event on the first stop when a nonempty reason is supplied. Calling
   `stop()` without a reason remains silent.
+- Add a separate opt-in `onSuppressed` callback and exported
+  `KeepaliveSuppression` notification type for consumers enabling suppression.
+  `KeepaliveEvent` and `onEvent` remain unchanged; existing exhaustive consumers
+  need no new case or compatible sibling-package release.
+- With opt-in suppression only, observe complete refusals before prefix bookkeeping
+  and do not qualify streams cancelled in final callbacks. Install refresh refusal
+  barriers before receipt observers, ignore identity-free `record()` calls, and
+  observe each foreground refusal handle only once.
+- With opt-in refusal suppression, nonfinite lineage caps use the bounded default.
+  With suppression unset or false, cap handling matches main without normalization
+  (NaN and positive Infinity are unbounded; negative Infinity retains nothing).
+- Opt-in refusal suppression requires known-normal foreground completion for
+  fresh identities, including after eviction. Excluded-lane and fresh pending
+  prefixes cannot starve successful stream qualification; finishing an already
+  registered request preserves its snapshot and refresh baseline.
+- Opt-in outcome state uses a bounded all-request LRU; every eviction reports
+  `skipped: outcome-lru-eviction`, even without a snapshot. Unrelated or excessive
+  concurrent traffic can invalidate in-flight handles; increase `maxLineages`
+  if needed. Ineligible prefixes preserve shared outcome identity. See
+  `docs/keepalive-refusal-suppression.md` for retention tradeoffs.
+- In opt-in mode, stale failed sender invocations and reentrant error observers
+  cannot bypass the existing global consecutive transport-error limit. This is
+  not per-key backoff, retry, or expiry policy.
+- In opt-in mode, empty resolved refresh responses are transport successes,
+  replay preparation failures retire only the failed snapshot without counting
+  toward the send-failure limit (a later qualified prefix can install a new one), and
+  a foreground refusal from an evicted handle still suppresses a currently
+  retained identity for its key. Default-off behavior is unchanged.

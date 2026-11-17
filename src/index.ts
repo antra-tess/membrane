@@ -20,6 +20,7 @@ export {
 export type {
   CacheKeepaliveConfig,
   KeepaliveEvent,
+  KeepaliveSuppression,
   KeepaliveCall,
   KeepaliveUsage,
   KeepaliveLane,
