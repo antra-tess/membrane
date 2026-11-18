@@ -199,10 +199,13 @@ that sender can still deliver a receipt after stop.
 Idle expiry and ineffective retirement drop both snapshot and identity, even
 when a newer foreground attempt is awaiting its prefix. Such an attempt cannot
 qualify the retired identity; a new begin and known-normal completion are needed.
-An ineligible prefix in a configured lane, unless older than the latest accepted
+An ineligible prefix for a currently retained outcome identity in a configured
+lane, when newer than its refusal barrier and not older than the latest accepted
 prefix for that key, removes its replay snapshot and emits
 `skipped` when one existed, or `ineligible-prefix` via `onDiagnostic` otherwise,
-without deleting the outcome identity or a retained refusal barrier. Excluded lanes cannot remove snapshots by prefix ineligibility.
+without deleting the outcome identity or a retained refusal barrier. Detached
+untracked handles (for example, a first stream without a one-hour cache marker)
+do not emit this diagnostic. Excluded lanes cannot remove snapshots by prefix ineligibility.
 There is no persistence or durable tombstone format.
 Low-level keeper clients must use `begin`, `prefix`, `finish` to observe outcomes.
 On failure or cancellation, low-level callers should call `finish(handle, undefined)`
@@ -226,7 +229,9 @@ Synchronous throws and rejected promises from event/call observers are isolated
 in both modes. This observer safety and adapter bookkeeping exception isolation
 are shared changes; default-off equivalence refers to scheduling and cap handling,
 not exception propagation. Error string conversion is guarded in both modes:
-printable errors keep their legacy formatting, while unprintable errors use
+ordinary string-valued Error messages keep their legacy formatting. Non-string
+Error messages are also converted to strings (for example, `42` becomes `"42"`
+in the event error field), unlike the legacy pass-through. Unprintable errors use
 `Unprintable keepalive error` and continue failure accounting and error/disabled
 notifications instead of throwing during formatting.
 Errors inside guarded keeper operations never replace foreground results (in either mode).

@@ -66,7 +66,9 @@
   token budget and message trimming. Foreground serialization is unchanged.
 - In both modes, unprintable error messages use `Unprintable keepalive error`
   and continue failure accounting/notifications instead of throwing during formatting.
-  Printable default-off errors retain their legacy formatting.
+  Ordinary string-valued Error messages retain their legacy formatting; non-string
+  Error messages are stringified in both modes, unlike the legacy pass-through
+  (for example, numeric `42` becomes `"42"` in the event error field).
 - Opt-in success receipt latency stops at sender resolution, excluding response
   copying and synchronous observers. Nonfinite usage errors name the field and
   coerced value. Preparation errors explicitly report snapshot retirement.

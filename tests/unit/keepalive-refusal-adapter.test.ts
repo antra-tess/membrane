@@ -144,7 +144,10 @@ for (const lane of ['complete', 'stream'] as const) {
         },
       } : { stop_reason: 'end_turn' };
       const { a, events, replays } = adapter({ suppressOnRefusal: true, lanes: [lane] },
-        () => Object.defineProperties({ ...answer, _request_id: 'req-changing' }, Object.getOwnPropertyDescriptors(terminal())),
+        () => Object.defineProperties({ ...answer }, {
+          ...Object.getOwnPropertyDescriptors(terminal()),
+          _request_id: { value: 'req-changing', enumerable: false },
+        }),
         () => sdkStream([messageStart, { type: 'message_delta', delta: terminal(), usage: readUsage }]));
       const run = () => lane === 'complete' ? a.complete(request('changing-terminal'))
         : a.stream(request('changing-terminal'), noCallbacks);
@@ -152,6 +155,10 @@ for (const lane of ['complete', 'stream'] as const) {
       expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
       changing = true;
       const response = await run();
+      if (lane === 'complete') {
+        expect(response.requestId).toBe('req-changing');
+        expect((response.raw as any).request_id).toBe('req-changing');
+      }
       expect(response.stopReason).toBe(firstReason);
       expect(response.providerStopReason).toBe(firstReason);
       expect((response.raw as any).stop_reason).toBe(firstReason);
