@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { NativeFormatter } from '../../src/formatters/native.js';
 import { AnthropicXmlFormatter } from '../../src/formatters/anthropic-xml.js';
-import { AnthropicAdapter } from '../../src/providers/anthropic.js';
+import { AnthropicAdapter } from '../../src/index.js';
 import { lineageKey, type CacheKeepaliveConfig, type KeepaliveEvent, type KeepaliveSuppression } from '../../src/cache-keepalive.js';
 
 const START = Date.parse('2026-10-19T00:00:00Z');
@@ -566,3 +566,43 @@ for (const route of ['complete', 'stream', 'streamYielding'] as const) {
     });
   }
 }
+
+
+it.each([false, true])('public adapter reports outcome-cap eviction (existing snapshot: %s)', async qualified => {
+  const gates = Array.from({ length: 5 }, () => held());
+  let holding = false;
+  let next = 0;
+  const { a, events, replays } = adapter({ suppressOnRefusal: true, lanes: ['complete'] },
+    w => w.max_tokens === 0 ? { ...answer, stop_reason: 'max_tokens' }
+      : holding ? gates[next++]!.promise : answer);
+  const key = lineageKey({ model: request('key-0').model, system: request('key-0').system });
+  if (qualified) {
+    await a.complete(request('key-0'));
+    expect(a.cacheKeepalive!.getStatus().map(s => s.key)).toEqual([key]);
+  }
+  holding = true;
+  const pending = gates.map((_, i) => a.complete(request(`key-${i}`)));
+  expect(next).toBe(5);
+  expect(events).toEqual([{
+    type: 'error', key, error: 'outcome-lru-eviction: maxLineages cap exceeded', consecutive: 0,
+  }]);
+  expect(a.cacheKeepalive!.getStatus()).toEqual([]);
+  // Both success qualification and refusal observation lose the evicted identity.
+  gates.forEach((gate, i) => gate.release({ ...answer, stop_reason: i === 0 ? 'refusal' : 'end_turn' }));
+  await Promise.all(pending);
+  expect(a.cacheKeepalive!.getStatus()).toHaveLength(4);
+  expect(a.cacheKeepalive!.getStatus().some(s => s.key === key)).toBe(false);
+  expect(events).toHaveLength(1); // No misleading skipped or suppression event.
+  await vi.advanceTimersByTimeAsync(100);
+  expect(replays()).toHaveLength(4); // Diagnostic did not disable the keeper.
+});
+
+
+it.each([{}, { suppressOnRefusal: false }])('public adapter default-off cap eviction stays silent (%j)', async config => {
+  const { a, events, replays } = adapter({ ...config, lanes: ['complete'] }, () => answer);
+  for (let i = 0; i < 5; i++) await a.complete(request(`key-${i}`));
+  expect(a.cacheKeepalive!.getStatus()).toHaveLength(4);
+  expect(events).toEqual([]);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(replays()).toHaveLength(4);
+});

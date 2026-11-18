@@ -9,3 +9,5 @@
   live attempt data on stop. Default-off scheduling remains unchanged.
 - With refusal suppression enabled, honor newer ineligible prefix ordering after
   refusal and release finished attempt data even when opaque handles are retained.
+- Restore opt-in outcome-LRU eviction diagnostics, including pending identities,
+  without classifying eviction as an ineligible-snapshot skip. Default-off eviction stays silent.

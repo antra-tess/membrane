@@ -59,7 +59,8 @@ export type KeepaliveCall = {
   /** Unix epoch milliseconds when this poke attempt began. */
   startedAt: number;
   durationMs: number;
-  /** Observer-owned structured clone of the prepared replay, not wire bytes.
+  /** Observer-owned structured clone of the replay after sender settlement, not wire bytes.
+   * A custom sender can mutate the prepared replay before this copy is made.
    * Default-off first JSON.stringify/JSON.parse round-trips the recorded request:
    * custom toJSON results are retained, callable fields may disappear, and
    * exact-digit JSON numbers may round before this copy is made.
@@ -140,7 +141,8 @@ export interface CacheKeepaliveConfig {
    * changing send-failure accounting or retiring the snapshot.
    * Observer errors are isolated, and returned promises never delay the loop.
    * skipped only reports removal of an ineligible snapshot, before any send.
-   * Error diagnostics for receipt loss and unknown terminals do not increment
+   * Opt-in outcome eviction emits error: outcome-lru-eviction even without a snapshot.
+   * Error diagnostics for eviction, receipt loss and unknown terminals do not increment
    * consecutive failures; the latter retires the snapshot after a send.
    * Expired/disabled entries normally initiate no new calls; default-off replay
    * serialization can reenter stop and still send afterward (legacy behavior).
@@ -324,6 +326,7 @@ export class CacheKeepalive {
       if (oldest === undefined) break;
       this.outcomes.delete(oldest);
       this.lineages.delete(oldest);
+      this.emit({ type: 'error', key: oldest, error: 'outcome-lru-eviction: maxLineages cap exceeded', consecutive: this.consecutiveErrors });
     }
     if (this.stopped) return undefined;
     const handle = Object.freeze({ key }) as KeepaliveAttempt;

@@ -127,10 +127,14 @@ it('retained suppression is bounded and blocks an ineligible prefix', () => {
 });
 
 it('legacy record alone cannot bypass suppression or outcome identity', () => {
-  const { k, begin } = setup();
+  const { k, begin, normal, events } = setup();
   k.record(wire(), undefined, 'stream');
   expect(k.getStatus()).toEqual([]);
+  normal();
+  expect(k.getStatus()).toHaveLength(1);
   const a = begin(); k.finish(a, 'refusal');
+  expect(k.getStatus()).toEqual([]);
+  expect(events).toEqual([{ type: 'suppressed', key: a.key, source: 'foreground' }]);
   k.record({ ...wire(), thinking: { type: 'enabled' } }, undefined, 'stream');
   k.record(wire(), undefined, 'stream');
   expect(k.getStatus()).toEqual([]);
@@ -211,7 +215,7 @@ it('ineligible completion preserves identity for an older in-flight refusal and 
   normal(); expect(k.getStatus()).toHaveLength(1);
 });
 
-it('unrelated excluded/ineligible traffic consumes the bounded outcome LRU silently', () => {
+it('unrelated excluded/ineligible traffic reports bounded outcome eviction', () => {
   const { k, normal, begin, events } = setup(); normal();
   const pending = begin();
   for (let i = 0; i < 4; i++) {
@@ -220,7 +224,7 @@ it('unrelated excluded/ineligible traffic consumes the bounded outcome LRU silen
   }
   expect(k.getStatus()).toEqual([]);
   expect((k as any).outcomes.size).toBe(4);
-  expect(events).toEqual([]);
+  expect(events).toEqual([{ type: 'error', key: pending.key, error: 'outcome-lru-eviction: maxLineages cap exceeded', consecutive: 0 }]);
   k.prefix(pending); k.finish(pending, 'end_turn'); expect(k.getStatus()).toEqual([]);
 });
 
@@ -367,11 +371,11 @@ it.each(['inflight replacement', 'error observer'])('global send-error limit sur
   expect(k.getStatus()).toEqual([]);
 });
 
-it('eviction of pending outcome identities is silent and invalidates old handles', () => {
+it('eviction of pending outcome identities reports the cap and invalidates old handles', () => {
   const { k, begin, events } = setup(undefined, { maxLineages: 1 });
   const old = begin();
   const other = begin('normal', wire('other'));
-  expect(events).toEqual([]);
+  expect(events).toEqual([{ type: 'error', key: old.key, error: 'outcome-lru-eviction: maxLineages cap exceeded', consecutive: 0 }]);
   k.finish(old, 'end_turn'); expect(k.getStatus()).toEqual([]);
   k.finish(other, 'end_turn'); expect(k.getStatus()[0].key).toBe(other.key);
 });
@@ -737,7 +741,8 @@ it.each(['end_turn', 'stop_sequence', 'tool_use', 'max_tokens', 'pause_turn'])(
 it.each([{}, { suppressOnRefusal: false }])('default-off refusal never uses suppression channel (%j)', async config => {
   const onSuppressed = vi.fn();
   // Construct directly so the first case genuinely omits the flag.
-  const k = new CacheKeepalive(async () => ({ ...ok, stop_reason: 'refusal' }), {
+  const send = vi.fn(async () => ({ ...ok, stop_reason: 'refusal' }));
+  const k = new CacheKeepalive(send, {
     ...config, onSuppressed, refreshAfterMs: 100, checkIntervalMs: 100, maxIdleMs: 1000,
   });
   keepers.push(k);
@@ -745,6 +750,7 @@ it.each([{}, { suppressOnRefusal: false }])('default-off refusal never uses supp
   expect(attempt).toBeUndefined();
   k.record(wire(), undefined, 'stream');
   await vi.advanceTimersByTimeAsync(300);
+  expect(send).toHaveBeenCalledTimes(3);
   expect(onSuppressed).not.toHaveBeenCalled();
   expect(k.getStatus()).toHaveLength(1);
 });
@@ -1022,13 +1028,13 @@ it('stop releases attempt data even while its handle is retained', () => {
 });
 
 
-it('outcome eviction removes a live snapshot silently', () => {
+it('outcome eviction reports removal of a live snapshot', () => {
   const { k, normal, begin, events } = setup(undefined, { maxLineages: 1 });
   normal(); expect(k.getStatus()).toHaveLength(1);
   const old = begin();
   expect(begin('normal', wire('other'))).toBeDefined();
   expect(k.getStatus()).toEqual([]);
-  expect(events).toEqual([]);
+  expect(events).toEqual([{ type: 'error', key: old.key, error: 'outcome-lru-eviction: maxLineages cap exceeded', consecutive: 0 }]);
   k.prefix(old); k.finish(old, 'end_turn');
   expect(k.getStatus()).toEqual([]);
 });

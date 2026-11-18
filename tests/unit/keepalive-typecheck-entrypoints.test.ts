@@ -1,4 +1,6 @@
 import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { expect, it } from 'vitest';
 
 it('typecheck commands reference the existing event compatibility fixture', () => {
@@ -10,4 +12,18 @@ it('typecheck commands reference the existing event compatibility fixture', () =
   expect(pkg.scripts.typecheck).toBe('tsc --noEmit && tsc -p tsconfig.compatibility.json');
   expect(read('tests/unit/keepalive-event-compatibility.types.ts').trim()).not.toBe('');
   expect(JSON.parse(read('tsconfig.compatibility.json')).include).toContain('tests/unit/keepalive-event-compatibility.types.ts');
+});
+
+
+it('the effective compatibility program includes the event fixture', () => {
+  const root = new URL('../../', import.meta.url);
+  const result = spawnSync(process.execPath, [
+    fileURLToPath(new URL('node_modules/typescript/bin/tsc', root)),
+    '-p', 'tsconfig.compatibility.json', '--listFilesOnly',
+  ], { cwd: root, encoding: 'utf8', timeout: 30_000 });
+  expect(result.error).toBeUndefined();
+  expect(result.status, result.stderr).toBe(0);
+  expect(result.stdout.split(/\r?\n/)).toContain(
+    fileURLToPath(new URL('tests/unit/keepalive-event-compatibility.types.ts', root)),
+  );
 });

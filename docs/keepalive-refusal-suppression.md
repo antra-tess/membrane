@@ -30,10 +30,12 @@ transport-error limit and can emit `error`/`disabled`, even after snapshot repla
 metadata was readable**, not semantic success. A throwing response accessor can
 instead produce an error receipt and increment the failure count after resolution.
 Refusal metadata is inspected and suppression applied before copying other response
-properties, so an unrelated throwing accessor cannot bypass the refusal barrier. With `onCall` configured and cloneable request/response values, each
+properties, so an unrelated throwing accessor cannot bypass the refusal barrier. With suppression enabled, `onCall` configured and cloneable request/response values, each
 actual sender invocation delivers one receipt, including refused, unknown, stale
 and failed sends. In opt-in mode the receipt request is a structured clone of
-the prepared replay based on the retained caller request, not wire bytes.
+the replay after sender settlement, based on the retained caller request, not wire bytes.
+A custom sender can mutate the prepared replay before the receipt copy; its
+changes are reflected in that copy in either mode.
 Default-off first JSON.stringify/JSON.parse round-trips the recorded request,
 then prepares and clones the replay: custom toJSON results survive, callable
 fields may disappear, and exact-digit JSON numbers may round.
@@ -138,7 +140,10 @@ including excluded lanes and ineligible/unknown requests. A stopped keeper does
 not register; sequence-advancing reentrant serialization instead returns a
 detached handle without touching the outer key's LRU position. Unrelated traffic can therefore evict an active
 snapshot even though legacy scheduling would retain it; increase `maxLineages`
-if needed. Outcome eviction is silent, like legacy snapshot LRU eviction;
+if needed. Each opt-in outcome eviction emits `error` with the evicted key and
+`outcome-lru-eviction: maxLineages cap exceeded`, even for an identity with no
+snapshot. This diagnostic does not increment consecutive failures or disable
+the keeper. Default-off snapshot LRU eviction remains silent;
 `skipped` remains limited to removal of an ineligible snapshot. More distinct in-flight keys than the cap can
 evict attempts before they finish; sustained round-robin overload can prevent
 qualification. Increase the cap or reduce concurrency if this contention recurs. We retain this shared bound so that refused and
