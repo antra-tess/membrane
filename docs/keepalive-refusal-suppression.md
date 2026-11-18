@@ -210,9 +210,14 @@ snapshot; finishing does not remove that snapshot or release its references.
 Retaining an unfinished handle retains attempt references despite the lineage cap.
 `record` is the legacy prefix-accounting API and is ignored entirely with suppression enabled,
 even for qualified keys; it cannot carry begin identity or ordering.
-Terminal capture first reads `stop_reason` once by ordinary property access,
-without a presence check. That getter/get trap necessarily runs before suppression;
-a returned refusal is applied before prototype/descriptor traps and unrelated
+Terminal capture initially reads `stop_reason` by ordinary property access,
+without a presence check. It freezes that value in the copied terminal when it is
+non-undefined or an own property exists. To preserve missing raw properties, an
+inherited getter returning undefined is not frozen: parsing and complete-path
+checks can read it again and disagree with bookkeeping. If it later returns
+`refusal`, an existing qualified replay can remain eligible. Changing inherited
+getters are outside the single-observation guarantee. The initial getter/get trap
+necessarily runs before suppression; a returned refusal is applied before prototype/descriptor traps and unrelated
 terminal metadata reads. Raw stream refusal is observed before progress callbacks or terminal parsing; a
 callback error still fails the foreground and closes the SDK iterator normally.
 Synchronous throws and rejected promises from event/call observers are isolated

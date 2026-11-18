@@ -80,7 +80,7 @@
   without classifying eviction as an ineligible-snapshot skip. Default-off eviction stays silent.
 - With refusal suppression enabled, recheck stop after admission accessors and
   measure error receipts at sender settlement, excluding later suppression observers.
-- Capture Anthropic foreground terminal stop reasons once when refusal-aware cache keepalive is enabled, so changing SDK accessors cannot make suppression disagree with complete or stream responses. Default-off behavior is unchanged. Refusal suppression precedes unrelated response/event getters, including streamed usage.
+- Capture Anthropic foreground terminal stop reasons when refusal-aware cache keepalive is enabled. Own properties and non-undefined values are frozen for subsequent parsing; inherited getters initially returning undefined remain inherited and can disagree with bookkeeping on later reads. Default-off behavior is unchanged. Refusal suppression precedes unrelated response/event getters, including streamed usage.
 - Opt-in idle expiry is rechecked for each lineage after earlier refreshes settle.
 - Foreground terminal capture preserves missing raw `stop_reason` properties.
 - Reasoned operator stops emit no duplicate failure-threshold `disabled` event.
@@ -92,8 +92,10 @@
   unqualified keys) and ineffective retirement with its consecutive count.
 - Apply observed foreground refusals before terminal capture runs prototype or
   property-descriptor proxy traps; throwing traps cannot leave the old key replayable.
-- Read foreground `stop_reason` once by ordinary property access, without a
+- Initially read foreground `stop_reason` by ordinary property access, without a
   presence check, before other terminal capture traps. The read itself can run
   a caller getter/get trap; suppression follows the returned refusal, not that trap.
 - Preparation-retirement diagnostics omit exception text to avoid leaking payloads;
   these notices require `onDiagnostic` and are not delivered to `onEvent`.
+- Guard keepalive error string conversion in both modes so unprintable sender
+  rejections still produce failure accounting and error/disabled notifications.

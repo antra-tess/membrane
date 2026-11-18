@@ -110,13 +110,11 @@ it('older success cannot replace a newer snapshot even without refusal', () => {
   expect((k as any).lineages.get(old.key).wire).toEqual(newerWire);
 });
 
-it('retained suppression is bounded and blocks an ineligible prefix', () => {
+it('retained suppression is bounded and bars stale pre-refusal attempts', () => {
   const { k, begin } = setup(undefined, { maxLineages: 1 });
   const qualified = begin(); k.finish(qualified, 'end_turn');
   const stale = begin();
   const a = begin(); k.finish(a, 'refusal');
-  const ineligible = k.begin({ ...wire(), thinking: { type: 'enabled' } }, undefined, 'stream')!;
-  k.prefix(ineligible); k.finish(ineligible, undefined);
   k.prefix(stale); k.finish(stale, 'end_turn'); expect(k.getStatus()).toEqual([]);
   const evicted = begin();
   const other = begin('normal', wire('other')); k.prefix(other);
@@ -1273,4 +1271,36 @@ it.each([false, true])('idle expiry after an earlier awaited refresh (suppressio
   expect(send).toHaveBeenCalledTimes(suppressOnRefusal ? 1 : 2);
   expect(events.filter(e => e.type === 'expired')).toHaveLength(suppressOnRefusal ? 1 : 0);
   if (!suppressOnRefusal) { release(ok); await vi.advanceTimersByTimeAsync(0); }
+});
+
+it('an ineligible prefix removes an existing snapshot but retains outcome identity', () => {
+  const { k, begin, normal, events } = setup();
+  const qualified = normal();
+  const identity = (k as any).outcomes.get(qualified.key);
+  expect(k.getStatus()).toHaveLength(1);
+  const ineligible = k.begin({ ...wire(), thinking: { type: 'enabled' } }, undefined, 'stream')!;
+  k.prefix(ineligible);
+  expect(k.getStatus()).toEqual([]);
+  expect(events).toContainEqual({ type: 'skipped', key: qualified.key, reason: 'legacy-thinking-budget' });
+  expect((k as any).outcomes.get(qualified.key)).toBe(identity);
+  // Preserved qualification lets a later eligible prefix install without finish.
+  k.prefix(begin());
+  expect(k.getStatus()).toHaveLength(1);
+});
+
+it.each([undefined, false, true])('unprintable sender errors still disable the keeper (suppression=%s)', async suppressOnRefusal => {
+  const unprintable = { toString() { throw new Error('cannot stringify'); } };
+  const send = vi.fn(async () => { throw unprintable; });
+  const { k, normal, calls, events } = setup(send, { suppressOnRefusal, maxConsecutiveErrors: 2 });
+  if (suppressOnRefusal) normal();
+  else k.record(wire(), undefined, 'stream');
+  await vi.advanceTimersByTimeAsync(300);
+  expect(send).toHaveBeenCalledTimes(2);
+  expect(calls.map(c => c.outcome)).toEqual(['error', 'error']);
+  expect(calls.every(c => c.error === unprintable)).toBe(true);
+  expect(events.filter(e => e.type === 'error')).toEqual([1, 2].map(consecutive => ({
+    type: 'error', key: lineageKey(wire()), error: 'Unprintable keepalive error', consecutive,
+  })));
+  expect(events.filter(e => e.type === 'disabled')).toHaveLength(1);
+  expect(k.getStatus()).toEqual([]);
 });

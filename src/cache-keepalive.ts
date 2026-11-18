@@ -627,9 +627,7 @@ export class CacheKeepalive {
       // Capture rejection time before error formatting or other caller code.
       if (this.cfg.suppressOnRefusal) settledDurationMs ??= Date.now() - startedAt;
       let message = 'Unprintable keepalive error';
-      if (this.cfg.suppressOnRefusal) {
-        try { message = String(err instanceof Error ? err.message : err); } catch {}
-      } else message = err instanceof Error ? err.message : String(err);
+      try { message = String(err instanceof Error ? err.message : err); } catch {}
       if (payload && (!this.cfg.suppressOnRefusal || (invoked && !reported))) {
         this.reportCall({
           key, lane: lin.lane, startedAt,

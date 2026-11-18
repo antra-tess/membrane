@@ -258,9 +258,9 @@ export function boundedProviderEvent(event: unknown): unknown {
   return { type, truncated: true, json: json.slice(0, PROVIDER_EVENT_MAX_CHARS) };
 }
 
-// Opt-in foreground bookkeeping and public/raw results must share one terminal
-// observation, even for custom SDK responses with changing accessors. Copy
-// descriptors so retaining raw diagnostics does not read that accessor again.
+// Capture the opt-in terminal observation for bookkeeping and public/raw results.
+// Copy descriptors without rereading own accessors. An inherited undefined result
+// stays inherited to preserve missing raw properties; later reads can differ.
 function captureTerminal<T extends { stop_reason?: unknown }>(terminal: T, observe: (reason: unknown) => void): T {
   // This read can invoke a caller getter/get trap; no presence trap runs first.
   const stopReason = terminal.stop_reason;

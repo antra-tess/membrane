@@ -832,3 +832,19 @@ for (const lane of ['complete', 'stream'] as const) {
     expect(replays()).toEqual([]);
   });
 }
+
+it('opt-in message_start updates a qualified replay even when the stream later fails', async () => {
+  let fail = false;
+  const failure = new Error('transport failed after message_start');
+  const { a, replays } = adapter({ suppressOnRefusal: true },
+    () => ({ ...answer, stop_reason: 'max_tokens' }),
+    () => fail ? sdkStream([messageStart], failure) : sdkStream([messageStart, ...rest]));
+  await a.stream(request('prefix-observation'), noCallbacks);
+  expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
+  fail = true;
+  await expect(a.stream(request('prefix-observation', 2), noCallbacks)).rejects.toThrow(failure.message);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(replays()).toHaveLength(1);
+  expect(replays()[0].messages).toHaveLength(2);
+  expect(replays()[0].messages[1].content[0].text).toBe('turn 1');
+});
