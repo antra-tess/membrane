@@ -153,21 +153,24 @@ export const PRICING_TABLE: readonly PricingRow[] = [
 
   // OpenAI — https://platform.openai.com/docs/pricing (standard tier).
   // "Cached input" is OpenAI's rate for the automatically cached prompt prefix.
+  // From GPT-5.6 on, a write to the 30-minute cache is billed at 1.25× input
+  // (prompt-caching guide); earlier models charge nothing for a write, so
+  // their rows have no write rate and a write is priced as input.
   {
     prefix: 'gpt-6-astra',
-    pricing: { inputPerMillion: 10, outputPerMillion: 50, cacheReadPerMillion: 1.00, currency: 'USD', asOf: '2026-09-06' },
+    pricing: { inputPerMillion: 10, outputPerMillion: 50, cacheWritePerMillion: 12.5, cacheReadPerMillion: 1.00, currency: 'USD', asOf: '2026-09-06' },
   },
   {
     prefix: 'gpt-5.6-sol',
-    pricing: { inputPerMillion: 4, outputPerMillion: 20, cacheReadPerMillion: 0.40, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
+    pricing: { inputPerMillion: 4, outputPerMillion: 20, cacheWritePerMillion: 5, cacheReadPerMillion: 0.40, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
   },
   {
     prefix: 'gpt-5.6-terra',
-    pricing: { inputPerMillion: 2, outputPerMillion: 12, cacheReadPerMillion: 0.20, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
+    pricing: { inputPerMillion: 2, outputPerMillion: 12, cacheWritePerMillion: 2.5, cacheReadPerMillion: 0.20, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
   },
   {
     prefix: 'gpt-5.6-luna',
-    pricing: { inputPerMillion: 0.20, outputPerMillion: 1.20, cacheReadPerMillion: 0.02, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
+    pricing: { inputPerMillion: 0.20, outputPerMillion: 1.20, cacheWritePerMillion: 0.25, cacheReadPerMillion: 0.02, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
   },
   {
     // Under 272K context; the long-context tier costs more and this table has
