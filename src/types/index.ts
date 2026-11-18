@@ -91,6 +91,7 @@ export type {
   MediaCapabilities,
   ProviderCapabilities,
   ModelPricing,
+  LongPromptPricing,
   ModelDefinition,
   ModelRegistry,
   ModelFilter,
