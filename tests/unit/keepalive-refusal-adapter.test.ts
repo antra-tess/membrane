@@ -508,24 +508,3 @@ it('stream checks caller abort when combined-signal propagation is blocked', asy
   expect(abort.signal.aborted).toBe(true);
   expect(a.cacheKeepalive!.getStatus()).toEqual([]);
 });
-
-
-it.each(['complete', 'stream'] as const)('%s sends the captured body without rerunning caller serializers', async lane => {
-  let reason = 'end_turn';
-  const sent: any[] = [];
-  const capture = (wire: any) => { sent.push(JSON.parse(JSON.stringify(wire))); };
-  const { a } = adapter({ suppressOnRefusal: true, lanes: [lane] },
-    wire => { capture(wire); return { ...answer, stop_reason: reason }; },
-    wire => { capture(wire); return sdkStream([messageStart, { type: 'message_delta', delta: { stop_reason: reason }, usage: readUsage }]); });
-  const run = (options?: any) => lane === 'complete' ? a.complete(request('same'), options)
-    : a.stream(request('same'), noCallbacks, options);
-  await run();
-  expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
-  const serialize = vi.fn().mockReturnValueOnce({ type: 'text', text: 'same', cache_control: { type: 'ephemeral', ttl: '1h' } })
-    .mockReturnValue({ type: 'text', text: 'different', cache_control: { type: 'ephemeral', ttl: '1h' } });
-  reason = 'refusal';
-  await run({ onRequest: (wire: any) => { wire.system[0].toJSON = serialize; } });
-  expect(serialize).toHaveBeenCalledTimes(1);
-  expect(sent[1].system).toEqual(sent[0].system);
-  expect(a.cacheKeepalive!.getStatus()).toEqual([]);
-});

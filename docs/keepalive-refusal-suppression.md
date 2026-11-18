@@ -123,7 +123,9 @@ old in-flight handles remain invalid for prefix/success updates. A late refusal
 from an evicted handle still suppresses a newly retained identity for that key,
 without recreating forgotten keys or growing the map. Fresh identities must qualify through a
 known-normal foreground completion, so forgetting cannot let maintenance or unknown
-outcomes restore eligibility. Stop clears everything permanently.
+outcomes restore eligibility. Stop permanently clears tracked maps and timers,
+but does not cancel an in-flight sender or immediately release its payload;
+that sender can still deliver a receipt after stop.
 Idle expiry and ineffective retirement drop both snapshot and identity.
 An ineligible prefix in a configured lane removes its replay snapshot and emits
 `skipped` when one existed, without deleting the outcome identity or a retained
@@ -183,9 +185,13 @@ successful qualification. Read-only calls such as `getStatus()` and normal
 completion of another attempt do not advance the sequence and are not excluded;
 ordinary subsequent requests can qualify normally.
 
-With suppression enabled, `begin` captures an owned JSON wire copy and numeric
-send time before hashing. The adapter sends this same owned body to the SDK, so
-caller serializers run only once and later caller mutation cannot change the
-transport or replay identity. Trusted low-level transport integrations can obtain
-that body with `requestForAttempt`; they must not mutate it.
-Serialization failure stops adapter keepalive rather than weakening refusal tracking.
+With suppression enabled, the adapter sends the caller's request object through
+normal SDK serialization, without a JSON parse round trip. Exact-digit numbers
+(such as `JSON.rawJSON` values) remain intact in foreground requests and replays.
+The keeper retains request references and copies headers and numeric send time.
+For immutable, ordinary JSON objects, hashed system/tools values are the values
+sent by the SDK. Caller mutation while tracked, getters, and custom/stateful
+`toJSON` serialization (including root serializers that replace identity fields)
+are outside this guarantee. Serialization can run more than once; keepalive does
+not promise single serialization or an owned transport snapshot.
+Bookkeeping failure stops adapter keepalive rather than weakening refusal tracking.

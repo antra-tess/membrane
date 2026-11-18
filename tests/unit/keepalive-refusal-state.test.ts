@@ -60,6 +60,10 @@ it.each(['success', 'refusal', 'error'])('stale refresh %s: refusal removes repl
   await vi.advanceTimersByTimeAsync(0);
   expect(calls).toHaveLength(1);
   expect(events.map(e => e.type)).toEqual(outcome === 'error' ? ['error'] : outcome === 'refusal' ? ['suppressed'] : []);
+  if (outcome === 'error') {
+    expect(events).toContainEqual({ type: 'error', key: original.key, error: 'old', consecutive: 1 });
+    expect((k as any).consecutiveErrors).toBe(1);
+  }
   expect(k.getStatus()).toHaveLength(outcome === 'refusal' ? 0 : 1);
   expect((k as any).lineages.get(replacement.key)).toBe(outcome === 'refusal' ? undefined : replacementSnapshot);
   k.finish(k.begin(wire(), undefined, 'stream')!, 'refusal'); expect(k.getStatus()).toEqual([]);
@@ -139,7 +143,7 @@ it('fresh identities require known-normal completion, not pending-prefix order',
   expect(k.getStatus()).toEqual([]);
   k.prefix(begin()); // Failed/cancelled attempt with no successful finish.
   expect(k.getStatus()).toEqual([]);
-  const oldWire = wire(), newerWire = wire();
+  const oldWire = wire(), newerWire = { ...wire(), max_tokens: 777 };
   const old = begin('normal', oldWire), newer = begin('normal', newerWire); k.prefix(newer);
   k.finish(old, 'end_turn');
   expect((k as any).lineages.get(old.key).wire).toEqual(oldWire);
@@ -934,18 +938,11 @@ it.each(['prefix', 'finish'])('sentAt is coerced once at begin, never during %s 
   expect(k.getStatus()).toEqual([]);
 });
 
-it('owned wire keeps replay identity stable after mutation and stateful toJSON', async () => {
-  const send = vi.fn(async (_wire: any) => ok);
-  const { k } = setup(send);
-  const w = wire(); let reads = 0;
-  Object.assign(w.system, { toJSON() { return ++reads === 1 ? wire().system : [{ type: 'text', text: 'drift' }]; } });
+it('begin retains SDK-native values without replacing the caller object', () => {
+  const { k } = setup();
+  const w = wire();
   const a = k.begin(w, undefined, 'stream')!;
-  w.model = 'changed'; w.system[0].text = 'changed';
-  k.finish(a, 'end_turn');
-  await vi.advanceTimersByTimeAsync(100);
-  expect(reads).toBe(1);
-  expect(lineageKey(send.mock.calls[0][0])).toBe(a.key);
-  expect(send.mock.calls[0][0].system).toEqual(wire().system);
+  expect(k.requestForAttempt(a)).toBe(w);
 });
 
 it('unknown terminal retires replay before an unrelated throwing getter', async () => {
@@ -965,12 +962,12 @@ it('begin touches an existing outcome before LRU eviction', () => {
   expect((k as any).outcomes.has(b.key)).toBe(false);
 });
 
-it('ineligible prefix under a barrier does not starve an older normal completion', () => {
+it('newer ineligible prefix under a barrier prevents an older snapshot', () => {
   const { k, begin } = setup(); k.finish(begin(), 'refusal');
   const pending = begin();
   const newer = k.begin({ ...wire(), thinking: { type: 'enabled' } }, undefined, 'stream')!;
   k.prefix(newer); k.finish(pending, 'end_turn');
-  expect(k.getStatus()).toHaveLength(1);
+  expect(k.getStatus()).toHaveLength(0);
 });
 
 it('non-enumerable uncloneable terminal does not poison a receipt', async () => {
@@ -1023,4 +1020,13 @@ it('eviction observer stop cannot retain a newly begun attempt', () => {
   expect(state.begin('normal', wire('other'))).toBeUndefined();
   expect(k.requestForAttempt(old)).toBeUndefined();
   expect(k.getStatus()).toEqual([]);
+});
+
+it.each(['end_turn', 'refusal', undefined])('finish %s releases attempt data for retained handles', reason => {
+  const { k, begin } = setup();
+  const handle = begin();
+  expect(k.requestForAttempt(handle)).toBeDefined();
+  k.finish(handle, reason);
+  expect(k.requestForAttempt(handle)).toBeUndefined();
+  expect((k as any).attempts.has(handle)).toBe(false);
 });

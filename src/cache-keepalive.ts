@@ -279,11 +279,8 @@ export class CacheKeepalive {
     if (!this.cfg.suppressOnRefusal || this.stopped) return undefined;
     // Reserve entry order before caller-owned serialization or observers reenter.
     const sequence = ++this.sequence;
-    // Capture caller values once, then hash and replay the same owned JSON.
-    wire = JSON.parse(JSON.stringify(wire));
-    if (!wire || typeof wire !== 'object' || Array.isArray(wire)) {
-      throw new Error('Keepalive request must serialize to a JSON object');
-    }
+    // Keep SDK-native values (including JSON.rawJSON exact numbers) intact.
+    // Callers must not mutate retained requests or use custom serialization.
     sentAt = Number(sentAt);
     headers = headers ? { ...headers } : undefined;
     const key = lineageKey(wire);
@@ -314,8 +311,7 @@ export class CacheKeepalive {
     return handle;
   }
 
-  /** Adapter transport body: send the captured JSON, not caller-owned serializers.
-   * Trusted transport callers must not mutate this body. */
+  /** Retained caller request; callers must not mutate it while tracked. */
   requestForAttempt(handle: KeepaliveAttempt): Record<string, unknown> | undefined {
     return this.attempts.get(handle)?.wire;
   }
@@ -327,7 +323,7 @@ export class CacheKeepalive {
   /** Prefix observation orders snapshots, but cannot initially qualify an identity. */
   prefix(handle: KeepaliveAttempt): void {
     const attempt = this.attempts.get(handle);
-    if (!attempt || !this.current(attempt) || (!attempt.state.qualified && attempt.state.barrier) ||
+    if (!attempt || !this.current(attempt) ||
         attempt.sequence <= attempt.state.barrier || attempt.sequence < attempt.state.latest) return;
     if (!this.cfg.lanes.includes(attempt.lane)) return;
     const reason = ineligibleReason(attempt.wire);
@@ -352,6 +348,7 @@ export class CacheKeepalive {
     const attempt = this.attempts.get(handle);
     if (!attempt || this.stopped || attempt.finished) return;
     attempt.finished = true; // Every first terminal wins, before accessors/observers reenter.
+    this.attempts.delete(handle); // Retained opaque handles must not retain prompts/headers.
     if (reason === 'refusal') {
       // Eviction invalidates successes, not a refusal for a retained key.
       // Do not recreate forgotten identities or enlarge the bounded map.
@@ -468,9 +465,10 @@ export class CacheKeepalive {
     let invoked = false;
     let reported = false;
     try {
-      // The JSON HTTP sends: callable fields serialize away, and toJSON values
-      // are evaluated.
-      const wire: unknown = JSON.parse(JSON.stringify(lin.wire));
+      // Validate before invoking the sender, but do not round-trip opt-in JSON:
+      // parsing would round exact-digit rawJSON numbers to JavaScript doubles.
+      const serialized = JSON.stringify(lin.wire);
+      const wire: unknown = this.cfg.suppressOnRefusal ? lin.wire : JSON.parse(serialized);
       if (!wire || typeof wire !== 'object' || Array.isArray(wire)) {
         throw new Error('Keepalive request must serialize to a JSON object');
       }
