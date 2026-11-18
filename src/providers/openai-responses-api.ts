@@ -553,8 +553,9 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
     const outputItems = Array.isArray(response.output) ? response.output : [];
     const content = this.outputToContent(outputItems);
     const cachedTokens = response.usage?.input_tokens_details?.cached_tokens;
-    // Billed at 1.25× input on GPT-5.6 and later (the 30-minute cache; 12-hour
-    // writes at 2.5× are a bucket this count does not yet split out).
+    // Billed at 1.25× input on GPT-5.6 and later, as input before (the
+    // 30-minute cache; 12-hour writes at 2.5× are a bucket this count does
+    // not yet split out).
     const writtenTokens = response.usage?.input_tokens_details?.cache_write_tokens;
 
     return {

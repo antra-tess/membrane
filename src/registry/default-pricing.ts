@@ -153,9 +153,12 @@ export const PRICING_TABLE: readonly PricingRow[] = [
 
   // OpenAI — https://platform.openai.com/docs/pricing (standard tier).
   // "Cached input" is OpenAI's rate for the automatically cached prompt prefix.
-  // From GPT-5.6 on, a write to the 30-minute cache is billed at 1.25× input
-  // (prompt-caching guide); earlier models charge nothing for a write, so
-  // their rows have no write rate and a write is priced as input.
+  // A write to the cache is a token the API also counts as input, so every row
+  // carries a write rate: from GPT-5.6 on 1.25× input for the 30-minute cache
+  // (prompt-caching guide), and the input rate itself on earlier models, which
+  // charge nothing extra for a write. A row without one would leave written
+  // tokens unpriced, since the adapter's cache-inclusive usage takes them out
+  // of the input count.
   {
     prefix: 'gpt-6-astra',
     pricing: { inputPerMillion: 10, outputPerMillion: 50, cacheWritePerMillion: 12.5, cacheReadPerMillion: 1.00, currency: 'USD', asOf: '2026-09-06' },
@@ -176,52 +179,52 @@ export const PRICING_TABLE: readonly PricingRow[] = [
     // Under 272K context; the long-context tier costs more and this table has
     // no field for context-dependent rates.
     prefix: 'gpt-5.5',
-    pricing: { inputPerMillion: 5, outputPerMillion: 30, cacheReadPerMillion: 0.50, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
+    pricing: { inputPerMillion: 5, outputPerMillion: 30, cacheWritePerMillion: 5, cacheReadPerMillion: 0.50, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
   },
   {
     prefix: 'gpt-5.4-mini',
-    pricing: { inputPerMillion: 0.75, outputPerMillion: 4.50, cacheReadPerMillion: 0.075, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
+    pricing: { inputPerMillion: 0.75, outputPerMillion: 4.50, cacheWritePerMillion: 0.75, cacheReadPerMillion: 0.075, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
   },
   {
     prefix: 'gpt-5.4-nano',
-    pricing: { inputPerMillion: 0.20, outputPerMillion: 1.25, cacheReadPerMillion: 0.02, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
+    pricing: { inputPerMillion: 0.20, outputPerMillion: 1.25, cacheWritePerMillion: 0.20, cacheReadPerMillion: 0.02, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
   },
   {
     // Under 272K context.
     prefix: 'gpt-5.4',
-    pricing: { inputPerMillion: 2.50, outputPerMillion: 15, cacheReadPerMillion: 0.25, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
+    pricing: { inputPerMillion: 2.50, outputPerMillion: 15, cacheWritePerMillion: 2.50, cacheReadPerMillion: 0.25, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
   },
   {
     prefix: 'gpt-5.2',
-    pricing: { inputPerMillion: 1.75, outputPerMillion: 14, cacheReadPerMillion: 0.175, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
+    pricing: { inputPerMillion: 1.75, outputPerMillion: 14, cacheWritePerMillion: 1.75, cacheReadPerMillion: 0.175, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
   },
   {
     prefix: 'gpt-5.1',
-    pricing: { inputPerMillion: 1.25, outputPerMillion: 10, cacheReadPerMillion: 0.125, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
+    pricing: { inputPerMillion: 1.25, outputPerMillion: 10, cacheWritePerMillion: 1.25, cacheReadPerMillion: 0.125, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
   },
   {
     prefix: 'gpt-5-mini',
-    pricing: { inputPerMillion: 0.25, outputPerMillion: 2, cacheReadPerMillion: 0.025, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
+    pricing: { inputPerMillion: 0.25, outputPerMillion: 2, cacheWritePerMillion: 0.25, cacheReadPerMillion: 0.025, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
   },
   {
     prefix: 'gpt-5-nano',
-    pricing: { inputPerMillion: 0.05, outputPerMillion: 0.40, cacheReadPerMillion: 0.005, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
+    pricing: { inputPerMillion: 0.05, outputPerMillion: 0.40, cacheWritePerMillion: 0.05, cacheReadPerMillion: 0.005, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
   },
   {
     prefix: 'gpt-5',
-    pricing: { inputPerMillion: 1.25, outputPerMillion: 10, cacheReadPerMillion: 0.125, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
+    pricing: { inputPerMillion: 1.25, outputPerMillion: 10, cacheWritePerMillion: 1.25, cacheReadPerMillion: 0.125, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
   },
   {
     prefix: 'gpt-4o-mini',
-    pricing: { inputPerMillion: 0.15, outputPerMillion: 0.60, cacheReadPerMillion: 0.075, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
+    pricing: { inputPerMillion: 0.15, outputPerMillion: 0.60, cacheWritePerMillion: 0.15, cacheReadPerMillion: 0.075, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
   },
   {
     prefix: 'gpt-4o-2024-05-13',
-    pricing: { inputPerMillion: 5, outputPerMillion: 15, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
+    pricing: { inputPerMillion: 5, outputPerMillion: 15, cacheWritePerMillion: 5, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
   },
   {
     prefix: 'gpt-4o',
-    pricing: { inputPerMillion: 2.50, outputPerMillion: 10, cacheReadPerMillion: 1.25, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
+    pricing: { inputPerMillion: 2.50, outputPerMillion: 10, cacheWritePerMillion: 2.50, cacheReadPerMillion: 1.25, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
   },
 
   // Google — https://ai.google.dev/gemini-api/docs/pricing (paid tier,
