@@ -368,12 +368,13 @@ export class CacheKeepalive {
         attempt.sequence <= attempt.state.barrier || attempt.sequence < attempt.state.latest) return;
     if (!this.cfg.lanes.includes(attempt.lane)) return;
     const reason = ineligibleReason(attempt.wire);
-    // Caller-owned eligibility accessors may reenter and observe a refusal.
-    if (!this.current(attempt) || attempt.sequence <= attempt.state.barrier ||
+    // Caller-owned eligibility accessors may reenter and finish this handle.
+    if (this.attempts.get(handle) !== attempt || !this.current(attempt) || attempt.sequence <= attempt.state.barrier ||
         attempt.sequence < attempt.state.latest) return;
     if (reason) {
       attempt.state.latest = attempt.sequence;
       if (this.lineages.delete(attempt.key)) this.emit({ type: 'skipped', key: attempt.key, reason });
+      else this.diagnose(attempt.key, `ineligible-prefix: ${reason}; older snapshots barred`);
       return;
     }
     // A pending prefix with no snapshot must not starve completed requests.

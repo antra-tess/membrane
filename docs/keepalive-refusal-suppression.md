@@ -103,7 +103,7 @@ Operational notices use the separate opt-in `onDiagnostic` callback with a
 failure `error` variant. It carries no prompt/response payload or failure count;
 throws and rejected promises are isolated. Reason prefixes identify receipt loss,
 replay preparation failure, unknown refresh/foreground terminals, outcome-LRU
-eviction and detached attempts. Unknown foreground terminals report
+eviction, detached attempts and ineligible prefixes without a snapshot. Unknown foreground terminals report
 `unknown-foreground-terminal` even for a fresh key with no replay snapshot;
 they cannot qualify or rearm keepalive even if response parsing falls back to
 `end_turn`. At `maxIneffective`, `ineffective-retirement` reports the consecutive
@@ -196,11 +196,13 @@ payload after its key serializer calls stop, and replay preparation can still
 invoke a sender after its serializer calls stop. Stop
 does not cancel an in-flight sender or immediately release its payload;
 that sender can still deliver a receipt after stop.
-Idle expiry and ineffective retirement drop both snapshot and identity.
+Idle expiry and ineffective retirement drop both snapshot and identity, even
+when a newer foreground attempt is awaiting its prefix. Such an attempt cannot
+qualify the retired identity; a new begin and known-normal completion are needed.
 An ineligible prefix in a configured lane, unless older than the latest accepted
 prefix for that key, removes its replay snapshot and emits
-`skipped` when one existed, without deleting the outcome identity or a retained
-refusal barrier. Excluded lanes cannot remove snapshots by prefix ineligibility.
+`skipped` when one existed, or `ineligible-prefix` via `onDiagnostic` otherwise,
+without deleting the outcome identity or a retained refusal barrier. Excluded lanes cannot remove snapshots by prefix ineligibility.
 There is no persistence or durable tombstone format.
 Low-level keeper clients must use `begin`, `prefix`, `finish` to observe outcomes.
 On failure or cancellation, low-level callers should call `finish(handle, undefined)`
@@ -223,7 +225,10 @@ callback error still fails the foreground and closes the SDK iterator normally.
 Synchronous throws and rejected promises from event/call observers are isolated
 in both modes. This observer safety and adapter bookkeeping exception isolation
 are shared changes; default-off equivalence refers to scheduling and cap handling,
-not exception propagation.
+not exception propagation. Error string conversion is guarded in both modes:
+printable errors keep their legacy formatting, while unprintable errors use
+`Unprintable keepalive error` and continue failure accounting and error/disabled
+notifications instead of throwing during formatting.
 Errors inside guarded keeper operations never replace foreground results (in either mode).
 Response metadata reads outside those guards, including complete()'s stop_reason
 checks, can still throw and fail the foreground; arbitrary throwing response

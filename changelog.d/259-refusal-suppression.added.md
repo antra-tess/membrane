@@ -42,8 +42,8 @@
   Excess eligible concurrency can still invalidate in-flight handles.
   Existing keys retain cross-lane refusal/rearm observation. See
   `docs/keepalive-refusal-suppression.md` for retention tradeoffs.
-- In opt-in mode, stale failed sender invocations and reentrant error observers
-  cannot bypass the existing global consecutive transport-error limit. This is
+- In opt-in mode, stale send/response-processing failures and reentrant error observers
+  cannot bypass the existing global consecutive failure limit. This is
   not per-key backoff, retry, or expiry policy.
 - In opt-in mode, empty resolved refresh responses are transport successes,
   replay preparation failures retire only the failed snapshot without counting
@@ -64,8 +64,9 @@
   changing refresh accounting. Response copies include own enumerable fields only.
 - Opt-in replays reject callable root `toJSON` methods to protect the prefill-only
   token budget and message trimming. Foreground serialization is unchanged.
-- Opt-in unprintable error messages cannot bypass failure disabling. Legacy
-  default-off error formatting is unchanged.
+- In both modes, unprintable error messages use `Unprintable keepalive error`
+  and continue failure accounting/notifications instead of throwing during formatting.
+  Printable default-off errors retain their legacy formatting.
 - Opt-in success receipt latency stops at sender resolution, excluding response
   copying and synchronous observers. Nonfinite usage errors name the field and
   coerced value. Preparation errors explicitly report snapshot retirement.
@@ -99,3 +100,6 @@
   these notices require `onDiagnostic` and are not delivered to `onEvent`.
 - Guard keepalive error string conversion in both modes so unprintable sender
   rejections still produce failure accounting and error/disabled notifications.
+- Opt-in prefixes cannot undo a reentrant finish of the same handle. A newer
+  ineligible prefix without a snapshot reports `ineligible-prefix` via
+  `onDiagnostic`, explaining why older successes cannot install a snapshot.

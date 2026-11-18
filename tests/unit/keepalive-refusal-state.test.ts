@@ -1304,3 +1304,32 @@ it.each([undefined, false, true])('unprintable sender errors still disable the k
   expect(events.filter(e => e.type === 'disabled')).toHaveLength(1);
   expect(k.getStatus()).toEqual([]);
 });
+
+it('prefix cannot undo a reentrant finish of its own handle', () => {
+  const { k, begin } = setup();
+  const w = wire();
+  const a = begin('normal', w);
+  let nested = false;
+  Object.defineProperty(w, 'thinking', { get() {
+    if (nested) return undefined;
+    nested = true;
+    k.finish(a, 'end_turn');
+    return { type: 'enabled' };
+  } });
+  k.prefix(a);
+  expect(k.requestForAttempt(a)).toBeUndefined();
+  expect(k.getStatus()).toHaveLength(1);
+});
+
+it('newer ineligible prefix diagnoses why an older first success is barred', () => {
+  const { k, begin, events } = setup();
+  const a = begin();
+  const w = { ...wire(), thinking: { type: 'enabled' } };
+  const b = k.begin(w, undefined, 'stream')!;
+  k.prefix(b);
+  k.finish(a, 'end_turn');
+  k.finish(b, 'end_turn');
+  expect(k.getStatus()).toEqual([]);
+  expect(events).toEqual([{ type: 'diagnostic', key: a.key,
+    reason: 'ineligible-prefix: legacy-thinking-budget; older snapshots barred' }]);
+});
