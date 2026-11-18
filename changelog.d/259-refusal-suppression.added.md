@@ -8,6 +8,9 @@
   opaque issuer-specific handle exposing only a read-only key, exported from the
   package root. `KeepaliveSend` accepts an optional `stop_reason: unknown` field;
   pre-existing custom senders remain assignable without opting in.
+- Low-level `requestForAttempt(handle)` exposes the retained mutable request
+  reference until the attempt finishes or the keeper stops; callers must not
+  mutate it while tracked.
 - Direct adapter callers enabling suppression must declare cache-warming prefill
   or other maintenance with `ProviderRequestOptions.keepalivePurpose: 'maintenance'`.
   Ordinary assistant-prefill continuations remain normal foreground inference by

@@ -112,14 +112,17 @@ it('older success cannot replace a newer snapshot even without refusal', () => {
 
 it('retained suppression is bounded and blocks an ineligible prefix', () => {
   const { k, begin } = setup(undefined, { maxLineages: 1 });
+  const qualified = begin(); k.finish(qualified, 'end_turn');
+  const stale = begin();
   const a = begin(); k.finish(a, 'refusal');
   const ineligible = k.begin({ ...wire(), thinking: { type: 'enabled' } }, undefined, 'stream')!;
   k.prefix(ineligible); k.finish(ineligible, undefined);
-  k.finish(a, 'end_turn'); expect(k.getStatus()).toEqual([]);
+  k.prefix(stale); k.finish(stale, 'end_turn'); expect(k.getStatus()).toEqual([]);
+  const evicted = begin();
   const other = begin('normal', wire('other')); k.prefix(other);
   expect(k.getStatus()).toEqual([]);
   k.finish(other, 'end_turn');
-  k.finish(a, 'end_turn'); expect(k.getStatus()[0].key).toBe(other.key);
+  k.prefix(evicted); k.finish(evicted, 'end_turn'); expect(k.getStatus()[0].key).toBe(other.key);
   expect((k as any).outcomes.size).toBe(1);
 });
 
@@ -209,7 +212,8 @@ it('ineligible completion preserves identity for an older in-flight refusal and 
 });
 
 it('unrelated excluded/ineligible traffic consumes the bounded outcome LRU visibly', () => {
-  const { k, normal, events } = setup(); const main = normal();
+  const { k, normal, begin, events } = setup(); const main = normal();
+  const pending = begin();
   for (let i = 0; i < 4; i++) {
     const a = k.begin({ model: `other-${i}`, messages: [] }, undefined, 'complete')!;
     k.prefix(a); k.finish(a, undefined);
@@ -217,7 +221,7 @@ it('unrelated excluded/ineligible traffic consumes the bounded outcome LRU visib
   expect(k.getStatus()).toEqual([]);
   expect((k as any).outcomes.size).toBe(4);
   expect(events).toEqual([{ type: 'skipped', key: main.key, reason: 'outcome-lru-eviction' }]);
-  k.finish(main, 'end_turn'); expect(k.getStatus()).toEqual([]);
+  k.prefix(pending); k.finish(pending, 'end_turn'); expect(k.getStatus()).toEqual([]);
 });
 
 it.each([NaN, Infinity, -Infinity])('nonfinite maxLineages %s uses the bounded default', cap => {
@@ -653,19 +657,28 @@ it('terminal metadata is read once for classification before checking snapshot i
 });
 
 it.each(['stop', 'refusal', 'replace'])('usage accessor %s prevents stale refresh events', async action => {
-  let act!: () => void;
+  let act!: () => void, reads = 0;
   const response = { stop_reason: 'max_tokens' };
-  Object.defineProperty(response, 'usage', { get() { act(); return ok.usage; } });
+  Object.defineProperty(response, 'usage', { get() { reads++; act(); return ok.usage; } });
   const { k, begin, normal, events } = setup(async () => response);
-  normal();
+  const original = normal();
+  const originalSnapshot = (k as any).lineages.get(original.key);
+  let replacement: unknown;
   let once = false;
   act = () => {
     if (once) return; once = true;
     if (action === 'stop') k.stop();
     if (action === 'refusal') k.finish(begin(), 'refusal');
-    if (action === 'replace') normal();
+    if (action === 'replace') { normal(); replacement = (k as any).lineages.get(original.key); }
   };
   await vi.advanceTimersByTimeAsync(100);
+  expect(reads).toBeGreaterThan(0);
+  expect(once).toBe(true);
+  if (action === 'replace') {
+    expect(replacement).toBeDefined();
+    expect(replacement).not.toBe(originalSnapshot);
+    expect((k as any).lineages.get(original.key)).toBe(replacement);
+  }
   expect(events.map(e => e.type)).toEqual(action === 'refusal' ? ['suppressed'] : []);
   expect(k.getStatus()).toHaveLength(action === 'replace' ? 1 : 0);
 });
@@ -717,9 +730,10 @@ it.each(['replace', 'refusal', 'stop'])('successful replay serialization %s prev
     if (action === 'replace') normal();
     if (action === 'refusal') k.finish(begin(), 'refusal');
     if (action === 'stop') k.stop();
-    return wire();
+    return { serialized: true };
   });
-  (k as any).lineages.values().next().value.wire.toJSON = serialize; // Internal fault injection.
+  // Non-root serialization succeeds without triggering the root-toJSON rejection.
+  (k as any).lineages.values().next().value.wire.metadata = { toJSON: serialize };
   await vi.advanceTimersByTimeAsync(100);
   expect(serialize).toHaveBeenCalledTimes(1);
   expect(send).not.toHaveBeenCalled();

@@ -8,7 +8,7 @@ const slowStartupMs = 5_100;
 const selfTestExecutionMs = 1_000;
 const selfTestTimeoutMs = 180_000;
 
-function runChild(script: string, executionMs = defaultExecutionMs) {
+function runChild(script: string, executionMs = defaultExecutionMs, startupBudgetMs = startupMs) {
   return new Promise<{ code: number | null; stdout: string; stderr: string; signal: string | null }>((resolve, reject) => {
     const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], {
       cwd: new URL('../../', import.meta.url), stdio: ['ignore', 'pipe', 'pipe'],
@@ -16,7 +16,7 @@ function runChild(script: string, executionMs = defaultExecutionMs) {
     let stdout = '', stderr = '', ready = false;
     // Import/startup has its own generous watchdog. The bounded-loop deadline
     // starts only after the child confirms that its imports have completed.
-    let timer = setTimeout(() => child.kill('SIGKILL'), startupMs);
+    let timer = setTimeout(() => child.kill('SIGKILL'), startupBudgetMs);
     child.stdout.on('data', chunk => {
       stdout += chunk;
       if (!ready && stdout.includes('ready\n')) {
@@ -103,3 +103,10 @@ it('watchdog self-test budget covers both sequential startup and execution bound
   expect(slowStartupMs).toBeGreaterThan(selfTestExecutionMs);
   expect(selfTestTimeoutMs).toBeGreaterThan(2 * startupMs + defaultExecutionMs + stuckExecutionMs + 10_000);
 });
+
+it('startup watchdog kills a child that never reports ready', async () => {
+  const stuck = await runChild('while (true) {}', defaultExecutionMs, 2_000);
+  expect(stuck.code).toBeNull();
+  expect(stuck.signal).toBe('SIGKILL');
+  expect(stuck.stdout).not.toContain('ready');
+}, 100_000);

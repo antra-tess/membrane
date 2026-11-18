@@ -151,7 +151,10 @@ Synchronous throws and rejected promises from event/call observers are isolated
 in both modes. This observer safety and adapter bookkeeping exception isolation
 are shared changes; default-off equivalence refers to scheduling and cap handling,
 not exception propagation.
-Adapter bookkeeping errors never replace foreground results (in either mode); a
+Errors inside guarded keeper operations never replace foreground results (in either mode).
+Response metadata reads outside those guards, including complete()'s stop_reason
+checks, can still throw and fail the foreground; arbitrary throwing response
+accessors are not covered by this isolation guarantee. For guarded failures, a
 payload-free warning reports potentially partial state,
 and recommends checking custom serialization or disabling keepalive if failures
 persist. A failed begin or finish stops the keeper permanently for this adapter and emits
@@ -210,3 +213,10 @@ Opt-in replay preparation rejects callable root `toJSON` methods, which could
 otherwise override `max_tokens: 0` or message trimming after preparation. The
 foreground request still uses ordinary SDK serialization. Nested serializers
 remain outside the immutable ordinary-JSON identity guarantee above.
+
+## Clock behavior
+
+Snapshot age and refresh scheduling use wall-clock timestamps, not a monotonic
+clock. A backward clock adjustment can postpone refresh and idle expiry by the
+size of the adjustment; keepalive does not guarantee cache retention across clock
+steps or VM restores.
