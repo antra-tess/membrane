@@ -43,14 +43,18 @@ resent on every timer check. Successfully processed resolutions reset consecutiv
 errors, including refusals, empty responses and unknown terminals in suppression
 mode. For a current known-normal refresh, usage fields must also be readable
 and numerically coercible before resetting that counter. Default-off preserves
-legacy accounting: each resolved send resets the counter before usage processing,
+legacy accounting: a resolved send resets the counter after response metadata
+is copied for its receipt and before usage processing,
 so repeated null/undefined response or usage-processing errors report 1 on each
 refresh rather than accumulating toward the default threshold. Preparation and
-rejected-send failures still accumulate in default-off mode. Replay serialization
-failures emit `error` without incrementing that send-failure counter or delivering
+rejected-send failures still accumulate in default-off mode, as do failures
+while copying response metadata (for example, throwing enumerable getters).
+With suppression enabled, replay serialization failures emit `error` without incrementing that send-failure counter or delivering
 a call receipt, since the sender was not invoked. They retire only the failed
 replay snapshot (retaining outcome identity), so it is not retried every timer
-check; a later qualified foreground prefix can install a new snapshot.
+check; a later qualified foreground prefix can install a new snapshot. In
+default-off mode, replay serialization failures instead increment the failure
+counter and leave the snapshot eligible for retry until keepalive is disabled.
 
 Initial eligibility (including after eviction or idle/ineffective retirement)
 requires a known-normal

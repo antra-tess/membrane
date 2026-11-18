@@ -428,7 +428,7 @@ describe('a refresh acts only on the snapshot it replayed', () => {
 });
 
 describe('the complete lane records a request once the response has arrived', () => {
-  it('a refused complete() is never recorded', async () => {
+  it('an HTTP-rejected complete() is never recorded', async () => {
     const { a, replays, client } = adapter({ lanes: ['complete'] }, () => { throw refused(); });
     const error = await settle(a.complete(request('Resident system D')));
     expect(error).toBeInstanceOf(MembraneError);
