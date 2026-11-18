@@ -718,3 +718,10 @@ it.each(['complete', 'stream'] as const)('Membrane %s suppresses refusal before 
   await vi.advanceTimersByTimeAsync(100);
   expect(replays()).toHaveLength(0);
 });
+
+it.each([false, true])('complete raw preserves absent terminal metadata (suppression %s)', async suppressOnRefusal => {
+  const { stop_reason, ...missing } = answer;
+  const { a } = adapter({ suppressOnRefusal, lanes: ['complete'] }, () => missing);
+  const result = await a.complete(request('missing terminal'));
+  expect(Object.hasOwn(result.raw as object, 'stop_reason')).toBe(false);
+});

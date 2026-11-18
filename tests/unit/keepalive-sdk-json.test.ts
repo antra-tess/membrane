@@ -1,11 +1,14 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
-import { lineageKey } from '../../src/cache-keepalive.js';
+import { Membrane } from '../../src/membrane.js';
+import { NativeFormatter } from '../../src/formatters/native.js';
+import { lineageKey, type CacheKeepaliveConfig, type KeepaliveEvent } from '../../src/cache-keepalive.js';
 
 const adapters: AnthropicAdapter[] = [];
 afterEach(() => {
   for (const a of adapters.splice(0)) a.cacheKeepalive?.stop();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 const message = {
   id: 'msg_test', type: 'message', role: 'assistant', model: 'claude-opus-4-1',
@@ -18,7 +21,7 @@ const events = [
   { type: 'message_stop' },
 ].map(e => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`).join('');
 
-function setup() {
+function setup(config: CacheKeepaliveConfig = {}) {
   const bodies: string[] = [];
   vi.stubGlobal('fetch', async (_input: unknown, init: RequestInit) => {
     const body = String(init.body);
@@ -28,7 +31,7 @@ function setup() {
       : new Response(JSON.stringify(message), { headers: { 'content-type': 'application/json' } });
   });
   const a = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: {
-    suppressOnRefusal: true, lanes: ['complete', 'stream'], refreshAfterMs: 0,
+    suppressOnRefusal: true, lanes: ['complete', 'stream'], refreshAfterMs: 0, ...config,
   } });
   adapters.push(a);
   const request: any = {
@@ -80,4 +83,55 @@ it('stream leaves stream:true serialization to the SDK, without rewriting the pr
   expect(JSON.parse(bodies[0])).toMatchObject({ stream: true, system: 'B' });
   // Custom root serialization is outside the keepalive identity contract, but
   // enabling suppression must not change what the ordinary SDK transport sends.
+});
+
+it.each(['complete', 'stream'] as const)('%s real SDK rejects a pre-aborted request without qualifying it', async lane => {
+  const { a, request, bodies } = setup();
+  const controller = new AbortController();
+  controller.abort();
+  const result = lane === 'complete' ? a.complete(request, { signal: controller.signal })
+    : a.stream(request, { onChunk() {} }, { signal: controller.signal });
+  await expect(result).rejects.toThrow(/abort/i);
+  expect(bodies).toEqual([]);
+  expect(a.cacheKeepalive!.getStatus()).toEqual([]);
+});
+
+it('Membrane.complete rejects a root serializer supplied by onRequest that changes during replay spread', async () => {
+  vi.useFakeTimers();
+  const observed: KeepaliveEvent[] = [];
+  const { a, bodies } = setup({ checkIntervalMs: 100, onEvent: event => { observed.push(event); } });
+  const membrane = new Membrane(a, { formatter: new NativeFormatter() });
+  let reads = 0;
+  const serialize = vi.fn(() => ({ model: message.model, max_tokens: 1024, messages: [] }));
+  await membrane.complete({
+    messages: [{ participant: 'User', content: [{ type: 'text', text: 'hello' }] }],
+    system: 'public root serializer regression',
+    config: { model: message.model, maxTokens: 32 },
+    promptCaching: true, cacheTtl: '1h', toolMode: 'native',
+  }, {
+    refusalRetries: 0,
+    onRequest(wire) {
+      // Installed before admission, without touching private keepalive state.
+      // Each stringify reads toJSON twice (root hook and enumerable field).
+      // Foreground (1–2), refresh stringify (3–4), and root check (5) see
+      // no serializer; the replay spread (6) receives a callable serializer.
+      Object.defineProperty(wire, 'toJSON', {
+        enumerable: true, get: () => ++reads < 6 ? undefined : serialize,
+      });
+    },
+  });
+  expect(reads).toBe(2); // Foreground path, including real SDK serialization.
+  expect(bodies).toHaveLength(1);
+  expect(JSON.parse(bodies[0])).toMatchObject({ max_tokens: 32 });
+  expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
+
+  await vi.advanceTimersByTimeAsync(100); // Public scheduler, not a private tick.
+  expect(reads).toBe(6);
+  expect(serialize).not.toHaveBeenCalled();
+  expect(bodies).toHaveLength(1); // No refresh transport invocation.
+  expect(a.cacheKeepalive!.getStatus()).toEqual([]);
+  expect(observed).toContainEqual(expect.objectContaining({
+    type: 'error', consecutive: 0,
+    error: expect.stringContaining('replay-preparation-failed: replay snapshot retired; Keepalive does not support root toJSON'),
+  }));
 });

@@ -262,6 +262,7 @@ export function boundedProviderEvent(event: unknown): unknown {
 // observation, even for custom SDK responses with changing accessors. Copy
 // descriptors so retaining raw diagnostics does not read that accessor again.
 function captureTerminal<T extends { stop_reason?: unknown }>(terminal: T): T {
+  if (!('stop_reason' in terminal)) return terminal;
   const stopReason = terminal.stop_reason;
   return Object.create(Object.getPrototypeOf(terminal), {
     ...Object.getOwnPropertyDescriptors(terminal),

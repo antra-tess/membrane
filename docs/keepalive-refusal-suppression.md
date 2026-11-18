@@ -46,8 +46,8 @@ rawJSON cloning entirely. Function-valued fields
 Receipt delivery is best-effort: clone failures drop the receipt and, in opt-in
 mode, emit `error` with diagnostic prefix `receipt-clone-failed` and an unchanged
 diagnostic-time consecutive count (before the current resolution resets it or
-rejection increments it). Default-off clone loss is silent: no receipt or event
-is delivered. Error receipts pass the error value through without cloning it.
+rejection increments it). Default-off clone loss drops the receipt without a clone-failure diagnostic;
+ordinary refresh events (such as `refreshed`) still fire. Error receipts pass the error value through without cloning it.
 Observer failures are isolated and not retried. Receipt loss does not count as a send failure or retire
 the replay snapshot. Response copies contain only own enumerable properties;
 inherited/non-enumerable metadata can affect suppression without appearing in receipts. Without `onCall`, no receipts are delivered.

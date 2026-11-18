@@ -81,3 +81,10 @@
   without classifying eviction as an ineligible-snapshot skip. Default-off eviction stays silent.
 - With refusal suppression enabled, recheck stop after admission accessors and
   measure error receipts at sender settlement, excluding later suppression observers.
+
+- Capture Anthropic foreground terminal stop reasons once when refusal-aware cache keepalive is enabled, so changing SDK accessors cannot make suppression disagree with complete or stream responses. Default-off behavior is unchanged. Refusal suppression precedes unrelated response/event getters, including streamed usage.
+- Opt-in idle expiry is rechecked for each lineage after earlier refreshes settle.
+- Foreground terminal capture preserves missing raw `stop_reason` properties.
+- Reasoned operator stops emit no duplicate failure-threshold `disabled` event.
+- Opt-in eligible attempts detached by serialization reentry emit a
+  `detached-attempt` error diagnostic without incrementing the failure count.

@@ -288,6 +288,7 @@ export class CacheKeepalive {
   private ticking = false;
   private consecutiveErrors = 0;
   private stopped = false;
+  private disabledReported = false;
   private readonly cfg: Required<Omit<CacheKeepaliveConfig, 'onEvent' | 'onCall' | 'onSuppressed'>> &
     Pick<CacheKeepaliveConfig, 'onEvent' | 'onCall' | 'onSuppressed'>;
 
@@ -324,6 +325,10 @@ export class CacheKeepalive {
       const handle = Object.freeze({ key }) as KeepaliveAttempt;
       const detached = { barrier: 0, latest: 0, qualified: false };
       this.attempts.set(handle, { key, state: detached, sequence, wire, headers, lane, purpose, sentAt });
+      if (admit && sequence !== this.sequence) this.emit({
+        type: 'error', key, error: 'detached-attempt: serialization reentry prevents qualification',
+        consecutive: this.consecutiveErrors,
+      });
       return handle;
     }
     const retained = state ?? { barrier: 0, latest: 0, qualified: false };
@@ -474,10 +479,11 @@ export class CacheKeepalive {
       for (const [key, lin] of [...this.lineages]) {
         if (this.stopped) break;
         if (this.lineages.get(key) !== lin) continue;
-        if (now - lin.lastRealAt >= this.cfg.maxIdleMs) {
+        const expiryNow = this.cfg.suppressOnRefusal ? Date.now() : now;
+        if (expiryNow - lin.lastRealAt >= this.cfg.maxIdleMs) {
           this.lineages.delete(key);
           if (this.cfg.suppressOnRefusal) this.outcomes.delete(key);
-          this.emit({ type: 'expired', key, idleMs: now - lin.lastRealAt });
+          this.emit({ type: 'expired', key, idleMs: expiryNow - lin.lastRealAt });
           continue;
         }
         if (now - lin.refreshBaselineAt < this.cfg.refreshAfterMs) continue;
@@ -511,6 +517,10 @@ export class CacheKeepalive {
         throw new Error('Keepalive does not support root toJSON serialization');
       }
       payload = { ...recorded, max_tokens: 0 };
+      // Spreading can read a changing accessor: validate the actual replay too.
+      if (this.cfg.suppressOnRefusal && typeof payload.toJSON === 'function') {
+        throw new Error('Keepalive does not support root toJSON serialization');
+      }
       if (Array.isArray(recorded.messages)) payload.messages = messagesForRefresh(recorded.messages);
       delete payload.stream;
       if (this.cfg.suppressOnRefusal &&
@@ -636,7 +646,7 @@ export class CacheKeepalive {
       if (!this.cfg.suppressOnRefusal ||
           (this.lineages.get(key) === lin && this.outcomes.get(key) === state)) lin.refreshBaselineAt = Date.now();
 
-      if ((!this.cfg.suppressOnRefusal || invoked) && this.consecutiveErrors >= this.cfg.maxConsecutiveErrors) {
+      if (!this.disabledReported && (!this.cfg.suppressOnRefusal || invoked) && this.consecutiveErrors >= this.cfg.maxConsecutiveErrors) {
         this.stop();
         this.emit({
           type: 'disabled',
@@ -691,6 +701,9 @@ export class CacheKeepalive {
     this.lineages.clear();
     this.outcomes.clear();
     this.attempts = new WeakMap();
-    if (reason && !wasStopped) this.emit({ type: 'disabled', reason });
+    if (reason && !wasStopped) {
+      this.disabledReported = true;
+      this.emit({ type: 'disabled', reason });
+    }
   }
 }

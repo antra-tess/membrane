@@ -548,7 +548,7 @@ it.each([false, true])('receipt stop rechecks remain opt-in (%s)', async suppres
   expect(state.events.map(e => e.type)).toEqual(suppressOnRefusal ? ['disabled'] : ['disabled', 'refreshed']);
 });
 
-it.each([false, true])('error observer stop rechecks remain opt-in (%s)', async suppressOnRefusal => {
+it.each([false, true])('reasoned error observer stop emits disabled only once (%s)', async suppressOnRefusal => {
   let k!: CacheKeepalive;
   const events: (KeepaliveEvent | KeepaliveSuppression)[] = [];
   const state = setup(async () => { throw new Error('outage'); }, {
@@ -559,7 +559,9 @@ it.each([false, true])('error observer stop rechecks remain opt-in (%s)', async 
   k = state.k;
   if (suppressOnRefusal) state.normal(); else k.record(wire(), undefined, 'stream');
   await vi.advanceTimersByTimeAsync(100);
-  expect(events.map(e => e.type)).toEqual(suppressOnRefusal ? ['error', 'disabled'] : ['error', 'disabled', 'disabled']);
+  expect(events).toEqual([
+    expect.objectContaining({ type: 'error' }), { type: 'disabled', reason: 'operator stop' },
+  ]);
 });
 
 it('throwing terminal metadata still delivers one error receipt', async () => {
@@ -894,9 +896,15 @@ it('hashing reentered by an unrelated key retains a handle for a later refusal',
   } });
   const refusing = begin('normal', w);
   expect(refusing).toBeDefined();
+  expect(events).toContainEqual({ type: 'error', key: lineageKey(wire()),
+    error: 'detached-attempt: serialization reentry prevents qualification', consecutive: 0 });
+  k.prefix(refusing); k.finish(refusing, 'end_turn');
+  expect(k.getStatus()).toEqual([]);
+  // A separate detached handle still carries a refusal.
+  const lateRefusal = begin('normal', w);
   k.finish(begin(), 'end_turn');
   expect(k.getStatus()).toHaveLength(1);
-  k.finish(refusing, 'refusal');
+  k.finish(lateRefusal, 'refusal');
   expect(events).toContainEqual({ type: 'suppressed', key: lineageKey(wire()), source: 'foreground' });
   expect(k.getStatus()).toEqual([]);
 });
@@ -1222,4 +1230,43 @@ it('outcome eviction leaves failure count unchanged before the next transport fa
     expect.objectContaining({ type: 'error', error: 'outage', consecutive: 2 }),
     expect.objectContaining({ type: 'disabled' }),
   ]);
+});
+
+it.each([false, true])('idle admission after an earlier pending refresh (%s)', async suppressOnRefusal => {
+  let release!: (value: unknown) => void;
+  const send = vi.fn().mockImplementationOnce(() => new Promise(resolve => { release = resolve; }))
+    .mockResolvedValue(ok);
+  const { k, begin, events } = setup(send, { suppressOnRefusal });
+  for (const model of ['first', 'second']) {
+    const w = wire(model);
+    if (suppressOnRefusal) { const a = begin('normal', w); k.finish(a, 'end_turn'); }
+    else k.record(w, undefined, 'stream');
+  }
+  await vi.advanceTimersByTimeAsync(100);
+  expect(send).toHaveBeenCalledTimes(1);
+  vi.setSystemTime(2100);
+  release(ok);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(send).toHaveBeenCalledTimes(suppressOnRefusal ? 1 : 2);
+  expect(events.filter(e => e.type === 'expired')).toHaveLength(suppressOnRefusal ? 1 : 0);
+});
+
+it.each([false, true])('idle expiry after an earlier awaited refresh (suppression %s)', async suppressOnRefusal => {
+  let release!: (value: typeof ok) => void;
+  const send = vi.fn(() => new Promise<typeof ok>(resolve => { release = resolve; }));
+  const { k, events } = setup(send, { suppressOnRefusal });
+  for (const model of ['first', 'second']) {
+    const w = wire(model);
+    if (suppressOnRefusal) {
+      const a = k.begin(w, undefined, 'stream')!; k.finish(a, 'end_turn');
+    } else k.record(w, undefined, 'stream');
+  }
+  await vi.advanceTimersByTimeAsync(100);
+  expect(send).toHaveBeenCalledTimes(1);
+  vi.setSystemTime(2100);
+  release(ok);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(send).toHaveBeenCalledTimes(suppressOnRefusal ? 1 : 2);
+  expect(events.filter(e => e.type === 'expired')).toHaveLength(suppressOnRefusal ? 1 : 0);
+  if (!suppressOnRefusal) { release(ok); await vi.advanceTimersByTimeAsync(0); }
 });
