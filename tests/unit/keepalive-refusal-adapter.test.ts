@@ -626,3 +626,35 @@ it.each([undefined, false, true])('side traffic preserves the primary stream (su
   expect(replays()).toHaveLength(1);
   expect(replays()[0].system).toEqual(request('primary').system);
 });
+
+it.each(['throw', 'abort'] as const)('buffered local-stop suffix %s happens after adapter qualification', async action => {
+  const { a, replays } = adapter({ suppressOnRefusal: true },
+    () => ({ ...answer, stop_reason: 'max_tokens' }),
+    () => sdkStream([messageStart, ...rest.map(event => event.type === 'content_block_delta'
+      ? { ...event, delta: { type: 'text_delta', text: 'ab' } } : event)]));
+  const membrane = new Membrane(a, { formatter: new NativeFormatter() });
+  const controller = new AbortController();
+  const failure = new Error('buffered application callback');
+  const chunks: string[] = [];
+  const onChunk = vi.fn((chunk: string) => {
+    chunks.push(chunk);
+    // This fresh identity has already qualified before Membrane releases 'ab'.
+    expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
+    if (action === 'throw') throw failure;
+    controller.abort(failure);
+  });
+  expect(a.cacheKeepalive!.getStatus()).toEqual([]);
+  const invocation = membrane.stream({
+    messages: [{ participant: 'User', content: [{ type: 'text', text: 'hi' }] }],
+    system: 'buffered callback boundary', config: { model: 'claude-opus-4-1', maxTokens: 1024 },
+    promptCaching: true, cacheTtl: '1h', toolMode: 'native', stopSequences: ['abc'],
+  }, { onChunk, signal: controller.signal, refusalRetries: 0 });
+  if (action === 'throw') await expect(invocation).rejects.toThrow('buffered application callback');
+  else await expect(invocation).resolves.toMatchObject({ stopReason: 'end_turn' });
+  expect(onChunk).toHaveBeenCalled();
+  expect(chunks.join('')).toBe('ab');
+  expect(controller.signal.aborted).toBe(action === 'abort');
+  expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(replays()).toHaveLength(1);
+});

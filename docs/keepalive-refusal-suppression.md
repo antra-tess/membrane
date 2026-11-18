@@ -84,8 +84,9 @@ requires a known-normal
 foreground completion too; a prefix alone never qualifies a fresh opt-in identity.
 Only a normal foreground request **begun after the accepted refusal** can rearm,
 and only with raw terminal `end_turn`, `stop_sequence`, `tool_use`, `max_tokens`
-`pause_turn`, or `model_context_window_exceeded`. Missing/null/unknown terminal, transport error, cancellation,
-timer replay and declared maintenance do not rearm. Complete-response parse
+`pause_turn`, or `model_context_window_exceeded`. Missing/null/unknown terminal, transport error,
+cancellation observed before the adapter's finish(), timer replay and declared
+maintenance do not rearm. Complete-response parse
 errors do not rearm; stream qualification precedes final response assembly
 (see the boundary below). Terminal
 parse fallbacks are not used. Begin order and refusal barriers use monotonic
@@ -103,11 +104,22 @@ stopped identities cannot be resurrected by their outstanding completions.
 default. Complete qualification follows response parsing. Stream qualification
 follows the observed provider terminal, stream callbacks, and block-order repair,
 but precedes final response assembly and transformation-path parsing; an error there does not undo
-qualification. Stream callbacks include application callbacks forwarded by Membrane
-(such as onContentBlockUpdate); if one throws before finish(), including during
-open-block finalization after a terminal event, normal qualification is not reached.
-Raw refusal observation is earlier, before progress callbacks. Processing or
-observer failures after finish() do not undo qualification. Complete qualification
+qualification. Callbacks invoked synchronously by the adapter include application
+callbacks forwarded immediately by Membrane (such as onContentBlockUpdate). If
+one throws before the adapter's keepalive finish(), including during open-block
+finalization after a terminal event, normal qualification is not reached. Raw
+refusal observation is earlier, before progress callbacks.
+
+This is an **adapter provider-response boundary**, not successful completion of
+all Membrane/application processing. In particular, Membrane's local stop-sequence
+handler can buffer a suffix and release it after the adapter returns, during
+localStops.finish(). For stop sequence `abc`, a normal response ending in `ab`
+can qualify before the application's callback receives that suffix. A throw or
+caller-signal abort in that buffered callback does not undo qualification: even
+if the Membrane invocation fails or the caller signal is now aborted, the snapshot
+remains eligible for refresh. A signal abort this late need not reject the already
+completed provider operation or the Membrane invocation. Other processing or
+observer failures after the adapter's finish() also do not undo qualification. Complete qualification
 precedes downstream Membrane response processing, but follows adapter parsing. A caller using these same entrypoints for cache-warming prefill or other
 maintenance **must**
 pass `ProviderRequestOptions.keepalivePurpose: 'maintenance'`. This trusted,

@@ -6,8 +6,10 @@
 // start of the request that writes or reads the entry. A read is billed at
 // 0.1x input, a one-hour write at 2x.
 //
-// A request with `max_tokens: 0` runs prefill only: content `[]`, stop_reason
-// `max_tokens`, no output tokens billed, and the cache entry refreshed.
+// A normal `max_tokens: 0` replay is intended to run prefill only, typically
+// returning content `[]` and stop_reason `max_tokens` without output tokens.
+// Refused, unknown or ineffective outcomes are not proof of a cache refresh;
+// opt-in suppression checks the raw terminal reason as well as cache usage.
 // `max_tokens` isn't part of the cache key. Caching is a prefix match, and an
 // innocent-looking change to a replay turns the read into a write of the
 // whole prefix, reported as a successful call and visible only in its usage:
@@ -314,6 +316,7 @@ export class CacheKeepalive {
     // retained by then, and existing identities keep cross-lane rearm semantics.
     const admit = !!state || (purpose === 'normal' &&
       this.cfg.lanes.includes(lane) && ineligibleReason(wire) === null);
+    if (this.stopped) return undefined;
     // Serialization may reenter, refuse, evict, and recreate this key. We cannot
     // safely adopt any resulting identity for success. Keep a detached handle:
     // its later refusal still applies to a retained key, without recreating one.
@@ -492,6 +495,7 @@ export class CacheKeepalive {
     let payload: Record<string, unknown> | undefined;
     let invoked = false;
     let reported = false;
+    let settledDurationMs: number | undefined;
     try {
       // Validate before invoking the sender, but do not round-trip opt-in JSON:
       // parsing would round exact-digit rawJSON numbers to JavaScript doubles.
@@ -513,7 +517,7 @@ export class CacheKeepalive {
           (this.stopped || this.lineages.get(key) !== lin || this.outcomes.get(key) !== state)) return;
       invoked = true;
       const resolved = await this.send(payload, lin.headers);
-      const resolvedDurationMs = this.cfg.suppressOnRefusal ? Date.now() - startedAt : 0;
+      if (this.cfg.suppressOnRefusal) settledDurationMs = Date.now() - startedAt;
       // A resolved sender is a transport success even without a response body.
       // Preserve main's legacy processing (including errors) when opted out.
       const res = this.cfg.suppressOnRefusal ? resolved ?? {} : resolved;
@@ -539,7 +543,7 @@ export class CacheKeepalive {
             (res as Record<string, unknown>)[key], enumerable: true, configurable: true, writable: true });
         }
       }
-      const durationMs = this.cfg.suppressOnRefusal ? resolvedDurationMs : Date.now() - startedAt;
+      const durationMs = this.cfg.suppressOnRefusal ? settledDurationMs! : Date.now() - startedAt;
       const receiptResponse = this.cfg.suppressOnRefusal ? response : { ...res };
       reported = true;
       this.reportCall({
@@ -602,13 +606,16 @@ export class CacheKeepalive {
       lin.refreshBaselineAt = startedAt;
       this.emit({ type: 'refreshed', key, lane: lin.lane, readTokens: read, idleMs });
     } catch (err) {
+      // Capture rejection time before error formatting or other caller code.
+      if (this.cfg.suppressOnRefusal) settledDurationMs ??= Date.now() - startedAt;
       let message = 'Unprintable keepalive error';
       if (this.cfg.suppressOnRefusal) {
         try { message = String(err instanceof Error ? err.message : err); } catch {}
       } else message = err instanceof Error ? err.message : String(err);
       if (payload && (!this.cfg.suppressOnRefusal || (invoked && !reported))) {
         this.reportCall({
-          key, lane: lin.lane, startedAt, durationMs: Date.now() - startedAt,
+          key, lane: lin.lane, startedAt,
+          durationMs: this.cfg.suppressOnRefusal ? settledDurationMs! : Date.now() - startedAt,
           request: payload, outcome: 'error', error: err,
         });
       }

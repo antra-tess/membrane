@@ -11,3 +11,5 @@
   refusal and release finished attempt data even when opaque handles are retained.
 - Restore opt-in outcome-LRU eviction diagnostics, including pending identities,
   without classifying eviction as an ineligible-snapshot skip. Default-off eviction stays silent.
+- With refusal suppression enabled, recheck stop after admission accessors and
+  measure error receipts at sender settlement, excluding later suppression observers.

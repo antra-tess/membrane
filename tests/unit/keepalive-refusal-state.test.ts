@@ -1148,3 +1148,65 @@ it.each(['excluded', 'ineligible', 'maintenance'])('untracked %s refusal still s
   k.finish(detached, 'refusal');
   expect(k.getStatus()).toEqual([]);
 });
+
+it.each(['lanes', 'eligibility'] as const)('admission %s reentrant stop cannot retain a new request', source => {
+  for (const eligible of [false, true]) {
+    const { k, events } = setup();
+    const w = wire();
+    const accessor = vi.fn(() => { k.stop(); return eligible; });
+    if (source === 'lanes') (k as any).cfg.lanes = { includes: accessor };
+    else Object.defineProperty(w, 'thinking', { get() { return accessor() ? undefined : { type: 'enabled' }; } });
+    const attempt = k.begin(w, { authorization: 'test-secret' }, 'stream');
+    expect(accessor).toHaveBeenCalledTimes(1);
+    expect(attempt).toBeUndefined();
+    expect((k as any).outcomes.size).toBe(0);
+    expect(k.getStatus()).toEqual([]);
+    expect(events).toEqual([]);
+  }
+});
+
+it('processing-error receipt duration excludes suppression observer time', async () => {
+  const { normal, calls, events } = setup(async () => {
+    vi.setSystemTime(Date.now() + 10);
+    return { stop_reason: 'refusal', get usage() { throw new Error('metadata'); } };
+  }, { onSuppressed: () => vi.setSystemTime(Date.now() + 2000) });
+  normal(); await vi.advanceTimersByTimeAsync(100);
+  expect(calls).toHaveLength(1);
+  expect(calls[0]).toMatchObject({ outcome: 'error', durationMs: 10 });
+  expect(events).toEqual([expect.objectContaining({ type: 'error', consecutive: 1 })]);
+});
+
+it('sender rejection after stop delivers receipt without changing failures or emitting events', async () => {
+  let reject!: (error: Error) => void;
+  const send = vi.fn(() => new Promise((_resolve, rejectSend) => { reject = rejectSend; }));
+  const { k, normal, calls, events } = setup(send, { maxConsecutiveErrors: 1 });
+  normal();
+  await vi.advanceTimersByTimeAsync(100);
+  expect(send).toHaveBeenCalledTimes(1);
+  k.stop();
+  const failures = (k as any).consecutiveErrors;
+  reject(new Error('late rejection'));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(calls).toEqual([expect.objectContaining({ outcome: 'error', error: expect.objectContaining({ message: 'late rejection' }) })]);
+  expect((k as any).consecutiveErrors).toBe(failures);
+  expect(events).toEqual([]);
+  expect(k.getStatus()).toEqual([]);
+});
+
+it('outcome eviction leaves failure count unchanged before the next transport failure', async () => {
+  const { k, begin, normal, events } = setup(async () => { throw new Error('outage'); }, {
+    maxLineages: 1, maxConsecutiveErrors: 2,
+  });
+  normal();
+  await vi.advanceTimersByTimeAsync(100);
+  expect((k as any).consecutiveErrors).toBe(1);
+  const other = begin('normal', wire('other'));
+  expect(events.at(-1)).toMatchObject({ type: 'error', error: 'outcome-lru-eviction: maxLineages cap exceeded', consecutive: 1 });
+  expect((k as any).consecutiveErrors).toBe(1);
+  k.finish(other, 'end_turn');
+  await vi.advanceTimersByTimeAsync(100);
+  expect(events.slice(-2)).toEqual([
+    expect.objectContaining({ type: 'error', error: 'outage', consecutive: 2 }),
+    expect.objectContaining({ type: 'disabled' }),
+  ]);
+});
