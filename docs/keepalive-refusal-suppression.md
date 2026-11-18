@@ -42,7 +42,11 @@ This is retirement, not a new retry/backoff policy; an unknown refresh is never
 resent on every timer check. Successfully processed resolutions reset consecutive send/response-processing
 errors, including refusals, empty responses and unknown terminals in suppression
 mode. For a current known-normal refresh, usage fields must also be readable
-before resetting that counter. Replay serialization
+and numerically coercible before resetting that counter. Default-off preserves
+legacy accounting: each resolved send resets the counter before usage processing,
+so repeated null/undefined response or usage-processing errors report 1 on each
+refresh rather than accumulating toward the default threshold. Preparation and
+rejected-send failures still accumulate in default-off mode. Replay serialization
 failures emit `error` without incrementing that send-failure counter or delivering
 a call receipt, since the sender was not invoked. They retire only the failed
 replay snapshot (retaining outcome identity), so it is not retried every timer
@@ -164,3 +168,9 @@ define restoration of suppression separately; no persistence is implemented.
 
 No provider behavior, billing, TTL extension, savings, refusal avoidance, live
 compatibility, merge or release claim follows from the fake-only tests.
+
+If caller-owned key serialization reenters keepalive, the outer attempt cannot
+qualify or update a snapshot: intervening work may have refused and evicted its
+identity. Its handle still reports a later refusal against a currently retained
+key. This conservatively excludes even unrelated serialization reentry from
+successful qualification; ordinary subsequent requests can qualify normally.

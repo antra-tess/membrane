@@ -469,3 +469,19 @@ it.each(['complete', 'stream'] as const)('default-off %s ignores keepalivePurpos
   expect(replays()).toHaveLength(1);
   expect(events.some(e => e.type === 'disabled')).toBe(false);
 });
+
+
+it('normal stream qualifies before input-transformation response assembly throws', async () => {
+  const { a, replays } = adapter({ suppressOnRefusal: true },
+    () => ({ ...answer, stop_reason: 'max_tokens' }),
+    () => sdkStream([
+      { ...messageStart, message: { ...messageStart.message, input_transformations: [
+        { get type() { throw new Error('assembly failed'); } },
+      ] } },
+      ...rest,
+    ]));
+  await expect(a.stream(request('assembly-failure'), noCallbacks)).rejects.toThrow('assembly failed');
+  expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(replays()).toHaveLength(1);
+});

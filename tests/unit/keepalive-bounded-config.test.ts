@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
 import { expect, it } from 'vitest';
 
 const startupMs = 60_000;
@@ -9,11 +10,12 @@ const selfTestExecutionMs = 1_000;
 const selfTestTimeoutMs = 180_000;
 
 function runChild(script: string, executionMs = defaultExecutionMs) {
-  return new Promise<{ code: number | null; stdout: string; stderr: string; signal: string | null }>((resolve, reject) => {
+  return new Promise<{ code: number | null; stdout: string; stderr: string; signal: string | null; executionElapsedMs: number }>((resolve, reject) => {
     const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], {
       cwd: new URL('../../', import.meta.url), stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '', stderr = '', ready = false;
+    let readyAt: number | undefined;
     // Import/startup has its own generous watchdog. The bounded-loop deadline
     // starts only after the child confirms that its imports have completed.
     let timer = setTimeout(() => child.kill('SIGKILL'), startupMs);
@@ -21,13 +23,15 @@ function runChild(script: string, executionMs = defaultExecutionMs) {
       stdout += chunk;
       if (!ready && stdout.includes('ready\n')) {
         ready = true;
+        readyAt = performance.now();
         clearTimeout(timer);
         timer = setTimeout(() => child.kill('SIGKILL'), executionMs);
       }
     });
     child.stderr.on('data', chunk => { stderr += chunk; });
     child.on('error', error => { clearTimeout(timer); reject(error); });
-    child.on('close', (code, signal) => { clearTimeout(timer); resolve({ code, stdout, stderr, signal }); });
+    child.on('close', (code, signal) => { clearTimeout(timer); resolve({ code, stdout, stderr, signal,
+      executionElapsedMs: readyAt === undefined ? Infinity : performance.now() - readyAt }); });
   });
 }
 
@@ -73,8 +77,9 @@ it('bounded-loop watchdog excludes child startup but still kills a stuck loop', 
   const stuck = await runChild(`console.log('ready'); while (true) {}`, stuckExecutionMs);
   expect(stuck.code).toBeNull();
   expect(stuck.signal).toBe('SIGKILL');
-  // Assert watchdog termination, not parent scheduling latency under contention.
   expect(stuck.stdout).toContain('ready');
+  // Generous scheduling slack, but not the separate 60-second startup deadline.
+  expect(stuck.executionElapsedMs).toBeLessThan(5_000);
 }, selfTestTimeoutMs);
 
 for (const suppression of ['{}', '{suppressOnRefusal:false}']) {

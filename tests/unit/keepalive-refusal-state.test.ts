@@ -165,7 +165,7 @@ it.each(['forced-tool-choice', 'legacy-thinking-budget'])('ineligible prefix emi
   normal();
   const w = { ...wire(), ...(reason === 'forced-tool-choice' ? { tool_choice: { type: 'any' } } : { thinking: { type: 'enabled' } }) };
   const a = k.begin(w, undefined, 'stream')!;
-  k.prefix(a); k.finish(a, undefined);
+  k.prefix(a); // Cancellation can prevent finish from ever being called.
   expect(k.getStatus()).toEqual([]);
   expect(events).toEqual([{ type: 'skipped', key: a.key, reason }]);
 });
@@ -829,4 +829,75 @@ it('model context window terminal qualifies fresh and post-refusal attempts', ()
   expect(k.getStatus()).toEqual([]);
   k.finish(begin(), 'model_context_window_exceeded');
   expect(k.getStatus()).toHaveLength(1);
+});
+
+
+it('hashing cannot adopt a barrier-zero identity recreated after nested refusal and eviction', () => {
+  const { k, begin, events } = setup(undefined, { maxLineages: 1 });
+  const key = lineageKey(wire());
+  const w = wire();
+  Object.assign(w.system, { toJSON() {
+    const refusing = begin();
+    k.finish(refusing, 'refusal');
+    expect(events).toContainEqual({ type: 'suppressed', key, source: 'foreground' });
+    begin('normal', wire('other'));
+    expect((k as any).outcomes.has(key)).toBe(false);
+    begin();
+    expect((k as any).outcomes.get(key).barrier).toBe(0);
+    return wire().system;
+  } });
+  const outer = begin('normal', w);
+  k.prefix(outer); k.finish(outer, 'end_turn');
+  expect(k.getStatus()).toEqual([]);
+  k.finish(begin(), 'end_turn');
+  expect(k.getStatus()).toHaveLength(1);
+});
+
+it('hashing reentered by an unrelated key retains a handle for a later refusal', () => {
+  const { k, begin, events } = setup();
+  const w = wire();
+  Object.assign(w.system, { toJSON() {
+    begin('normal', wire('other'));
+    return wire().system;
+  } });
+  const refusing = begin('normal', w);
+  expect(refusing).toBeDefined();
+  k.finish(begin(), 'end_turn');
+  expect(k.getStatus()).toHaveLength(1);
+  k.finish(refusing, 'refusal');
+  expect(events).toContainEqual({ type: 'suppressed', key: lineageKey(wire()), source: 'foreground' });
+  expect(k.getStatus()).toEqual([]);
+});
+
+it.each(['cache_read_input_tokens', 'cache_creation_input_tokens'])('suppression counts repeated %s coercion failures', async field => {
+  const { normal, events, k } = setup(async () => ({
+    stop_reason: 'max_tokens', usage: { ...ok.usage, [field]: Object.create(null) },
+  }), { maxConsecutiveErrors: 3 });
+  normal();
+  await vi.advanceTimersByTimeAsync(300);
+  expect(events.filter(e => e.type === 'error').map(e => e.consecutive)).toEqual([1, 2, 3]);
+  expect(events.some(e => e.type === 'disabled')).toBe(true);
+  expect(k.getStatus()).toEqual([]);
+});
+
+it.each([{}, { suppressOnRefusal: false }])('default-off preserves main per-resolution resets: %j', async config => {
+  // Pin main's distinction between a rejected send and a failure after resolution.
+  // Run explicitly below rather than relying on timer cadence.
+  for (const response of [null, undefined,
+    { usage: { get cache_read_input_tokens() { throw new Error('bad usage'); } } },
+    { usage: { cache_read_input_tokens: Object.create(null) } },
+  ]) {
+    const events: KeepaliveEvent[] = [];
+    const k = new CacheKeepalive(async () => response as any, {
+      ...config, refreshAfterMs: 0, maxConsecutiveErrors: 3,
+      onEvent: e => { events.push(e); },
+    });
+    keepers.push(k);
+    k.record(wire(), undefined, 'stream');
+    for (let i = 0; i < 3; i++) await (k as any).tick();
+    expect(events.filter(e => e.type === 'error').map(e => e.consecutive)).toEqual([1, 1, 1]);
+    expect(events.some(e => e.type === 'disabled')).toBe(false);
+    expect(k.getStatus()).toHaveLength(1);
+    k.stop();
+  }
 });

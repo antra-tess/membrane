@@ -108,7 +108,9 @@ export interface CacheKeepaliveConfig {
    *  negative Infinity also retains nothing. */
   maxLineages?: number;
   /** Consecutive send/response-processing failures before disabling. Default 3.
-   * Default-off also counts replay preparation failures; suppression mode does not. */
+   * Suppression mode counts usage access/coercion failures, but not replay preparation.
+   * Default-off matches legacy: preparation/send failures accumulate, but a resolved
+   * send resets the counter before usage processing, so those later errors restart at 1. */
   maxConsecutiveErrors?: number;
   /**
    * The number of pokes of a lineage in a row coming back without a cache read
@@ -279,9 +281,15 @@ export class CacheKeepalive {
     const key = lineageKey(wire);
     if (this.stopped) return undefined;
     let state = this.outcomes.get(key);
-    // Serialization may reenter, refuse this key, and evict its identity.
-    // Do not recreate forgotten state for an attempt older than that work.
-    if (!state && sequence !== this.sequence) return undefined;
+    // Serialization may reenter, refuse, evict, and recreate this key. We cannot
+    // safely adopt any resulting identity for success. Keep a detached handle:
+    // its later refusal still applies to a retained key, without recreating one.
+    if (sequence !== this.sequence) {
+      const handle = Object.freeze({ key }) as KeepaliveAttempt;
+      const detached = { barrier: 0, latest: 0, qualified: false };
+      this.attempts.set(handle, { key, state: detached, sequence, wire, headers, lane, purpose, sentAt });
+      return handle;
+    }
     if (!state) state = { barrier: 0, latest: 0, qualified: false };
     this.outcomes.delete(key);
     this.outcomes.set(key, state);
@@ -501,8 +509,12 @@ export class CacheKeepalive {
           return;
         }
       }
-      const read = res.usage?.cache_read_input_tokens ?? 0;
-      const wrote = res.usage?.cache_creation_input_tokens ?? 0;
+      const rawRead = res.usage?.cache_read_input_tokens ?? 0;
+      const rawWrote = res.usage?.cache_creation_input_tokens ?? 0;
+      // In opt-in mode, complete potentially throwing coercion before resetting
+      // the failure run. Subsequent comparisons must use captured primitives.
+      const read = this.cfg.suppressOnRefusal ? Number(rawRead) : rawRead;
+      const wrote = this.cfg.suppressOnRefusal ? Number(rawWrote) : rawWrote;
       if (this.cfg.suppressOnRefusal) this.consecutiveErrors = 0;
       // Usage accessors, like receipt observers, may replace or stop this key.
       if (this.cfg.suppressOnRefusal &&
