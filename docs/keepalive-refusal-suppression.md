@@ -18,7 +18,7 @@ With the option enabled, raw SDK `stop_reason: 'refusal'` from foreground or a
 refresh (including a stale one) suppresses its currently retained key and removes its replay snapshot, even with
 positive cache-read counters. The separate opt-in `onSuppressed` callback receives a `KeepaliveSuppression`
 notification naming foreground or refresh. The existing `KeepaliveEvent` union
-and `onEvent` channel are unchanged; suppression notifications never go to
+is unchanged; suppression notifications never go to
 `onEvent`. Register `onSuppressed` only when enabling suppression. Its throws
 and rejected promises are isolated. A stale non-refusal resolution only receives
 its transport receipt, not semantic state events. The guarantee that stale outcomes
@@ -37,14 +37,15 @@ branding and custom toJSON behavior are not preserved; some runtimes reject
 rawJSON cloning entirely. Function-valued fields
 (such as a metadata toJSON method) can prevent cloning even for valid SDK JSON.
 Receipt delivery is best-effort: clone failures drop the receipt and, in opt-in
-mode, emit `skipped` with reason `receipt-clone-failed`; observer failures are
+mode, emit `error` with diagnostic prefix `receipt-clone-failed` and an unchanged
+consecutive count; observer failures are
 isolated and not retried. Receipt loss does not count as a send failure or retire
 the replay snapshot. Response copies contain only own enumerable properties;
 inherited/non-enumerable metadata can affect suppression without appearing in receipts. Without `onCall`, no receipts are delivered.
 A refresh with missing/null/unrecognized raw terminal reason never emits `refreshed` or advances its refresh timestamp;
 usage alone isn't evidence of a known terminal outcome. It removes the replay
-snapshot and emits `skipped` with reason
-`unknown-refresh-terminal`, while retaining outcome identity/barrier state. A later
+snapshot and emits `error` with diagnostic prefix
+`unknown-refresh-terminal` (without incrementing consecutive failures), while retaining outcome identity/barrier state. A later
 foreground prefix may register a new snapshot if the identity is still qualified.
 This is retirement, not a new retry/backoff policy; an unknown refresh is never
 resent on every timer check. Successfully processed resolutions reset consecutive send/response-processing
@@ -58,7 +59,8 @@ refresh rather than accumulating toward the default threshold. Preparation and
 rejected-send failures still accumulate in default-off mode, as do failures
 while copying response metadata (for example, throwing enumerable getters).
 With suppression enabled, replay serialization failures for a still-current snapshot
-emit `error` without incrementing that send-failure counter or delivering
+emit `error` prefixed `replay-preparation-failed`, explicitly naming snapshot
+retirement, without incrementing that send-failure counter or delivering
 a call receipt, since the sender was not invoked. They retire only the failed
 replay snapshot (retaining outcome identity), so it is not retried every timer
 check; a later qualified foreground prefix can install a new snapshot. If serialization
@@ -103,8 +105,9 @@ continuation and caller-requested refusal reissues are normal inference unless
 explicitly declared maintenance. Each adapter invocation is a new begin;
 internal credential resends remain the same invocation. This contract does not
 verify arbitrary caller intent. Membrane's own inference invocations use the
-normal default; the override is available to direct adapter/decorator callers,
-not a new high-level Membrane option. No purpose metadata goes on provider wire.
+normal default; `complete`, `stream`, and `streamYielding` forward their
+`keepalivePurpose` option to every adapter invocation, including continuations and retries.
+Cache-warming callers through Membrane must also declare maintenance. No purpose metadata goes on provider wire.
 
 ## Shared keys, retention and bounds
 
@@ -122,10 +125,10 @@ wire snapshots. Every request begin touches the outcome LRU, including excluded
 lanes and
 ineligible/unknown requests. Unrelated traffic can therefore evict an active
 snapshot even though legacy scheduling would retain it; increase `maxLineages`
-if needed. Every outcome eviction emits `skipped` with reason `outcome-lru-eviction`,
-even when no snapshot existed. More distinct in-flight keys than the cap can
+if needed. Outcome eviction is silent, like legacy snapshot LRU eviction;
+`skipped` remains limited to removal of an ineligible snapshot. More distinct in-flight keys than the cap can
 evict attempts before they finish; sustained round-robin overload can prevent
-qualification. Increase the cap or reduce concurrency if these events recur. We retain this shared bound so that refused and
+qualification. Increase the cap or reduce concurrency if this contention recurs. We retain this shared bound so that refused and
 in-flight keys from all lanes remain observable without unbounded state.
 Suppression has no time
 expiry while retained; it holds no wire snapshot. LRU eviction forgets both
@@ -134,15 +137,21 @@ old in-flight handles remain invalid for prefix/success updates. A late refusal
 from an evicted handle still suppresses a newly retained identity for that key,
 without recreating forgotten keys or growing the map. Fresh identities must qualify through a
 known-normal foreground completion, so forgetting cannot let maintenance or unknown
-outcomes restore eligibility. Stop permanently clears tracked maps and timers,
-but does not cancel an in-flight sender or immediately release its payload;
+outcomes restore eligibility. In opt-in mode, stop permanently clears tracked maps and timers.
+Default-off retains a legacy reentrant-serialization gap: `record()` can retain a
+payload after its key serializer calls stop, and replay preparation can still
+invoke a sender after its serializer calls stop. Stop
+does not cancel an in-flight sender or immediately release its payload;
 that sender can still deliver a receipt after stop.
 Idle expiry and ineffective retirement drop both snapshot and identity.
 An ineligible prefix in a configured lane removes its replay snapshot and emits
 `skipped` when one existed, without deleting the outcome identity or a retained
 refusal barrier. Excluded lanes cannot remove snapshots by prefix ineligibility.
 There is no persistence or durable tombstone format.
-Low-level keeper clients must use `begin`, `prefix`, `finish` to observe outcomes;
+Low-level keeper clients must use `begin`, `prefix`, `finish` to observe outcomes.
+On failure or cancellation, low-level callers should call `finish(handle, undefined)`
+to release request/header references without qualifying the attempt. Retaining an
+unfinished handle retains those references despite the lineage cap.
 `record` is the legacy prefix-accounting API and is ignored entirely with suppression enabled,
 even for qualified keys; it cannot carry begin identity or ordering.
 Raw stream refusal is observed before progress callbacks or terminal parsing; a

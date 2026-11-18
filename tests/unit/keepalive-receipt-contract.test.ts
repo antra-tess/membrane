@@ -24,12 +24,15 @@ function setup(send: any, onCall?: (call: KeepaliveCall) => void) {
 const response = { stop_reason: 'max_tokens', usage: { cache_read_input_tokens: 10 } };
 
 it('documents request receipts as caller objects, not wire bytes, and pins rawJSON brand loss', async () => {
+  let serialized = '';
   const { wire, qualify, tick, calls, events } = setup(async (payload: unknown) => {
-    expect(JSON.stringify(payload)).toContain('"id":9007199254740993');
+    serialized = JSON.stringify(payload);
     return response;
   });
   wire.metadata = { id: (JSON as any).rawJSON('9007199254740993') };
   qualify(); await tick();
+  expect(serialized).toContain('"id":9007199254740993');
+  expect(events.some(e => e.type === 'refreshed')).toBe(true);
   // Node versions either strip the rawJSON brand or reject its clone entirely.
   let cloneable = true;
   try { structuredClone(wire.metadata); } catch { cloneable = false; }
@@ -37,7 +40,7 @@ it('documents request receipts as caller objects, not wire bytes, and pins rawJS
     expect(JSON.stringify(calls[0]!.request)).toContain('"id":{"rawJSON":"9007199254740993"}');
   } else {
     expect(calls).toEqual([]);
-    expect(events[0]).toMatchObject({ type: 'skipped', reason: 'receipt-clone-failed' });
+    expect(events[0]).toMatchObject({ type: 'error', error: 'receipt-clone-failed: receipt dropped; replay snapshot unchanged', consecutive: 0 });
   }
   const guide = readFileSync(new URL('../../docs/keepalive-refusal-suppression.md', import.meta.url), 'utf8');
   const api = readFileSync(new URL('../../src/cache-keepalive.ts', import.meta.url), 'utf8');
@@ -56,8 +59,8 @@ it.each(['request', 'response'] as const)('reports %s clone loss without changin
   wire.metadata = side === 'request' ? { toJSON() { return { id: 'sent' }; } } : { id: 'sent' };
   qualify(); await tick();
   expect(calls).toEqual([]);
-  expect(events.map(e => e.type)).toEqual(['skipped', 'refreshed']);
-  expect(events[0]).toEqual({ type: 'skipped', key: k.getStatus()[0]!.key, reason: 'receipt-clone-failed' });
+  expect(events.map(e => e.type)).toEqual(['error', 'refreshed']);
+  expect(events[0]).toEqual({ type: 'error', key: k.getStatus()[0]!.key, error: 'receipt-clone-failed: receipt dropped; replay snapshot unchanged', consecutive: 0 });
   expect(k.getStatus()).toHaveLength(1);
 });
 

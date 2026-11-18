@@ -4,15 +4,15 @@
 - Low-level keeper callers enabling suppression must migrate from `record` alone
   to `begin`/`prefix`/`finish`, and senders must return raw `stop_reason` alongside
   usage. Missing or unknown refresh terminals retire the snapshot with a
-  `skipped` event with reason `unknown-refresh-terminal` rather than repeatedly resending it. `KeepaliveAttempt` is an
+  `error` diagnostic prefixed `unknown-refresh-terminal` (no failure-count increment) rather than repeatedly resending it. `KeepaliveAttempt` is an
   opaque issuer-specific handle exposing only a read-only key, exported from the
   package root. `KeepaliveSend` accepts an optional `stop_reason: unknown` field;
   pre-existing custom senders remain assignable without opting in.
 - Low-level `requestForAttempt(handle)` exposes the retained mutable request
   reference until the attempt finishes or the keeper stops; callers must not
   mutate it while tracked.
-- Direct adapter callers enabling suppression must declare cache-warming prefill
-  or other maintenance with `ProviderRequestOptions.keepalivePurpose: 'maintenance'`.
+- Adapter and Membrane callers enabling suppression must declare cache-warming prefill
+  or other maintenance with `keepalivePurpose: 'maintenance'` on their call options.
   Ordinary assistant-prefill continuations remain normal foreground inference by
   default; the declaration is non-wire metadata, not inferred from token counts.
 - `CacheKeepalive.stop(reason)` accepts an optional reason and emits one
@@ -33,8 +33,8 @@
   fresh identities, including after eviction. Excluded-lane and fresh pending
   prefixes cannot starve successful stream qualification; finishing an already
   registered request preserves its snapshot and refresh baseline.
-- Opt-in outcome state uses a bounded all-request LRU; every eviction reports
-  `skipped: outcome-lru-eviction`, even without a snapshot. Unrelated or excessive
+- Opt-in outcome state uses a bounded all-request LRU; eviction is silent, like
+  legacy snapshot LRU eviction; `skipped` only reports ineligible-snapshot removal. Unrelated or excessive
   concurrent traffic can invalidate in-flight handles; increase `maxLineages`
   if needed. Ineligible prefixes preserve shared outcome identity. See
   `docs/keepalive-refusal-suppression.md` for retention tradeoffs.
@@ -55,9 +55,15 @@
   remains unchanged.
 - Opt-in receipts copy the caller request object, not SDK wire bytes; raw JSON
   brands and custom serializers are not preserved. Uncloneable request/response
-  values drop the receipt and emit `skipped: receipt-clone-failed`, without
+  values drop the receipt and emit an `error` diagnostic prefixed `receipt-clone-failed`, without
   changing refresh accounting. Response copies include own enumerable fields only.
 - Opt-in replays reject callable root `toJSON` methods to protect the prefill-only
   token budget and message trimming. Foreground serialization is unchanged.
 - Opt-in unprintable error messages cannot bypass failure disabling. Legacy
   default-off error formatting is unchanged.
+
+- Opt-in success receipt latency stops at sender resolution, excluding response
+  copying and synchronous observers. Nonfinite usage errors name the field and
+  coerced value. Preparation errors explicitly report snapshot retirement.
+- Opt-in ineffective retirement completes before notifying observers, so a new
+  same-key request begun by the observer retains a valid outcome identity.

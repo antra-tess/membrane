@@ -128,12 +128,17 @@ export interface CacheKeepaliveConfig {
    * In suppression mode, invoked once on success (including ineffective responses)
    * or failure; legacy malformed empty responses may emit success then error.
    * Delivery requires cloneable receipt values; clone failures drop the receipt.
-   * Opt-in mode reports that loss as skipped: receipt-clone-failed, without
+   * Opt-in mode reports that loss as error: receipt-clone-failed, without
    * changing send-failure accounting or retiring the snapshot.
    * Observer errors are isolated, and returned promises never delay the loop.
-   * Skipped, expired, and disabled entries initiate no new calls; a sender already
-   * in flight still delivers its receipt after snapshot removal or stop.
-   * Poke serialization failures are reported through onEvent before any sender invocation. */
+   * skipped only reports removal of an ineligible snapshot, before any send.
+   * Error diagnostics for receipt loss and unknown terminals do not increment
+   * consecutive failures; the latter retires the snapshot after a send.
+   * Expired/disabled entries normally initiate no new calls; default-off replay
+   * serialization can reenter stop and still send afterward (legacy behavior).
+   * An in-flight sender still delivers its receipt after removal or stop.
+   * Poke serialization failures are reported through onEvent before any sender invocation;
+   * opt-in replay-preparation-failed errors name snapshot retirement without incrementing failures. */
   onCall?: (call: KeepaliveCall) => void | Promise<void>;
 }
 
@@ -309,7 +314,6 @@ export class CacheKeepalive {
       if (oldest === undefined) break;
       this.outcomes.delete(oldest);
       this.lineages.delete(oldest);
-      this.emit({ type: 'skipped', key: oldest, reason: 'outcome-lru-eviction' });
     }
     if (this.stopped) return undefined;
     const handle = Object.freeze({ key }) as KeepaliveAttempt;
@@ -491,6 +495,7 @@ export class CacheKeepalive {
           (this.stopped || this.lineages.get(key) !== lin || this.outcomes.get(key) !== state)) return;
       invoked = true;
       const resolved = await this.send(payload, lin.headers);
+      const resolvedDurationMs = this.cfg.suppressOnRefusal ? Date.now() - startedAt : 0;
       // A resolved sender is a transport success even without a response body.
       // Preserve main's legacy processing (including errors) when opted out.
       const res = this.cfg.suppressOnRefusal ? resolved ?? {} : resolved;
@@ -505,7 +510,7 @@ export class CacheKeepalive {
       const unknown = this.cfg.suppressOnRefusal && !refused && !knownTerminal(stopReason);
       if (unknown && !this.stopped && this.lineages.get(key) === lin && this.outcomes.get(key) === state) {
         this.lineages.delete(key);
-        this.emit({ type: 'skipped', key, reason: 'unknown-refresh-terminal' });
+        this.emit({ type: 'error', key, error: 'unknown-refresh-terminal: replay snapshot retired', consecutive: this.consecutiveErrors });
       }
       // Do not invoke a caller-owned terminal getter a second time while copying.
       // Keep legacy spread semantics unchanged when suppression is off.
@@ -516,7 +521,7 @@ export class CacheKeepalive {
             (res as Record<string, unknown>)[key], enumerable: true, configurable: true, writable: true });
         }
       }
-      const durationMs = Date.now() - startedAt;
+      const durationMs = this.cfg.suppressOnRefusal ? resolvedDurationMs : Date.now() - startedAt;
       const receiptResponse = this.cfg.suppressOnRefusal ? response : { ...res };
       reported = true;
       this.reportCall({
@@ -540,7 +545,9 @@ export class CacheKeepalive {
       const read = this.cfg.suppressOnRefusal ? Number(rawRead) : rawRead;
       const wrote = this.cfg.suppressOnRefusal ? Number(rawWrote) : rawWrote;
       if (this.cfg.suppressOnRefusal) {
-        if (!Number.isFinite(read) || !Number.isFinite(wrote)) throw new Error('Non-finite keepalive usage');
+        for (const [field, value] of [['cache_read_input_tokens', read], ['cache_creation_input_tokens', wrote]] as const) {
+          if (!Number.isFinite(value)) throw new Error(`Non-finite keepalive usage: ${field}=${value}; sender must return a finite number`);
+        }
         this.consecutiveErrors = 0;
       }
       // Usage accessors, like receipt observers, may replace or stop this key.
@@ -549,6 +556,11 @@ export class CacheKeepalive {
 
       if (read <= 0 || wrote > 0) {
         lin.ineffective += 1;
+        // Retire opt-in identity before observers can begin its replacement.
+        if (this.cfg.suppressOnRefusal && lin.ineffective >= this.cfg.maxIneffective) {
+          this.lineages.delete(key);
+          this.outcomes.delete(key);
+        }
         this.emit({
           type: 'ineffective',
           key,
@@ -587,7 +599,10 @@ export class CacheKeepalive {
           (this.lineages.get(key) !== lin || this.outcomes.get(key) !== state)))) return;
       // A preparation failure cannot improve by retrying the same snapshot.
       // Keep outcome identity so a later qualified prefix can replace it.
-      if (this.cfg.suppressOnRefusal && !invoked) this.lineages.delete(key);
+      if (this.cfg.suppressOnRefusal && !invoked) {
+        this.lineages.delete(key);
+        message = `replay-preparation-failed: replay snapshot retired; ${message}`;
+      }
       // Preparation failures are observable, but are not failed sends.
       if (!this.cfg.suppressOnRefusal || invoked) this.consecutiveErrors += 1;
       this.emit({ type: 'error', key, error: message, consecutive: this.consecutiveErrors });
@@ -614,7 +629,7 @@ export class CacheKeepalive {
         ? { ...call, request: structuredClone(call.request), response: structuredClone(call.response) }
         : { ...call, request: structuredClone(call.request) };
     } catch {
-      if (this.cfg.suppressOnRefusal) this.emit({ type: 'skipped', key: call.key, reason: 'receipt-clone-failed' });
+      if (this.cfg.suppressOnRefusal) this.emit({ type: 'error', key: call.key, error: 'receipt-clone-failed: receipt dropped; replay snapshot unchanged', consecutive: this.consecutiveErrors });
       return;
     }
     try {

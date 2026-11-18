@@ -358,6 +358,9 @@ export interface YieldingStream extends AsyncIterable<StreamEvent> {
 
 /** Options for streamYielding(). */
 export interface YieldingStreamOptions {
+  /** Trusted non-wire Anthropic keepalive purpose; cache-warming callers must
+   * declare maintenance. Defaults to normal foreground inference. */
+  keepalivePurpose?: 'normal' | 'maintenance';
   /** Abort signal for cancellation */
   signal?: AbortSignal;
 

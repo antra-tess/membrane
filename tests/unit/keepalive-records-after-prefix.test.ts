@@ -63,7 +63,7 @@ function held() {
   return { promise, release };
 }
 
-function heldStream(gate: Promise<unknown>, events: unknown[]) {
+function heldStream(gate: Promise<unknown>, events: unknown[], entered?: () => void) {
   const inner = sdkStream(events)[Symbol.asyncIterator]();
   let waited = false;
   return {
@@ -71,7 +71,7 @@ function heldStream(gate: Promise<unknown>, events: unknown[]) {
     [Symbol.asyncIterator]() {
       return {
         async next() {
-          if (!waited) { waited = true; await gate; }
+          if (!waited) { waited = true; entered?.(); await gate; }
           return inner.next();
         },
       };
@@ -167,12 +167,14 @@ describe('the stream lane records a request at message_start', () => {
 
   it('while a call waits for its first event, a refresh that falls due replays the earlier snapshot, once per refreshAfterMs of the wait', async () => {
     let first: ReturnType<typeof held> | undefined;
+    const entered = held();
     const { a, replays } = adapter({}, () => ({ ...answer, content: [], stop_reason: 'max_tokens', usage: readUsage }),
-      () => first ? heldStream(first.promise, [messageStart, ...rest]) : sdkStream([messageStart, ...rest]));
+      () => first ? heldStream(first.promise, [messageStart, ...rest], () => entered.release(undefined)) : sdkStream([messageStart, ...rest]));
     await a.stream(request('Resident system G'), noCallbacks);
     await vi.advanceTimersByTimeAsync(50);
     first = held();
     const call = a.stream(request('Resident system G', 2), noCallbacks);
+    await entered.promise;
     await vi.advanceTimersByTimeAsync(200);
     expect(replays().map(wire => wire.messages.length)).toEqual([1, 1]);
     first.release(undefined);

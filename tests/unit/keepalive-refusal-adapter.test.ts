@@ -5,6 +5,9 @@
  * starts at a request's send.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Membrane } from '../../src/membrane.js';
+import { NativeFormatter } from '../../src/formatters/native.js';
+import { AnthropicXmlFormatter } from '../../src/formatters/anthropic-xml.js';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import { lineageKey, type CacheKeepaliveConfig, type KeepaliveEvent, type KeepaliveSuppression } from '../../src/cache-keepalive.js';
 
@@ -342,7 +345,7 @@ for (const lane of ['complete', 'stream'] as const) {
       expect((a.cacheKeepalive as any).outcomes.has(aKey)).toBe(true);
       reason = undefined; await run('B'); // Evict A with no known-normal success.
       expect([...(a.cacheKeepalive as any).outcomes.keys()]).toEqual([bKey]);
-      expect(events).toContainEqual({ type: 'skipped', key: aKey, reason: 'outcome-lru-eviction' });
+      expect(events.some(e => e.type === 'skipped')).toBe(false);
       reason = mode === 'maintenance' ? 'max_tokens' : undefined;
       await run('A', options);
       await vi.advanceTimersByTimeAsync(100);
@@ -403,9 +406,15 @@ it('complete refusal is observed even if prefix bookkeeping throws', async () =>
   const { a, events } = adapter({ suppressOnRefusal: true, lanes: ['complete'] }, () => ({ ...answer, stop_reason: reason }));
   await a.complete(request('prefix-error'));
   const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
-  vi.spyOn(a.cacheKeepalive!, 'prefix').mockImplementation(() => { throw new Error('prefix'); });
+  let suppressedAtPrefix = false;
+  const prefix = vi.spyOn(a.cacheKeepalive!, 'prefix').mockImplementation(() => {
+    suppressedAtPrefix = events.some(e => e.type === 'suppressed') && a.cacheKeepalive!.getStatus().length === 0;
+    throw new Error('prefix');
+  });
   reason = 'refusal';
   expect((await a.complete(request('prefix-error'))).stopReason).toBe('refusal');
+  expect(prefix).toHaveBeenCalledTimes(1);
+  expect(suppressedAtPrefix).toBe(true);
   expect(events.map(e => e.type)).toContain('suppressed');
   expect(a.cacheKeepalive!.getStatus()).toEqual([]);
   warning.mockRestore();
@@ -522,3 +531,38 @@ it('stream checks caller abort when combined-signal propagation is blocked', asy
   expect(abort.signal.aborted).toBe(true);
   expect(a.cacheKeepalive!.getStatus()).toEqual([]);
 });
+
+// The purpose declaration must survive both Membrane streaming implementations.
+
+for (const route of ['complete', 'stream', 'streamYielding'] as const) {
+  for (const toolMode of ['native', 'xml'] as const) {
+    it(`Membrane ${route}/${toolMode} forwards maintenance without rearming refusal`, async () => {
+      let reason = 'end_turn';
+      const { a } = adapter({ suppressOnRefusal: true, lanes: ['complete', 'stream'] },
+        () => ({ ...answer, stop_reason: reason }),
+        () => sdkStream([messageStart, { type: 'message_delta', delta: { stop_reason: reason }, usage: readUsage }]));
+      const entry = vi.spyOn(a, route === 'complete' ? 'complete' : 'stream');
+      const membrane = new Membrane(a, { formatter: toolMode === 'native' ? new NativeFormatter() : new AnthropicXmlFormatter() });
+      const req = {
+        messages: [{ participant: 'User', content: [{ type: 'text' as const, text: 'hi' }] }],
+        system: 'purpose boundary', config: { model: 'claude-opus-4-1', maxTokens: 1024 },
+        promptCaching: true, cacheTtl: '1h' as const, toolMode,
+      };
+      const run = async (keepalivePurpose?: 'maintenance') => {
+        const options = { ...(keepalivePurpose ? { keepalivePurpose } : {}), refusalRetries: 0 };
+        if (route === 'complete') await membrane.complete(req, options);
+        else if (route === 'stream') await membrane.stream(req, { ...options, onChunk: () => {} });
+        else for await (const event of membrane.streamYielding(req, options)) {
+          expect(event.type).not.toBe('error');
+        }
+      };
+      await run(); expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
+      reason = 'refusal'; await run(); expect(a.cacheKeepalive!.getStatus()).toEqual([]);
+      reason = 'max_tokens'; await run('maintenance');
+      const args = entry.mock.calls.at(-1)!;
+      expect(args[route === 'complete' ? 1 : 2]).toMatchObject({ keepalivePurpose: 'maintenance' });
+      expect(a.cacheKeepalive!.getStatus()).toEqual([]);
+      await run(); expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
+    });
+  }
+}

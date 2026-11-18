@@ -24,3 +24,16 @@ type LegacyEvent =
   | { type: 'expired'; key: string; idleMs: number };
 export const legacyPayload: (event: KeepaliveEvent) => LegacyEvent = event => event;
 export const currentPayload: (event: LegacyEvent) => KeepaliveEvent = event => event;
+
+// Structural assignability ignores readonly. Legacy consumers may mutate every field.
+export function mutableLegacyPayload(event: KeepaliveEvent): void {
+  event.type = event.type;
+  if ('key' in event) event.key = event.key;
+  if ('lane' in event) event.lane = event.lane;
+  if ('readTokens' in event) event.readTokens = event.readTokens;
+  if ('writeTokens' in event) event.writeTokens = event.writeTokens;
+  if ('idleMs' in event) event.idleMs = event.idleMs;
+  if ('reason' in event) event.reason = event.reason;
+  if ('error' in event) event.error = event.error;
+  if ('consecutive' in event) event.consecutive = event.consecutive;
+}

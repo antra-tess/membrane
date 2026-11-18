@@ -30,7 +30,7 @@ it.each([null, undefined, 'future_stop'])('unknown refresh %s never claims refre
   const { normal, events, calls } = setup(async () => ({ ...ok, stop_reason: reason }));
   normal(); await vi.advanceTimersByTimeAsync(100);
   expect(calls).toHaveLength(1);
-  expect(events).toEqual([{ type: 'skipped', key: lineageKey(wire()), reason: 'unknown-refresh-terminal' }]);
+  expect(events).toEqual([{ type: 'error', key: lineageKey(wire()), error: 'unknown-refresh-terminal: replay snapshot retired', consecutive: 0 }]);
   await vi.advanceTimersByTimeAsync(500);
   expect(calls).toHaveLength(1);
 });
@@ -166,7 +166,7 @@ it.each(['refusal', null, 'future_stop'])('resolved %s refresh breaks consecutiv
   }
   await vi.advanceTimersByTimeAsync(100);
   expect(send).toHaveBeenCalledTimes(3);
-  expect(events.filter(e => e.type === 'error').map(e => e.consecutive)).toEqual([1, 1]);
+  expect(events.filter(e => e.type === 'error' && !e.error.startsWith('unknown-refresh-terminal')).map(e => e.consecutive)).toEqual([1, 1]);
   expect(events.some(e => e.type === 'disabled')).toBe(false);
 });
 
@@ -211,8 +211,8 @@ it('ineligible completion preserves identity for an older in-flight refusal and 
   normal(); expect(k.getStatus()).toHaveLength(1);
 });
 
-it('unrelated excluded/ineligible traffic consumes the bounded outcome LRU visibly', () => {
-  const { k, normal, begin, events } = setup(); const main = normal();
+it('unrelated excluded/ineligible traffic consumes the bounded outcome LRU silently', () => {
+  const { k, normal, begin, events } = setup(); normal();
   const pending = begin();
   for (let i = 0; i < 4; i++) {
     const a = k.begin({ model: `other-${i}`, messages: [] }, undefined, 'complete')!;
@@ -220,7 +220,7 @@ it('unrelated excluded/ineligible traffic consumes the bounded outcome LRU visib
   }
   expect(k.getStatus()).toEqual([]);
   expect((k as any).outcomes.size).toBe(4);
-  expect(events).toEqual([{ type: 'skipped', key: main.key, reason: 'outcome-lru-eviction' }]);
+  expect(events).toEqual([]);
   k.prefix(pending); k.finish(pending, 'end_turn'); expect(k.getStatus()).toEqual([]);
 });
 
@@ -299,8 +299,8 @@ it('uncloneable custom response drops its receipt without losing refresh process
   const { normal, calls, events } = setup(async () => ({ ...ok, custom: () => {} }));
   normal(); await vi.advanceTimersByTimeAsync(100);
   expect(calls).toEqual([]);
-  expect(events.map(e => e.type)).toEqual(['skipped', 'refreshed']);
-  expect(events[0]).toMatchObject({ type: 'skipped', reason: 'receipt-clone-failed' });
+  expect(events.map(e => e.type)).toEqual(['error', 'refreshed']);
+  expect(events[0]).toMatchObject({ type: 'error', error: 'receipt-clone-failed: receipt dropped; replay snapshot unchanged', consecutive: 0 });
 });
 
 
@@ -337,24 +337,6 @@ it('finish after a resolved refresh preserves the refreshed baseline', async () 
   expect(k.getStatus()[0].idleMs).toBe(0);
 });
 
-it('reentrant eviction refusal bars the outer begin', () => {
-  let k!: CacheKeepalive, nested = false;
-  const state = setup(undefined, { maxLineages: 1, onEvent: (e: KeepaliveEvent) => {
-    if (e.type === 'skipped' && !nested) {
-      nested = true;
-      const a = k.begin(wire('B'), undefined, 'stream')!;
-      k.finish(a, 'refusal');
-    }
-  } }); k = state.k;
-  state.normal();
-  const outer = k.begin(wire('B'), undefined, 'stream')!;
-  k.prefix(outer); k.finish(outer, 'end_turn');
-  expect(nested).toBe(true);
-  expect(k.getStatus()).toEqual([]);
-  const after = k.begin(wire('B'), undefined, 'stream')!;
-  k.finish(after, 'end_turn'); expect(k.getStatus()).toHaveLength(1);
-});
-
 it.each(['inflight replacement', 'error observer'])('global send-error limit survives %s', async race => {
   let reject!: (e: Error) => void;
   let replace!: () => void;
@@ -385,11 +367,11 @@ it.each(['inflight replacement', 'error observer'])('global send-error limit sur
   expect(k.getStatus()).toEqual([]);
 });
 
-it('eviction of pending outcome identities is visible and invalidates old handles', () => {
+it('eviction of pending outcome identities is silent and invalidates old handles', () => {
   const { k, begin, events } = setup(undefined, { maxLineages: 1 });
   const old = begin();
   const other = begin('normal', wire('other'));
-  expect(events).toEqual([{ type: 'skipped', key: old.key, reason: 'outcome-lru-eviction' }]);
+  expect(events).toEqual([]);
   k.finish(old, 'end_turn'); expect(k.getStatus()).toEqual([]);
   k.finish(other, 'end_turn'); expect(k.getStatus()[0].key).toBe(other.key);
 });
@@ -463,7 +445,7 @@ it.each([null, undefined])('empty resolved refresh %s resets send failures and r
   normal();
   await vi.advanceTimersByTimeAsync(200);
   expect(calls.map(c => c.outcome)).toEqual(['error', 'success']);
-  expect(events.map(e => e.type)).toEqual(['error', 'skipped']);
+  expect(events.map(e => e.type)).toEqual(['error', 'error']);
   expect(k.getStatus()).toEqual([]);
   // A new failed send must start a fresh run, not disable the keeper.
   send.mockRejectedValue(new Error('new outage'));
@@ -780,12 +762,17 @@ it.each(['system', 'tools'] as const)('begin reserves order before %s serializat
   normal(); expect(k.getStatus()).toHaveLength(1);
 });
 
-it.each([0, 1])('begin cannot mutate outcomes after serialization stops keeper (cap %s)', maxLineages => {
-  const { k, begin, events } = setup(undefined, { maxLineages });
+it.each([1, 2])('begin cannot mutate outcomes after serialization stops keeper (cap %s)', maxLineages => {
+  const { k, begin, normal, events } = setup(undefined, { maxLineages });
+  normal();
+  expect(k.getStatus()).toHaveLength(1);
+  expect((k as any).timer).not.toBeNull();
   const w = wire();
   Object.assign(w, { system: { toJSON() { k.stop(); return wire().system; } } });
   expect(begin('normal', w)).toBeUndefined();
   expect((k as any).outcomes.size).toBe(0);
+  expect(k.getStatus()).toEqual([]);
+  expect((k as any).timer).toBeNull();
   expect(events).toEqual([]);
 });
 
@@ -818,13 +805,19 @@ it('normal finish cannot be replayed as refusal against newer work', () => {
 it('serialization cannot recreate an identity evicted after a nested refusal', () => {
   const { k, begin } = setup(undefined, { maxLineages: 1 });
   const outerWire = wire();
+  let serialized = 0;
   Object.assign(outerWire.system, { toJSON() {
+    serialized++;
     k.finish(begin(), 'refusal');
+    expect((k as any).outcomes.get(lineageKey(wire())).qualified).toBe(false);
     begin('normal', wire('other'));
+    expect((k as any).outcomes.has(lineageKey(wire()))).toBe(false);
     return wire().system;
   } });
   const outer = k.begin(outerWire, undefined, 'stream');
-  if (outer) k.finish(outer, 'end_turn');
+  expect(serialized).toBe(1);
+  expect(outer).toBeDefined();
+  k.finish(outer!, 'end_turn');
   expect(k.getStatus()).toEqual([]);
 });
 
@@ -833,7 +826,7 @@ it('repeated usage-processing errors reach the send failure threshold', async ()
   const { normal, events, k } = setup(async () => ({ stop_reason: 'max_tokens', usage }), { maxConsecutiveErrors: 3 });
   normal();
   await vi.advanceTimersByTimeAsync(300);
-  expect(events.filter(e => e.type === 'error').map(e => e.consecutive)).toEqual([1, 2, 3]);
+  expect(events.filter(e => e.type === 'error' && !e.error.startsWith('receipt-clone-failed')).map(e => e.consecutive)).toEqual([1, 2, 3]);
   expect(events.some(e => e.type === 'disabled')).toBe(true);
   expect(k.getStatus()).toEqual([]);
 });
@@ -845,7 +838,7 @@ it('unprintable preparation errors retire the snapshot and emit a diagnostic', a
   Object.assign((k as any).lineages.values().next().value.wire, { toJSON() { throw Object.create(null); } });
   await vi.advanceTimersByTimeAsync(100);
   expect(k.getStatus()).toEqual([]);
-  expect(events).toEqual([expect.objectContaining({ type: 'error', error: 'Unprintable keepalive error', consecutive: 0 })]);
+  expect(events).toEqual([expect.objectContaining({ type: 'error', error: 'replay-preparation-failed: replay snapshot retired; Unprintable keepalive error', consecutive: 0 })]);
 });
 
 it('model context window terminal qualifies fresh and post-refusal attempts', () => {
@@ -966,7 +959,7 @@ it('unknown terminal retires replay before an unrelated throwing getter', async 
   await vi.advanceTimersByTimeAsync(300);
   expect(send).toHaveBeenCalledTimes(1);
   expect(k.getStatus()).toEqual([]);
-  expect(events).toContainEqual({ type: 'skipped', key: lineageKey(wire()), reason: 'unknown-refresh-terminal' });
+  expect(events).toContainEqual({ type: 'error', key: lineageKey(wire()), error: 'unknown-refresh-terminal: replay snapshot retired', consecutive: 0 });
 });
 
 it('begin touches an existing outcome before LRU eviction', () => {
@@ -1008,10 +1001,12 @@ it.each(['excluded', 'registered'])('finish does not rescan discarded eligibilit
 
 it.each(['cache_read_input_tokens', 'cache_creation_input_tokens'] as const)('non-finite %s counts toward shutdown', async field => {
   for (const value of ['not-a-number', NaN, Infinity, -Infinity]) {
-    const { k, normal, events } = setup(async () => ({ ...ok, usage: { ...ok.usage, [field]: value } }), { maxConsecutiveErrors: 2 });
+    const { k, normal, events, calls } = setup(async () => ({ ...ok, usage: { ...ok.usage, [field]: value } }), { maxConsecutiveErrors: 2 });
     normal();
     await vi.advanceTimersByTimeAsync(200);
     expect(events.map(e => e.type)).toEqual(['error', 'error', 'disabled']);
+    expect(calls.map(c => c.outcome)).toEqual(['success', 'success']);
+    expect(events[0]).toMatchObject({ error: expect.stringContaining(field) });
     expect(k.getStatus()).toEqual([]);
   }
 });
@@ -1027,15 +1022,17 @@ it('stop releases attempt data even while its handle is retained', () => {
 });
 
 
-it('eviction observer stop cannot retain a newly begun attempt', () => {
-  let k!: CacheKeepalive;
-  const state = setup(undefined, { maxLineages: 1, onEvent: () => k.stop() });
-  k = state.k;
-  const old = state.begin();
-  expect(state.begin('normal', wire('other'))).toBeUndefined();
-  expect(k.requestForAttempt(old)).toBeUndefined();
+it('outcome eviction removes a live snapshot silently', () => {
+  const { k, normal, begin, events } = setup(undefined, { maxLineages: 1 });
+  normal(); expect(k.getStatus()).toHaveLength(1);
+  const old = begin();
+  expect(begin('normal', wire('other'))).toBeDefined();
+  expect(k.getStatus()).toEqual([]);
+  expect(events).toEqual([]);
+  k.prefix(old); k.finish(old, 'end_turn');
   expect(k.getStatus()).toEqual([]);
 });
+
 
 it.each(['end_turn', 'refusal', undefined])('finish %s releases attempt data for retained handles', reason => {
   const { k, begin } = setup();
@@ -1044,4 +1041,44 @@ it.each(['end_turn', 'refusal', undefined])('finish %s releases attempt data for
   k.finish(handle, reason);
   expect(k.requestForAttempt(handle)).toBeUndefined();
   expect((k as any).attempts.has(handle)).toBe(false);
+});
+
+
+it('idle expiry invalidates an unfinished attempt identity', async () => {
+  const { k, normal, begin, events } = setup(undefined, { maxIdleMs: 100, refreshAfterMs: 1000 });
+  normal(); const pending = begin();
+  expect(k.getStatus()).toHaveLength(1);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(events.map(e => e.type)).toEqual(['expired']);
+  expect((k as any).outcomes.size).toBe(0);
+  k.prefix(pending); k.finish(pending, 'end_turn');
+  expect(k.getStatus()).toEqual([]);
+});
+
+it('success receipt duration excludes synchronous suppression observers', async () => {
+  const { normal, calls } = setup(async () => {
+    vi.setSystemTime(Date.now() + 10);
+    return { ...ok, stop_reason: 'refusal' };
+  }, { onSuppressed: () => vi.setSystemTime(Date.now() + 2000) });
+  normal(); await vi.advanceTimersByTimeAsync(100);
+  expect(calls).toHaveLength(1);
+  expect(calls[0].durationMs).toBe(10);
+});
+
+
+it('ineffective retirement precedes an observer beginning replacement work', async () => {
+  let replacement: ReturnType<CacheKeepalive['begin']>;
+  let k!: CacheKeepalive;
+  const state = setup(async () => ({ stop_reason: 'max_tokens', usage: {} }), {
+    maxIneffective: 1,
+    onEvent: (event: KeepaliveEvent) => {
+      if (event.type === 'ineffective') replacement = k.begin(wire(), undefined, 'stream');
+    },
+  });
+  k = state.k; state.normal();
+  await vi.advanceTimersByTimeAsync(100);
+  expect(replacement).toBeDefined();
+  expect(k.getStatus()).toEqual([]);
+  k.prefix(replacement!); k.finish(replacement!, 'end_turn');
+  expect(k.getStatus()).toHaveLength(1);
 });
