@@ -1,7 +1,12 @@
 import { spawn } from 'node:child_process';
 import { expect, it } from 'vitest';
 
-function runChild(script: string, executionMs = 30_000) {
+const startupMs = 60_000;
+const defaultExecutionMs = 30_000;
+const stuckExecutionMs = 50;
+const selfTestTimeoutMs = 180_000;
+
+function runChild(script: string, executionMs = defaultExecutionMs) {
   return new Promise<{ code: number | null; stdout: string; stderr: string; signal: string | null }>((resolve, reject) => {
     const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], {
       cwd: new URL('../../', import.meta.url), stdio: ['ignore', 'pipe', 'pipe'],
@@ -9,7 +14,7 @@ function runChild(script: string, executionMs = 30_000) {
     let stdout = '', stderr = '', ready = false;
     // Import/startup has its own generous watchdog. The bounded-loop deadline
     // starts only after the child confirms that its imports have completed.
-    let timer = setTimeout(() => child.kill('SIGKILL'), 60_000);
+    let timer = setTimeout(() => child.kill('SIGKILL'), startupMs);
     child.stdout.on('data', chunk => {
       stdout += chunk;
       if (!ready && stdout.includes('ready\n')) {
@@ -63,12 +68,12 @@ it('bounded-loop watchdog excludes child startup but still kills a stuck loop', 
   `);
   expect(slowStart.code, slowStart.stderr).toBe(0);
   expect(slowStart.stdout).toContain('returned');
-  const stuck = await runChild(`console.log('ready'); while (true) {}`, 50);
+  const stuck = await runChild(`console.log('ready'); while (true) {}`, stuckExecutionMs);
   expect(stuck.code).toBeNull();
   expect(stuck.signal).toBe('SIGKILL');
   // Assert watchdog termination, not parent scheduling latency under contention.
   expect(stuck.stdout).toContain('ready');
-}, 140_000);
+}, selfTestTimeoutMs);
 
 for (const suppression of ['{}', '{suppressOnRefusal:false}']) {
   it.each(['-Infinity', '-1', '-0.5'])(`default-off negative cap %s is killably bounded (${suppression})`, async cap => {
@@ -92,3 +97,7 @@ for (const suppression of ['{}', '{suppressOnRefusal:false}']) {
     expect(result.stdout).toContain('returned');
   }, 100_000);
 }
+
+it('watchdog self-test budget covers both sequential startup and execution bounds plus close slack', () => {
+  expect(selfTestTimeoutMs).toBeGreaterThan(2 * startupMs + defaultExecutionMs + stuckExecutionMs + 10_000);
+});

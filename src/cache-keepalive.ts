@@ -243,7 +243,7 @@ interface AttemptData {
   readonly sentAt: number;
   readonly purpose: 'normal' | 'maintenance';
   registered?: boolean;
-  refusalObserved?: boolean;
+  finished?: boolean;
 }
 
 /** Raw SDK terminal allowlist, never parse fallbacks or usage inference. */
@@ -274,9 +274,10 @@ export class CacheKeepalive {
   begin(wire: Record<string, unknown>, headers: Record<string, string> | undefined,
     lane: KeepaliveLane, purpose: 'normal' | 'maintenance' = 'normal', sentAt = Date.now()): KeepaliveAttempt | undefined {
     if (!this.cfg.suppressOnRefusal || this.stopped) return undefined;
-    const key = lineageKey(wire);
-    // Reserve begin order before eviction observers can reenter.
+    // Reserve entry order before caller-owned serialization or observers reenter.
     const sequence = ++this.sequence;
+    const key = lineageKey(wire);
+    if (this.stopped) return undefined;
     let state = this.outcomes.get(key);
     if (!state) state = { barrier: 0, latest: 0, qualified: false };
     this.outcomes.delete(key);
@@ -323,10 +324,9 @@ export class CacheKeepalive {
   /** Observe raw terminal metadata. Errors/cancellation must not call this as success. */
   finish(handle: KeepaliveAttempt, reason: unknown): void {
     const attempt = this.attempts.get(handle);
-    if (!attempt || this.stopped) return;
+    if (!attempt || this.stopped || attempt.finished) return;
+    attempt.finished = true; // Every first terminal wins, before accessors/observers reenter.
     if (reason === 'refusal') {
-      if (attempt.refusalObserved) return;
-      attempt.refusalObserved = true; // Before observers can reenter finish.
       // Eviction invalidates successes, not a refusal for a retained key.
       // Do not recreate forgotten identities or enlarge the bounded map.
       const state = this.outcomes.get(attempt.key);
@@ -463,11 +463,21 @@ export class CacheKeepalive {
       const refused = this.cfg.suppressOnRefusal && stopReason === 'refusal';
       const currentState = this.outcomes.get(key);
       if (refused && !this.stopped && currentState) this.suppress(key, currentState, 'refresh');
-      const response = { ...res };
+      // Do not invoke a caller-owned terminal getter a second time while copying.
+      // Keep legacy spread semantics unchanged when suppression is off.
+      const response: Record<string, unknown> = {};
+      if (this.cfg.suppressOnRefusal) {
+        for (const key of Object.keys(res)) {
+          Object.defineProperty(response, key, { value: key === 'stop_reason' ? stopReason :
+            (res as Record<string, unknown>)[key], enumerable: true, configurable: true, writable: true });
+        }
+        response.stop_reason = stopReason;
+      }
+      const receiptResponse = this.cfg.suppressOnRefusal ? response : { ...res };
       reported = true;
       this.reportCall({
         key, lane: lin.lane, startedAt, durationMs: Date.now() - startedAt,
-        request: payload, outcome: 'success', response,
+        request: payload, outcome: 'success', response: receiptResponse,
       });
       // Successfully processed resolutions break a run of failures, even when the
       // semantic outcome cannot refresh the cache (or its snapshot is stale).

@@ -129,7 +129,7 @@ describe('the stream lane records a request at message_start', () => {
     expect(events.filter(e => e.type === 'expired').map(e => (e as { idleMs: number }).idleMs)).toEqual([timing.maxIdleMs]);
   });
 
-  it('a refused call is never recorded, so never replayed', async () => {
+  it('an HTTP rejection before message_start is never recorded or replayed', async () => {
     const { a, replays, client } = adapter({}, () => { throw refused(); }, () => sdkStream([], refused()));
     const error = await settle(a.stream(request('Resident system B'), noCallbacks));
     expect(error).toBeInstanceOf(MembraneError);

@@ -271,20 +271,22 @@ it('opt-in complete deadline still aborts the SDK and cannot rearm', async () =>
 for (const lane of ['complete', 'stream'] as const) {
   for (const action of ['replace', 'drop', 'stop', 'evict']) {
     it(`${lane}: old SDK completion cannot resurrect ${action}d identity`, async () => {
-      const gate = held(); let holdNext = false;
+      const gate = held(), entry = held(); let holdNext = false, entered = false;
       const { a, replays } = adapter({ suppressOnRefusal: true, lanes: [lane], maxLineages: 1, maxIneffective: 1 },
         w => {
           if (w.max_tokens === 0) return { ...answer, stop_reason: 'max_tokens', usage: {} };
-          if (holdNext) { holdNext = false; return gate.promise; }
+          if (holdNext) { holdNext = false; entered = true; entry.release(undefined); return gate.promise; }
           return answer;
         },
         () => {
-          if (holdNext) { holdNext = false; return heldStream(gate.promise, [messageStart, ...rest]); }
+          if (holdNext) { holdNext = false; entered = true; entry.release(undefined); return heldStream(gate.promise, [messageStart, ...rest]); }
           return sdkStream([messageStart, ...rest]);
         });
       const run = (system = 'retire', turns = 1) => lane === 'complete' ? a.complete(request(system, turns)) : a.stream(request(system, turns), noCallbacks);
       await run(); holdNext = true;
       const old = run();
+      await entry.promise;
+      expect(entered).toBe(true);
       if (action === 'stop') a.cacheKeepalive!.stop();
       if (action === 'evict') await run('other');
       const retainedKeys = a.cacheKeepalive!.getStatus().map(s => s.key);

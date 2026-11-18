@@ -62,7 +62,7 @@ it.each(['success', 'refusal', 'error'])('stale refresh %s: refusal removes repl
   expect(events.map(e => e.type)).toEqual(outcome === 'error' ? ['error'] : outcome === 'refusal' ? ['suppressed'] : []);
   expect(k.getStatus()).toHaveLength(outcome === 'refusal' ? 0 : 1);
   expect((k as any).lineages.get(replacement.key)).toBe(outcome === 'refusal' ? undefined : replacementSnapshot);
-  k.finish(replacement, 'refusal'); expect(k.getStatus()).toEqual([]);
+  k.finish(k.begin(wire(), undefined, 'stream')!, 'refusal'); expect(k.getStatus()).toEqual([]);
 });
 
 it.each(['stop', 'evict', 'drop'])('old foreground and refresh cannot resurrect after %s', async action => {
@@ -182,7 +182,7 @@ it.each([{ tool_choice: { type: 'any' } }, { system: [{ type: 'text', text: 'sys
   k.prefix(excluded); k.finish(excluded, 'end_turn');
   expect(k.getStatus()).toHaveLength(1);
   expect(events).toEqual([]);
-  k.finish(excluded, 'refusal');
+  k.finish(k.begin(ineligible, undefined, 'complete')!, 'refusal');
   expect(k.getStatus()).toEqual([]); // Excluded lanes still observe refusals.
 });
 
@@ -487,8 +487,13 @@ it.each(['cycle', 'toJSON'])('replay %s preparation errors retire the snapshot w
 it('an evicted refusal suppresses a newly retained identity and bars its pending success', () => {
   const { k, begin, normal, events } = setup(undefined, { maxLineages: 1 });
   const old = begin();
-  begin('normal', wire('other'));
+  const oldState = (k as any).outcomes.get(old.key);
+  const other = begin('normal', wire('other'));
+  expect([...(k as any).outcomes.keys()]).toEqual([other.key]);
+  expect((k as any).outcomes.has(old.key)).toBe(false);
   const pending = begin();
+  expect((k as any).outcomes.get(old.key)).not.toBe(oldState);
+  expect((k as any).outcomes.has(other.key)).toBe(false);
   k.finish(old, 'refusal');
   expect(events.at(-1)).toEqual({ type: 'suppressed', key: old.key, source: 'foreground' });
   k.prefix(pending); k.finish(pending, 'end_turn');
@@ -573,10 +578,17 @@ it.each([false, true])('suppression uses only its dedicated channel (enabled %s)
 it.each(['same identity', 'recreated identity'])('stale refresh refusal bars pre-observation attempts: %s', async identity => {
   let resolve!: (r: any) => void;
   const { k, normal, begin, events, calls } = setup(() => new Promise(r => { resolve = r; }), { maxLineages: 1 });
-  normal();
+  const original = normal();
+  const originalState = (k as any).outcomes.get(original.key);
   await vi.advanceTimersByTimeAsync(100);
-  if (identity === 'recreated identity') begin('normal', wire('other'));
+  if (identity === 'recreated identity') {
+    const other = begin('normal', wire('other'));
+    expect([...(k as any).outcomes.keys()]).toEqual([other.key]);
+    expect((k as any).outcomes.has(original.key)).toBe(false);
+  }
   const replacement = normal();
+  if (identity === 'recreated identity') expect((k as any).outcomes.get(original.key)).not.toBe(originalState);
+  else expect((k as any).outcomes.get(original.key)).toBe(originalState);
   const pending = begin();
   expect(k.getStatus()).toHaveLength(1);
   resolve({ ...ok, stop_reason: 'refusal' });
@@ -688,13 +700,15 @@ it.each(['replace', 'refusal', 'stop'])('successful replay serialization %s prev
   const { k, begin, normal, calls } = setup(send);
   const w: Record<string, unknown> = wire();
   k.finish(begin('normal', w as ReturnType<typeof wire>), 'end_turn');
-  w.toJSON = () => {
+  const serialize = vi.fn(() => {
     if (action === 'replace') normal();
     if (action === 'refusal') k.finish(begin(), 'refusal');
     if (action === 'stop') k.stop();
     return wire();
-  };
+  });
+  w.toJSON = serialize;
   await vi.advanceTimersByTimeAsync(100);
+  expect(serialize).toHaveBeenCalledTimes(1);
   expect(send).not.toHaveBeenCalled();
   expect(calls).toEqual([]);
   expect(k.getStatus()).toHaveLength(action === 'replace' ? 1 : 0);
@@ -724,4 +738,52 @@ it.each([{}, { suppressOnRefusal: false }])('default-off refusal never uses supp
   await vi.advanceTimersByTimeAsync(300);
   expect(onSuppressed).not.toHaveBeenCalled();
   expect(k.getStatus()).toHaveLength(1);
+});
+
+it.each(['system', 'tools'] as const)('begin reserves order before %s serialization can report refusal', field => {
+  const { k, begin, normal } = setup(); normal();
+  const refusing = begin();
+  const w = wire();
+  const value = field === 'system' ? w.system : null;
+  Object.assign(w, { [field]: { toJSON() { k.finish(refusing, 'refusal'); return value; } } });
+  const earlier = begin('normal', w);
+  k.finish(earlier, 'end_turn');
+  expect((k as any).outcomes.get(earlier.key).qualified).toBe(false);
+  expect(k.getStatus()).toEqual([]);
+  normal(); expect(k.getStatus()).toHaveLength(1);
+});
+
+it.each([0, 1])('begin cannot mutate outcomes after serialization stops keeper (cap %s)', maxLineages => {
+  const { k, begin, events } = setup(undefined, { maxLineages });
+  const w = wire();
+  Object.assign(w, { system: { toJSON() { k.stop(); return wire().system; } } });
+  expect(begin('normal', w)).toBeUndefined();
+  expect((k as any).outcomes.size).toBe(0);
+  expect(events).toEqual([]);
+});
+
+it('success receipt uses the single captured enumerable terminal value', async () => {
+  let reads = 0;
+  const response = { usage: ok.usage, get stop_reason() { return ++reads === 1 ? 'refusal' : 'end_turn'; } };
+  const { k, normal, calls, events } = setup(async () => response);
+  normal(); await vi.advanceTimersByTimeAsync(100);
+  expect(reads).toBe(1);
+  expect(calls).toHaveLength(1);
+  expect(calls[0]).toMatchObject({ outcome: 'success', response: { stop_reason: 'refusal' } });
+  expect(events.map(e => e.type)).toEqual(['suppressed']);
+  expect(k.getStatus()).toEqual([]);
+});
+
+it('unknown finish cannot be replayed as a normal terminal', () => {
+  const { k, begin } = setup();
+  const a = begin(); k.finish(a, 'future_stop'); k.finish(a, 'end_turn');
+  expect(k.getStatus()).toEqual([]);
+});
+
+it('normal finish cannot be replayed as refusal against newer work', () => {
+  const { k, normal, events } = setup();
+  const old = normal(); normal();
+  k.finish(old, 'refusal');
+  expect(k.getStatus()).toHaveLength(1);
+  expect(events).toEqual([]);
 });
