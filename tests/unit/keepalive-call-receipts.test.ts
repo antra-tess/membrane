@@ -68,16 +68,19 @@ describe('keepalive terminal call receipts', () => {
   });
 
   it.each([
-    ['writes', { ...usage, cache_creation_input_tokens: 25, cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 25 } }],
-    ['reads nothing', { ...usage, cache_read_input_tokens: 0 }],
-  ])('reports a successful vendor response even when the poke %s', async (_label, vendorUsage) => {
+    ['writes', { ...usage, cache_creation_input_tokens: 25, cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 25 } }, 'wrote-instead-of-read'],
+    ['reads nothing', { ...usage, cache_read_input_tokens: 0 }, 'no-cache-read'],
+  ] as const)('reports a successful vendor response even when the poke %s', async (_label, vendorUsage, reason) => {
     const response = { usage: vendorUsage };
     const { ka, calls, events } = setup(vi.fn().mockResolvedValue(response), { maxIneffective: 1 });
     ka.record(wire(), undefined, 'stream');
     await vi.advanceTimersByTimeAsync(100);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ outcome: 'success', response });
-    expect(events[0].type).toBe('ineffective');
+    expect(events).toEqual([{
+      type: 'ineffective', key: lineageKey(wire()), reason,
+      readTokens: vendorUsage.cache_read_input_tokens, writeTokens: vendorUsage.cache_creation_input_tokens,
+    }]);
     expect(ka.getStatus()).toEqual([]);
   });
 
@@ -141,9 +144,14 @@ describe('keepalive terminal call receipts', () => {
     for (const config of [
       { enabled: false }, { maxIdleMs: 50 }, { lanes: ['complete'] as const },
     ]) {
-      const { ka, calls } = setup(vi.fn(), config as CacheKeepaliveConfig);
+      const { ka, calls, events } = setup(vi.fn(), config as CacheKeepaliveConfig);
       ka.record(wire(), undefined, 'stream');
+      if ('maxIdleMs' in config) expect(ka.getStatus()).toHaveLength(1);
       await vi.advanceTimersByTimeAsync(200);
+      if ('maxIdleMs' in config) {
+        expect(ka.getStatus()).toEqual([]);
+        expect(events).toEqual([expect.objectContaining({ type: 'expired' })]);
+      }
       expect(calls).toEqual([]);
     }
     const { ka, calls } = setup(vi.fn());
@@ -258,4 +266,17 @@ describe('Anthropic adapter receipt integration', () => {
     expect(calls[0]!.request).toEqual(requests[2]);
     expect(calls[0]).not.toHaveProperty('headers');
   });
+});
+
+it('legacy receipt duration excludes sender response getters', async () => {
+  const { ka, calls } = setup(async () => ({
+    usage,
+    get extra() { vi.setSystemTime(Date.now() + 25); return 'value'; },
+  }));
+  ka.record(wire(), undefined, 'stream');
+  await vi.advanceTimersByTimeAsync(100);
+  expect(calls).toHaveLength(1);
+  expect(calls[0].durationMs).toBe(0);
+  expect(calls[0]).toMatchObject({ outcome: 'success', response: { extra: 'value' } });
+  expect(Date.now()).toBe(START + 125);
 });

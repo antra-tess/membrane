@@ -1,3 +1,15 @@
+// Maintenance bookkeeping must never change foreground delivery.
+function keepaliveObservation<T>(observe: () => T, onFailure?: () => void): T | undefined {
+  try { return observe(); } catch {
+    try { onFailure?.(); } catch {}
+    // No request, response, or exception payload: these can contain secrets.
+    try { console.warn(onFailure
+      ? '[membrane] Keepalive bookkeeping failed; keepalive is now permanently stopped for this adapter. Check custom request serialization; create a new adapter to restart keepalive.'
+      : '[membrane] Keepalive bookkeeping failed; state may be partially updated. Check custom request serialization; disable cacheKeepalive if failures persist.'); } catch {}
+    return undefined;
+  }
+}
+
 import { unreportedUsage } from '../utils/usage.js';
 import { assertMessagePrefillSupported } from './request-capabilities.js';
 
@@ -35,7 +47,7 @@ import { flattenRootSchemaUnion } from './anthropic-tool-schema.js';
 import { isPlainObject } from '../utils/tool-schema.js';
 import { assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, isToolCallBlock, isToolCallArgumentsDelta, progressOfAnthropicEvent, callerAbort } from './utils.js';
 import { fetchWithCredentials, validateCredential, type CredentialContext, type CredentialResolver } from './credentials.js';
-import { CacheKeepalive, type CacheKeepaliveConfig } from '../cache-keepalive.js';
+import { CacheKeepalive, type CacheKeepaliveConfig, type KeepaliveAttempt } from '../cache-keepalive.js';
 
 /**
  * Models that reject the sampling parameters (`temperature`, `top_p`,
@@ -246,6 +258,23 @@ export function boundedProviderEvent(event: unknown): unknown {
   return { type, truncated: true, json: json.slice(0, PROVIDER_EVENT_MAX_CHARS) };
 }
 
+// Capture the opt-in terminal observation for bookkeeping and public/raw results.
+// Copy descriptors without rereading accessors, including inherited undefined
+// values, while preserving genuinely missing raw properties.
+function captureTerminal<T extends { stop_reason?: unknown }>(terminal: T, observe: (reason: unknown) => void): T {
+  // This read can invoke a caller getter/get trap; no presence trap runs first.
+  const stopReason = terminal.stop_reason;
+  // Apply refusal before prototype/descriptor copying can run throwing proxy traps.
+  observe(stopReason);
+  const prototype = Object.getPrototypeOf(terminal);
+  const descriptors = Object.getOwnPropertyDescriptors(terminal);
+  if (stopReason !== undefined || Object.hasOwn(descriptors, 'stop_reason') ||
+      (prototype !== null && 'stop_reason' in prototype)) {
+    descriptors.stop_reason = { value: stopReason, enumerable: true, configurable: true, writable: true };
+  }
+  return Object.create(prototype, descriptors);
+}
+
 function sdkRequestId(holder: unknown, key: 'request_id' | '_request_id'): string | undefined {
   if (holder === null || typeof holder !== 'object') return undefined;
   const id = (holder as Record<string, unknown>)[key];
@@ -298,10 +327,13 @@ export interface AnthropicAdapterConfig {
    * Prompt-cache keepalive: hold this agent's cached prefix warm across idle
    * gaps by replaying the last request with `max_tokens: 0`, through its last
    * one-hour cache marker and the end of the user turn at or after it (whole,
-   * when no user turn comes there), which refreshes the entry's TTL at
-   * cache-READ price instead of letting it expire into a 2x cache write on the
-   * next wake.
-   * Pass `{ enabled: false }` to turn off.
+   * when no user turn comes there). A normal, effective cache-read replay can
+   * refresh the entry's TTL at cache-READ price rather than requiring a 2x cache
+   * write on the next wake; refused, unknown or ineffective outcomes are not
+   * proof of a refresh.
+   * Pass `{ enabled: false }` to turn off. Only `suppressOnRefusal: true`
+   * makes stream keepalive track the SDK request instead of the legacy
+   * observer copy.
    */
   cacheKeepalive?: CacheKeepaliveConfig;
 }
@@ -369,6 +401,7 @@ export class AnthropicAdapter implements ProviderAdapter {
   private defaultBeta: string | undefined;
   /** Holds idle agents' cached prefixes warm; undefined when disabled. */
   readonly cacheKeepalive: CacheKeepalive | undefined;
+  private readonly suppressKeepaliveOnRefusal: boolean;
   private readonly dynamicHeaders?: (ctx?: DynamicHeadersContext) => Record<string, string | number | null | undefined>;
 
   constructor(config: AnthropicAdapterConfig = {}) {
@@ -400,7 +433,8 @@ export class AnthropicAdapter implements ProviderAdapter {
     this.client = new Anthropic(clientOptions);
     this.defaultMaxTokens = config.defaultMaxTokens ?? 4096;
 
-    this.cacheKeepalive = config.cacheKeepalive?.enabled === false
+    const keepaliveConfig = config.cacheKeepalive;
+    this.cacheKeepalive = keepaliveConfig?.enabled === false
       ? undefined
       : new CacheKeepalive(
           // The already-built wire request goes as it is: a rebuild risks a byte diff,
@@ -408,8 +442,9 @@ export class AnthropicAdapter implements ProviderAdapter {
           async (wire, headers) => this.createMessage(
             wire as unknown as Anthropic.MessageCreateParamsNonStreaming, headers,
           ),
-          config.cacheKeepalive ?? {},
+          keepaliveConfig ?? {},
         );
+    this.suppressKeepaliveOnRefusal = !!this.cacheKeepalive && (keepaliveConfig?.suppressOnRefusal ?? false);
   }
 
   // When given a signal, the SDK gets this request's own controller's signal
@@ -498,14 +533,31 @@ export class AnthropicAdapter implements ProviderAdapter {
     // createCombinedSignal (#97): the SDK's own timeout clears once response
     // headers arrive, so it alone never bounds the request.
     const { signal: callSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
+    let unfinished: KeepaliveAttempt | undefined;
     try {
       const sentAt = Date.now();
-      const response = await this.createMessage(fullRequest, live, callSignal, { maxRetries: 0 });
-      this.cacheKeepalive?.record(
-        fullRequest as unknown as Record<string, unknown>, headers, 'complete', sentAt,
-      );
+      const attempt = unfinished = keepaliveObservation(() => this.cacheKeepalive?.begin(
+        fullRequest as unknown as Record<string, unknown>, headers, 'complete', this.suppressKeepaliveOnRefusal ? options?.keepalivePurpose : undefined, sentAt,
+      ), () => this.cacheKeepalive?.stop('keepalive begin bookkeeping failed; permanently stopped for this adapter; create a new adapter to restart keepalive'));
+      const received = await this.createMessage(fullRequest, live, callSignal, { maxRetries: 0 });
+      const response = this.suppressKeepaliveOnRefusal ? captureTerminal(received, reason => {
+        if (attempt && reason === 'refusal') {
+          keepaliveObservation(() => this.cacheKeepalive?.finish(attempt, 'refusal'),
+            () => this.cacheKeepalive?.stop('keepalive finish bookkeeping failed; permanently stopped for this adapter; create a new adapter to restart keepalive'));
+        }
+      }) : received;
+      keepaliveObservation(() => {
+        if (attempt) {
+          this.cacheKeepalive?.prefix(attempt);
+        } else this.cacheKeepalive?.record(fullRequest as unknown as Record<string, unknown>, headers, 'complete', sentAt);
+      });
 
-      return this.parseResponse(response, fullRequest);
+      const parsed = this.parseResponse(response, fullRequest);
+      if (attempt && response.stop_reason !== 'refusal' && !callSignal?.aborted && !options?.signal?.aborted) {
+        keepaliveObservation(() => this.cacheKeepalive?.finish(attempt, response.stop_reason),
+          () => this.cacheKeepalive?.stop('keepalive finish bookkeeping failed; permanently stopped for this adapter; create a new adapter to restart keepalive'));
+      }
+      return parsed;
     } catch (error) {
       const aborted = callerAbort(options?.signal, error, fullRequest);
       if (aborted) throw aborted;
@@ -515,6 +567,8 @@ export class AnthropicAdapter implements ProviderAdapter {
       if (isDeadlineAbort(callSignal?.reason)) throw deadlineTimeoutError(callSignal!.reason, fullRequest);
       throw this.handleError(error, fullRequest);
     } finally {
+      const attempt = unfinished;
+      if (attempt) keepaliveObservation(() => this.cacheKeepalive?.cancel(attempt));
       cleanup?.();
     }
   }
@@ -579,11 +633,18 @@ export class AnthropicAdapter implements ProviderAdapter {
 
     resetIdleTimer();
     let session: ReturnType<AnthropicAdapter['credentialSession']> | undefined;
+    let unfinished: KeepaliveAttempt | undefined;
 
     try {
       session = this.credentialSession(idleAbort.signal, onTransportActivity);
+      // The SDK streams anthropicRequest, adding stream:true itself. Without
+      // suppression, preserve legacy bookkeeping on the observer copy.
+      const keepaliveRequest = (this.suppressKeepaliveOnRefusal ? anthropicRequest : fullRequest) as unknown as Record<string, unknown>;
       // The cache's clock starts with the request, not at message_start.
       const sentAt = Date.now();
+      const attempt = unfinished = keepaliveObservation(() => this.cacheKeepalive?.begin(
+        keepaliveRequest, headers, 'stream', this.suppressKeepaliveOnRefusal ? options?.keepalivePurpose : undefined, sentAt,
+      ), () => this.cacheKeepalive?.stop('keepalive begin bookkeeping failed; permanently stopped for this adapter; create a new adapter to restart keepalive'));
       const stream = await session.client.messages.stream(anthropicRequest, {
         signal: session.signal,
         headers: live,
@@ -701,12 +762,25 @@ export class AnthropicAdapter implements ProviderAdapter {
         noteUnhandled(event);
       };
 
-      for await (const event of stream) {
+      for await (const received of stream) {
+        let event = received;
+        if (this.suppressKeepaliveOnRefusal && received.type === 'message_delta') {
+          const delta = captureTerminal(received.delta, reason => {
+            if (attempt && reason === 'refusal') {
+              keepaliveObservation(() => this.cacheKeepalive?.finish(attempt, 'refusal'),
+                () => this.cacheKeepalive?.stop('keepalive finish bookkeeping failed; permanently stopped for this adapter; create a new adapter to restart keepalive'));
+            }
+          });
+          event = { ...received, delta };
+        }
         sawEvent = true;
         resetIdleTimer();
         // From message_start on, the provider has processed the request's prefix.
         if (event.type === 'message_start') {
-          this.cacheKeepalive?.record(fullRequest as unknown as Record<string, unknown>, headers, 'stream', sentAt);
+          keepaliveObservation(() => {
+            if (attempt) this.cacheKeepalive?.prefix(attempt);
+            else this.cacheKeepalive?.record(keepaliveRequest, headers, 'stream', sentAt);
+          });
         }
         // Every SDK event is progress; the SDK drops pings before this loop.
         options?.onProgress?.(progressOfAnthropicEvent(event, summarized));
@@ -858,6 +932,10 @@ export class AnthropicAdapter implements ProviderAdapter {
       try { stream.controller.abort(); } catch { }
 
       assertTerminalEventObserved(sawTerminalEvent, 'Anthropic', fullRequest);
+      if (attempt && providerStopReason !== 'refusal' && !callSignal?.aborted && !options?.signal?.aborted) {
+        keepaliveObservation(() => this.cacheKeepalive?.finish(attempt, providerStopReason),
+          () => this.cacheKeepalive?.stop('keepalive finish bookkeeping failed; permanently stopped for this adapter; create a new adapter to restart keepalive'));
+      }
 
       // The SDK's MessageStream records the request-id header on connect,
       // before its first event.
@@ -941,6 +1019,9 @@ export class AnthropicAdapter implements ProviderAdapter {
       // whatever the SDK wrapped the abort in.
       if (isDeadlineAbort(callSignal?.reason)) throw deadlineTimeoutError(callSignal!.reason, fullRequest);
       throw this.handleError(session?.failure() ?? error, fullRequest);
+    } finally {
+      const attempt = unfinished;
+      if (attempt) keepaliveObservation(() => this.cacheKeepalive?.cancel(attempt));
     }
   }
 

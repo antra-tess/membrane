@@ -155,7 +155,7 @@ never do.
 npm ci                # strict lockfile install (see below)
 npm run build         # tsc
 npm test              # vitest run
-npx tsc --noEmit      # typecheck
+npm run typecheck     # typecheck
 ```
 
 Push-time CI (`ci.yml`) builds, typechecks and runs the whole suite for every
@@ -171,6 +171,10 @@ only your platform's native binaries, which is why CI installs on both.
 
 Provider credentials come from the environment; tests that would need real
 ones are mocked, so the suite runs without keys.
+
+On CPU-quota runners, use `MEMBRANE_TEST_WATCHDOG_SCALE=3 npm test` (for
+example) to give the keepalive subprocess probes more time. The watchdogs
+still fail the test on timeout rather than silently skipping the probe.
 
 Most test files share their worker's modules, so membrane is imported once per
 worker rather than once per file. A file that watches or changes process-wide

@@ -20,10 +20,13 @@ export {
 export type {
   CacheKeepaliveConfig,
   KeepaliveEvent,
+  KeepaliveSuppression,
+  KeepaliveDiagnostic,
   KeepaliveCall,
   KeepaliveUsage,
   KeepaliveLane,
   KeepaliveSend,
+  KeepaliveAttempt,
 } from './cache-keepalive.js';
 
 export { getDefaultModelLimits, type ModelLimits } from './registry/model-limits.js';

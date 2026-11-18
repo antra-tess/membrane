@@ -1,6 +1,7 @@
 /**
- * The real SDK fails a refused or undelivered stream at its iterator's first
- * event, after messages.stream() has returned. The provider's cache clock
+ * The real SDK can surface request rejection at the first iterator event, or
+ * transport failure after earlier events (distinct from semantic refusal),
+ * after messages.stream() has returned. The provider's cache clock
  * starts at a request's send.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -13,6 +14,7 @@ import { NativeFormatter } from '../../src/formatters/native.js';
 
 const START = Date.parse('2026-10-19T00:00:00Z');
 const timing = { refreshAfterMs: 100, checkIntervalMs: 100, maxIdleMs: 10_000 };
+const suppressionModes = [{}, { suppressOnRefusal: false }, { suppressOnRefusal: true }];
 
 function request(system: string, turns = 1) {
   const hour = { type: 'ephemeral', ttl: '1h' };
@@ -62,7 +64,7 @@ function held() {
   return { promise, release };
 }
 
-function heldStream(gate: Promise<unknown>, events: unknown[]) {
+function heldStream(gate: Promise<unknown>, events: unknown[], entered?: () => void) {
   const inner = sdkStream(events)[Symbol.asyncIterator]();
   let waited = false;
   return {
@@ -70,7 +72,7 @@ function heldStream(gate: Promise<unknown>, events: unknown[]) {
     [Symbol.asyncIterator]() {
       return {
         async next() {
-          if (!waited) { waited = true; await gate; }
+          if (!waited) { waited = true; entered?.(); await gate; }
           return inner.next();
         },
       };
@@ -105,7 +107,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe('the stream lane records a request at message_start', () => {
+describe('stream keepalive recording boundaries (default-off unless parameterized)', () => {
   it('a call that fails before message_start leaves the earlier snapshot, its touch and its window', async () => {
     let fail = false;
     const { a, events, replays, client } = adapter({}, () => ({ ...answer, content: [], stop_reason: 'max_tokens', usage: readUsage }),
@@ -128,7 +130,7 @@ describe('the stream lane records a request at message_start', () => {
     expect(events.filter(e => e.type === 'expired').map(e => (e as { idleMs: number }).idleMs)).toEqual([timing.maxIdleMs]);
   });
 
-  it('a refused call is never recorded, so never replayed', async () => {
+  it('an HTTP rejection before message_start is never recorded or replayed', async () => {
     const { a, replays, client } = adapter({}, () => { throw refused(); }, () => sdkStream([], refused()));
     const error = await settle(a.stream(request('Resident system B'), noCallbacks));
     expect(error).toBeInstanceOf(MembraneError);
@@ -138,15 +140,17 @@ describe('the stream lane records a request at message_start', () => {
     expect(replays()).toEqual([]);
   });
 
-  it('a call that fails after message_start is recorded, since the provider had the prefix (control)', async () => {
+  it.each(suppressionModes)('stream transport failure after message_start (%j)', async config => {
     const overloaded = Object.assign(new Error('Overloaded'), { status: 529 });
-    const { a, replays } = adapter({}, () => ({ ...answer, content: [], stop_reason: 'max_tokens', usage: readUsage }),
+    const { a, replays } = adapter(config, () => ({ ...answer, content: [], stop_reason: 'max_tokens', usage: readUsage }),
       () => sdkStream([messageStart], overloaded));
     const error = await settle(a.stream(request('Resident system C'), noCallbacks));
     expect(error).toBeDefined();
-    expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
+    // Legacy records on provider contact; opt-in requires a qualifying terminal.
+    expect(a.cacheKeepalive!.getStatus()).toHaveLength(config.suppressOnRefusal ? 0 : 1);
     await vi.advanceTimersByTimeAsync(200);
-    expect(replays().length).toBeGreaterThan(0);
+    if (config.suppressOnRefusal) expect(replays()).toEqual([]);
+    else expect(replays().length).toBeGreaterThan(0);
   });
 
   it("refused real calls don't trip the breaker for a healthy lineage beside them", async () => {
@@ -166,12 +170,14 @@ describe('the stream lane records a request at message_start', () => {
 
   it('while a call waits for its first event, a refresh that falls due replays the earlier snapshot, once per refreshAfterMs of the wait', async () => {
     let first: ReturnType<typeof held> | undefined;
+    const entered = held();
     const { a, replays } = adapter({}, () => ({ ...answer, content: [], stop_reason: 'max_tokens', usage: readUsage }),
-      () => first ? heldStream(first.promise, [messageStart, ...rest]) : sdkStream([messageStart, ...rest]));
+      () => first ? heldStream(first.promise, [messageStart, ...rest], () => entered.release(undefined)) : sdkStream([messageStart, ...rest]));
     await a.stream(request('Resident system G'), noCallbacks);
     await vi.advanceTimersByTimeAsync(50);
     first = held();
     const call = a.stream(request('Resident system G', 2), noCallbacks);
+    await entered.promise;
     await vi.advanceTimersByTimeAsync(200);
     expect(replays().map(wire => wire.messages.length)).toEqual([1, 1]);
     first.release(undefined);
@@ -180,13 +186,14 @@ describe('the stream lane records a request at message_start', () => {
     expect(replays().map(wire => wire.messages.length)).toEqual([1, 1, 2]);
   });
 
-  it("a call whose onProgress throws at message_start is still recorded, since the provider had the prefix", async () => {
-    const { a } = adapter({}, () => ({ ...answer, content: [], stop_reason: 'max_tokens', usage: readUsage }),
+  it.each(suppressionModes)('stream onProgress throws at message_start (%j)', async config => {
+    const { a } = adapter(config, () => ({ ...answer, content: [], stop_reason: 'max_tokens', usage: readUsage }),
       () => sdkStream([messageStart, ...rest]));
     const onProgress = () => { throw new Error('the caller'); };
     const error = await settle(a.stream(request('Resident system J'), noCallbacks, { onProgress }));
     expect(error).toBeDefined();
-    expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
+    // Legacy records on provider contact; opt-in requires a qualifying terminal.
+    expect(a.cacheKeepalive!.getStatus()).toHaveLength(config.suppressOnRefusal ? 0 : 1);
   });
 
   it('records the headers before dynamicHeaders, beta headers included, so a replay never resends a stale stamp', async () => {
@@ -346,7 +353,7 @@ describe('the touch counts from the send', () => {
   });
 });
 
-describe('a refresh acts only on the snapshot it replayed', () => {
+describe('non-failing default-off refreshes preserve foreground snapshot replacements and drops', () => {
   const noRead = { input_tokens: 5, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
   const replyWith = (usage: object) => ({ ...answer, content: [], stop_reason: 'max_tokens', usage });
 
@@ -426,8 +433,8 @@ describe('a refresh acts only on the snapshot it replayed', () => {
   });
 });
 
-describe('the complete lane records a request once the response has arrived', () => {
-  it('a refused complete() is never recorded', async () => {
+describe('complete keepalive recording boundaries (default-off unless parameterized)', () => {
+  it('an HTTP-rejected complete() is never recorded', async () => {
     const { a, replays, client } = adapter({ lanes: ['complete'] }, () => { throw refused(); });
     const error = await settle(a.complete(request('Resident system D')));
     expect(error).toBeInstanceOf(MembraneError);
@@ -447,11 +454,12 @@ describe('the complete lane records a request once the response has arrived', ()
     expect(replays().length).toBeGreaterThan(0);
   });
 
-  it("a complete() whose answer membrane can't parse is still recorded, since the provider answered", async () => {
-    const { a } = adapter({ lanes: ['complete'] }, () => ({ ...answer, usage: undefined }));
+  it.each(suppressionModes)('complete response parsing fails (%j)', async config => {
+    const { a } = adapter({ ...config, lanes: ['complete'] }, () => ({ ...answer, usage: undefined }));
     const error = await settle(a.complete(request('Resident system K')));
     expect(error).toBeDefined();
-    expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
+    // Legacy records on provider contact; opt-in requires a qualifying terminal.
+    expect(a.cacheKeepalive!.getStatus()).toHaveLength(config.suppressOnRefusal ? 0 : 1);
   });
 
   it('a complete() that fails leaves the earlier snapshot, its touch and its window', async () => {

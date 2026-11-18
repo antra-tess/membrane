@@ -125,6 +125,7 @@ export async function processContext(
   };
   
   const response = await membrane.stream(request, {
+    keepalivePurpose: options?.keepalivePurpose,
     onChunk: options?.onChunk,
     signal: options?.signal,
     onToolCalls: options?.onToolCalls,

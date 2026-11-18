@@ -514,6 +514,7 @@ export class Membrane {
         let rawProviderResponse: ProviderResponse;
         try {
           const adapterCall = this.adapter.complete(finalRequest, {
+            ...(options.keepalivePurpose ? { keepalivePurpose: options.keepalivePurpose } : {}),
             requestContext: {
               formatterName: activeFormatter.name,
               toolMode,
@@ -938,6 +939,7 @@ export class Membrane {
             progressTimeoutMs,
             progressBounds,
             retry,
+            ...(options.keepalivePurpose ? { keepalivePurpose: options.keepalivePurpose } : {}),
             normalizedRequest: request,
             formatterName: formatter.name,
             requiresAssistantPrefill: true,
@@ -1366,6 +1368,7 @@ export class Membrane {
             progressTimeoutMs,
             progressBounds,
             retry,
+            ...(options.keepalivePurpose ? { keepalivePurpose: options.keepalivePurpose } : {}),
             normalizedRequest: request,
             formatterName: activeFormatter.name,
             requiresAssistantPrefill: false,
@@ -2041,6 +2044,7 @@ export class Membrane {
     request: any,
     callbacks: StreamCallbacks,
     options: {
+      keepalivePurpose?: 'normal' | 'maintenance';
       signal?: AbortSignal;
       timeoutMs?: number;
       idleTimeoutMs?: number;
@@ -3067,6 +3071,7 @@ export class Membrane {
             progressTimeoutMs: options.progressTimeoutMs,
             progressBounds: options.progressBounds,
             retry: options.retry,
+            ...(options.keepalivePurpose ? { keepalivePurpose: options.keepalivePurpose } : {}),
             normalizedRequest: request,
             formatterName: formatter.name,
             requiresAssistantPrefill: true,
@@ -3569,6 +3574,7 @@ export class Membrane {
             progressTimeoutMs: options.progressTimeoutMs,
             progressBounds: options.progressBounds,
             retry: options.retry,
+            ...(options.keepalivePurpose ? { keepalivePurpose: options.keepalivePurpose } : {}),
             normalizedRequest: request,
             formatterName: activeFormatter.name,
             requiresAssistantPrefill: false,

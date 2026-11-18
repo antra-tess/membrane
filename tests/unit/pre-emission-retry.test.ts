@@ -264,9 +264,13 @@ describe('streamYielding() retries a call that failed before it delivered anythi
   it('XML: a later round is retried too', async () => {
     const adapter = new FlakyXmlAdapter(new Map([[2, overloaded529]]));
     adapter.queueResponses([XML_TOOL_CALL, 'zz round two']);
-    const events = await onFakeTime(() => drive(new Membrane(adapter, SCHEDULES).streamYielding(XML_REQUEST)));
+    const spy = vi.spyOn(adapter, 'stream');
+    const events = await onFakeTime(() => drive(new Membrane(adapter, SCHEDULES).streamYielding(XML_REQUEST, {
+      keepalivePurpose: 'maintenance',
+    })));
 
     expect(adapter.sends).toBe(3);
+    expect(spy.mock.calls.map(call => call[2]?.keepalivePurpose)).toEqual(['maintenance', 'maintenance', 'maintenance']);
     expect(ofType(events, 'tool-calls')).toHaveLength(1);
     expect(tokensOf(events)).toContain('zz round two');
     expect(tokensOf(events).match(/zz round two/g)).toHaveLength(1);
@@ -442,14 +446,35 @@ describe('stream() retries a later round the same way', () => {
       { fail: overloaded529 },
       { text: 'zz round two' },
     ]);
+    const spy = vi.spyOn(adapter, 'stream');
     const chunks: string[] = [];
     const result = await onFakeTime(() => native(adapter).stream(NATIVE_REQUEST, {
+      keepalivePurpose: 'maintenance',
       onChunk: (text, meta) => { if (meta?.type === 'text') chunks.push(text); },
       onToolCalls: async (calls) => calls.map((c) => ({ toolUseId: c.id, content: 'zz ok' })),
     }));
 
     expect(adapter.sends).toBe(3);
+    expect(spy.mock.calls.map(call => call[2]?.keepalivePurpose)).toEqual(['maintenance', 'maintenance', 'maintenance']);
     expect(chunks.join('')).toBe('zz round onezz round two');
+    expect('details' in result && result.details.timing).toMatchObject({ attempts: 3, rounds: 2 });
+    expect('details' in result && result.details.timing.retryDelaysMs).toHaveLength(1);
+  });
+
+  it('XML: forwards maintenance purpose on the first call, continuation and transport retry', async () => {
+    const adapter = new FlakyXmlAdapter(new Map([[2, overloaded529]]));
+    adapter.queueResponses([XML_TOOL_CALL, 'zz round two']);
+    const spy = vi.spyOn(adapter, 'stream');
+    const onToolCalls = vi.fn(async (calls: { id: string }[]) =>
+      calls.map(c => ({ toolUseId: c.id, content: 'zz ok' })));
+    const result = await onFakeTime(() => new Membrane(adapter, SCHEDULES).stream(XML_REQUEST, {
+      keepalivePurpose: 'maintenance',
+      onToolCalls,
+    }));
+
+    expect(onToolCalls).toHaveBeenCalledTimes(1);
+    expect(adapter.sends).toBe(3);
+    expect(spy.mock.calls.map(call => call[2]?.keepalivePurpose)).toEqual(['maintenance', 'maintenance', 'maintenance']);
     expect('details' in result && result.details.timing).toMatchObject({ attempts: 3, rounds: 2 });
     expect('details' in result && result.details.timing.retryDelaysMs).toHaveLength(1);
   });
@@ -538,10 +563,15 @@ describe('a refusal re-issue starts the transport budget again', () => {
     ]);
     const onError = vi.fn(() => 'retry' as const);
     const membrane = native(adapter, { ...SCHEDULES, hooks: { onError } });
-    if (entry === 'complete') await onFakeTime(() => membrane.complete(NATIVE_REQUEST, { refusalRetries: 1 }));
-    else await onFakeTime(() => drive(membrane.streamYielding(NATIVE_REQUEST, { refusalRetries: 1 })));
+    const spy = entry === 'complete' ? vi.spyOn(adapter, 'complete') : vi.spyOn(adapter, 'stream');
+    const options = { refusalRetries: 1, keepalivePurpose: 'maintenance' as const };
+    if (entry === 'complete') await onFakeTime(() => membrane.complete(NATIVE_REQUEST, options));
+    else await onFakeTime(() => drive(membrane.streamYielding(NATIVE_REQUEST, options)));
 
     expect(adapter.sends).toBe(3);
+    expect(spy.mock.calls.map(call => call[entry === 'complete' ? 1 : 2])).toEqual(
+      Array.from({ length: 3 }, () => expect.objectContaining({ keepalivePurpose: 'maintenance' })),
+    );
     expect(onError.mock.calls.map((call) => call[1])).toEqual([1]);
   });
 
@@ -725,9 +755,13 @@ describe('a refusal re-issue in a later round re-issues that round only', () => 
       { refuse: 'zz refused' },
       { text: 'zz round two' },
     ]);
-    const events = await drive(native(adapter).streamYielding(NATIVE_REQUEST, { refusalRetries: 1 }));
+    const spy = vi.spyOn(adapter, 'stream');
+    const events = await drive(native(adapter).streamYielding(NATIVE_REQUEST, {
+      refusalRetries: 1, keepalivePurpose: 'maintenance',
+    }));
 
     expect(adapter.sends).toBe(3);
+    expect(spy.mock.calls.map(call => call[2]?.keepalivePurpose)).toEqual(['maintenance', 'maintenance', 'maintenance']);
     const order = events.map((e) => e.type);
     const tokensAt = (text: string): number => events.findIndex((e) => e.type === 'tokens' && e.content.includes(text));
     const retrying = order.indexOf('retrying');

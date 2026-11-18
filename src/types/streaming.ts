@@ -160,6 +160,9 @@ export type OnRequestCallback = (rawRequest: unknown) => void;
 export type OnResponseCallback = (rawResponse: unknown) => void;
 
 export interface StreamOptions {
+  /** Trusted non-wire Anthropic keepalive purpose; cache-warming callers must
+   * declare maintenance. Defaults to normal foreground inference. */
+  keepalivePurpose?: 'normal' | 'maintenance';
   /** Abort signal for cancellation */
   signal?: AbortSignal;
   
@@ -301,6 +304,9 @@ export interface StreamOptions {
 }
 
 export interface CompleteOptions {
+  /** Trusted non-wire Anthropic keepalive purpose; cache-warming callers must
+   * declare maintenance. Defaults to normal foreground inference. */
+  keepalivePurpose?: 'normal' | 'maintenance';
   /** Abort signal for cancellation */
   signal?: AbortSignal;
 
