@@ -12,3 +12,5 @@
   replay preparation failure or a permanent stop at the consecutive failure
   threshold. After a replay snapshot is retired, send a new eligible foreground
   request once serialization is fixed.
+- Opt-in `receipt-clone-failed` notices explain how to restore receipt delivery:
+  make the replay request and response structured-cloneable.

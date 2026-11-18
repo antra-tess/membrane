@@ -350,7 +350,7 @@ it('uncloneable custom response drops its receipt without losing refresh process
   normal(); await vi.advanceTimersByTimeAsync(100);
   expect(calls).toEqual([]);
   expect(events.map(e => e.type)).toEqual(['diagnostic', 'refreshed']);
-  expect(events[0]).toMatchObject({ type: 'diagnostic', reason: 'receipt-clone-failed: receipt dropped' });
+  expect(events[0]).toMatchObject({ type: 'diagnostic', reason: 'receipt-clone-failed: receipt dropped; make the replay request and response structured-cloneable to restore receipt delivery' });
 });
 
 
@@ -1052,16 +1052,32 @@ it.each([{}, { suppressOnRefusal: false }])('default-off preserves main per-reso
 });
 
 it.each(['prefix', 'finish'])('lanes reentrancy cannot restore a refused or stopped snapshot via %s', operation => {
-  for (const action of ['refusal', 'stop']) {
+  for (const action of ['refusal', 'refusal then rearm', 'stop']) {
     let reenter = () => {};
     const lanes = ['stream'];
-    lanes.includes = () => { reenter(); return true; };
+    lanes.includes = lane => { reenter(); return lane === 'stream'; };
     const { k, normal, begin } = setup(undefined, { lanes }); normal();
     expect(k.getStatus()).toHaveLength(1);
     const refusing = begin(), pending = begin();
-    reenter = vi.fn(() => { if (action === 'stop') k.stop(); else k.finish(refusing, 'refusal'); });
+    const duringLanes = vi.fn(() => {
+      reenter = () => {};
+      if (action === 'stop') {
+        k.stop();
+        return;
+      }
+      k.finish(refusing, 'refusal');
+      if (action === 'refusal then rearm') {
+        // The excluded completion requalifies the same outcome without
+        // advancing its latest snapshot sequence or installing a snapshot.
+        const rearm = k.begin(wire(), undefined, 'complete')!;
+        k.finish(rearm, 'end_turn');
+        expect((k as any).outcomes.get(pending.key).qualified).toBe(true);
+        expect(k.getStatus()).toEqual([]);
+      }
+    });
+    reenter = duringLanes;
     if (operation === 'prefix') k.prefix(pending); else k.finish(pending, 'end_turn');
-    expect(reenter).toHaveBeenCalled();
+    expect(duringLanes).toHaveBeenCalledTimes(1);
     expect(k.getStatus()).toEqual([]);
   }
 });
@@ -1093,13 +1109,17 @@ it('unknown terminal retires replay before an unrelated throwing getter', async 
   expect(events).toContainEqual({ type: 'diagnostic', key: lineageKey(wire()), reason: 'unknown-refresh-terminal: replay snapshot retired' });
 });
 
-it('begin touches an existing outcome before LRU eviction', () => {
-  const { k, begin } = setup(undefined, { maxLineages: 2 });
+it('begin touches an existing outcome before LRU eviction, preserving its replay', async () => {
+  const { k, begin, calls } = setup(undefined, { maxLineages: 2 });
   const a = begin('normal', wire('a')), b = begin('normal', wire('b'));
   k.finish(a, 'end_turn'); k.finish(b, 'end_turn');
-  begin('normal', wire('a')); k.finish(begin('normal', wire('c')), 'end_turn');
+  begin('normal', wire('a'));
+  const c = begin('normal', wire('c'));
+  k.finish(c, 'end_turn');
   expect((k as any).outcomes.has(a.key)).toBe(true);
   expect((k as any).outcomes.has(b.key)).toBe(false);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(calls.map(call => call.key)).toEqual([a.key, c.key]);
 });
 
 it('newer ineligible prefix under a barrier prevents an older snapshot', () => {
@@ -1241,7 +1261,7 @@ it.each(['max_tokens', 'refusal', 'future_stop'])('clone failure makes no snapsh
   const { k, normal, calls, events } = setup(async () => ({ ...ok, stop_reason, uncloneable() {} }));
   normal(); await vi.advanceTimersByTimeAsync(100);
   expect(calls).toEqual([]);
-  expect(events).toContainEqual({ type: 'diagnostic', key: lineageKey(wire()), reason: 'receipt-clone-failed: receipt dropped' });
+  expect(events).toContainEqual({ type: 'diagnostic', key: lineageKey(wire()), reason: 'receipt-clone-failed: receipt dropped; make the replay request and response structured-cloneable to restore receipt delivery' });
   expect(k.getStatus()).toHaveLength(stop_reason === 'max_tokens' ? 1 : 0);
   expect(events.some(e => e.type === 'refreshed')).toBe(stop_reason === 'max_tokens');
   expect(events.some(e => e.type === 'suppressed')).toBe(stop_reason === 'refusal');

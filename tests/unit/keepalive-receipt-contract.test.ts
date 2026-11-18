@@ -40,7 +40,7 @@ it('documents mode-specific request copies and pins opt-in rawJSON brand loss', 
     expect(JSON.stringify(calls[0]!.request)).toContain('"id":{"rawJSON":"9007199254740993"}');
   } else {
     expect(calls).toEqual([]);
-    expect(events[0]).toMatchObject({ type: 'diagnostic', reason: 'receipt-clone-failed: receipt dropped' });
+    expect(events[0]).toMatchObject({ type: 'diagnostic', reason: 'receipt-clone-failed: receipt dropped; make the replay request and response structured-cloneable to restore receipt delivery' });
   }
   const guide = readFileSync(new URL('../../docs/keepalive-refusal-suppression.md', import.meta.url), 'utf8');
   const api = readFileSync(new URL('../../src/cache-keepalive.ts', import.meta.url), 'utf8');
@@ -62,7 +62,7 @@ it.each(['request', 'response'] as const)('reports %s clone loss without changin
   qualify(); await tick();
   expect(calls).toEqual([]);
   expect(events.map(e => e.type)).toEqual(['diagnostic', 'refreshed']);
-  expect(events[0]).toEqual({ type: 'diagnostic', key: k.getStatus()[0]!.key, reason: 'receipt-clone-failed: receipt dropped' });
+  expect(events[0]).toEqual({ type: 'diagnostic', key: k.getStatus()[0]!.key, reason: 'receipt-clone-failed: receipt dropped; make the replay request and response structured-cloneable to restore receipt delivery' });
   expect(k.getStatus()).toHaveLength(1);
 });
 
@@ -73,7 +73,7 @@ it('reports receipt clone loss separately from the failure count', async () => {
   qualify(); await tick(); await tick();
   expect(events).toEqual([
     expect.objectContaining({ type: 'error', error: 'first', consecutive: 1 }),
-    expect.objectContaining({ type: 'diagnostic', reason: 'receipt-clone-failed: receipt dropped' }),
+    expect.objectContaining({ type: 'diagnostic', reason: 'receipt-clone-failed: receipt dropped; make the replay request and response structured-cloneable to restore receipt delivery' }),
     expect.objectContaining({ type: 'refreshed' }),
   ]);
   expect(calls.map(c => c.outcome)).toEqual(['error']);

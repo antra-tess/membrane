@@ -460,6 +460,24 @@ describe('stream() retries a later round the same way', () => {
     expect('details' in result && result.details.timing).toMatchObject({ attempts: 3, rounds: 2 });
     expect('details' in result && result.details.timing.retryDelaysMs).toHaveLength(1);
   });
+
+  it('XML: forwards maintenance purpose on the first call, continuation and transport retry', async () => {
+    const adapter = new FlakyXmlAdapter(new Map([[2, overloaded529]]));
+    adapter.queueResponses([XML_TOOL_CALL, 'zz round two']);
+    const spy = vi.spyOn(adapter, 'stream');
+    const onToolCalls = vi.fn(async (calls: { id: string }[]) =>
+      calls.map(c => ({ toolUseId: c.id, content: 'zz ok' })));
+    const result = await onFakeTime(() => new Membrane(adapter, SCHEDULES).stream(XML_REQUEST, {
+      keepalivePurpose: 'maintenance',
+      onToolCalls,
+    }));
+
+    expect(onToolCalls).toHaveBeenCalledTimes(1);
+    expect(adapter.sends).toBe(3);
+    expect(spy.mock.calls.map(call => call[2]?.keepalivePurpose)).toEqual(['maintenance', 'maintenance', 'maintenance']);
+    expect('details' in result && result.details.timing).toMatchObject({ attempts: 3, rounds: 2 });
+    expect('details' in result && result.details.timing.retryDelaysMs).toHaveLength(1);
+  });
 });
 
 describe('the sends a call gets, on each entry point', () => {
