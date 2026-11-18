@@ -456,9 +456,13 @@ it('refresh refusal installs the barrier before a reentrant receipt prefix', asy
 
 it('record-only pre-refusal wire cannot replace a qualified post-barrier snapshot', async () => {
   const send = vi.fn(async (_wire: Record<string, unknown>) => ok);
-  const { k, begin } = setup(send);
+  const { k, begin, normal } = setup(send);
+  const initial = normal();
+  expect(k.getStatus().map(s => s.key)).toEqual([initial.key]);
   const oldWire = { ...wire(), messages: [{ role: 'user', content: 'old' }] };
-  k.finish(begin(), 'refusal');
+  k.finish(begin('normal', oldWire), 'refusal');
+  expect(k.getStatus()).toEqual([]);
+  expect((k as any).outcomes.get(initial.key)?.barrier).toBeGreaterThan(0);
   const freshWire = { ...wire(), messages: [{ role: 'user', content: 'fresh' }] };
   const fresh = begin('normal', freshWire); k.finish(fresh, 'end_turn');
   k.record(oldWire, undefined, 'stream');
@@ -919,7 +923,10 @@ it('repeated usage-processing errors reach the send failure threshold', async ()
   normal();
   await vi.advanceTimersByTimeAsync(300);
   expect(events.filter(e => e.type === 'error').map(e => e.consecutive)).toEqual([1, 2, 3]);
-  expect(events.some(e => e.type === 'disabled')).toBe(true);
+  expect(events.at(-1)).toEqual({
+    type: 'disabled',
+    reason: '3 consecutive keepalive failures; last: bad usage; all refreshes permanently stopped for this keeper; fix the cause and create a new adapter or keeper to restart',
+  });
   expect(k.getStatus()).toEqual([]);
 });
 
@@ -930,7 +937,7 @@ it('unprintable preparation errors retire the snapshot and emit a diagnostic', a
   Object.assign((k as any).lineages.values().next().value.wire, { toJSON() { throw Object.create(null); } });
   await vi.advanceTimersByTimeAsync(100);
   expect(k.getStatus()).toEqual([]);
-  expect(events).toEqual([expect.objectContaining({ type: 'diagnostic', reason: 'replay-preparation-failed: replay snapshot retired' })]);
+  expect(events).toEqual([expect.objectContaining({ type: 'diagnostic', reason: 'replay-preparation-failed: replay snapshot retired; check request serialization (including nested values), then send a new eligible foreground request' })]);
 });
 
 it('model context window terminal qualifies fresh and post-refusal attempts', () => {

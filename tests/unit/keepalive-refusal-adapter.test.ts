@@ -817,10 +817,19 @@ it.each(['complete', 'stream'] as const)('Membrane %s reports unknown foreground
     : membrane.stream(req, { onChunk: () => {}, refusalRetries: 0 });
   expect((await run()).stopReason).toBe('end_turn');
   expect(a.cacheKeepalive!.getStatus()).toEqual([]);
+  reason = 'end_turn'; await run();
+  const keeper = a.cacheKeepalive!;
+  const [status] = keeper.getStatus();
+  expect(status).toBeDefined();
   reason = 'refusal'; await run();
+  const retained = () => (keeper as any).outcomes.get(status!.key);
+  const barrier = retained()?.barrier;
+  expect(barrier).toBeGreaterThan(0);
+  expect(retained().qualified).toBe(false);
   reason = undefined;
   expect((await run()).stopReason).toBe('end_turn');
-  expect(a.cacheKeepalive!.getStatus()).toEqual([]);
+  expect(keeper.getStatus()).toEqual([]);
+  expect(retained()).toMatchObject({ barrier, qualified: false });
   expect(events.filter(e => e.type === 'diagnostic')).toEqual([
     expect.objectContaining({ reason: 'unknown-foreground-terminal: completion cannot qualify or rearm keepalive' }),
     expect.objectContaining({ reason: 'unknown-foreground-terminal: completion cannot qualify or rearm keepalive' }),

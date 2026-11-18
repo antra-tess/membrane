@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { expect, it } from 'vitest';
+import { watchdogMs } from '../helpers/watchdog.js';
 
 const startupMs = 60_000;
 const defaultExecutionMs = 30_000;
@@ -16,13 +17,13 @@ function runChild(script: string, executionMs = defaultExecutionMs, startupBudge
     let stdout = '', stderr = '', ready = false;
     // Import/startup has its own generous watchdog. The bounded-loop deadline
     // starts only after the child confirms that its imports have completed.
-    let timer = setTimeout(() => child.kill('SIGKILL'), startupBudgetMs);
+    let timer = setTimeout(() => child.kill('SIGKILL'), watchdogMs(startupBudgetMs));
     child.stdout.on('data', chunk => {
       stdout += chunk;
       if (!ready && stdout.includes('ready\n')) {
         ready = true;
         clearTimeout(timer);
-        timer = setTimeout(() => child.kill('SIGKILL'), executionMs);
+        timer = setTimeout(() => child.kill('SIGKILL'), watchdogMs(executionMs));
       }
     });
     child.stderr.on('data', chunk => { stderr += chunk; });
@@ -56,10 +57,10 @@ it.each([-1, -0.5, 0, 0.5, 1])('maxLineages %s returns before SDK send and keeps
     a.cacheKeepalive.stop();console.log('returned');
   `;
   const result = await runChild(script);
-  expect(result.code, result.stderr).toBe(0);
+  expect(result.code, result.signal ? `child terminated (${result.signal}): ${result.stderr}` : result.stderr).toBe(0);
   expect(result.stdout).toContain('ready\n');
   expect(result.stdout).toContain('returned');
-}, 100_000);
+}, watchdogMs(100_000));
 
 
 it('bounded-loop watchdog excludes child startup but still kills a stuck loop', async () => {
@@ -74,7 +75,7 @@ it('bounded-loop watchdog excludes child startup but still kills a stuck loop', 
   expect(stuck.code).toBeNull();
   expect(stuck.signal).toBe('SIGKILL');
   expect(stuck.stdout).toContain('ready');
-}, selfTestTimeoutMs);
+}, watchdogMs(selfTestTimeoutMs));
 
 for (const suppression of ['{}', '{suppressOnRefusal:false}']) {
   it.each(['-Infinity', '-1', '-0.5'])(`default-off negative cap %s is killably bounded (${suppression})`, async cap => {
@@ -96,7 +97,7 @@ for (const suppression of ['{}', '{suppressOnRefusal:false}']) {
     `);
     expect(result.code, result.stderr).toBe(0);
     expect(result.stdout).toContain('returned');
-  }, 100_000);
+  }, watchdogMs(100_000));
 }
 
 it('watchdog self-test budget covers both sequential startup and execution bounds plus close slack', () => {
@@ -109,4 +110,4 @@ it('startup watchdog kills a child that never reports ready', async () => {
   expect(stuck.code).toBeNull();
   expect(stuck.signal).toBe('SIGKILL');
   expect(stuck.stdout).not.toContain('ready');
-}, 100_000);
+}, watchdogMs(100_000));

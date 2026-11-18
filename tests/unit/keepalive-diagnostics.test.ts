@@ -116,6 +116,6 @@ it('reports preparation retirement only onDiagnostic without exception payloads'
   expect(events).toEqual([]);
   expect(diagnostics).toEqual([{
     type: 'diagnostic', key: cacheLineageKey(wire()),
-    reason: 'replay-preparation-failed: replay snapshot retired',
+    reason: 'replay-preparation-failed: replay snapshot retired; check request serialization (including nested values), then send a new eligible foreground request',
   }]);
 });

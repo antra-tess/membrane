@@ -36,6 +36,9 @@ export interface KeepaliveUsage {
   inference_geo?: string | null;
 }
 
+/** With refusal suppression enabled, nested request values are shared with the
+ * retained snapshot and are read-only for the sender. If the sender mutates
+ * them anyway, a later refresh may send the mutated content. */
 export type KeepaliveSend = (
   wire: Record<string, unknown>,
   headers: Record<string, string> | undefined,
@@ -62,7 +65,9 @@ export type KeepaliveCall = {
   startedAt: number;
   durationMs: number;
   /** Observer-owned structured clone of the replay after sender settlement, not wire bytes.
-   * A custom sender can mutate the prepared replay before this copy is made.
+   * In opt-in mode, nested request values sent to a custom sender are shared with
+   * the retained snapshot and are read-only for the sender. If the sender mutates
+   * them anyway, a later refresh may send the mutated content.
    * Default-off first JSON.stringify/JSON.parse round-trips the recorded request:
    * custom toJSON results are retained, callable fields may disappear, and
    * exact-digit JSON numbers may round before this copy is made.
@@ -72,7 +77,8 @@ export type KeepaliveCall = {
    * Clone loss is silent default-off; opt-in reports receipt-clone-failed via onDiagnostic.
    * In both modes the prepared replay has max_tokens: 0, omits stream, and trims
    * messages through the user turn at or after its last one-hour marker,
-   * or retains all messages when no user message follows that marker. */
+   * including consecutive user and effort-only system messages at the cutoff,
+   * or retains all messages when no user message is found at or after the marker. */
   request: Record<string, unknown>;
 } & (
   | { outcome: 'success'; response: Record<string, unknown> & { usage?: KeepaliveUsage } }
@@ -229,7 +235,8 @@ function isOneHourMarker(cc: { ttl?: unknown }): boolean {
 /**
  * The API takes consecutive user messages as one turn, and some models refuse
  * a request that ends with an assistant message, so a refresh's messages end
- * where a user turn ends, when one follows the last one-hour marker.
+ * where a user turn ends, when one is found at or after the last one-hour
+ * marker. Consecutive user and effort-only system messages extend the cutoff.
  */
 export function messagesForRefresh(messages: readonly unknown[]): unknown[] {
   const isUser = (message: unknown) => (message as { role?: unknown } | null)?.role === 'user';
@@ -706,7 +713,7 @@ export class CacheKeepalive {
         this.lineages.delete(key);
         message = err === ROOT_SERIALIZER_REPLAY_ERROR
           ? 'replay-preparation-failed: replay snapshot retired; remove callable root toJSON'
-          : 'replay-preparation-failed: replay snapshot retired';
+          : 'replay-preparation-failed: replay snapshot retired; check request serialization (including nested values), then send a new eligible foreground request';
       }
       // Preparation failures are observable, but are not failed sends.
       if (!this.cfg.suppressOnRefusal || invoked) this.consecutiveErrors += 1;
@@ -721,7 +728,8 @@ export class CacheKeepalive {
         this.stop();
         this.emit({
           type: 'disabled',
-          reason: `${this.consecutiveErrors} consecutive keepalive failures; last: ${message}`,
+          reason: `${this.consecutiveErrors} consecutive keepalive failures; last: ${message}` +
+            (this.cfg.suppressOnRefusal ? '; all refreshes permanently stopped for this keeper; fix the cause and create a new adapter or keeper to restart' : ''),
         });
       }
     }

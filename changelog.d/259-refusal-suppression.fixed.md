@@ -8,3 +8,6 @@
   and continue failure accounting and error/disabled notifications instead of
   throwing during formatting. Ordinary string-valued Error messages retain
   legacy formatting; non-string messages are converted to strings.
+- With suppression enabled, keepalive notices explain how to recover from a
+  replay preparation failure or a permanent stop at the consecutive failure
+  threshold.

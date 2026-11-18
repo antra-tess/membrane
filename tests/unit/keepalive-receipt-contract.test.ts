@@ -108,7 +108,7 @@ it('counts opt-in unprintable Error.message failures through disabling', async (
   expect(events).toEqual([
     expect.objectContaining({ type: 'error', error: 'Unprintable keepalive error', consecutive: 1 }),
     expect.objectContaining({ type: 'error', error: 'Unprintable keepalive error', consecutive: 2 }),
-    { type: 'disabled', reason: '2 consecutive keepalive failures; last: Unprintable keepalive error' },
+    { type: 'disabled', reason: expect.stringMatching(/^2 consecutive keepalive failures; last: Unprintable keepalive error;/) },
   ]);
   expect(k.getStatus()).toEqual([]);
 });

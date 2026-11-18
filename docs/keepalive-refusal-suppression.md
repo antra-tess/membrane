@@ -35,8 +35,9 @@ properties, so an unrelated throwing accessor cannot bypass the refusal barrier.
 actual sender invocation delivers one receipt, including refused, unknown, stale
 and failed sends. In opt-in mode the receipt request is a structured clone of
 the replay after sender settlement, based on the retained caller request, not wire bytes.
-A custom sender can mutate the prepared replay before the receipt copy; its
-changes are reflected in that copy in either mode.
+In opt-in mode, nested request values handed to a custom sender are shared with
+the retained snapshot and are read-only for the sender. If the sender mutates
+them anyway, a later refresh may send the mutated content.
 Default-off first JSON.stringify/JSON.parse round-trips the recorded request,
 then prepares and clones the replay: custom toJSON results survive, callable
 fields may disappear, and exact-digit JSON numbers may round.
@@ -72,7 +73,9 @@ while copying response metadata (for example, throwing enumerable getters).
 With suppression enabled, replay serialization failures for a still-current snapshot
 report `replay-preparation-failed` through `onDiagnostic`, explicitly naming snapshot
 retirement. The root-serializer guard also says to remove callable root `toJSON`;
-other preparation errors omit caller exception details. This notice is NOT delivered to `onEvent`: configure `onDiagnostic`
+other preparation errors direct operators to check request serialization and send
+a new eligible foreground request, without exposing caller exception details.
+This notice is NOT delivered to `onEvent`: configure `onDiagnostic`
 to observe preparation retirement (as well as unknown-terminal retirement and LRU
 eviction). Without it these removals are silent. It is emitted without incrementing that send-failure counter or delivering
 a call receipt, since the sender was not invoked. They retire only the failed
@@ -124,6 +127,9 @@ healthy keys interleave. Use keyed error telemetry to identify that sender/key;
 disabling the whole adapter for nonconsecutive key-local errors would also stop
 healthy cache refreshes. No per-key failure counter or automatic permanent
 quarantine is introduced by refusal suppression.
+When that limit is reached in opt-in mode, the `disabled` event states that all
+refreshes have stopped permanently for this keeper. Fix the cause and create a
+new adapter (or a new standalone keeper) to restart.
 
 ## Purpose boundary
 
