@@ -195,8 +195,17 @@ for (const lane of ['complete', 'stream'] as const) {
       const run = () => lane === 'complete' ? a.complete(request('race')) : a.stream(request('race'), noCallbacks);
       await run();
       expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
+      const keeper = a.cacheKeepalive!;
+      const begin = vi.spyOn(keeper, 'begin');
       first = true;
       const old = run();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(first).toBe(false);
+      const handle = begin.mock.results[0]?.value;
+      expect(handle).toBeDefined();
+      const retained = keeper['outcomes'].get(handle!.key);
+      expect(retained).toBeDefined();
+      expect(keeper['attempts'].get(handle!)?.state).toBe(retained);
       reason = 'refusal';
       await run();
       gate.release(answer);

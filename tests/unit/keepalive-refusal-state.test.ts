@@ -35,16 +35,21 @@ it.each([null, undefined, 'future_stop'])('unknown refresh %s never claims refre
   expect(calls).toHaveLength(1);
 });
 
-it('error, unknown, cancellation (no finish), and maintenance cannot rearm a barrier', () => {
+it('unknown terminals, cancellation, and maintenance leave a refused key unscheduled', () => {
   const { k, begin, normal, events } = setup();
   const initial = normal();
   expect(k.getStatus().map(s => s.key)).toEqual([initial.key]);
   k.finish(begin(), 'refusal');
   expect(events).toEqual([{ type: 'suppressed', source: 'foreground', key: initial.key }]);
-  expect((k as any).outcomes.get(initial.key).barrier).toBeGreaterThan(0);
+  const retained = () => (k as any).outcomes.get(initial.key);
+  const barrier = retained().barrier;
+  expect(barrier).toBeGreaterThan(0);
   expect(k.getStatus()).toEqual([]);
   for (const reason of [undefined, null, 'future_stop']) { const a = begin(); k.prefix(a); k.finish(a, reason); }
-  k.prefix(begin()); // cancelled/error: no successful terminal
+  const cancelled = begin(); k.prefix(cancelled); k.cancel(cancelled);
+  expect(k.requestForAttempt(cancelled)).toBeUndefined();
+  expect(retained()).toMatchObject({ barrier, qualified: false });
+  expect(k.getStatus()).toEqual([]);
   const maintenance = begin('maintenance'); k.prefix(maintenance); k.finish(maintenance, 'max_tokens');
   expect(k.getStatus()).toEqual([]);
   normal(); expect(k.getStatus()).toHaveLength(1);
@@ -272,6 +277,7 @@ it.each(['transport error', 'unknown terminal', 'refusal', 'ineligible terminal'
     const qualified = normal();
     const freshWire = wire('fresh');
     const fresh = begin('normal', freshWire);
+    expect([...(k as any).pendingOutcomes.keys()]).toEqual([fresh.key]);
     if (failure === 'ineligible terminal') Object.assign(freshWire, { thinking: { type: 'enabled' } });
     k.prefix(fresh);
     if (failure === 'transport error') k.cancel(fresh);
@@ -1324,6 +1330,9 @@ it.each(['excluded', 'ineligible', 'maintenance'])('untracked %s refusal still s
   const w = kind === 'ineligible' ? { ...wire(), thinking: { type: 'enabled' } } : wire();
   const detached = k.begin(w, undefined, kind === 'excluded' ? 'complete' : 'stream',
     kind === 'maintenance' ? 'maintenance' : 'normal')!;
+  expect(k.requestForAttempt(detached)).toBe(w);
+  expect((k as any).attempts.get(detached).state).toBeUndefined();
+  expect((k as any).pendingOutcomes.size).toBe(0);
   expect((k as any).outcomes.size).toBe(0);
   normal();
   expect(k.getStatus()).toHaveLength(1);

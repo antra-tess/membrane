@@ -353,7 +353,7 @@ describe('the touch counts from the send', () => {
   });
 });
 
-describe('a refresh acts only on the snapshot it replayed', () => {
+describe('non-failing default-off refreshes preserve foreground snapshot replacements and drops', () => {
   const noRead = { input_tokens: 5, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
   const replyWith = (usage: object) => ({ ...answer, content: [], stop_reason: 'max_tokens', usage });
 
