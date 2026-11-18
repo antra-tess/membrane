@@ -130,12 +130,14 @@ export const PRICING_TABLE: readonly PricingRow[] = [
     pricing: { inputPerMillion: 3, outputPerMillion: 15, cacheWritePerMillion: 3.75, cacheWrite1hPerMillion: 6, cacheReadPerMillion: 0.30, currency: 'USD', asOf: ANTHROPIC_PRICING_LAST_VERIFIED },
   },
   {
-    // Prompts up to 100,000 tokens. Over that, Haiku 5.5 costs $0.50 input,
-    // $2.50 output, $0.625 for a 5-minute write and $0.05 for a hit, and this
-    // table has no field for a prompt-length tier, so a longer prompt is priced
-    // low.
+    // Priced by prompt length: over 100,000 tokens — counting cache reads and
+    // writes, each request on its own — every rate rises. Both rows are on the
+    // page.
     prefix: 'claude-haiku-5-5',
-    pricing: { inputPerMillion: 0.10, outputPerMillion: 0.50, cacheWritePerMillion: 0.125, cacheWrite1hPerMillion: 0.2, cacheReadPerMillion: 0.01, currency: 'USD', asOf: ANTHROPIC_PRICING_LAST_VERIFIED },
+    pricing: {
+      inputPerMillion: 0.10, outputPerMillion: 0.50, cacheWritePerMillion: 0.125, cacheWrite1hPerMillion: 0.2, cacheReadPerMillion: 0.01, currency: 'USD', asOf: ANTHROPIC_PRICING_LAST_VERIFIED,
+      longPrompt: { overTokens: 100_000, inputPerMillion: 0.50, outputPerMillion: 2.50, cacheWritePerMillion: 0.625, cacheWrite1hPerMillion: 1, cacheReadPerMillion: 0.05 },
+    },
   },
   {
     prefix: 'claude-haiku-4-5',
@@ -173,10 +175,14 @@ export const PRICING_TABLE: readonly PricingRow[] = [
     pricing: { inputPerMillion: 0.20, outputPerMillion: 1.20, cacheReadPerMillion: 0.02, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
   },
   {
-    // Under 272K context; the long-context tier costs more and this table has
-    // no field for context-dependent rates.
+    // The model page: "prompts with >272K input tokens are priced at 2x input
+    // and 1.5x output". It states no long-context rate for cached input, so
+    // that one stays at the base rate.
     prefix: 'gpt-5.5',
-    pricing: { inputPerMillion: 5, outputPerMillion: 30, cacheReadPerMillion: 0.50, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
+    pricing: {
+      inputPerMillion: 5, outputPerMillion: 30, cacheReadPerMillion: 0.50, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED,
+      longPrompt: { overTokens: 272_000, inputPerMillion: 10, outputPerMillion: 45 },
+    },
   },
   {
     prefix: 'gpt-5.4-mini',
@@ -228,9 +234,8 @@ export const PRICING_TABLE: readonly PricingRow[] = [
   // Standard), and https://ai.google.dev/gemini-api/docs/deprecations. Google's
   // published output price INCLUDES thinking tokens. Cache rates are the
   // context-caching per-token price and exclude Google's separate per-hour
-  // storage charge. Where a model has a >200k-token tier the smaller-prompt
-  // rate is used, so a longer prompt is underpriced. Where input costs more
-  // for audio, the text rate is used.
+  // storage charge. Where a model has a >200k-token tier it is the row's
+  // `longPrompt`. Where input costs more for audio, the text rate is used.
   {
     // Google: "Implicit caching only (explicit caching is not supported)", so
     // the context-caching price is what an implicitly cached span costs.
@@ -263,10 +268,12 @@ export const PRICING_TABLE: readonly PricingRow[] = [
     pricing: { inputPerMillion: 0.30, outputPerMillion: 2.50, cacheReadPerMillion: 0.03, currency: 'USD', asOf: GOOGLE_PRICING_LAST_VERIFIED },
   },
   {
-    // Prompts of 200k tokens or fewer; above that, 4/18 and 0.40 for cache
-    // reads. Also covers gemini-3.1-pro-preview-customtools, priced the same.
+    // Also covers gemini-3.1-pro-preview-customtools, priced the same.
     prefix: 'gemini-3.1-pro-preview',
-    pricing: { inputPerMillion: 2, outputPerMillion: 12, cacheReadPerMillion: 0.20, currency: 'USD', asOf: GOOGLE_PRICING_LAST_VERIFIED },
+    pricing: {
+      inputPerMillion: 2, outputPerMillion: 12, cacheReadPerMillion: 0.20, currency: 'USD', asOf: GOOGLE_PRICING_LAST_VERIFIED,
+      longPrompt: { overTokens: 200_000, inputPerMillion: 4, outputPerMillion: 18, cacheReadPerMillion: 0.40 },
+    },
   },
   {
     prefix: 'gemini-3.1-flash-lite',
@@ -277,10 +284,11 @@ export const PRICING_TABLE: readonly PricingRow[] = [
     pricing: { inputPerMillion: 0.50, outputPerMillion: 3, cacheReadPerMillion: 0.05, currency: 'USD', asOf: GOOGLE_PRICING_LAST_VERIFIED },
   },
   {
-    // Prompts of 200k tokens or fewer; above that, 2.50/15 and 0.25 for
-    // cache reads.
     prefix: 'gemini-2.5-pro',
-    pricing: { inputPerMillion: 1.25, outputPerMillion: 10, cacheReadPerMillion: 0.125, currency: 'USD', asOf: GOOGLE_PRICING_LAST_VERIFIED },
+    pricing: {
+      inputPerMillion: 1.25, outputPerMillion: 10, cacheReadPerMillion: 0.125, currency: 'USD', asOf: GOOGLE_PRICING_LAST_VERIFIED,
+      longPrompt: { overTokens: 200_000, inputPerMillion: 2.50, outputPerMillion: 15, cacheReadPerMillion: 0.25 },
+    },
   },
   {
     prefix: 'gemini-2.5-flash-lite',

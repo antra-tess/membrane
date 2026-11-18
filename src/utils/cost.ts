@@ -67,7 +67,31 @@ function cacheWriteCost(usage: CostableUsage, shortRate: number, oneHourRate: nu
   return (short * shortRate + oneHour * (oneHourRate ?? shortRate)) / 1_000_000;
 }
 
-export function calculateCost(usage: CostableUsage, pricing: ModelPricing): CostBreakdown {
+/** Every input token the request was billed for: fresh, cache-written and cache-read. */
+export function promptTokens(usage: CostableUsage): number {
+  return usage.inputTokens + (usage.cacheCreationTokens ?? 0) + (usage.cacheReadTokens ?? 0);
+}
+
+/**
+ * The rate card this request is billed at: the row's base rates, or, where
+ * the row has a long-prompt tier and the prompt is longer than its threshold,
+ * the tier's rates with any it leaves unset taken from the base.
+ */
+export function ratesFor(usage: CostableUsage, pricing: ModelPricing): ModelPricing {
+  const tier = pricing.longPrompt;
+  if (!tier || !(promptTokens(usage) > tier.overTokens)) return pricing;
+  return {
+    ...pricing,
+    inputPerMillion: tier.inputPerMillion ?? pricing.inputPerMillion,
+    outputPerMillion: tier.outputPerMillion ?? pricing.outputPerMillion,
+    ...(tier.cacheWritePerMillion != null ? { cacheWritePerMillion: tier.cacheWritePerMillion } : {}),
+    ...(tier.cacheWrite1hPerMillion != null ? { cacheWrite1hPerMillion: tier.cacheWrite1hPerMillion } : {}),
+    ...(tier.cacheReadPerMillion != null ? { cacheReadPerMillion: tier.cacheReadPerMillion } : {}),
+  };
+}
+
+export function calculateCost(usage: CostableUsage, basePricing: ModelPricing): CostBreakdown {
+  const pricing = ratesFor(usage, basePricing);
   const input = usage.inputTokens * pricing.inputPerMillion / 1_000_000;
   const output = usage.outputTokens * pricing.outputPerMillion / 1_000_000;
   const cacheWrite = pricing.cacheWritePerMillion != null

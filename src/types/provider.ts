@@ -72,6 +72,25 @@ export interface ProviderCapabilities {
  */
 export type UsageCacheConvention = 'cache-excluded' | 'cache-inclusive' | 'unknown';
 
+/**
+ * Rates for a request whose prompt is longer than `overTokens`. A prompt's
+ * length is every input token the request was billed for: fresh input, cache
+ * writes and cache reads together (Anthropic's definition for Haiku 5.5; the
+ * natural reading of "prompt" for Google's and OpenAI's tiers, which don't say).
+ * Each request is priced on its own. A rate left unset keeps the row's base
+ * rate, which is how OpenAI's long-context tier, stated for input and output
+ * only, is written.
+ */
+export interface LongPromptPricing {
+  /** Prompts strictly longer than this many tokens take these rates. */
+  overTokens: number;
+  inputPerMillion?: number;
+  outputPerMillion?: number;
+  cacheWritePerMillion?: number;
+  cacheWrite1hPerMillion?: number;
+  cacheReadPerMillion?: number;
+}
+
 export interface ModelPricing {
   /** Cost per million input tokens */
   inputPerMillion: number;
@@ -101,6 +120,13 @@ export interface ModelPricing {
   
   /** Currency code */
   currency: string;
+
+  /**
+   * Higher rates for a prompt longer than a threshold, where the provider
+   * prices by prompt length (Haiku 5.5 over 100k, gpt-5.5 over 272k, Gemini
+   * Pro over 200k). Unset: one rate card for every prompt length.
+   */
+  longPrompt?: LongPromptPricing;
 
   /**
    * ISO date these rates were last checked against the provider's published
