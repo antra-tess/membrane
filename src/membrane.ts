@@ -2407,6 +2407,8 @@ export class Membrane {
       inputTokens: providerResponse.usage.inputTokens,
       outputTokens: providerResponse.usage.outputTokens,
       cacheCreationTokens: providerResponse.usage.cacheCreationTokens,
+      ...(providerResponse.usage.cacheCreation1hTokens != null
+        ? { cacheCreation1hTokens: providerResponse.usage.cacheCreation1hTokens } : {}),
       cacheReadTokens: providerResponse.usage.cacheReadTokens,
       thinkingTokens: providerResponse.usage.thinkingTokens,
       estimatedCost: this.estimateCost(providerResponse.usage, request.config.model, providerResponse.model),
@@ -2646,6 +2648,9 @@ export class Membrane {
     if (add.cacheCreationTokens != null) {
       next.cacheCreationTokens = (next.cacheCreationTokens ?? 0) + add.cacheCreationTokens;
     }
+    if (add.cacheCreation1hTokens != null) {
+      next.cacheCreation1hTokens = (next.cacheCreation1hTokens ?? 0) + add.cacheCreation1hTokens;
+    }
     if (add.cacheReadTokens != null) {
       next.cacheReadTokens = (next.cacheReadTokens ?? 0) + add.cacheReadTokens;
     }
@@ -2659,6 +2664,7 @@ export class Membrane {
       inputTokens: detailed.inputTokens ?? 0,
       outputTokens: detailed.outputTokens ?? 0,
       ...(detailed.cacheCreationTokens != null ? { cacheCreationTokens: detailed.cacheCreationTokens } : {}),
+      ...(detailed.cacheCreation1hTokens != null ? { cacheCreation1hTokens: detailed.cacheCreation1hTokens } : {}),
       ...(detailed.cacheReadTokens != null ? { cacheReadTokens: detailed.cacheReadTokens } : {}),
     };
   }

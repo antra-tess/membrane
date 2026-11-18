@@ -5,6 +5,8 @@ export interface CostableUsage {
   inputTokens: number;
   outputTokens: number;
   cacheCreationTokens?: number;
+  /** Of cacheCreationTokens, those written with a 1-hour TTL (see CallUsage). */
+  cacheCreation1hTokens?: number;
   cacheReadTokens?: number;
 }
 
@@ -51,11 +53,25 @@ export function addCostBreakdowns(
   };
 }
 
+/**
+ * Cache writes at two rates: the 1-hour-TTL tokens the provider reported at
+ * the 1-hour rate, the rest at the short-TTL rate. A pricing row without a
+ * 1-hour rate prices every write at the short rate, as before. A 1-hour count
+ * larger than the total (a provider report that contradicts itself) is clamped
+ * to the total rather than billing tokens that were not written.
+ */
+function cacheWriteCost(usage: CostableUsage, shortRate: number, oneHourRate: number | undefined): number {
+  const total = usage.cacheCreationTokens ?? 0;
+  const oneHour = Math.min(Math.max(usage.cacheCreation1hTokens ?? 0, 0), total);
+  const short = total - oneHour;
+  return (short * shortRate + oneHour * (oneHourRate ?? shortRate)) / 1_000_000;
+}
+
 export function calculateCost(usage: CostableUsage, pricing: ModelPricing): CostBreakdown {
   const input = usage.inputTokens * pricing.inputPerMillion / 1_000_000;
   const output = usage.outputTokens * pricing.outputPerMillion / 1_000_000;
   const cacheWrite = pricing.cacheWritePerMillion != null
-    ? (usage.cacheCreationTokens ?? 0) * pricing.cacheWritePerMillion / 1_000_000
+    ? cacheWriteCost(usage, pricing.cacheWritePerMillion, pricing.cacheWrite1hPerMillion)
     : undefined;
   const cacheRead = pricing.cacheReadPerMillion != null
     ? (usage.cacheReadTokens ?? 0) * pricing.cacheReadPerMillion / 1_000_000

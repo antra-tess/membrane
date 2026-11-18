@@ -94,6 +94,9 @@ export class TurnUsageAccumulator {
     if (usage.cacheCreationTokens != null) {
       this.tokens.cacheCreationTokens = (this.tokens.cacheCreationTokens ?? 0) + usage.cacheCreationTokens;
     }
+    if (usage.cacheCreation1hTokens != null) {
+      this.tokens.cacheCreation1hTokens = (this.tokens.cacheCreation1hTokens ?? 0) + usage.cacheCreation1hTokens;
+    }
     if (usage.cacheReadTokens != null) {
       this.tokens.cacheReadTokens = (this.tokens.cacheReadTokens ?? 0) + usage.cacheReadTokens;
     }
@@ -112,6 +115,7 @@ export class TurnUsageAccumulator {
         inputTokens: usage.inputTokens,
         outputTokens: usage.outputTokens,
         ...(usage.cacheCreationTokens != null ? { cacheCreationTokens: usage.cacheCreationTokens } : {}),
+        ...(usage.cacheCreation1hTokens != null ? { cacheCreation1hTokens: usage.cacheCreation1hTokens } : {}),
         ...(usage.cacheReadTokens != null ? { cacheReadTokens: usage.cacheReadTokens } : {}),
         ...(usage.thinkingTokens != null ? { thinkingTokens: usage.thinkingTokens } : {}),
         ...(roundCost ? { estimatedCost: roundCost } : {}),

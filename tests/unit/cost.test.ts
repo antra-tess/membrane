@@ -38,6 +38,50 @@ describe('calculateCost', () => {
     expect(cost.total).toBeCloseTo(0.3 + 0.75 + 0.75 + 0.15, 10);
   });
 
+  it('prices 1-hour cache writes at the 1-hour rate and the rest at the 5-minute rate', () => {
+    const pricing: ModelPricing = { ...PRICING, cacheWrite1hPerMillion: 6 };
+    const usage: CostableUsage = {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationTokens: 300_000,
+      cacheCreation1hTokens: 200_000,
+    };
+    const cost = calculateCost(usage, pricing);
+    // 100k × $3.75 + 200k × $6
+    expect(cost.cacheWrite).toBeCloseTo(0.375 + 1.2, 10);
+    expect(cost.total).toBeCloseTo(0.375 + 1.2, 10);
+  });
+
+  it('prices every write at the 5-minute rate when the usage has no TTL split', () => {
+    const pricing: ModelPricing = { ...PRICING, cacheWrite1hPerMillion: 6 };
+    const cost = calculateCost({ inputTokens: 0, outputTokens: 0, cacheCreationTokens: 300_000 }, pricing);
+    expect(cost.cacheWrite).toBeCloseTo(1.125, 10);
+  });
+
+  it('falls back to the 5-minute rate for 1-hour writes when the row has no 1-hour rate', () => {
+    const usage: CostableUsage = {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationTokens: 300_000,
+      cacheCreation1hTokens: 300_000,
+    };
+    expect(calculateCost(usage, PRICING).cacheWrite).toBeCloseTo(1.125, 10);
+  });
+
+  it('never bills more 1-hour writes than were written', () => {
+    const pricing: ModelPricing = { ...PRICING, cacheWrite1hPerMillion: 6 };
+    const usage: CostableUsage = {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationTokens: 100_000,
+      cacheCreation1hTokens: 250_000,
+    };
+    // Clamped to the 100k total, all at the 1-hour rate.
+    expect(calculateCost(usage, pricing).cacheWrite).toBeCloseTo(0.6, 10);
+    const negative: CostableUsage = { ...usage, cacheCreation1hTokens: -5 };
+    expect(calculateCost(negative, pricing).cacheWrite).toBeCloseTo(0.375, 10);
+  });
+
   it('returns zero cost for zero tokens', () => {
     expect(calculateCost({ inputTokens: 0, outputTokens: 0 }, PRICING).total).toBeCloseTo(0, 10);
   });
@@ -94,6 +138,18 @@ describe('getDefaultPricing', () => {
     expect(sonnet.inputPerMillion).toBe(3);
     expect(sonnet.outputPerMillion).toBe(15);
     expect(sonnet.cacheWritePerMillion).toBe(3.75);
+    expect(sonnet.cacheWrite1hPerMillion).toBe(6);
     expect(sonnet.cacheReadPerMillion).toBe(0.3);
+  });
+
+  it('gives every Anthropic row a 1-hour write rate of twice its input rate', () => {
+    for (const id of [
+      'claude-fable-5-1-20260601', 'claude-mythos-5-2', 'claude-opus-5-5', 'claude-sonnet-5',
+      'claude-opus-4-7', 'claude-haiku-5-5', 'claude-haiku-4-5-20251001', 'claude-3-5-haiku-20241022',
+    ]) {
+      const row = getDefaultPricing(id)!;
+      expect(row.cacheWrite1hPerMillion, id).toBeCloseTo(row.inputPerMillion * 2, 10);
+      expect(row.cacheWritePerMillion, id).toBeCloseTo(row.inputPerMillion * 1.25, 10);
+    }
   });
 });

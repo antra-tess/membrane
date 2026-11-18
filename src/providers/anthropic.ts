@@ -246,6 +246,17 @@ export function boundedProviderEvent(event: unknown): unknown {
   return { type, truncated: true, json: json.slice(0, PROVIDER_EVENT_MAX_CHARS) };
 }
 
+/**
+ * The 1-hour share of a non-streaming response's cache writes, from the
+ * `usage.cache_creation` breakdown Anthropic reports beside the total. Absent
+ * breakdown → no field, so the split reads as unknown rather than zero.
+ */
+function cacheCreation1h(cacheCreation: unknown): { cacheCreation1hTokens?: number } {
+  if (!cacheCreation || typeof cacheCreation !== 'object') return {};
+  const oneHour = (cacheCreation as Record<string, unknown>).ephemeral_1h_input_tokens;
+  return { cacheCreation1hTokens: typeof oneHour === 'number' ? oneHour : 0 };
+}
+
 function sdkRequestId(holder: unknown, key: 'request_id' | '_request_id'): string | undefined {
   if (holder === null || typeof holder !== 'object') return undefined;
   const id = (holder as Record<string, unknown>)[key];
@@ -875,6 +886,7 @@ export class AnthropicAdapter implements ProviderAdapter {
           inputTokens,
           outputTokens,
           cacheCreationTokens,
+          ...(hasCacheCreationBreakdown ? { cacheCreation1hTokens: cacheCreation1hTokens ?? 0 } : {}),
           cacheReadTokens,
         },
         ...unreportedUsage(inputReported ? inputTokens : undefined, outputReported ? outputTokens : undefined),
@@ -1071,6 +1083,7 @@ export class AnthropicAdapter implements ProviderAdapter {
         inputTokens: response.usage.input_tokens,
         outputTokens: response.usage.output_tokens,
         cacheCreationTokens: (response.usage as any).cache_creation_input_tokens,
+        ...cacheCreation1h((response.usage as any).cache_creation),
         cacheReadTokens: (response.usage as any).cache_read_input_tokens,
       },
       ...unreportedUsage(response.usage?.input_tokens, response.usage?.output_tokens),
