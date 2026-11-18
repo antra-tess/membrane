@@ -50,13 +50,16 @@ ordinary refresh events (such as `refreshed`) still fire. Error receipts pass th
 Observer failures are isolated and not retried. Receipt loss does not count as a send failure or retire
 the replay snapshot. Response copies contain only own enumerable properties;
 inherited/non-enumerable metadata can affect suppression without appearing in receipts. Without `onCall`, no receipts are delivered.
-A refresh with missing/null/unrecognized raw terminal reason never emits `refreshed` or advances its refresh timestamp;
+With suppression enabled, a refresh with a missing/null/unrecognized raw terminal reason
+never emits `refreshed` or advances its refresh timestamp;
 usage alone isn't evidence of a known terminal outcome. It removes the replay
 snapshot and reports `unknown-refresh-terminal` through `onDiagnostic`,
 while retaining outcome identity/barrier state. A later
 foreground prefix may register a new snapshot if the identity is still qualified.
 This is retirement, not a new retry/backoff policy; an unknown refresh is never
-resent on every timer check. Successfully processed resolutions reset consecutive send/response-processing
+resent on every timer check. Default-off does not classify the terminal: positive
+reads with no cache writes can emit `refreshed` and advance the timestamp even
+if the raw stop reason is missing. Successfully processed resolutions reset consecutive send/response-processing
 errors, including refusals, empty responses and unknown terminals in suppression
 mode. For a current known-normal refresh, usage fields must also be readable
 and numerically coercible before resetting that counter. Default-off preserves
@@ -68,7 +71,8 @@ rejected-send failures still accumulate in default-off mode, as do failures
 while copying response metadata (for example, throwing enumerable getters).
 With suppression enabled, replay serialization failures for a still-current snapshot
 report `replay-preparation-failed` through `onDiagnostic`, explicitly naming snapshot
-retirement. This notice is NOT delivered to `onEvent`: configure `onDiagnostic`
+retirement. The root-serializer guard also says to remove callable root `toJSON`;
+other preparation errors omit caller exception details. This notice is NOT delivered to `onEvent`: configure `onDiagnostic`
 to observe preparation retirement (as well as unknown-terminal retirement and LRU
 eviction). Without it these removals are silent. It is emitted without incrementing that send-failure counter or delivering
 a call receipt, since the sender was not invoked. They retire only the failed
@@ -103,9 +107,11 @@ Operational notices use the separate opt-in `onDiagnostic` callback with a
 failure `error` variant. It carries no prompt/response payload or failure count;
 throws and rejected promises are isolated. Reason prefixes identify receipt loss,
 replay preparation failure, unknown refresh/foreground terminals, outcome-LRU
-eviction, detached attempts and ineligible prefixes without a snapshot. Unknown foreground terminals report
-`unknown-foreground-terminal` even for a fresh key with no replay snapshot;
-they cannot qualify or rearm keepalive even if response parsing falls back to
+eviction, detached attempts and ineligible prefixes without a snapshot. Unknown terminals
+observed on foreground attempt handles report `unknown-foreground-terminal` even
+for fresh keys with no replay snapshot. A stopped keeper or an opt-in cap below
+one issues no attempt handle and thus no such notice. Unknown terminals cannot
+qualify or rearm keepalive even if response parsing falls back to
 `end_turn`. At `maxIneffective`, `ineffective-retirement` reports the consecutive
 ineffective count after removing the snapshot and identity. The existing
 `ineffective` event still reports the usage outcome on every ineffective refresh.
@@ -284,8 +290,9 @@ define restoration of suppression separately; no persistence is implemented.
 No provider behavior, billing, TTL extension, savings, refusal avoidance, live
 compatibility, merge or release claim follows from the fake-only tests.
 
-If caller-owned key serialization advances the keepalive sequence (by beginning
-an attempt or suppressing a key), the outer attempt cannot
+If caller-owned key serialization or admission advances the keepalive sequence
+(by beginning an attempt or observing a refusal, even on an evicted handle),
+the outer attempt cannot
 qualify or update a snapshot: intervening work may have refused and evicted its
 identity. Its handle still reports a later refusal against a currently retained
 key. This conservatively excludes even unrelated sequence-advancing reentry from
@@ -301,12 +308,13 @@ For immutable, ordinary JSON objects, hashed system/tools values are the values
 sent by the SDK. Caller mutation while tracked, getters, and custom/stateful
 `toJSON` serialization (including root serializers that replace identity fields)
 are outside this guarantee. Serialization can run more than once; keepalive does
-not promise single serialization or an owned transport snapshot. Stream
-bookkeeping retains the `onRequest` observer's `fullRequest` in both modes.
-Replacing its fields changes the replay snapshot, not the original foreground
-SDK stream request. This mismatch predates suppression; with suppression opted
-in, a replacement of `system` or `tools` also changes the key against which a
-stream refusal is recorded. Observers should not replace fields on that object.
+not promise single serialization or an owned transport snapshot. With
+suppression enabled, stream bookkeeping uses the request
+passed to the SDK. Top-level `onRequest` replacements on the observer copy are
+not sent by streaming and do not affect its key, eligibility or replay in that
+mode. With suppression unset or false, the keeper preserves legacy bookkeeping
+from the observer copy even with `enabled: true`. Complete still sends the
+modified request in all modes.
 Begin and finish bookkeeping failures stop adapter keepalive; prefix/record failures only warn.
 Opt-in replay preparation rejects callable root `toJSON` methods, which could
 otherwise override `max_tokens: 0` or message trimming after preparation. The
@@ -318,4 +326,5 @@ remain outside the immutable ordinary-JSON identity guarantee above.
 Snapshot age and refresh scheduling use wall-clock timestamps, not a monotonic
 clock. A backward clock adjustment can postpone refresh and idle expiry by the
 size of the adjustment; keepalive does not guarantee cache retention across clock
-steps or VM restores.
+steps or VM restores. Receipt durations also use the wall clock and can be
+negative after a backward step.

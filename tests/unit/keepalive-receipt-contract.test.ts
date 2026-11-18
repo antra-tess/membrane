@@ -87,7 +87,7 @@ it('does not misreport a throwing receipt observer as a clone failure', async ()
   expect(events.map(e => e.type)).toEqual(['refreshed']);
 });
 
-it('rejects root serialization that could undo the prefill budget and trimming', async () => {
+it('diagnoses and rejects root serialization that could undo the prefill budget and trimming', async () => {
   const send = vi.fn(async () => response);
   const { wire, qualify, tick, events, k } = setup(send);
   wire.toJSON = function(this: any) { return { ...this, toJSON: undefined, max_tokens: 1024 }; };
@@ -95,7 +95,9 @@ it('rejects root serialization that could undo the prefill budget and trimming',
   await tick();
   expect(send).not.toHaveBeenCalled();
   expect(k.getStatus()).toEqual([]);
-  expect(events).toEqual([expect.objectContaining({ type: 'diagnostic', reason: expect.stringContaining('replay-preparation-failed') })]);
+  expect(events).toEqual([expect.objectContaining({
+    type: 'diagnostic', reason: 'replay-preparation-failed: replay snapshot retired; remove callable root toJSON',
+  })]);
 });
 
 it('counts opt-in unprintable Error.message failures through disabling', async () => {

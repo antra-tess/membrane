@@ -331,7 +331,9 @@ export interface AnthropicAdapterConfig {
    * refresh the entry's TTL at cache-READ price rather than requiring a 2x cache
    * write on the next wake; refused, unknown or ineffective outcomes are not
    * proof of a refresh.
-   * Pass `{ enabled: false }` to turn off.
+   * Pass `{ enabled: false }` to turn off. Only `suppressOnRefusal: true`
+   * makes stream keepalive track the SDK request instead of the legacy
+   * observer copy.
    */
   cacheKeepalive?: CacheKeepaliveConfig;
 }
@@ -431,7 +433,8 @@ export class AnthropicAdapter implements ProviderAdapter {
     this.client = new Anthropic(clientOptions);
     this.defaultMaxTokens = config.defaultMaxTokens ?? 4096;
 
-    this.cacheKeepalive = config.cacheKeepalive?.enabled === false
+    const keepaliveConfig = config.cacheKeepalive;
+    this.cacheKeepalive = keepaliveConfig?.enabled === false
       ? undefined
       : new CacheKeepalive(
           // The already-built wire request goes as it is: a rebuild risks a byte diff,
@@ -439,9 +442,9 @@ export class AnthropicAdapter implements ProviderAdapter {
           async (wire, headers) => this.createMessage(
             wire as unknown as Anthropic.MessageCreateParamsNonStreaming, headers,
           ),
-          config.cacheKeepalive ?? {},
+          keepaliveConfig ?? {},
         );
-    this.suppressKeepaliveOnRefusal = !!this.cacheKeepalive && (config.cacheKeepalive?.suppressOnRefusal ?? false);
+    this.suppressKeepaliveOnRefusal = !!this.cacheKeepalive && (keepaliveConfig?.suppressOnRefusal ?? false);
   }
 
   // When given a signal, the SDK gets this request's own controller's signal
@@ -634,10 +637,13 @@ export class AnthropicAdapter implements ProviderAdapter {
 
     try {
       session = this.credentialSession(idleAbort.signal, onTransportActivity);
+      // The SDK streams anthropicRequest, adding stream:true itself. Without
+      // suppression, preserve legacy bookkeeping on the observer copy.
+      const keepaliveRequest = (this.suppressKeepaliveOnRefusal ? anthropicRequest : fullRequest) as unknown as Record<string, unknown>;
       // The cache's clock starts with the request, not at message_start.
       const sentAt = Date.now();
       const attempt = unfinished = keepaliveObservation(() => this.cacheKeepalive?.begin(
-        fullRequest as unknown as Record<string, unknown>, headers, 'stream', this.suppressKeepaliveOnRefusal ? options?.keepalivePurpose : undefined, sentAt,
+        keepaliveRequest, headers, 'stream', this.suppressKeepaliveOnRefusal ? options?.keepalivePurpose : undefined, sentAt,
       ), () => this.cacheKeepalive?.stop('keepalive begin bookkeeping failed; permanently stopped for this adapter; create a new adapter to restart keepalive'));
       const stream = await session.client.messages.stream(anthropicRequest, {
         signal: session.signal,
@@ -773,7 +779,7 @@ export class AnthropicAdapter implements ProviderAdapter {
         if (event.type === 'message_start') {
           keepaliveObservation(() => {
             if (attempt) this.cacheKeepalive?.prefix(attempt);
-            else this.cacheKeepalive?.record(fullRequest as unknown as Record<string, unknown>, headers, 'stream', sentAt);
+            else this.cacheKeepalive?.record(keepaliveRequest, headers, 'stream', sentAt);
           });
         }
         // Every SDK event is progress; the SDK drops pings before this loop.

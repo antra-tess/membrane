@@ -288,6 +288,9 @@ function knownTerminal(reason: unknown): boolean {
   return typeof reason === 'string' && ['end_turn', 'stop_sequence', 'tool_use', 'max_tokens', 'pause_turn', 'model_context_window_exceeded'].includes(reason);
 }
 
+// Fixed internal error identity; never classify a caller exception by its text.
+const ROOT_SERIALIZER_REPLAY_ERROR = new Error('Keepalive replay does not support callable root toJSON');
+
 export class CacheKeepalive {
   private outcomes = new Map<string, OutcomeState>();
   // Pending first qualifications have their own bounded LRU. A new key cannot
@@ -424,6 +427,9 @@ export class CacheKeepalive {
       // Do not recreate forgotten identities or enlarge the bounded map.
       const state = this.outcomeFor(attempt.key);
       if (state) this.suppress(attempt.key, state, 'foreground');
+      // A synchronous begin may be evaluating admission for this key before
+      // publishing its pending state. Invalidate its sequence without a tombstone.
+      else ++this.sequence;
       return;
     }
     if (!knownTerminal(reason)) {
@@ -568,12 +574,12 @@ export class CacheKeepalive {
       // A root serializer can override the zero-output budget and trimmed messages.
       // Fail closed in opt-in mode rather than risk a billable generation replay.
       if (this.cfg.suppressOnRefusal && typeof recorded.toJSON === 'function') {
-        throw new Error('Keepalive does not support root toJSON serialization');
+        throw ROOT_SERIALIZER_REPLAY_ERROR;
       }
       payload = { ...recorded, max_tokens: 0 };
       // Spreading can read a changing accessor: validate the actual replay too.
       if (this.cfg.suppressOnRefusal && typeof payload.toJSON === 'function') {
-        throw new Error('Keepalive does not support root toJSON serialization');
+        throw ROOT_SERIALIZER_REPLAY_ERROR;
       }
       if (Array.isArray(recorded.messages)) payload.messages = messagesForRefresh(recorded.messages);
       delete payload.stream;
@@ -698,7 +704,9 @@ export class CacheKeepalive {
       // Keep outcome identity so a later qualified prefix can replace it.
       if (this.cfg.suppressOnRefusal && !invoked) {
         this.lineages.delete(key);
-        message = 'replay-preparation-failed: replay snapshot retired';
+        message = err === ROOT_SERIALIZER_REPLAY_ERROR
+          ? 'replay-preparation-failed: replay snapshot retired; remove callable root toJSON'
+          : 'replay-preparation-failed: replay snapshot retired';
       }
       // Preparation failures are observable, but are not failed sends.
       if (!this.cfg.suppressOnRefusal || invoked) this.consecutiveErrors += 1;

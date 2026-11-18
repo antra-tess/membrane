@@ -92,19 +92,23 @@
   `detached-attempt` notice via `onDiagnostic` without incrementing the failure count.
 - Add a separate opt-in `onDiagnostic` callback and `KeepaliveDiagnostic` type
   for non-failure operational notices, keeping `onEvent` error events reserved
-  for counted failures. Report unknown foreground terminals (including fresh
-  unqualified keys) and ineffective retirement with its consecutive count.
+  for counted failures. Report unknown foreground terminals on observed attempts
+  (including fresh unqualified keys) and ineffective retirement with its consecutive count.
 - Apply observed foreground refusals before terminal capture runs prototype or
   property-descriptor proxy traps; throwing traps cannot leave the old key replayable.
 - Initially read foreground `stop_reason` by ordinary property access, without a
   presence check, before other terminal capture traps. The read itself can run
   a caller getter/get trap; suppression follows the returned refusal, not that trap.
-- Preparation-retirement diagnostics omit exception text to avoid leaking payloads;
-  these notices require `onDiagnostic` and are not delivered to `onEvent`.
+- Preparation-retirement diagnostics omit exception text to avoid leaking payloads.
+  The root serializer guard names callable root `toJSON` as the cause.
+  These notices require `onDiagnostic` and are not delivered to `onEvent`.
 - Opt-in prefixes cannot undo a reentrant finish of the same handle. A newer
   ineligible prefix for a retained identity without a snapshot reports `ineligible-prefix` via
   `onDiagnostic`, explaining why older successes cannot install a snapshot. Detached untracked
   ineligible attempts do not emit this notice.
 
-- Stream replay bookkeeping honors `onRequest` field replacements in both modes;
-  these replacements do not alter the original foreground SDK stream request.
+- Only with refusal suppression enabled, stream keepalive
+  keys and snapshots come from the request passed to the SDK, not unsent
+  top-level `onRequest` replacements. Without suppression, even with
+  `enabled: true`, legacy bookkeeping is unchanged. Both foreground
+  transports are unchanged.

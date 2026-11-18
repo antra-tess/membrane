@@ -21,16 +21,23 @@ function setup(send: KeepaliveSend = async () => ok, config: CacheKeepaliveConfi
 }
 
 it('distinguishes retryable ineffective refresh from retirement without changing legacy events', async () => {
-  const { keeper, qualify, events, diagnostics } = setup(vi.fn(async () => ({ stop_reason: 'max_tokens', usage: { cache_read_input_tokens: 0 } })), { maxIneffective: 2 });
+  const send = vi.fn()
+    .mockResolvedValueOnce({ stop_reason: 'max_tokens', usage: { cache_read_input_tokens: 0 } })
+    .mockResolvedValueOnce({ stop_reason: 'max_tokens', usage: { cache_read_input_tokens: 30, cache_creation_input_tokens: 70 } });
+  const { keeper, qualify, events, diagnostics } = setup(send, { maxIneffective: 2 });
   qualify();
   await vi.advanceTimersByTimeAsync(100);
   expect(keeper.getStatus()).toHaveLength(1);
   expect(diagnostics).toEqual([]);
   await vi.advanceTimersByTimeAsync(100);
   expect(keeper.getStatus()).toEqual([]);
-  expect(events.map(e => e.type)).toEqual(['ineffective', 'ineffective']);
+  const key = cacheLineageKey(wire());
+  expect(events).toEqual([
+    { type: 'ineffective', key, reason: 'no-cache-read', readTokens: 0, writeTokens: 0 },
+    { type: 'ineffective', key, reason: 'wrote-instead-of-read', readTokens: 30, writeTokens: 70 },
+  ]);
   expect(diagnostics).toEqual([{
-    type: 'diagnostic', key: cacheLineageKey(wire()),
+    type: 'diagnostic', key,
     reason: 'ineffective-retirement: replay snapshot and identity retired after 2 consecutive ineffective refreshes',
   }]);
 });

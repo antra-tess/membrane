@@ -351,6 +351,9 @@ it.each(['complete', 'stream'] as const)('%s cannot qualify a normal terminal de
     : a.stream(request('late-normal'), noCallbacks, options);
   const send = lane === 'complete' ? client.messages.create : client.messages.stream;
   expect(send).toHaveBeenCalledTimes(1);
+  const key = lineageKey(send.mock.calls[0][0]);
+  expect((a.cacheKeepalive as any).pendingOutcomes.get(key)).toMatchObject({ active: 1 });
+  expect(a.cacheKeepalive!.getStatus()).toEqual([]); // Pending, not qualified.
   const { signal } = send.mock.calls[0][1];
   expect(signal.aborted).toBe(false);
   await vi.advanceTimersByTimeAsync(20);
@@ -584,26 +587,6 @@ it('normal stream qualifies before input-transformation response assembly throws
   expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
   await vi.advanceTimersByTimeAsync(100);
   expect(replays()).toHaveLength(1);
-});
-
-it.each([false, true])('stream keeper honors onRequest replacements (suppression: %s)', async suppressOnRefusal => {
-  const { a, client, replays } = adapter({ suppressOnRefusal }, () => answer,
-    () => sdkStream([messageStart, ...rest]));
-  await a.stream(request('actual'), noCallbacks, {
-    onRequest: (wire: any) => {
-      wire.system = [{ type: 'text', text: 'observer replacement', cache_control: { type: 'ephemeral', ttl: '1h' } }];
-      wire.messages = [{ role: 'user', content: 'redacted' }];
-      wire.model = 'observer-model';
-    },
-  });
-  // Observer replacement changes bookkeeping in both modes, not the SDK wire.
-  expect(client.messages.stream.mock.calls[0][0].system[0].text).toBe('actual');
-  expect(client.messages.stream.mock.calls[0][0].messages[0].content).not.toBe('redacted');
-  await vi.advanceTimersByTimeAsync(100);
-  expect(replays()).toHaveLength(1);
-  expect(replays()[0].model).toBe('observer-model');
-  expect(replays()[0].system[0].text).toBe('observer replacement');
-  expect(replays()[0].messages).toEqual([{ role: 'user', content: 'redacted' }]);
 });
 
 it('stream checks caller abort when combined-signal propagation is blocked', async () => {

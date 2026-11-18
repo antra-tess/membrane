@@ -36,8 +36,13 @@ it.each([null, undefined, 'future_stop'])('unknown refresh %s never claims refre
 });
 
 it('error, unknown, cancellation (no finish), and maintenance cannot rearm a barrier', () => {
-  const { k, begin, normal } = setup();
-  normal(); k.finish(begin(), 'refusal');
+  const { k, begin, normal, events } = setup();
+  const initial = normal();
+  expect(k.getStatus().map(s => s.key)).toEqual([initial.key]);
+  k.finish(begin(), 'refusal');
+  expect(events).toEqual([{ type: 'suppressed', source: 'foreground', key: initial.key }]);
+  expect((k as any).outcomes.get(initial.key).barrier).toBeGreaterThan(0);
+  expect(k.getStatus()).toEqual([]);
   for (const reason of [undefined, null, 'future_stop']) { const a = begin(); k.prefix(a); k.finish(a, reason); }
   k.prefix(begin()); // cancelled/error: no successful terminal
   const maintenance = begin('maintenance'); k.prefix(maintenance); k.finish(maintenance, 'max_tokens');
@@ -74,11 +79,14 @@ it.each(['stop', 'evict', 'drop'])('old foreground and refresh cannot resurrect 
   const { k, normal, begin, calls, events } = setup(() => new Promise(r => { resolve = r; }), { maxLineages: 1, maxIneffective: 1 });
   normal();
   const old = begin(); // Unregistered in-flight attempt must lose its identity.
+  expect(old).toBeDefined();
+  expect(k.requestForAttempt(old)).toBeDefined();
   await vi.advanceTimersByTimeAsync(100);
   if (action === 'stop') k.stop();
   if (action === 'evict') k.finish(begin('normal', wire('other')), 'end_turn');
   resolve(action === 'drop' ? { stop_reason: 'max_tokens', usage: {} } : ok);
   await vi.advanceTimersByTimeAsync(0);
+  if (action !== 'stop') expect(k.requestForAttempt(old)).toBeDefined();
   k.prefix(old); k.finish(old, 'end_turn');
   expect(k.getStatus().map(s => s.key)).toEqual(action === 'evict' ? [lineageKey(wire('other'))] : []);
   expect(calls).toHaveLength(1);
@@ -838,8 +846,15 @@ it('success receipt uses the single captured enumerable terminal value', async (
 });
 
 it('unknown finish cannot be replayed as a normal terminal', () => {
-  const { k, begin } = setup();
-  const a = begin(); k.finish(a, 'future_stop'); k.finish(a, 'end_turn');
+  const { k, begin, events } = setup();
+  const request = wire();
+  const a = begin('normal', request);
+  expect(a).toBeDefined();
+  expect(k.requestForAttempt(a)).toBe(request);
+  k.finish(a, 'future_stop');
+  expect(k.requestForAttempt(a)).toBeUndefined();
+  expect(events).toEqual([expect.objectContaining({ reason: expect.stringContaining('unknown-foreground-terminal') })]);
+  k.finish(a, 'end_turn');
   expect(k.getStatus()).toEqual([]);
 });
 
@@ -875,6 +890,27 @@ it('serialization cannot recreate an identity evicted after a nested refusal', (
   expect(outer).toBeDefined();
   k.finish(outer!, 'end_turn');
   expect(k.getStatus().map(s => s.key)).toEqual([lineageKey(wire('other'))]);
+});
+
+it('an evicted handle can bar qualification while same-key admission is in progress', () => {
+  const { k, begin, normal, events } = setup(undefined, { maxLineages: 1 });
+  const original = begin();
+  expect(k.requestForAttempt(original)).toBeDefined();
+  const other = begin('normal', wire('other'));
+  expect(events).toEqual([{ type: 'diagnostic', key: original.key,
+    reason: 'outcome-lru-eviction: pending maxLineages cap exceeded' }]);
+  const refusal = vi.fn(() => k.finish(original, 'refusal'));
+  const request = { ...wire(), get thinking() { refusal(); return undefined; } };
+  const inProgress = begin('normal', request);
+  expect(refusal).toHaveBeenCalledTimes(1);
+  expect(k.requestForAttempt(original)).toBeUndefined();
+  expect(k.requestForAttempt(inProgress)).toBe(request);
+  expect((k as any).pendingOutcomes.has(original.key)).toBe(false);
+  k.prefix(inProgress); k.finish(inProgress, 'end_turn');
+  expect(k.getStatus()).toEqual([]);
+  k.cancel(other);
+  expect(normal().key).toBe(original.key);
+  expect(k.getStatus().map(s => s.key)).toEqual([original.key]);
 });
 
 it('repeated usage-processing errors reach the send failure threshold', async () => {
@@ -1140,10 +1176,13 @@ it.each(['end_turn', 'refusal', undefined])('finish %s releases attempt data for
 it('idle expiry invalidates an unfinished attempt identity', async () => {
   const { k, normal, begin, events } = setup(undefined, { maxIdleMs: 100, refreshAfterMs: 1000 });
   normal(); const pending = begin();
+  expect(pending).toBeDefined();
+  expect(k.requestForAttempt(pending)).toBeDefined();
   expect(k.getStatus()).toHaveLength(1);
   await vi.advanceTimersByTimeAsync(100);
   expect(events.map(e => e.type)).toEqual(['expired']);
   expect((k as any).outcomes.size).toBe(0);
+  expect(k.requestForAttempt(pending)).toBeDefined();
   k.prefix(pending); k.finish(pending, 'end_turn');
   expect(k.getStatus()).toEqual([]);
 });

@@ -68,16 +68,19 @@ describe('keepalive terminal call receipts', () => {
   });
 
   it.each([
-    ['writes', { ...usage, cache_creation_input_tokens: 25, cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 25 } }],
-    ['reads nothing', { ...usage, cache_read_input_tokens: 0 }],
-  ])('reports a successful vendor response even when the poke %s', async (_label, vendorUsage) => {
+    ['writes', { ...usage, cache_creation_input_tokens: 25, cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 25 } }, 'wrote-instead-of-read'],
+    ['reads nothing', { ...usage, cache_read_input_tokens: 0 }, 'no-cache-read'],
+  ] as const)('reports a successful vendor response even when the poke %s', async (_label, vendorUsage, reason) => {
     const response = { usage: vendorUsage };
     const { ka, calls, events } = setup(vi.fn().mockResolvedValue(response), { maxIneffective: 1 });
     ka.record(wire(), undefined, 'stream');
     await vi.advanceTimersByTimeAsync(100);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ outcome: 'success', response });
-    expect(events[0].type).toBe('ineffective');
+    expect(events).toEqual([{
+      type: 'ineffective', key: lineageKey(wire()), reason,
+      readTokens: vendorUsage.cache_read_input_tokens, writeTokens: vendorUsage.cache_creation_input_tokens,
+    }]);
     expect(ka.getStatus()).toEqual([]);
   });
 
