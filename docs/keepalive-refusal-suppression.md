@@ -32,21 +32,28 @@ instead produce an error receipt and increment the failure count after resolutio
 Refusal metadata is inspected and suppression applied before copying other response
 properties, so an unrelated throwing accessor cannot bypass the refusal barrier. With `onCall` configured and cloneable request/response values, each
 actual sender invocation delivers one receipt, including refused, unknown, stale
-and failed sends. The receipt request is a structured clone of the replay's
-caller request object, not wire bytes. It is not a wire audit: JSON.rawJSON
+and failed sends. In opt-in mode the receipt request is a structured clone of
+the prepared replay based on the retained caller request, not wire bytes.
+Default-off first JSON.stringify/JSON.parse round-trips the recorded request,
+then prepares and clones the replay: custom toJSON results survive, callable
+fields may disappear, and exact-digit JSON numbers may round.
+Neither mode is a wire audit. Opt-in JSON.rawJSON
 branding and custom toJSON behavior are not preserved; some runtimes reject
 rawJSON cloning entirely. Function-valued fields
 (such as a metadata toJSON method) can prevent cloning even for valid SDK JSON.
 Receipt delivery is best-effort: clone failures drop the receipt and, in opt-in
 mode, emit `error` with diagnostic prefix `receipt-clone-failed` and an unchanged
-consecutive count; observer failures are
-isolated and not retried. Receipt loss does not count as a send failure or retire
+diagnostic-time consecutive count (before the current resolution resets it or
+rejection increments it). Default-off clone loss is silent: no receipt or event
+is delivered. Error receipts pass the error value through without cloning it.
+Observer failures are isolated and not retried. Receipt loss does not count as a send failure or retire
 the replay snapshot. Response copies contain only own enumerable properties;
 inherited/non-enumerable metadata can affect suppression without appearing in receipts. Without `onCall`, no receipts are delivered.
 A refresh with missing/null/unrecognized raw terminal reason never emits `refreshed` or advances its refresh timestamp;
 usage alone isn't evidence of a known terminal outcome. It removes the replay
 snapshot and emits `error` with diagnostic prefix
-`unknown-refresh-terminal` (without incrementing consecutive failures), while retaining outcome identity/barrier state. A later
+`unknown-refresh-terminal` (without incrementing consecutive failures, using the
+count before this resolution's reset), while retaining outcome identity/barrier state. A later
 foreground prefix may register a new snapshot if the identity is still qualified.
 This is retirement, not a new retry/backoff policy; an unknown refresh is never
 resent on every timer check. Successfully processed resolutions reset consecutive send/response-processing
@@ -94,8 +101,12 @@ stopped identities cannot be resurrected by their outstanding completions.
 default. Complete qualification follows response parsing. Stream qualification
 follows the observed provider terminal, stream callbacks, and block-order repair,
 but precedes final response assembly and transformation-path parsing; an error there does not undo
-qualification. Neither lane waits for downstream Membrane processing or application observers. A downstream
-callback failure does not undo a successful provider outcome. A caller using these same entrypoints for cache-warming prefill or other
+qualification. Stream callbacks include application callbacks forwarded by Membrane
+(such as onContentBlockUpdate); if one throws before finish(), including during
+open-block finalization after a terminal event, normal qualification is not reached.
+Raw refusal observation is earlier, before progress callbacks. Processing or
+observer failures after finish() do not undo qualification. Complete qualification
+precedes downstream Membrane response processing, but follows adapter parsing. A caller using these same entrypoints for cache-warming prefill or other
 maintenance **must**
 pass `ProviderRequestOptions.keepalivePurpose: 'maintenance'`. This trusted,
 non-wire declaration only affects initial eligibility and rearm permission. It does not modify the
@@ -122,9 +133,10 @@ prefix accounting but cannot clear suppression.
 State is local to each keeper (one per adapter), not shared across adapters in
 the same process. A refusal on one adapter does not suppress another adapter. At most `maxLineages` outcome identities (default four)
 are retained, including suppressed keys, separately from at most that many full
-wire snapshots. Every request begin touches the outcome LRU, including excluded
-lanes and
-ineligible/unknown requests. Unrelated traffic can therefore evict an active
+wire snapshots. A begin that reaches outcome registration touches the outcome LRU,
+including excluded lanes and ineligible/unknown requests. A stopped keeper does
+not register; sequence-advancing reentrant serialization instead returns a
+detached handle without touching the outer key's LRU position. Unrelated traffic can therefore evict an active
 snapshot even though legacy scheduling would retain it; increase `maxLineages`
 if needed. Outcome eviction is silent, like legacy snapshot LRU eviction;
 `skipped` remains limited to removal of an ineligible snapshot. More distinct in-flight keys than the cap can
@@ -170,8 +182,8 @@ payload-free warning reports potentially partial state,
 and recommends checking custom serialization or disabling keepalive if failures
 persist. A failed begin or finish stops the keeper permanently for this adapter and emits
 `disabled` with a payload-free reason; its warning explicitly discloses that stop and directs callers to create a new adapter to restart,
-because outcome tracking may be incomplete. Prefix/legacy record failures only warn;
-state may be partially updated, and suppression is not guaranteed by such a warning.
+because outcome tracking may be incomplete. Prefix/legacy record failures only warn, once per failure via console.warn,
+without rate limiting or host-logger routing; state may be partially updated, and suppression is not guaranteed by such a warning.
 Finite nonpositive `maxLineages` retains no identities or snapshots (fractional caps round
 down by eviction); negative caps do not block the foreground. Only with `suppressOnRefusal: true`, NaN and either infinity
 are normalized to the default cap. With suppression unset or false, cap handling

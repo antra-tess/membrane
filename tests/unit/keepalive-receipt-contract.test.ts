@@ -23,7 +23,7 @@ function setup(send: any, onCall?: (call: KeepaliveCall) => void) {
 }
 const response = { stop_reason: 'max_tokens', usage: { cache_read_input_tokens: 10 } };
 
-it('documents request receipts as caller objects, not wire bytes, and pins rawJSON brand loss', async () => {
+it('documents mode-specific request copies and pins opt-in rawJSON brand loss', async () => {
   let serialized = '';
   const { wire, qualify, tick, calls, events } = setup(async (payload: unknown) => {
     serialized = JSON.stringify(payload);
@@ -45,7 +45,9 @@ it('documents request receipts as caller objects, not wire bytes, and pins rawJS
   const guide = readFileSync(new URL('../../docs/keepalive-refusal-suppression.md', import.meta.url), 'utf8');
   const api = readFileSync(new URL('../../src/cache-keepalive.ts', import.meta.url), 'utf8');
   for (const text of [guide, api]) {
-    expect(text).toContain('caller request object, not wire bytes');
+    expect(text).toContain('not wire bytes');
+    expect(text).toContain('Default-off first JSON.stringify/JSON.parse');
+    expect(text).toContain('Opt-in');
     expect(text).toContain('JSON.rawJSON');
   }
 });

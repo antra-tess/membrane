@@ -48,8 +48,10 @@ export type KeepaliveLane = 'stream' | 'complete';
  * SDK-internal retries belong to that invocation. A success copies own enumerable
  * vendor response fields and their usage, including ineffective cache writes.
  * Resolved responses with throwing metadata accessors can instead report errors.
- * Request and response objects are observer-owned copies; recorded request
- * headers are excluded. */
+ * Request and success-response objects are observer-owned copies; an error
+ * receipt's error value is not cloned. Recorded request headers are excluded.
+ * Clone loss drops the receipt: opt-in emits error: receipt-clone-failed;
+ * default-off drops it silently. */
 export type KeepaliveCall = {
   key: string;
   /** The real request's lane whose cache lineage this poke refreshes. */
@@ -57,13 +59,17 @@ export type KeepaliveCall = {
   /** Unix epoch milliseconds when this poke attempt began. */
   startedAt: number;
   durationMs: number;
-  /** Structured clone of the replay's caller request object, not wire bytes.
-   * JSON.rawJSON branding and custom toJSON behavior are not preserved.
-   * Callable fields and, on some runtimes, rawJSON prevent receipt delivery
-   * (receipt-clone-failed).
-   * Before SDK serialization, max_tokens is 0, stream is omitted, and
-   *  its messages are the recorded request's, through the user turn at or after its last one-hour marker,
-   *  or all of them when no user message follows that marker. */
+  /** Observer-owned structured clone of the prepared replay, not wire bytes.
+   * Default-off first JSON.stringify/JSON.parse round-trips the recorded request:
+   * custom toJSON results are retained, callable fields may disappear, and
+   * exact-digit JSON numbers may round before this copy is made.
+   * Opt-in instead prepares from the retained caller request without JSON.parse;
+   * structuredClone loses JSON.rawJSON branding and custom toJSON behavior.
+   * Callable fields and, on some runtimes, rawJSON can then prevent delivery.
+   * Clone loss is silent default-off; opt-in emits error: receipt-clone-failed.
+   * In both modes the prepared replay has max_tokens: 0, omits stream, and trims
+   * messages through the user turn at or after its last one-hour marker,
+   * or retains all messages when no user message follows that marker. */
   request: Record<string, unknown>;
 } & (
   | { outcome: 'success'; response: Record<string, unknown> & { usage?: KeepaliveUsage } }
@@ -125,9 +131,11 @@ export interface CacheKeepaliveConfig {
   /** Each keepalive event as it happens. Throws and rejected promises are ignored. */
   onEvent?: (event: KeepaliveEvent) => void;
   /** Report background calls to the same ledger as foreground inference.
-   * In suppression mode, invoked once on success (including ineffective responses)
-   * or failure; legacy malformed empty responses may emit success then error.
-   * Delivery requires cloneable receipt values; clone failures drop the receipt.
+   * In suppression mode, one delivery attempt on success (including ineffective
+   * responses) or failure; legacy malformed empty responses may emit success then error.
+   * Delivery requires a cloneable prepared request and success response;
+   * error receipt error values are passed through, not cloned.
+   * Clone failures drop the receipt silently in default-off mode.
    * Opt-in mode reports that loss as error: receipt-clone-failed, without
    * changing send-failure accounting or retiring the snapshot.
    * Observer errors are isolated, and returned promises never delay the loop.
@@ -137,8 +145,10 @@ export interface CacheKeepaliveConfig {
    * Expired/disabled entries normally initiate no new calls; default-off replay
    * serialization can reenter stop and still send afterward (legacy behavior).
    * An in-flight sender still delivers its receipt after removal or stop.
-   * Poke serialization failures are reported through onEvent before any sender invocation;
-   * opt-in replay-preparation-failed errors name snapshot retirement without incrementing failures. */
+   * Poke serialization failures reach onEvent before any sender invocation,
+   * except opt-in preparation made obsolete by reentrant stop or replacement:
+   * those failures are silently abandoned. Still-current opt-in failures emit
+   * replay-preparation-failed, naming snapshot retirement without incrementing failures. */
   onCall?: (call: KeepaliveCall) => void | Promise<void>;
 }
 
