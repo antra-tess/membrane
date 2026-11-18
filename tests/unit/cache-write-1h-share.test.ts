@@ -4,10 +4,12 @@
  * are summed, unknown where any part wrote without a split, and taken from
  * the usage event it describes.
  */
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { Membrane } from '../../src/membrane.js';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
-import { TurnUsageAccumulator, sumCacheCreation1h } from '../../src/utils/usage.js';
+import { TurnUsageAccumulator, cacheCreation1h, sumCacheCreation1h } from '../../src/utils/usage.js';
+import { OpenRouterAdapter } from '../../src/providers/openrouter.js';
+import { sseResponse } from '../helpers/sse-fixtures.js';
 import type { ModelPricing, ProviderAdapter, ProviderResponse } from '../../src/types/provider.js';
 import type { NormalizedRequest } from '../../src/types/index.js';
 
@@ -168,5 +170,56 @@ describe('AnthropicAdapter streaming: the split follows the usage event it came 
   it('keeps message_start\'s split when the delta repeats the same total', async () => {
     const response = await streamed(start, { cache_creation_input_tokens: 100 });
     expect(response.usage).toMatchObject({ cacheCreationTokens: 100, cacheCreation1hTokens: 100 });
+  });
+});
+
+describe('the 1-hour member missing from a breakdown', () => {
+  it('leaves the share unknown in complete(), not zero', async () => {
+    const adapter = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { enabled: false } });
+    (adapter as any).client = {
+      messages: {
+        create: async () => ({
+          id: 'msg_5m', model: 'claude-fable-5', content: [{ type: 'text', text: 'ok' }],
+          stop_reason: 'end_turn', stop_sequence: null,
+          usage: { input_tokens: 2, output_tokens: 1, cache_creation_input_tokens: 5_000, cache_read_input_tokens: 0, cache_creation: { ephemeral_5m_input_tokens: 1_000 } },
+        }),
+      },
+    };
+    const response = await adapter.complete({ model: 'claude-fable-5', messages: [{ role: 'user', content: 'hi' } as any], maxTokens: 10 } as any);
+    expect(response.usage.cacheCreationTokens).toBe(5_000);
+    expect('cacheCreation1hTokens' in response.usage).toBe(false);
+  });
+
+  it('is absent from the helper, and a numeric member is kept as given', () => {
+    expect(cacheCreation1h(undefined)).toEqual({});
+    expect(cacheCreation1h({ ephemeral_5m_input_tokens: 10 })).toEqual({});
+    expect(cacheCreation1h({ ephemeral_5m_input_tokens: 10, ephemeral_1h_input_tokens: 0 })).toEqual({ cacheCreation1hTokens: 0 });
+    expect(cacheCreation1h({ ephemeral_1h_input_tokens: 7 })).toEqual({ cacheCreation1hTokens: 7 });
+  });
+});
+
+describe('OpenRouter, an Anthropic-shaped usage', () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
+  const usage = {
+    prompt_tokens: 100, completion_tokens: 2,
+    cache_creation_input_tokens: 1_000, cache_read_input_tokens: 0,
+    cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 1_000 },
+  };
+  const request = { model: 'anthropic/claude-fable-5', messages: [{ role: 'user', content: 'hi' }], maxTokens: 10 } as any;
+
+  it('carries the 1-hour share from complete()', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }], usage,
+    }))));
+    const response = await new OpenRouterAdapter({ apiKey: 'zz-key' }).complete(request);
+    expect(response.usage).toMatchObject({ cacheCreationTokens: 1_000, cacheCreation1hTokens: 1_000 });
+  });
+
+  it('carries the 1-hour share from a stream', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(sseResponse([
+      JSON.stringify({ choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }], usage }),
+    ])));
+    const response = await new OpenRouterAdapter({ apiKey: 'zz-key' }).stream(request, { onChunk: () => {} });
+    expect(response.usage).toMatchObject({ cacheCreationTokens: 1_000, cacheCreation1hTokens: 1_000 });
   });
 });

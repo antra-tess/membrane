@@ -52,6 +52,19 @@ export function sumCacheCreation1h(
   return { cacheCreation1hTokens: (a.cacheCreation1hTokens ?? 0) + (b.cacheCreation1hTokens ?? 0) };
 }
 
+/**
+ * The 1-hour share of a response's cache writes, from the
+ * `usage.cache_creation` breakdown Anthropic reports beside the total — and
+ * that an Anthropic-shaped usage from a router may carry. No breakdown, or a
+ * breakdown without the 1-hour member → no field: the share is unknown, not
+ * zero.
+ */
+export function cacheCreation1h(cacheCreation: unknown): { cacheCreation1hTokens?: number } {
+  if (!cacheCreation || typeof cacheCreation !== 'object') return {};
+  const oneHour = (cacheCreation as Record<string, unknown>).ephemeral_1h_input_tokens;
+  return typeof oneHour === 'number' ? { cacheCreation1hTokens: oneHour } : {};
+}
+
 export function calculateCacheHitRatio(
   usage: { inputTokens: number; cacheCreationTokens?: number; cacheReadTokens?: number },
 ): number {

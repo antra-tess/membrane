@@ -1,4 +1,4 @@
-import { unreportedUsage } from '../utils/usage.js';
+import { cacheCreation1h, unreportedUsage } from '../utils/usage.js';
 import { assertMessagePrefillSupported } from './request-capabilities.js';
 
 import Anthropic, { type ClientOptions } from '@anthropic-ai/sdk';
@@ -244,17 +244,6 @@ export function boundedProviderEvent(event: unknown): unknown {
   if (json === undefined) return null;
   if (json.length <= PROVIDER_EVENT_MAX_CHARS) return JSON.parse(json);
   return { type, truncated: true, json: json.slice(0, PROVIDER_EVENT_MAX_CHARS) };
-}
-
-/**
- * The 1-hour share of a non-streaming response's cache writes, from the
- * `usage.cache_creation` breakdown Anthropic reports beside the total. Absent
- * breakdown → no field, so the split reads as unknown rather than zero.
- */
-function cacheCreation1h(cacheCreation: unknown): { cacheCreation1hTokens?: number } {
-  if (!cacheCreation || typeof cacheCreation !== 'object') return {};
-  const oneHour = (cacheCreation as Record<string, unknown>).ephemeral_1h_input_tokens;
-  return { cacheCreation1hTokens: typeof oneHour === 'number' ? oneHour : 0 };
 }
 
 function sdkRequestId(holder: unknown, key: 'request_id' | '_request_id'): string | undefined {
@@ -742,7 +731,7 @@ export class AnthropicAdapter implements ProviderAdapter {
             cacheCreation5mTokens = typeof cacheCreation.ephemeral_5m_input_tokens === 'number'
               ? cacheCreation.ephemeral_5m_input_tokens : 0;
             cacheCreation1hTokens = typeof cacheCreation.ephemeral_1h_input_tokens === 'number'
-              ? cacheCreation.ephemeral_1h_input_tokens : 0;
+              ? cacheCreation.ephemeral_1h_input_tokens : undefined;
           }
           inferenceGeo = typeof usage.inference_geo === 'string' ? usage.inference_geo : undefined;
           serviceTier = typeof usage.service_tier === 'string' ? usage.service_tier : undefined;
@@ -845,7 +834,7 @@ export class AnthropicAdapter implements ProviderAdapter {
               cacheCreation5mTokens = typeof deltaUsage.cache_creation.ephemeral_5m_input_tokens === 'number'
                 ? deltaUsage.cache_creation.ephemeral_5m_input_tokens : 0;
               cacheCreation1hTokens = typeof deltaUsage.cache_creation.ephemeral_1h_input_tokens === 'number'
-                ? deltaUsage.cache_creation.ephemeral_1h_input_tokens : 0;
+                ? deltaUsage.cache_creation.ephemeral_1h_input_tokens : undefined;
             } else if (totalChanged) {
               hasCacheCreationBreakdown = false;
               cacheCreation5mTokens = undefined;
@@ -904,7 +893,7 @@ export class AnthropicAdapter implements ProviderAdapter {
           inputTokens,
           outputTokens,
           cacheCreationTokens,
-          ...(hasCacheCreationBreakdown ? { cacheCreation1hTokens: cacheCreation1hTokens ?? 0 } : {}),
+          ...(hasCacheCreationBreakdown && cacheCreation1hTokens != null ? { cacheCreation1hTokens } : {}),
           cacheReadTokens,
         },
         ...unreportedUsage(inputReported ? inputTokens : undefined, outputReported ? outputTokens : undefined),
