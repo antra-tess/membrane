@@ -308,9 +308,16 @@ export class CacheKeepalive {
       this.lineages.delete(oldest);
       this.emit({ type: 'skipped', key: oldest, reason: 'outcome-lru-eviction' });
     }
+    if (this.stopped) return undefined;
     const handle = Object.freeze({ key }) as KeepaliveAttempt;
     this.attempts.set(handle, { key, state, sequence, wire, headers, lane, purpose, sentAt });
     return handle;
+  }
+
+  /** Adapter transport body: send the captured JSON, not caller-owned serializers.
+   * Trusted transport callers must not mutate this body. */
+  requestForAttempt(handle: KeepaliveAttempt): Record<string, unknown> | undefined {
+    return this.attempts.get(handle)?.wire;
   }
 
   private current(attempt: AttemptData): boolean {
@@ -523,7 +530,10 @@ export class CacheKeepalive {
       // the failure run. Subsequent comparisons must use captured primitives.
       const read = this.cfg.suppressOnRefusal ? Number(rawRead) : rawRead;
       const wrote = this.cfg.suppressOnRefusal ? Number(rawWrote) : rawWrote;
-      if (this.cfg.suppressOnRefusal) this.consecutiveErrors = 0;
+      if (this.cfg.suppressOnRefusal) {
+        if (!Number.isFinite(read) || !Number.isFinite(wrote)) throw new Error('Non-finite keepalive usage');
+        this.consecutiveErrors = 0;
+      }
       // Usage accessors, like receipt observers, may replace or stop this key.
       if (this.cfg.suppressOnRefusal &&
           (this.stopped || this.lineages.get(key) !== lin || this.outcomes.get(key) !== state)) return;
@@ -626,6 +636,7 @@ export class CacheKeepalive {
     }
     this.lineages.clear();
     this.outcomes.clear();
+    this.attempts = new WeakMap();
     if (reason && !wasStopped) this.emit({ type: 'disabled', reason });
   }
 }

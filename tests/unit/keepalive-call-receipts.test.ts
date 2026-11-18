@@ -141,9 +141,14 @@ describe('keepalive terminal call receipts', () => {
     for (const config of [
       { enabled: false }, { maxIdleMs: 50 }, { lanes: ['complete'] as const },
     ]) {
-      const { ka, calls } = setup(vi.fn(), config as CacheKeepaliveConfig);
+      const { ka, calls, events } = setup(vi.fn(), config as CacheKeepaliveConfig);
       ka.record(wire(), undefined, 'stream');
+      if ('maxIdleMs' in config) expect(ka.getStatus()).toHaveLength(1);
       await vi.advanceTimersByTimeAsync(200);
+      if ('maxIdleMs' in config) {
+        expect(ka.getStatus()).toEqual([]);
+        expect(events).toEqual([expect.objectContaining({ type: 'expired' })]);
+      }
       expect(calls).toEqual([]);
     }
     const { ka, calls } = setup(vi.fn());

@@ -174,12 +174,18 @@ define restoration of suppression separately; no persistence is implemented.
 No provider behavior, billing, TTL extension, savings, refusal avoidance, live
 compatibility, merge or release claim follows from the fake-only tests.
 
-If caller-owned key serialization reenters keepalive, the outer attempt cannot
+If caller-owned key serialization advances the keepalive sequence (by beginning
+an attempt or suppressing a key), the outer attempt cannot
 qualify or update a snapshot: intervening work may have refused and evicted its
 identity. Its handle still reports a later refusal against a currently retained
-key. This conservatively excludes even unrelated serialization reentry from
-successful qualification; ordinary subsequent requests can qualify normally.
+key. This conservatively excludes even unrelated sequence-advancing reentry from
+successful qualification. Read-only calls such as `getStatus()` and normal
+completion of another attempt do not advance the sequence and are not excluded;
+ordinary subsequent requests can qualify normally.
 
 With suppression enabled, `begin` captures an owned JSON wire copy and numeric
-send time before hashing. Later caller mutation cannot change the replay identity.
+send time before hashing. The adapter sends this same owned body to the SDK, so
+caller serializers run only once and later caller mutation cannot change the
+transport or replay identity. Trusted low-level transport integrations can obtain
+that body with `requestForAttempt`; they must not mutate it.
 Serialization failure stops adapter keepalive rather than weakening refusal tracking.

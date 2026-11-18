@@ -7,6 +7,6 @@ it('publish and contributor typechecks run the exhaustive event compatibility fi
   expect(read('.github/workflows/publish.yml')).toMatch(/name: Type-check\s+run: npm run typecheck/);
   expect(read('CONTRIBUTING.md')).toMatch(/npm run typecheck\s+# typecheck/);
   const pkg = JSON.parse(read('package.json'));
-  expect(pkg.scripts.typecheck).toContain('tsc -p tsconfig.compatibility.json');
+  expect(pkg.scripts.typecheck).toBe('tsc --noEmit && tsc -p tsconfig.compatibility.json');
   expect(JSON.parse(read('tsconfig.compatibility.json')).include).toContain('tests/unit/keepalive-event-compatibility.types.ts');
 });

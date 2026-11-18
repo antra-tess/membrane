@@ -93,13 +93,16 @@ it('onCall reentrancy cannot refresh a stopped keeper', async () => {
 it('older success cannot replace a newer snapshot even without refusal', () => {
   const { k, begin } = setup();
   const old = begin();
+  vi.advanceTimersByTime(5);
   const newerWire = wire();
+  newerWire.messages[0].content = 'newer request';
   const newer = begin('normal', newerWire);
   k.prefix(newer); k.finish(newer, 'end_turn');
   vi.advanceTimersByTime(10);
   k.prefix(old); k.finish(old, 'end_turn');
   expect(k.getStatus()[0].realIdleMs).toBe(10);
-  // The owned wire content is more meaningful than the shared timestamp.
+  expect(k.getStatus()[0].idleMs).toBe(10);
+  // Same lineage key, distinct messages and send times reveal stale replacement.
   expect((k as any).lineages.get(old.key).wire).toEqual(newerWire);
 });
 
@@ -688,11 +691,15 @@ it.each(['prefix', 'finish'])('eligibility accessor stop invalidates %s', operat
 it('eligibility accessor newer prefix cannot be overwritten by the outer prefix', () => {
   const { k, begin, normal } = setup(); normal();
   const w = wire(), attempt = begin('normal', w), freshWire = wire();
+  freshWire.messages[0].content = 'newer reentrant request';
   Object.defineProperty((k as any).attempts.get(attempt).wire, 'tool_choice', { get() {
+    vi.advanceTimersByTime(5);
     const fresh = begin('normal', freshWire); k.prefix(fresh);
     return undefined;
   } });
   k.prefix(attempt);
+  expect(k.getStatus()[0].realIdleMs).toBe(0);
+  expect(k.getStatus()[0].idleMs).toBe(0);
   expect((k as any).lineages.get(attempt.key).wire).toEqual(freshWire);
 });
 
@@ -985,4 +992,35 @@ it.each(['excluded', 'registered'])('finish does not rescan discarded eligibilit
   Object.defineProperty(owned, 'messages', { get: read }); // Internal scan instrumentation.
   k.finish(a, 'end_turn');
   expect(read).not.toHaveBeenCalled();
+});
+
+it.each(['cache_read_input_tokens', 'cache_creation_input_tokens'] as const)('non-finite %s counts toward shutdown', async field => {
+  for (const value of ['not-a-number', NaN, Infinity, -Infinity]) {
+    const { k, normal, events } = setup(async () => ({ ...ok, usage: { ...ok.usage, [field]: value } }), { maxConsecutiveErrors: 2 });
+    normal();
+    await vi.advanceTimersByTimeAsync(200);
+    expect(events.map(e => e.type)).toEqual(['error', 'error', 'disabled']);
+    expect(k.getStatus()).toEqual([]);
+  }
+});
+
+it('stop releases attempt data even while its handle is retained', () => {
+  const { k, begin } = setup();
+  const handle = begin();
+  expect(k.requestForAttempt(handle)).toBeDefined();
+  k.stop();
+  expect(k.requestForAttempt(handle)).toBeUndefined();
+  k.prefix(handle); k.finish(handle, 'end_turn');
+  expect(k.getStatus()).toEqual([]);
+});
+
+
+it('eviction observer stop cannot retain a newly begun attempt', () => {
+  let k!: CacheKeepalive;
+  const state = setup(undefined, { maxLineages: 1, onEvent: () => k.stop() });
+  k = state.k;
+  const old = state.begin();
+  expect(state.begin('normal', wire('other'))).toBeUndefined();
+  expect(k.requestForAttempt(old)).toBeUndefined();
+  expect(k.getStatus()).toEqual([]);
 });
