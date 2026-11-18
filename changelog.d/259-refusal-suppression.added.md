@@ -3,8 +3,10 @@
   known-normal foreground completion. Legacy behavior remains the default.
 - Low-level keeper callers enabling suppression must migrate from `record` alone
   to `begin`/`prefix`/`finish`, and senders must return raw `stop_reason` alongside
-  usage. Missing or unknown refresh terminals retire the snapshot with an
-  `onDiagnostic` notice prefixed `unknown-refresh-terminal` (no failure-count increment) rather than repeatedly resending it. `KeepaliveAttempt` is an
+  usage. Missing or unknown refresh terminals retire the snapshot only while the
+  keeper is running and both that snapshot and its retained outcome identity are
+  still current. Retirement emits `unknown-refresh-terminal` via `onDiagnostic`
+  if configured, without incrementing the failure count. `KeepaliveAttempt` is an
   opaque issuer-specific handle exposing only a read-only key, exported from the
   package root. `KeepaliveSend` accepts an optional `stop_reason: unknown` field;
   pre-existing custom senders remain assignable without opting in.
@@ -74,16 +76,20 @@
 - Opt-in ineffective retirement completes before notifying observers, so a new
   same-key request begun by the observer retains a valid outcome identity.
 - With refusal suppression enabled, retain SDK-native request values without a lossy JSON parse round trip
-  (caller mutation and custom serialization are outside the identity guarantee), reject non-finite refresh usage as a processing failure, and release
-  live attempt data on stop. Default-off scheduling remains unchanged.
+  (caller mutation and custom serialization are outside the identity guarantee)
+  and release live attempt data on stop. The running keeper rejects non-finite
+  coerced cache usage as a processing failure only for a known-normal refresh
+  whose snapshot and outcome identity are still current after receipt processing.
+  Default-off scheduling remains unchanged.
 - With refusal suppression enabled, honor newer ineligible prefix ordering after
   refusal and release finished attempt data even when opaque handles are retained.
 - With refusal suppression enabled, recheck stop after admission accessors and
   measure error receipts at sender settlement, excluding later suppression observers.
-- Capture Anthropic foreground terminal stop reasons only when keepalive is
-  enabled and refusal suppression is opted in. Own and inherited properties
-  (including initially-undefined getters) and non-undefined values are frozen
-  for subsequent parsing. Refusal suppression precedes unrelated response/event
+- Capture Anthropic foreground terminal stop reasons when the adapter has a keeper
+  (`enabled: false` bypasses it) and refusal suppression is opted in. Non-undefined
+  values are copied to a writable data property for parsing; undefined is copied
+  only if a subsequent descriptor or prototype lookup still finds `stop_reason`.
+  Refusal suppression precedes unrelated response/event
   getters, including streamed usage.
 - Opt-in idle expiry is rechecked for each lineage after earlier refreshes settle and immediately before send, after replay preparation.
 - Foreground terminal capture preserves missing raw `stop_reason` properties.

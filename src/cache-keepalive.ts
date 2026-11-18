@@ -136,7 +136,10 @@ export interface CacheKeepaliveConfig {
   maxLineages?: number;
   /** Adapter-global consecutive send/response-processing failures before disabling. Default 3.
    * A successfully processed refresh of any key resets the run; not a per-key budget.
-   * Suppression mode counts usage access/coercion failures, but not replay preparation.
+   * Suppression mode checks cache usage only for known-normal refreshes while
+   * the keeper is running and the replayed snapshot and outcome identity are
+   * still current after receipt processing. Usage access/coercion failures and
+   * non-finite coerced values count as failures, but replay preparation does not.
    * Default-off matches legacy: preparation/send failures accumulate, but a resolved
    * send resets the counter after receipt copying and before usage processing, so
    * usage errors restart at 1; throwing enumerable response getters precede that reset. */
@@ -160,7 +163,10 @@ export interface CacheKeepaliveConfig {
    * skipped only reports removal of an ineligible snapshot, before any send.
    * Opt-in operational notices go to onDiagnostic, never onEvent.
    * Eviction, receipt loss and unknown terminals do not increment consecutive
-   * failures; an unknown refresh terminal retires the snapshot after a send.
+   * failures. An unknown refresh terminal retires the replayed snapshot and
+   * reports unknown-refresh-terminal via onDiagnostic (if configured) only
+   * while the keeper is running and that snapshot and its outcome identity
+   * are still current.
    * Expired/disabled entries normally initiate no new calls; default-off replay
    * serialization can reenter stop and still send afterward (legacy behavior).
    * An in-flight sender still delivers its receipt after removal or stop.

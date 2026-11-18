@@ -53,17 +53,25 @@ the replay snapshot. Response copies contain only own enumerable properties;
 inherited/non-enumerable metadata can affect suppression without appearing in receipts. Without `onCall`, no receipts are delivered.
 With suppression enabled, a refresh with a missing/null/unrecognized raw terminal reason
 never emits `refreshed` or advances its refresh timestamp;
-usage alone isn't evidence of a known terminal outcome. It removes the replay
-snapshot and reports `unknown-refresh-terminal` through `onDiagnostic`,
-while retaining outcome identity/barrier state. A later
+usage alone isn't evidence of a known terminal outcome. Only if the keeper is
+still running and both the replayed snapshot and its retained outcome identity
+are still current does it retire that snapshot and report
+`unknown-refresh-terminal` through `onDiagnostic` (if configured).
+It retains the outcome identity and barrier state. Without `onCall`, a stale
+unknown resolution with readable metadata produces neither a receipt nor an
+unknown-terminal notice. A later
 foreground prefix may register a new snapshot if the identity is still qualified.
 This is retirement, not a new retry/backoff policy; an unknown refresh is never
 resent on every timer check. Default-off does not classify the terminal: positive
 reads with no cache writes can emit `refreshed` and advance the timestamp even
 if the raw stop reason is missing. Successfully processed resolutions reset consecutive send/response-processing
 errors, including refusals, empty responses and unknown terminals in suppression
-mode. For a current known-normal refresh, usage fields must also be readable
-and numerically coercible before resetting that counter. Default-off preserves
+mode. Only a known-normal refresh is checked for finite usage, and only if the
+keeper is running and both its snapshot and outcome identity are still current
+after receipt processing. The two cache
+usage counters default to zero when nullish, and unreadable, non-coercible or
+non-finite values after numeric coercion count as processing failures.
+Default-off preserves
 legacy accounting: a resolved send resets the counter after response metadata
 is copied for its receipt and before usage processing,
 so repeated null/undefined response or usage-processing errors report 1 on each
@@ -92,11 +100,11 @@ Initial eligibility (including after eviction or idle/ineffective retirement)
 requires a known-normal
 foreground completion too; a prefix alone never qualifies a fresh opt-in identity.
 Only a normal foreground request **begun after the accepted refusal** can rearm,
-and only with raw terminal `end_turn`, `stop_sequence`, `tool_use`, `max_tokens`
+and only with raw terminal `end_turn`, `stop_sequence`, `tool_use`, `max_tokens`,
 `pause_turn`, or `model_context_window_exceeded`. Missing/null/unknown terminal, transport error,
 cancellation observed before the adapter's finish(), timer replay and declared
-maintenance do not rearm. Complete-response parse
-errors do not rearm; stream qualification precedes final response assembly
+maintenance do not rearm (see the terminal capture caveat below for custom
+getters). Complete-response parse errors do not rearm; stream qualification precedes final response assembly
 (see the boundary below). Terminal
 parse fallbacks are not used. Begin order and refusal barriers use monotonic
 identities, not timestamps: equal clock readings and older in-flight successes
@@ -114,10 +122,11 @@ throws and rejected promises are isolated. Reason prefixes identify receipt loss
 replay preparation failure, unknown refresh/foreground terminals, outcome-LRU
 eviction, detached attempts and ineligible prefixes without a snapshot. Unknown terminals
 observed on foreground attempt handles report `unknown-foreground-terminal` even
-for fresh keys with no replay snapshot. A stopped keeper or an opt-in cap below
-one issues no attempt handle and thus no such notice. Unknown terminals cannot
+for fresh keys with no replay snapshot. Stopped keepers and finite caps below one in
+opt-in mode yield no attempt handle and thus no such notice. Unknown terminals cannot
 qualify or rearm keepalive even if response parsing falls back to
-`end_turn`. At `maxIneffective`, `ineffective-retirement` reports the consecutive
+`end_turn`; a custom getter changing the raw value is not a parse fallback.
+At `maxIneffective`, `ineffective-retirement` reports the consecutive
 ineffective count after removing the snapshot and identity. The existing
 `ineffective` event still reports the usage outcome on every ineffective refresh.
 Default-off emits none of these diagnostics.
@@ -239,12 +248,18 @@ snapshot; finishing does not remove that snapshot or release its references.
 Retaining an unfinished handle retains attempt references despite the lineage cap.
 `record` is the legacy prefix-accounting API and is ignored entirely with suppression enabled,
 even for qualified keys; it cannot carry begin identity or ordering.
-Terminal capture (with keepalive enabled and suppression opted in) initially
+Terminal capture (with an adapter keeper present and suppression opted in) initially
 reads `stop_reason` by ordinary property access,
-without a presence check. It freezes that value in the copied terminal when it is
+without a presence check. It copies that value into a writable data property when it is
 non-undefined or an own or inherited property exists. In either case an
 initially-undefined getter becomes an own data property with value `undefined`;
-genuinely missing raw properties remain absent.
+genuinely missing raw properties remain absent. In complete(), a custom
+`content` getter can rewrite `this.stop_reason` during parsing: a captured
+`end_turn` rewritten to `refusal` makes parsing report refusal, but the
+post-parse guard skips finish, so an existing replay snapshot can survive.
+An initially unknown value rewritten to a normal one can instead qualify.
+Use `enabled: false` to bypass capture; other falsy values
+such as `null` or an explicit `undefined` can stop the keeper without bypassing capture.
 The initial getter/get trap
 necessarily runs before suppression; a returned refusal is applied before prototype/descriptor traps and unrelated
 terminal metadata reads. Raw stream refusal is observed before progress callbacks or terminal parsing; a
