@@ -21,6 +21,7 @@ export type {
   CacheKeepaliveConfig,
   KeepaliveEvent,
   KeepaliveSuppression,
+  KeepaliveDiagnostic,
   KeepaliveCall,
   KeepaliveUsage,
   KeepaliveLane,

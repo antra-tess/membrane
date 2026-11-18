@@ -9,7 +9,7 @@ import { Membrane } from '../../src/membrane.js';
 import { NativeFormatter } from '../../src/formatters/native.js';
 import { AnthropicXmlFormatter } from '../../src/formatters/anthropic-xml.js';
 import { AnthropicAdapter } from '../../src/index.js';
-import { lineageKey, type CacheKeepaliveConfig, type KeepaliveEvent, type KeepaliveSuppression } from '../../src/cache-keepalive.js';
+import { lineageKey, type CacheKeepaliveConfig, type KeepaliveDiagnostic, type KeepaliveEvent, type KeepaliveSuppression } from '../../src/cache-keepalive.js';
 
 const START = Date.parse('2026-10-19T00:00:00Z');
 const timing = { refreshAfterMs: 100, checkIntervalMs: 100, maxIdleMs: 10_000 };
@@ -79,8 +79,8 @@ function heldStream(gate: Promise<unknown>, events: unknown[]) {
 
 const adapters: AnthropicAdapter[] = [];
 function adapter(config: CacheKeepaliveConfig, create: (wire: any) => unknown, stream?: (wire: any) => unknown) {
-  const events: (KeepaliveEvent | KeepaliveSuppression)[] = [];
-  const a = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { ...timing, ...config, onSuppressed: e => { events.push(e); }, onEvent: e => { events.push(e); } } });
+  const events: (KeepaliveEvent | KeepaliveSuppression | KeepaliveDiagnostic)[] = [];
+  const a = new AnthropicAdapter({ apiKey: 'sk-test', cacheKeepalive: { ...timing, ...config, onSuppressed: e => { events.push(e); }, onDiagnostic: e => { events.push(e); }, onEvent: e => { events.push(e); } } });
   adapters.push(a);
   const sent: any[] = [];
   const client: any = {
@@ -618,7 +618,7 @@ it.each([false, true])('public adapter reports outcome-cap eviction (existing sn
   const pending = gates.map((_, i) => a.complete(request(`key-${i}`)));
   expect(next).toBe(5);
   expect(events).toEqual([{
-    type: 'error', key, error: 'outcome-lru-eviction: maxLineages cap exceeded', consecutive: 0,
+    type: 'diagnostic', key, reason: 'outcome-lru-eviction: maxLineages cap exceeded',
   }]);
   expect(a.cacheKeepalive!.getStatus()).toEqual([]);
   // Both success qualification and refusal observation lose the evicted identity.
@@ -724,4 +724,69 @@ it.each([false, true])('complete raw preserves absent terminal metadata (suppres
   const { a } = adapter({ suppressOnRefusal, lanes: ['complete'] }, () => missing);
   const result = await a.complete(request('missing terminal'));
   expect(Object.hasOwn(result.raw as object, 'stop_reason')).toBe(false);
+});
+
+for (const lane of ['complete', 'stream'] as const) {
+  it.each(['ownKeys', 'getPrototypeOf'] as const)(`Membrane ${lane} suppresses refusal before a throwing %s capture trap`, async trap => {
+    let refusing = false;
+    let reads = 0;
+    const failure = new Error(`terminal ${trap} trap`);
+    const terminal = () => new Proxy(lane === 'complete' ? { ...answer, stop_reason: 'refusal' } : { stop_reason: 'refusal' }, {
+      get(target, key, receiver) {
+        if (key === 'stop_reason') reads++;
+        return Reflect.get(target, key, receiver);
+      },
+      [trap]() { throw failure; },
+    });
+    const { a, replays, events } = adapter({ suppressOnRefusal: true, lanes: [lane] },
+      () => refusing ? terminal() : answer,
+      () => sdkStream([messageStart, { type: 'message_delta', delta: refusing ? terminal() : { stop_reason: 'end_turn' }, usage: readUsage }]));
+    const membrane = new Membrane(a, { formatter: new NativeFormatter() });
+    const req = {
+      messages: [{ participant: 'User', content: [{ type: 'text' as const, text: 'hi' }] }],
+      system: 'throwing capture trap', config: { model: 'claude-opus-4-1', maxTokens: 1024 },
+      promptCaching: true, cacheTtl: '1h' as const, toolMode: 'native' as const,
+    };
+    const run = () => lane === 'complete' ? membrane.complete(req, { refusalRetries: 0 })
+      : membrane.stream(req, { onChunk: () => {}, refusalRetries: 0 });
+    await run();
+    expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
+    refusing = true;
+    await expect(run()).rejects.toThrow(failure.message);
+    expect(reads).toBe(1);
+    expect(events.filter(e => e.type === 'suppressed')).toEqual([
+      expect.objectContaining({ source: 'foreground' }),
+    ]);
+    expect(a.cacheKeepalive!.getStatus()).toEqual([]);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(replays()).toEqual([]);
+  });
+}
+
+it.each(['complete', 'stream'] as const)('Membrane %s reports unknown foreground terminals on fresh and refused keys', async lane => {
+  let reason: string | undefined;
+  const { a, events, replays } = adapter({ suppressOnRefusal: true, lanes: [lane] },
+    () => ({ ...answer, stop_reason: reason }),
+    () => sdkStream([messageStart, { type: 'message_delta', delta: { stop_reason: reason }, usage: readUsage }]));
+  const membrane = new Membrane(a, { formatter: new NativeFormatter() });
+  const req = {
+    messages: [{ participant: 'User', content: [{ type: 'text' as const, text: 'hi' }] }],
+    system: 'unknown foreground', config: { model: 'claude-opus-4-1', maxTokens: 1024 },
+    promptCaching: true, cacheTtl: '1h' as const, toolMode: 'native' as const,
+  };
+  const run = () => lane === 'complete' ? membrane.complete(req, { refusalRetries: 0 })
+    : membrane.stream(req, { onChunk: () => {}, refusalRetries: 0 });
+  expect((await run()).stopReason).toBe('end_turn');
+  expect(a.cacheKeepalive!.getStatus()).toEqual([]);
+  reason = 'refusal'; await run();
+  reason = undefined;
+  expect((await run()).stopReason).toBe('end_turn');
+  expect(a.cacheKeepalive!.getStatus()).toEqual([]);
+  expect(events.filter(e => e.type === 'diagnostic')).toEqual([
+    expect.objectContaining({ reason: 'unknown-foreground-terminal: completion cannot qualify or rearm keepalive' }),
+    expect.objectContaining({ reason: 'unknown-foreground-terminal: completion cannot qualify or rearm keepalive' }),
+  ]);
+  expect(events.some(e => e.type === 'error')).toBe(false);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(replays()).toEqual([]);
 });

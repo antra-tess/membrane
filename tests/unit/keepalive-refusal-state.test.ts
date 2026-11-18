@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { CacheKeepalive, lineageKey, type KeepaliveCall, type KeepaliveEvent, type KeepaliveSuppression } from '../../src/cache-keepalive.js';
+import { CacheKeepalive, lineageKey, type KeepaliveCall, type KeepaliveDiagnostic, type KeepaliveEvent, type KeepaliveSuppression } from '../../src/cache-keepalive.js';
 const wire = (model = 'claude-test') => ({ model, system: [{ type: 'text', text: 'system', cache_control: { type: 'ephemeral', ttl: '1h' } }], messages: [{ role: 'user', content: 'hi' }] });
 const ok = { stop_reason: 'max_tokens', usage: { cache_read_input_tokens: 100, cache_creation_input_tokens: 0 } };
 const keepers: CacheKeepalive[] = [];
 function setup(send: any = async () => ok, extra: any = {}) {
-  const calls: KeepaliveCall[] = [], events: (KeepaliveEvent | KeepaliveSuppression)[] = [];
-  const k = new CacheKeepalive(send, { suppressOnRefusal: true, refreshAfterMs: 100, checkIntervalMs: 100, maxIdleMs: 1000, onCall: c => { calls.push(c); }, onSuppressed: e => { events.push(e); }, onEvent: e => { events.push(e); }, ...extra });
+  const calls: KeepaliveCall[] = [], events: (KeepaliveEvent | KeepaliveSuppression | KeepaliveDiagnostic)[] = [];
+  const k = new CacheKeepalive(send, { suppressOnRefusal: true, refreshAfterMs: 100, checkIntervalMs: 100, maxIdleMs: 1000, onCall: c => { calls.push(c); }, onSuppressed: e => { events.push(e); }, onDiagnostic: e => { events.push(e); }, onEvent: e => { events.push(e); }, ...extra });
   keepers.push(k);
   const begin = (purpose: 'normal' | 'maintenance' = 'normal', w = wire()) => k.begin(w, undefined, 'stream', purpose)!;
   const normal = () => { const a = begin(); k.prefix(a); k.finish(a, 'end_turn'); return a; };
@@ -30,7 +30,7 @@ it.each([null, undefined, 'future_stop'])('unknown refresh %s never claims refre
   const { normal, events, calls } = setup(async () => ({ ...ok, stop_reason: reason }));
   normal(); await vi.advanceTimersByTimeAsync(100);
   expect(calls).toHaveLength(1);
-  expect(events).toEqual([{ type: 'error', key: lineageKey(wire()), error: 'unknown-refresh-terminal: replay snapshot retired', consecutive: 0 }]);
+  expect(events).toEqual([{ type: 'diagnostic', key: lineageKey(wire()), reason: 'unknown-refresh-terminal: replay snapshot retired' }]);
   await vi.advanceTimersByTimeAsync(500);
   expect(calls).toHaveLength(1);
 });
@@ -170,10 +170,10 @@ it.each(['refusal', null, 'future_stop'])('resolved %s refresh breaks consecutiv
   }
   await vi.advanceTimersByTimeAsync(100);
   expect(send).toHaveBeenCalledTimes(3);
-  expect(events.filter(e => e.type === 'error' && !e.error.startsWith('unknown-refresh-terminal')).map(e => e.consecutive)).toEqual([1, 1]);
+  expect(events.filter(e => e.type === 'error').map(e => e.consecutive)).toEqual([1, 1]);
   if (reason !== 'refusal') {
     expect(events).toContainEqual(expect.objectContaining({
-      type: 'error', error: 'unknown-refresh-terminal: replay snapshot retired', consecutive: 1,
+      type: 'diagnostic', reason: 'unknown-refresh-terminal: replay snapshot retired',
     }));
   }
   expect(events.some(e => e.type === 'disabled')).toBe(false);
@@ -229,7 +229,8 @@ it('unrelated excluded/ineligible traffic cannot evict eligible outcomes', () =>
   }
   expect(k.getStatus()).toHaveLength(1);
   expect((k as any).outcomes.size).toBe(1);
-  expect(events).toEqual([]);
+  expect(events).toHaveLength(4);
+  expect(events.every(e => e.type === 'diagnostic' && e.reason.startsWith('unknown-foreground-terminal'))).toBe(true);
   k.prefix(pending); k.finish(pending, 'end_turn'); expect(k.getStatus()).toHaveLength(1);
 });
 
@@ -308,8 +309,8 @@ it('uncloneable custom response drops its receipt without losing refresh process
   const { normal, calls, events } = setup(async () => ({ ...ok, custom: () => {} }));
   normal(); await vi.advanceTimersByTimeAsync(100);
   expect(calls).toEqual([]);
-  expect(events.map(e => e.type)).toEqual(['error', 'refreshed']);
-  expect(events[0]).toMatchObject({ type: 'error', error: 'receipt-clone-failed: receipt dropped', consecutive: 0 });
+  expect(events.map(e => e.type)).toEqual(['diagnostic', 'refreshed']);
+  expect(events[0]).toMatchObject({ type: 'diagnostic', reason: 'receipt-clone-failed: receipt dropped' });
 });
 
 
@@ -350,7 +351,7 @@ it.each(['inflight replacement', 'error observer'])('global send-error limit sur
   let reject!: (e: Error) => void;
   let replace!: () => void;
   let replacementSnapshot: unknown;
-  const events: (KeepaliveEvent | KeepaliveSuppression)[] = [];
+  const events: (KeepaliveEvent | KeepaliveSuppression | KeepaliveDiagnostic)[] = [];
   const { k, normal, begin, calls } = setup(() => new Promise((_r, j) => { reject = j; }), {
     maxConsecutiveErrors: 1,
     onEvent: (e: KeepaliveEvent) => {
@@ -380,7 +381,7 @@ it('eviction of pending outcome identities reports the cap and invalidates old h
   const { k, begin, events } = setup(undefined, { maxLineages: 1 });
   const old = begin();
   const other = begin('normal', wire('other'));
-  expect(events).toEqual([{ type: 'error', key: old.key, error: 'outcome-lru-eviction: maxLineages cap exceeded', consecutive: 0 }]);
+  expect(events).toEqual([{ type: 'diagnostic', key: old.key, reason: 'outcome-lru-eviction: maxLineages cap exceeded' }]);
   k.finish(old, 'end_turn'); expect(k.getStatus()).toEqual([]);
   k.finish(other, 'end_turn'); expect(k.getStatus()[0].key).toBe(other.key);
 });
@@ -455,7 +456,7 @@ it.each([null, undefined])('empty resolved refresh %s resets send failures and r
   normal();
   await vi.advanceTimersByTimeAsync(200);
   expect(calls.map(c => c.outcome)).toEqual(['error', 'success']);
-  expect(events.map(e => e.type)).toEqual(['error', 'error']);
+  expect(events.map(e => e.type)).toEqual(['error', 'diagnostic']);
   expect(k.getStatus()).toEqual([]);
   // A new failed send must start a fresh run, not disable the keeper.
   send.mockRejectedValue(new Error('new outage'));
@@ -478,7 +479,10 @@ it.each(['cycle', 'toJSON'])('replay %s preparation errors retire the snapshot w
   expect(send).toHaveBeenCalledTimes(1);
   expect(calls.map(c => c.outcome)).toEqual(['error']);
   expect(events).toHaveLength(2);
-  expect(events.every(e => e.type === 'error' && e.consecutive === 1)).toBe(true);
+  expect(events).toEqual([
+    expect.objectContaining({ type: 'error', consecutive: 1 }),
+    expect.objectContaining({ type: 'diagnostic', reason: expect.stringContaining('replay-preparation-failed') }),
+  ]);
   expect(k.getStatus()).toHaveLength(0);
   expect((k as any).outcomes.has(a.key)).toBe(true);
   delete w.circular; delete w.toJSON;
@@ -550,7 +554,7 @@ it.each([false, true])('receipt stop rechecks remain opt-in (%s)', async suppres
 
 it.each([false, true])('reasoned error observer stop emits disabled only once (%s)', async suppressOnRefusal => {
   let k!: CacheKeepalive;
-  const events: (KeepaliveEvent | KeepaliveSuppression)[] = [];
+  const events: (KeepaliveEvent | KeepaliveSuppression | KeepaliveDiagnostic)[] = [];
   const state = setup(async () => { throw new Error('outage'); }, {
     suppressOnRefusal, maxConsecutiveErrors: 1, onEvent: (e: KeepaliveEvent) => {
       events.push(e); if (e.type === 'error') k.stop('operator stop');
@@ -840,7 +844,7 @@ it('repeated usage-processing errors reach the send failure threshold', async ()
   const { normal, events, k } = setup(async () => ({ stop_reason: 'max_tokens', usage }), { maxConsecutiveErrors: 3 });
   normal();
   await vi.advanceTimersByTimeAsync(300);
-  expect(events.filter(e => e.type === 'error' && !e.error.startsWith('receipt-clone-failed')).map(e => e.consecutive)).toEqual([1, 2, 3]);
+  expect(events.filter(e => e.type === 'error').map(e => e.consecutive)).toEqual([1, 2, 3]);
   expect(events.some(e => e.type === 'disabled')).toBe(true);
   expect(k.getStatus()).toEqual([]);
 });
@@ -852,7 +856,7 @@ it('unprintable preparation errors retire the snapshot and emit a diagnostic', a
   Object.assign((k as any).lineages.values().next().value.wire, { toJSON() { throw Object.create(null); } });
   await vi.advanceTimersByTimeAsync(100);
   expect(k.getStatus()).toEqual([]);
-  expect(events).toEqual([expect.objectContaining({ type: 'error', error: 'replay-preparation-failed: replay snapshot retired; Unprintable keepalive error', consecutive: 0 })]);
+  expect(events).toEqual([expect.objectContaining({ type: 'diagnostic', reason: 'replay-preparation-failed: replay snapshot retired; Unprintable keepalive error' })]);
 });
 
 it('model context window terminal qualifies fresh and post-refusal attempts', () => {
@@ -896,8 +900,8 @@ it('hashing reentered by an unrelated key retains a handle for a later refusal',
   } });
   const refusing = begin('normal', w);
   expect(refusing).toBeDefined();
-  expect(events).toContainEqual({ type: 'error', key: lineageKey(wire()),
-    error: 'detached-attempt: serialization reentry prevents qualification', consecutive: 0 });
+  expect(events).toContainEqual({ type: 'diagnostic', key: lineageKey(wire()),
+    reason: 'detached-attempt: serialization reentry prevents qualification' });
   k.prefix(refusing); k.finish(refusing, 'end_turn');
   expect(k.getStatus()).toEqual([]);
   // A separate detached handle still carries a refusal.
@@ -927,10 +931,10 @@ it.each([{}, { suppressOnRefusal: false }])('default-off preserves main per-reso
     { usage: { get cache_read_input_tokens() { throw new Error('bad usage'); } } },
     { usage: { cache_read_input_tokens: Object.create(null) } },
   ]) {
-    const events: KeepaliveEvent[] = [];
+    const events: (KeepaliveEvent | KeepaliveDiagnostic)[] = [];
     const k = new CacheKeepalive(async () => response as any, {
       ...config, refreshAfterMs: 0, maxConsecutiveErrors: 3,
-      onEvent: e => { events.push(e); },
+      onDiagnostic: e => { events.push(e); }, onEvent: e => { events.push(e); },
     });
     keepers.push(k);
     k.record(wire(), undefined, 'stream');
@@ -981,7 +985,7 @@ it('unknown terminal retires replay before an unrelated throwing getter', async 
   await vi.advanceTimersByTimeAsync(300);
   expect(send).toHaveBeenCalledTimes(1);
   expect(k.getStatus()).toEqual([]);
-  expect(events).toContainEqual({ type: 'error', key: lineageKey(wire()), error: 'unknown-refresh-terminal: replay snapshot retired', consecutive: 0 });
+  expect(events).toContainEqual({ type: 'diagnostic', key: lineageKey(wire()), reason: 'unknown-refresh-terminal: replay snapshot retired' });
 });
 
 it('begin touches an existing outcome before LRU eviction', () => {
@@ -1053,7 +1057,7 @@ it('outcome eviction reports removal of a live snapshot', () => {
   const old = begin();
   expect(begin('normal', wire('other'))).toBeDefined();
   expect(k.getStatus()).toEqual([]);
-  expect(events).toEqual([{ type: 'error', key: old.key, error: 'outcome-lru-eviction: maxLineages cap exceeded', consecutive: 0 }]);
+  expect(events).toEqual([{ type: 'diagnostic', key: old.key, reason: 'outcome-lru-eviction: maxLineages cap exceeded' }]);
   k.prefix(old); k.finish(old, 'end_turn');
   expect(k.getStatus()).toEqual([]);
 });
@@ -1112,7 +1116,7 @@ it.each(['max_tokens', 'refusal', 'future_stop'])('clone failure makes no snapsh
   const { k, normal, calls, events } = setup(async () => ({ ...ok, stop_reason, uncloneable() {} }));
   normal(); await vi.advanceTimersByTimeAsync(100);
   expect(calls).toEqual([]);
-  expect(events).toContainEqual({ type: 'error', key: lineageKey(wire()), error: 'receipt-clone-failed: receipt dropped', consecutive: 0 });
+  expect(events).toContainEqual({ type: 'diagnostic', key: lineageKey(wire()), reason: 'receipt-clone-failed: receipt dropped' });
   expect(k.getStatus()).toHaveLength(stop_reason === 'max_tokens' ? 1 : 0);
   expect(events.some(e => e.type === 'refreshed')).toBe(stop_reason === 'max_tokens');
   expect(events.some(e => e.type === 'suppressed')).toBe(stop_reason === 'refusal');
@@ -1222,7 +1226,7 @@ it('outcome eviction leaves failure count unchanged before the next transport fa
   await vi.advanceTimersByTimeAsync(100);
   expect((k as any).consecutiveErrors).toBe(1);
   const other = begin('normal', wire('other'));
-  expect(events.at(-1)).toMatchObject({ type: 'error', error: 'outcome-lru-eviction: maxLineages cap exceeded', consecutive: 1 });
+  expect(events.at(-1)).toMatchObject({ type: 'diagnostic', reason: 'outcome-lru-eviction: maxLineages cap exceeded' });
   expect((k as any).consecutiveErrors).toBe(1);
   k.finish(other, 'end_turn');
   await vi.advanceTimersByTimeAsync(100);

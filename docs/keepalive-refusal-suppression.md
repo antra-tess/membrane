@@ -6,6 +6,7 @@ import { AnthropicAdapter } from '@animalabs/membrane';
 new AnthropicAdapter({ cacheKeepalive: {
   suppressOnRefusal: true,
   onSuppressed: event => console.log(event.key, event.source),
+  onDiagnostic: event => console.log(event.key, event.reason),
 } });
 ```
 
@@ -44,18 +45,15 @@ branding and custom toJSON behavior are not preserved; some runtimes reject
 rawJSON cloning entirely. Function-valued fields
 (such as a metadata toJSON method) can prevent cloning even for valid SDK JSON.
 Receipt delivery is best-effort: clone failures drop the receipt and, in opt-in
-mode, emit `error` with diagnostic prefix `receipt-clone-failed` and an unchanged
-diagnostic-time consecutive count (before the current resolution resets it or
-rejection increments it). Default-off clone loss drops the receipt without a clone-failure diagnostic;
+mode, report `receipt-clone-failed` through `onDiagnostic`, not `onEvent`. Default-off clone loss drops the receipt without a clone-failure diagnostic;
 ordinary refresh events (such as `refreshed`) still fire. Error receipts pass the error value through without cloning it.
 Observer failures are isolated and not retried. Receipt loss does not count as a send failure or retire
 the replay snapshot. Response copies contain only own enumerable properties;
 inherited/non-enumerable metadata can affect suppression without appearing in receipts. Without `onCall`, no receipts are delivered.
 A refresh with missing/null/unrecognized raw terminal reason never emits `refreshed` or advances its refresh timestamp;
 usage alone isn't evidence of a known terminal outcome. It removes the replay
-snapshot and emits `error` with diagnostic prefix
-`unknown-refresh-terminal` (without incrementing consecutive failures, using the
-count before this resolution's reset), while retaining outcome identity/barrier state. A later
+snapshot and reports `unknown-refresh-terminal` through `onDiagnostic`,
+while retaining outcome identity/barrier state. A later
 foreground prefix may register a new snapshot if the identity is still qualified.
 This is retirement, not a new retry/backoff policy; an unknown refresh is never
 resent on every timer check. Successfully processed resolutions reset consecutive send/response-processing
@@ -69,7 +67,7 @@ refresh rather than accumulating toward the default threshold. Preparation and
 rejected-send failures still accumulate in default-off mode, as do failures
 while copying response metadata (for example, throwing enumerable getters).
 With suppression enabled, replay serialization failures for a still-current snapshot
-emit `error` prefixed `replay-preparation-failed`, explicitly naming snapshot
+report `replay-preparation-failed` through `onDiagnostic`, explicitly naming snapshot
 retirement, without incrementing that send-failure counter or delivering
 a call receipt, since the sender was not invoked. They retire only the failed
 replay snapshot (retaining outcome identity), so it is not retried every timer
@@ -97,6 +95,27 @@ older success cannot replace a newer installed snapshot or undo a newer ineligib
 prefix. Excluded-lane prefixes and pending eligible prefixes on fresh identities
 do not block an older successful stream from installing the first snapshot. Dropped, evicted or
 stopped identities cannot be resurrected by their outstanding completions.
+
+Operational notices use the separate opt-in `onDiagnostic` callback with a
+`KeepaliveDiagnostic` (`type: 'diagnostic'`, `key`, `reason`), not `onEvent`'s
+failure `error` variant. It carries no prompt/response payload or failure count;
+throws and rejected promises are isolated. Reason prefixes identify receipt loss,
+replay preparation failure, unknown refresh/foreground terminals, outcome-LRU
+eviction and detached attempts. Unknown foreground terminals report
+`unknown-foreground-terminal` even for a fresh key with no replay snapshot;
+they cannot qualify or rearm keepalive even if response parsing falls back to
+`end_turn`. At `maxIneffective`, `ineffective-retirement` reports the consecutive
+ineffective count after removing the snapshot and identity. The existing
+`ineffective` event still reports the usage outcome on every ineffective refresh.
+Default-off emits none of these diagnostics.
+
+The failure limit remains adapter-global and consecutive, not a per-key retry
+budget: a successfully processed refresh of another key resets it. A key whose
+usage repeatedly fails validation can therefore retry until idle expiry when
+healthy keys interleave. Use keyed error telemetry to identify that sender/key;
+disabling the whole adapter for nonconsecutive key-local errors would also stop
+healthy cache refreshes. No per-key failure counter or automatic permanent
+quarantine is introduced by refusal suppression.
 
 ## Purpose boundary
 
@@ -155,7 +174,7 @@ time their refusal arrives, but cannot qualify it. Requests for existing keys
 still touch the outcome LRU and observe cross-lane refusals and rearm.
 A stopped keeper does not register; sequence-advancing reentrant serialization
 also returns a detached handle.
-Each opt-in outcome eviction emits `error` with the evicted key and
+Each opt-in outcome eviction reports to `onDiagnostic` with the evicted key and
 `outcome-lru-eviction: maxLineages cap exceeded`, even without a snapshot.
 This diagnostic does not increment consecutive failures or disable the keeper.
 Default-off snapshot LRU eviction remains silent; `skipped` only reports

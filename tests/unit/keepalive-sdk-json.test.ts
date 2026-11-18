@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { AnthropicAdapter } from '../../src/providers/anthropic.js';
 import { Membrane } from '../../src/membrane.js';
 import { NativeFormatter } from '../../src/formatters/native.js';
-import { lineageKey, type CacheKeepaliveConfig, type KeepaliveEvent } from '../../src/cache-keepalive.js';
+import { lineageKey, type CacheKeepaliveConfig, type KeepaliveDiagnostic, type KeepaliveEvent } from '../../src/cache-keepalive.js';
 
 const adapters: AnthropicAdapter[] = [];
 afterEach(() => {
@@ -96,10 +96,10 @@ it.each(['complete', 'stream'] as const)('%s real SDK rejects a pre-aborted requ
   expect(a.cacheKeepalive!.getStatus()).toEqual([]);
 });
 
-it('Membrane.complete rejects a root serializer supplied by onRequest that changes during replay spread', async () => {
+it('Membrane.complete succeeds, then replay preparation rejects an onRequest root serializer that changes during spread', async () => {
   vi.useFakeTimers();
-  const observed: KeepaliveEvent[] = [];
-  const { a, bodies } = setup({ checkIntervalMs: 100, onEvent: event => { observed.push(event); } });
+  const observed: (KeepaliveEvent | KeepaliveDiagnostic)[] = [];
+  const { a, bodies } = setup({ checkIntervalMs: 100, onDiagnostic: event => { observed.push(event); }, onEvent: event => { observed.push(event); } });
   const membrane = new Membrane(a, { formatter: new NativeFormatter() });
   let reads = 0;
   const serialize = vi.fn(() => ({ model: message.model, max_tokens: 1024, messages: [] }));
@@ -131,7 +131,7 @@ it('Membrane.complete rejects a root serializer supplied by onRequest that chang
   expect(bodies).toHaveLength(1); // No refresh transport invocation.
   expect(a.cacheKeepalive!.getStatus()).toEqual([]);
   expect(observed).toContainEqual(expect.objectContaining({
-    type: 'error', consecutive: 0,
-    error: expect.stringContaining('replay-preparation-failed: replay snapshot retired; Keepalive does not support root toJSON'),
+    type: 'diagnostic',
+    reason: expect.stringContaining('replay-preparation-failed: replay snapshot retired; Keepalive does not support root toJSON'),
   }));
 });

@@ -1,15 +1,15 @@
 import { readFileSync } from 'node:fs';
 import { afterEach, expect, it, vi } from 'vitest';
-import { CacheKeepalive, type KeepaliveCall, type KeepaliveEvent } from '../../src/cache-keepalive.js';
+import { CacheKeepalive, type KeepaliveCall, type KeepaliveDiagnostic, type KeepaliveEvent } from '../../src/cache-keepalive.js';
 
 const keepers: CacheKeepalive[] = [];
 afterEach(() => { for (const k of keepers.splice(0)) k.stop(); });
 function setup(send: any, onCall?: (call: KeepaliveCall) => void) {
-  const events: KeepaliveEvent[] = [];
+  const events: (KeepaliveEvent | KeepaliveDiagnostic)[] = [];
   const calls: KeepaliveCall[] = [];
   const k = new CacheKeepalive(send, {
     suppressOnRefusal: true, refreshAfterMs: 0, maxConsecutiveErrors: 2,
-    onCall: onCall ?? (c => { calls.push(c); }), onEvent: e => { events.push(e); },
+    onCall: onCall ?? (c => { calls.push(c); }), onDiagnostic: e => { events.push(e); }, onEvent: e => { events.push(e); },
   });
   keepers.push(k);
   const wire: Record<string, unknown> = {
@@ -40,7 +40,7 @@ it('documents mode-specific request copies and pins opt-in rawJSON brand loss', 
     expect(JSON.stringify(calls[0]!.request)).toContain('"id":{"rawJSON":"9007199254740993"}');
   } else {
     expect(calls).toEqual([]);
-    expect(events[0]).toMatchObject({ type: 'error', error: 'receipt-clone-failed: receipt dropped', consecutive: 0 });
+    expect(events[0]).toMatchObject({ type: 'diagnostic', reason: 'receipt-clone-failed: receipt dropped' });
   }
   const guide = readFileSync(new URL('../../docs/keepalive-refusal-suppression.md', import.meta.url), 'utf8');
   const api = readFileSync(new URL('../../src/cache-keepalive.ts', import.meta.url), 'utf8');
@@ -61,19 +61,19 @@ it.each(['request', 'response'] as const)('reports %s clone loss without changin
   wire.metadata = side === 'request' ? { toJSON() { return { id: 'sent' }; } } : { id: 'sent' };
   qualify(); await tick();
   expect(calls).toEqual([]);
-  expect(events.map(e => e.type)).toEqual(['error', 'refreshed']);
-  expect(events[0]).toEqual({ type: 'error', key: k.getStatus()[0]!.key, error: 'receipt-clone-failed: receipt dropped', consecutive: 0 });
+  expect(events.map(e => e.type)).toEqual(['diagnostic', 'refreshed']);
+  expect(events[0]).toEqual({ type: 'diagnostic', key: k.getStatus()[0]!.key, reason: 'receipt-clone-failed: receipt dropped' });
   expect(k.getStatus()).toHaveLength(1);
 });
 
-it('reports receipt clone loss with the pre-reset failure count', async () => {
+it('reports receipt clone loss separately from the failure count', async () => {
   const send = vi.fn().mockRejectedValueOnce(new Error('first'))
     .mockResolvedValueOnce({ ...response, custom: () => {} });
   const { qualify, tick, events, calls, k } = setup(send);
   qualify(); await tick(); await tick();
   expect(events).toEqual([
     expect.objectContaining({ type: 'error', error: 'first', consecutive: 1 }),
-    expect.objectContaining({ type: 'error', error: 'receipt-clone-failed: receipt dropped', consecutive: 1 }),
+    expect.objectContaining({ type: 'diagnostic', reason: 'receipt-clone-failed: receipt dropped' }),
     expect.objectContaining({ type: 'refreshed' }),
   ]);
   expect(calls.map(c => c.outcome)).toEqual(['error']);
@@ -95,7 +95,7 @@ it('rejects root serialization that could undo the prefill budget and trimming',
   await tick();
   expect(send).not.toHaveBeenCalled();
   expect(k.getStatus()).toEqual([]);
-  expect(events).toEqual([expect.objectContaining({ type: 'error', consecutive: 0 })]);
+  expect(events).toEqual([expect.objectContaining({ type: 'diagnostic', reason: expect.stringContaining('replay-preparation-failed') })]);
 });
 
 it('counts opt-in unprintable Error.message failures through disabling', async () => {
@@ -113,10 +113,10 @@ it('counts opt-in unprintable Error.message failures through disabling', async (
 
 
 it.each([{}, { suppressOnRefusal: false }])('keeps legacy serialization and silent clone loss: %j', async config => {
-  const calls: KeepaliveCall[] = [], events: KeepaliveEvent[] = [];
+  const calls: KeepaliveCall[] = [], events: (KeepaliveEvent | KeepaliveDiagnostic)[] = [];
   const send = vi.fn(async () => ({ ...response, uncloneable: () => {} }));
   const k = new CacheKeepalive(send, { ...config, refreshAfterMs: 0,
-    onCall: c => { calls.push(c); }, onEvent: e => { events.push(e); } });
+    onCall: c => { calls.push(c); }, onDiagnostic: e => { events.push(e); }, onEvent: e => { events.push(e); } });
   keepers.push(k);
   const wire = { model: 'claude-test', system: [{ type: 'text', text: 'system',
     cache_control: { type: 'ephemeral', ttl: '1h' } }], messages: [{ role: 'user', content: 'hi' }],

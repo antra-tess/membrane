@@ -52,7 +52,7 @@ export type KeepaliveLane = 'stream' | 'complete';
  * Resolved responses with throwing metadata accessors can instead report errors.
  * Request and success-response objects are observer-owned copies; an error
  * receipt's error value is not cloned. Recorded request headers are excluded.
- * Clone loss drops the receipt: opt-in emits error: receipt-clone-failed;
+ * Clone loss drops the receipt: opt-in reports receipt-clone-failed via onDiagnostic;
  * default-off drops it silently. */
 export type KeepaliveCall = {
   key: string;
@@ -69,7 +69,7 @@ export type KeepaliveCall = {
    * Opt-in instead prepares from the retained caller request without JSON.parse;
    * structuredClone loses JSON.rawJSON branding and custom toJSON behavior.
    * Callable fields and, on some runtimes, rawJSON can then prevent delivery.
-   * Clone loss is silent default-off; opt-in emits error: receipt-clone-failed.
+   * Clone loss is silent default-off; opt-in reports receipt-clone-failed via onDiagnostic.
    * In both modes the prepared replay has max_tokens: 0, omits stream, and trims
    * messages through the user turn at or after its last one-hour marker,
    * or retains all messages when no user message follows that marker. */
@@ -78,6 +78,9 @@ export type KeepaliveCall = {
   | { outcome: 'success'; response: Record<string, unknown> & { usage?: KeepaliveUsage } }
   | { outcome: 'error'; error: unknown }
 );
+
+/** Opt-in operational notice, not a failed send and never delivered to onEvent. */
+export type KeepaliveDiagnostic = { type: 'diagnostic'; key: string; reason: string };
 
 export type KeepaliveSuppression = { type: 'suppressed'; key: string; source: 'foreground' | 'refresh' };
 
@@ -97,6 +100,10 @@ export interface CacheKeepaliveConfig {
   /** Separate opt-in suppression notifications; never delivered to onEvent.
    * Used only with suppressOnRefusal. Observer failures are isolated. */
   onSuppressed?: (event: KeepaliveSuppression) => void | Promise<void>;
+  /** Non-failure operational notices, only with suppressOnRefusal.
+   * Separate from onEvent so error events retain their failure-count semantics.
+   * Throws and rejected promises are isolated. No request/response payloads. */
+  onDiagnostic?: (event: KeepaliveDiagnostic) => void | Promise<void>;
   /** Master switch. Default true. */
   enabled?: boolean;
   /**
@@ -120,7 +127,8 @@ export interface CacheKeepaliveConfig {
    *  Finite nonpositive caps retain nothing in either mode; default-off
    *  negative Infinity also retains nothing. */
   maxLineages?: number;
-  /** Consecutive send/response-processing failures before disabling. Default 3.
+  /** Adapter-global consecutive send/response-processing failures before disabling. Default 3.
+   * A successfully processed refresh of any key resets the run; not a per-key budget.
    * Suppression mode counts usage access/coercion failures, but not replay preparation.
    * Default-off matches legacy: preparation/send failures accumulate, but a resolved
    * send resets the counter after receipt copying and before usage processing, so
@@ -139,13 +147,13 @@ export interface CacheKeepaliveConfig {
    * Delivery requires a cloneable prepared request and success response;
    * error receipt error values are passed through, not cloned.
    * Clone failures drop the receipt silently in default-off mode.
-   * Opt-in mode reports that loss as error: receipt-clone-failed, without
+   * Opt-in mode reports receipt-clone-failed via onDiagnostic, without
    * changing send-failure accounting or retiring the snapshot.
    * Observer errors are isolated, and returned promises never delay the loop.
    * skipped only reports removal of an ineligible snapshot, before any send.
-   * Opt-in outcome eviction emits error: outcome-lru-eviction even without a snapshot.
-   * Error diagnostics for eviction, receipt loss and unknown terminals do not increment
-   * consecutive failures; the latter retires the snapshot after a send.
+   * Opt-in operational notices go to onDiagnostic, never onEvent.
+   * Eviction, receipt loss and unknown terminals do not increment consecutive
+   * failures; an unknown refresh terminal retires the snapshot after a send.
    * Expired/disabled entries normally initiate no new calls; default-off replay
    * serialization can reenter stop and still send afterward (legacy behavior).
    * An in-flight sender still delivers its receipt after removal or stop.
@@ -289,8 +297,8 @@ export class CacheKeepalive {
   private consecutiveErrors = 0;
   private stopped = false;
   private disabledReported = false;
-  private readonly cfg: Required<Omit<CacheKeepaliveConfig, 'onEvent' | 'onCall' | 'onSuppressed'>> &
-    Pick<CacheKeepaliveConfig, 'onEvent' | 'onCall' | 'onSuppressed'>;
+  private readonly cfg: Required<Omit<CacheKeepaliveConfig, 'onEvent' | 'onCall' | 'onSuppressed' | 'onDiagnostic'>> &
+    Pick<CacheKeepaliveConfig, 'onEvent' | 'onCall' | 'onSuppressed' | 'onDiagnostic'>;
 
   constructor(private readonly send: KeepaliveSend, config: CacheKeepaliveConfig = {}) {
     this.cfg = { ...DEFAULTS, ...config };
@@ -325,10 +333,7 @@ export class CacheKeepalive {
       const handle = Object.freeze({ key }) as KeepaliveAttempt;
       const detached = { barrier: 0, latest: 0, qualified: false };
       this.attempts.set(handle, { key, state: detached, sequence, wire, headers, lane, purpose, sentAt });
-      if (admit && sequence !== this.sequence) this.emit({
-        type: 'error', key, error: 'detached-attempt: serialization reentry prevents qualification',
-        consecutive: this.consecutiveErrors,
-      });
+      if (admit && sequence !== this.sequence) this.diagnose(key, 'detached-attempt: serialization reentry prevents qualification');
       return handle;
     }
     const retained = state ?? { barrier: 0, latest: 0, qualified: false };
@@ -339,7 +344,7 @@ export class CacheKeepalive {
       if (oldest === undefined) break;
       this.outcomes.delete(oldest);
       this.lineages.delete(oldest);
-      this.emit({ type: 'error', key: oldest, error: 'outcome-lru-eviction: maxLineages cap exceeded', consecutive: this.consecutiveErrors });
+      this.diagnose(oldest, 'outcome-lru-eviction: maxLineages cap exceeded');
     }
     if (this.stopped) return undefined;
     const handle = Object.freeze({ key }) as KeepaliveAttempt;
@@ -392,7 +397,11 @@ export class CacheKeepalive {
       if (state) this.suppress(attempt.key, state, 'foreground');
       return;
     }
-    if (!this.current(attempt) || attempt.purpose !== 'normal' || !knownTerminal(reason) ||
+    if (!knownTerminal(reason)) {
+      this.diagnose(attempt.key, 'unknown-foreground-terminal: completion cannot qualify or rearm keepalive');
+      return;
+    }
+    if (!this.current(attempt) || attempt.purpose !== 'normal' ||
         attempt.sequence <= attempt.state.barrier) return;
     const included = this.cfg.lanes.includes(attempt.lane);
     const needsSnapshot = included && attempt.sequence >= attempt.state.latest && !attempt.registered;
@@ -542,7 +551,7 @@ export class CacheKeepalive {
       const unknown = this.cfg.suppressOnRefusal && !refused && !knownTerminal(stopReason);
       if (unknown && !this.stopped && this.lineages.get(key) === lin && this.outcomes.get(key) === state) {
         this.lineages.delete(key);
-        this.emit({ type: 'error', key, error: 'unknown-refresh-terminal: replay snapshot retired', consecutive: this.consecutiveErrors });
+        this.diagnose(key, 'unknown-refresh-terminal: replay snapshot retired');
       }
       // Do not invoke a caller-owned terminal getter a second time while copying.
       // Keep legacy spread semantics unchanged when suppression is off.
@@ -592,6 +601,7 @@ export class CacheKeepalive {
         if (this.cfg.suppressOnRefusal && lin.ineffective >= this.cfg.maxIneffective) {
           this.lineages.delete(key);
           this.outcomes.delete(key);
+          this.diagnose(key, `ineffective-retirement: replay snapshot and identity retired after ${lin.ineffective} consecutive ineffective refreshes`);
         }
         this.emit({
           type: 'ineffective',
@@ -640,7 +650,8 @@ export class CacheKeepalive {
       }
       // Preparation failures are observable, but are not failed sends.
       if (!this.cfg.suppressOnRefusal || invoked) this.consecutiveErrors += 1;
-      this.emit({ type: 'error', key, error: message, consecutive: this.consecutiveErrors });
+      if (this.cfg.suppressOnRefusal && !invoked) this.diagnose(key, message);
+      else this.emit({ type: 'error', key, error: message, consecutive: this.consecutiveErrors });
       if (this.cfg.suppressOnRefusal && this.stopped) return;
 
       if (!this.cfg.suppressOnRefusal ||
@@ -664,11 +675,18 @@ export class CacheKeepalive {
         ? { ...call, request: structuredClone(call.request), response: structuredClone(call.response) }
         : { ...call, request: structuredClone(call.request) };
     } catch {
-      if (this.cfg.suppressOnRefusal) this.emit({ type: 'error', key: call.key, error: 'receipt-clone-failed: receipt dropped', consecutive: this.consecutiveErrors });
+      if (this.cfg.suppressOnRefusal) this.diagnose(call.key, 'receipt-clone-failed: receipt dropped');
       return;
     }
     try {
       void Promise.resolve(this.cfg.onCall(receipt)).catch(() => {});
+    } catch {
+    }
+  }
+
+  private diagnose(key: string, reason: string): void {
+    try {
+      void Promise.resolve(this.cfg.onDiagnostic?.({ type: 'diagnostic', key, reason })).catch(() => {});
     } catch {
     }
   }

@@ -3,8 +3,8 @@
   known-normal foreground completion. Legacy behavior remains the default.
 - Low-level keeper callers enabling suppression must migrate from `record` alone
   to `begin`/`prefix`/`finish`, and senders must return raw `stop_reason` alongside
-  usage. Missing or unknown refresh terminals retire the snapshot with a
-  `error` diagnostic prefixed `unknown-refresh-terminal` (no failure-count increment) rather than repeatedly resending it. `KeepaliveAttempt` is an
+  usage. Missing or unknown refresh terminals retire the snapshot with an
+  `onDiagnostic` notice prefixed `unknown-refresh-terminal` (no failure-count increment) rather than repeatedly resending it. `KeepaliveAttempt` is an
   opaque issuer-specific handle exposing only a read-only key, exported from the
   package root. `KeepaliveSend` accepts an optional `stop_reason: unknown` field;
   pre-existing custom senders remain assignable without opting in.
@@ -35,7 +35,7 @@
   fresh identities, including after eviction. Excluded-lane and fresh pending
   prefixes cannot starve successful stream qualification; finishing an already
   registered request preserves its snapshot and refresh baseline.
-- Opt-in outcome state is bounded; eviction emits an `onEvent` error diagnostic
+- Opt-in outcome state is bounded; eviction emits an `onDiagnostic` notice
   (`outcome-lru-eviction`), unlike silent legacy snapshot eviction.
   Only normal, eligible requests in configured lanes allocate new identities;
   unrelated excluded/ineligible traffic cannot evict eligible lineages.
@@ -60,13 +60,12 @@
   remains unchanged.
 - Opt-in receipts copy the caller request object, not SDK wire bytes; raw JSON
   brands and custom serializers are not preserved. Uncloneable request/response
-  values drop the receipt and emit an `error` diagnostic prefixed `receipt-clone-failed`, without
+  values drop the receipt and emit an `onDiagnostic` notice prefixed `receipt-clone-failed`, without
   changing refresh accounting. Response copies include own enumerable fields only.
 - Opt-in replays reject callable root `toJSON` methods to protect the prefill-only
   token budget and message trimming. Foreground serialization is unchanged.
 - Opt-in unprintable error messages cannot bypass failure disabling. Legacy
   default-off error formatting is unchanged.
-
 - Opt-in success receipt latency stops at sender resolution, excluding response
   copying and synchronous observers. Nonfinite usage errors name the field and
   coerced value. Preparation errors explicitly report snapshot retirement.
@@ -81,10 +80,15 @@
   without classifying eviction as an ineligible-snapshot skip. Default-off eviction stays silent.
 - With refusal suppression enabled, recheck stop after admission accessors and
   measure error receipts at sender settlement, excluding later suppression observers.
-
 - Capture Anthropic foreground terminal stop reasons once when refusal-aware cache keepalive is enabled, so changing SDK accessors cannot make suppression disagree with complete or stream responses. Default-off behavior is unchanged. Refusal suppression precedes unrelated response/event getters, including streamed usage.
 - Opt-in idle expiry is rechecked for each lineage after earlier refreshes settle.
 - Foreground terminal capture preserves missing raw `stop_reason` properties.
 - Reasoned operator stops emit no duplicate failure-threshold `disabled` event.
 - Opt-in eligible attempts detached by serialization reentry emit a
-  `detached-attempt` error diagnostic without incrementing the failure count.
+  `detached-attempt` notice via `onDiagnostic` without incrementing the failure count.
+- Add a separate opt-in `onDiagnostic` callback and `KeepaliveDiagnostic` type
+  for non-failure operational notices, keeping `onEvent` error events reserved
+  for counted failures. Report unknown foreground terminals (including fresh
+  unqualified keys) and ineffective retirement with its consecutive count.
+- Apply observed foreground refusals before terminal capture runs prototype or
+  property-descriptor proxy traps; throwing traps cannot leave the old key replayable.
