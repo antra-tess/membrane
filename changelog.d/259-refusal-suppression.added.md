@@ -43,10 +43,18 @@
   toward the send-failure limit (a later qualified prefix can install a new one), and
   a foreground refusal from an evicted handle still suppresses a currently
   retained identity for its key. Default-off behavior is unchanged.
-- In opt-in mode, a failed begin permanently stops keepalive for that adapter,
+- In opt-in mode, a failed begin or finish permanently stops keepalive for that adapter,
   emits `disabled` with a reason, and warns of the permanent stop.
 - With opt-in keepalive refusal suppression, reserve request order before lineage
   serialization, honor stop during serialization, and accept only the first
   foreground terminal observation per attempt. Background receipts use the same
   captured terminal value as suppression classification. Default-off scheduling
   remains unchanged.
+- Opt-in receipts copy the caller request object, not SDK wire bytes; raw JSON
+  brands and custom serializers are not preserved. Uncloneable request/response
+  values drop the receipt and emit `skipped: receipt-clone-failed`, without
+  changing refresh accounting. Response copies include own enumerable fields only.
+- Opt-in replays reject callable root `toJSON` methods to protect the prefill-only
+  token budget and message trimming. Foreground serialization is unchanged.
+- Opt-in unprintable error messages cannot bypass failure disabling. Legacy
+  default-off error formatting is unchanged.

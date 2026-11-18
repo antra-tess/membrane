@@ -45,8 +45,8 @@ export type KeepaliveLane = 'stream' | 'complete';
  * not per HTTP attempt. Legacy malformed null/undefined responses can deliver
  * success then error receipts during response processing.
  * Delivery is best-effort when onCall is configured and values are cloneable.
- * SDK-internal retries belong to that invocation. A success carries the full
- * vendor response and its terminal usage, including ineffective cache writes.
+ * SDK-internal retries belong to that invocation. A success copies own enumerable
+ * vendor response fields and their usage, including ineffective cache writes.
  * Resolved responses with throwing metadata accessors can instead report errors.
  * Request and response objects are observer-owned copies; recorded request
  * headers are excluded. */
@@ -57,7 +57,11 @@ export type KeepaliveCall = {
   /** Unix epoch milliseconds when this poke attempt began. */
   startedAt: number;
   durationMs: number;
-  /** JSON wire payload sent by the poke: max_tokens is 0, stream is omitted, and
+  /** Structured clone of the replay's caller request object, not wire bytes.
+   * JSON.rawJSON branding and custom toJSON behavior are not preserved.
+   * Callable fields and, on some runtimes, rawJSON prevent receipt delivery
+   * (receipt-clone-failed).
+   * Before SDK serialization, max_tokens is 0, stream is omitted, and
    *  its messages are the recorded request's, through the user turn at or after its last one-hour marker,
    *  or all of them when no user message follows that marker. */
   request: Record<string, unknown>;
@@ -124,6 +128,8 @@ export interface CacheKeepaliveConfig {
    * In suppression mode, invoked once on success (including ineffective responses)
    * or failure; legacy malformed empty responses may emit success then error.
    * Delivery requires cloneable receipt values; clone failures drop the receipt.
+   * Opt-in mode reports that loss as skipped: receipt-clone-failed, without
+   * changing send-failure accounting or retiring the snapshot.
    * Observer errors are isolated, and returned promises never delay the loop.
    * Skipped, expired, and disabled entries initiate no new calls; a sender already
    * in flight still delivers its receipt after snapshot removal or stop.
@@ -473,6 +479,11 @@ export class CacheKeepalive {
         throw new Error('Keepalive request must serialize to a JSON object');
       }
       const recorded = wire as Record<string, unknown>;
+      // A root serializer can override the zero-output budget and trimmed messages.
+      // Fail closed in opt-in mode rather than risk a billable generation replay.
+      if (this.cfg.suppressOnRefusal && typeof recorded.toJSON === 'function') {
+        throw new Error('Keepalive does not support root toJSON serialization');
+      }
       payload = { ...recorded, max_tokens: 0 };
       if (Array.isArray(recorded.messages)) payload.messages = messagesForRefresh(recorded.messages);
       delete payload.stream;
@@ -563,7 +574,7 @@ export class CacheKeepalive {
     } catch (err) {
       let message = 'Unprintable keepalive error';
       if (this.cfg.suppressOnRefusal) {
-        try { message = err instanceof Error ? err.message : String(err); } catch {}
+        try { message = String(err instanceof Error ? err.message : err); } catch {}
       } else message = err instanceof Error ? err.message : String(err);
       if (payload && (!this.cfg.suppressOnRefusal || (invoked && !reported))) {
         this.reportCall({
@@ -597,12 +608,17 @@ export class CacheKeepalive {
 
   private reportCall(call: KeepaliveCall): void {
     if (!this.cfg.onCall) return;
+    let receipt: KeepaliveCall;
     try {
-      const receipt: KeepaliveCall = call.outcome === 'success'
+      receipt = call.outcome === 'success'
         ? { ...call, request: structuredClone(call.request), response: structuredClone(call.response) }
         : { ...call, request: structuredClone(call.request) };
-      void Promise.resolve(this.cfg.onCall(receipt)).catch(() => {
-      });
+    } catch {
+      if (this.cfg.suppressOnRefusal) this.emit({ type: 'skipped', key: call.key, reason: 'receipt-clone-failed' });
+      return;
+    }
+    try {
+      void Promise.resolve(this.cfg.onCall(receipt)).catch(() => {});
     } catch {
     }
   }

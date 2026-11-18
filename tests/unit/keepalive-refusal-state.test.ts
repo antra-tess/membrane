@@ -295,7 +295,8 @@ it('uncloneable custom response drops its receipt without losing refresh process
   const { normal, calls, events } = setup(async () => ({ ...ok, custom: () => {} }));
   normal(); await vi.advanceTimersByTimeAsync(100);
   expect(calls).toEqual([]);
-  expect(events.map(e => e.type)).toEqual(['refreshed']);
+  expect(events.map(e => e.type)).toEqual(['skipped', 'refreshed']);
+  expect(events[0]).toMatchObject({ type: 'skipped', reason: 'receipt-clone-failed' });
 });
 
 

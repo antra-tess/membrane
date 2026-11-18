@@ -4,7 +4,7 @@ function keepaliveObservation<T>(observe: () => T, onFailure?: () => void): T | 
     try { onFailure?.(); } catch {}
     // No request, response, or exception payload: these can contain secrets.
     try { console.warn(onFailure
-      ? '[membrane] Keepalive begin bookkeeping failed; keepalive is now permanently stopped for this adapter. Check custom request serialization; create a new adapter to restart keepalive.'
+      ? '[membrane] Keepalive bookkeeping failed; keepalive is now permanently stopped for this adapter. Check custom request serialization; create a new adapter to restart keepalive.'
       : '[membrane] Keepalive bookkeeping failed; state may be partially updated. Check custom request serialization; disable cacheKeepalive if failures persist.'); } catch {}
     return undefined;
   }
@@ -516,10 +516,11 @@ export class AnthropicAdapter implements ProviderAdapter {
       const sentAt = Date.now();
       const attempt = keepaliveObservation(() => this.cacheKeepalive?.begin(
         fullRequest as unknown as Record<string, unknown>, headers, 'complete', this.suppressKeepaliveOnRefusal ? options?.keepalivePurpose : undefined, sentAt,
-      ), () => this.cacheKeepalive?.stop('keepalive begin bookkeeping failed'));
+      ), () => this.cacheKeepalive?.stop('keepalive begin bookkeeping failed; permanently stopped for this adapter; create a new adapter to restart keepalive'));
       const response = await this.createMessage(fullRequest, live, callSignal, { maxRetries: 0 });
       if (attempt && response.stop_reason === 'refusal') {
-        keepaliveObservation(() => this.cacheKeepalive?.finish(attempt, 'refusal'));
+        keepaliveObservation(() => this.cacheKeepalive?.finish(attempt, 'refusal'),
+          () => this.cacheKeepalive?.stop('keepalive finish bookkeeping failed; permanently stopped for this adapter; create a new adapter to restart keepalive'));
       }
       keepaliveObservation(() => {
         if (attempt) {
@@ -529,7 +530,8 @@ export class AnthropicAdapter implements ProviderAdapter {
 
       const parsed = this.parseResponse(response, fullRequest);
       if (attempt && response.stop_reason !== 'refusal' && !callSignal?.aborted && !options?.signal?.aborted) {
-        keepaliveObservation(() => this.cacheKeepalive?.finish(attempt, response.stop_reason));
+        keepaliveObservation(() => this.cacheKeepalive?.finish(attempt, response.stop_reason),
+          () => this.cacheKeepalive?.stop('keepalive finish bookkeeping failed; permanently stopped for this adapter; create a new adapter to restart keepalive'));
       }
       return parsed;
     } catch (error) {
@@ -612,7 +614,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       const sentAt = Date.now();
       const attempt = keepaliveObservation(() => this.cacheKeepalive?.begin(
         (this.suppressKeepaliveOnRefusal ? { ...anthropicRequest, stream: true } : fullRequest) as unknown as Record<string, unknown>, headers, 'stream', this.suppressKeepaliveOnRefusal ? options?.keepalivePurpose : undefined, sentAt,
-      ), () => this.cacheKeepalive?.stop('keepalive begin bookkeeping failed'));
+      ), () => this.cacheKeepalive?.stop('keepalive begin bookkeeping failed; permanently stopped for this adapter; create a new adapter to restart keepalive'));
       const stream = await session.client.messages.stream(anthropicRequest, {
         signal: session.signal,
         headers: live,
@@ -733,7 +735,8 @@ export class AnthropicAdapter implements ProviderAdapter {
       for await (const event of stream) {
         // Raw refusal is authoritative even if progress/terminal processing throws.
         if (attempt && event.type === 'message_delta' && event.delta.stop_reason === 'refusal') {
-          keepaliveObservation(() => this.cacheKeepalive?.finish(attempt, 'refusal'));
+          keepaliveObservation(() => this.cacheKeepalive?.finish(attempt, 'refusal'),
+          () => this.cacheKeepalive?.stop('keepalive finish bookkeeping failed; permanently stopped for this adapter; create a new adapter to restart keepalive'));
         }
         sawEvent = true;
         resetIdleTimer();
@@ -895,7 +898,8 @@ export class AnthropicAdapter implements ProviderAdapter {
 
       assertTerminalEventObserved(sawTerminalEvent, 'Anthropic', fullRequest);
       if (attempt && providerStopReason !== 'refusal' && !callSignal?.aborted && !options?.signal?.aborted) {
-        keepaliveObservation(() => this.cacheKeepalive?.finish(attempt, providerStopReason));
+        keepaliveObservation(() => this.cacheKeepalive?.finish(attempt, providerStopReason),
+          () => this.cacheKeepalive?.stop('keepalive finish bookkeeping failed; permanently stopped for this adapter; create a new adapter to restart keepalive'));
       }
 
       // The SDK's MessageStream records the request-id header on connect,

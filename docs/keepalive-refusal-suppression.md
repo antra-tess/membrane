@@ -31,8 +31,16 @@ instead produce an error receipt and increment the failure count after resolutio
 Refusal metadata is inspected and suppression applied before copying other response
 properties, so an unrelated throwing accessor cannot bypass the refusal barrier. With `onCall` configured and cloneable request/response values, each
 actual sender invocation delivers one receipt, including refused, unknown, stale
-and failed sends. Receipt delivery is best-effort: clone failures or observer
-failures are isolated, not retried. Without `onCall`, no receipts are delivered.
+and failed sends. The receipt request is a structured clone of the replay's
+caller request object, not wire bytes. It is not a wire audit: JSON.rawJSON
+branding and custom toJSON behavior are not preserved; some runtimes reject
+rawJSON cloning entirely. Function-valued fields
+(such as a metadata toJSON method) can prevent cloning even for valid SDK JSON.
+Receipt delivery is best-effort: clone failures drop the receipt and, in opt-in
+mode, emit `skipped` with reason `receipt-clone-failed`; observer failures are
+isolated and not retried. Receipt loss does not count as a send failure or retire
+the replay snapshot. Response copies contain only own enumerable properties;
+inherited/non-enumerable metadata can affect suppression without appearing in receipts. Without `onCall`, no receipts are delivered.
 A refresh with missing/null/unrecognized raw terminal reason never emits `refreshed` or advances its refresh timestamp;
 usage alone isn't evidence of a known terminal outcome. It removes the replay
 snapshot and emits `skipped` with reason
@@ -49,10 +57,13 @@ so repeated null/undefined response or usage-processing errors report 1 on each
 refresh rather than accumulating toward the default threshold. Preparation and
 rejected-send failures still accumulate in default-off mode, as do failures
 while copying response metadata (for example, throwing enumerable getters).
-With suppression enabled, replay serialization failures emit `error` without incrementing that send-failure counter or delivering
+With suppression enabled, replay serialization failures for a still-current snapshot
+emit `error` without incrementing that send-failure counter or delivering
 a call receipt, since the sender was not invoked. They retire only the failed
 replay snapshot (retaining outcome identity), so it is not retried every timer
-check; a later qualified foreground prefix can install a new snapshot. In
+check; a later qualified foreground prefix can install a new snapshot. If serialization
+reenters and stops or replaces the snapshot before throwing, the obsolete preparation
+is silently abandoned: there was no sender invocation to receipt. In
 default-off mode, replay serialization failures instead increment the failure
 counter and leave the snapshot eligible for retry until keepalive is disabled.
 
@@ -143,10 +154,10 @@ not exception propagation.
 Adapter bookkeeping errors never replace foreground results (in either mode); a
 payload-free warning reports potentially partial state,
 and recommends checking custom serialization or disabling keepalive if failures
-persist. A failed begin stops the keeper permanently for this adapter and emits
+persist. A failed begin or finish stops the keeper permanently for this adapter and emits
 `disabled` with a payload-free reason; its warning explicitly discloses that stop and directs callers to create a new adapter to restart,
-since its attempt identity cannot safely observe a subsequent refusal. Other failed bookkeeping is not a
-guarantee that suppression was applied.
+because outcome tracking may be incomplete. Prefix/legacy record failures only warn;
+state may be partially updated, and suppression is not guaranteed by such a warning.
 Finite nonpositive `maxLineages` retains no identities or snapshots (fractional caps round
 down by eviction); negative caps do not block the foreground. Only with `suppressOnRefusal: true`, NaN and either infinity
 are normalized to the default cap. With suppression unset or false, cap handling
@@ -194,4 +205,8 @@ sent by the SDK. Caller mutation while tracked, getters, and custom/stateful
 `toJSON` serialization (including root serializers that replace identity fields)
 are outside this guarantee. Serialization can run more than once; keepalive does
 not promise single serialization or an owned transport snapshot.
-Bookkeeping failure stops adapter keepalive rather than weakening refusal tracking.
+Begin and finish bookkeeping failures stop adapter keepalive; prefix/record failures only warn.
+Opt-in replay preparation rejects callable root `toJSON` methods, which could
+otherwise override `max_tokens: 0` or message trimming after preparation. The
+foreground request still uses ordinary SDK serialization. Nested serializers
+remain outside the immutable ordinary-JSON identity guarantee above.

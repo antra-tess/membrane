@@ -191,16 +191,30 @@ for (const lane of ['complete', 'stream'] as const) {
   }
 }
 
-it('bookkeeping exceptions do not break foreground results', async () => {
-  const { a } = adapter({ suppressOnRefusal: true, lanes: ['complete'] }, () => answer);
-  const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
-  const finish = a.cacheKeepalive!.finish.bind(a.cacheKeepalive!);
-  vi.spyOn(a.cacheKeepalive!, 'finish').mockImplementation((...args) => { finish(...args); throw new Error('observer'); });
-  expect((await a.complete(request('safe'))).stopReason).toBe('end_turn');
-  expect(a.cacheKeepalive!.getStatus()).toHaveLength(1); // State changed before the throw.
-  expect(warning).toHaveBeenCalledWith('[membrane] Keepalive bookkeeping failed; state may be partially updated. Check custom request serialization; disable cacheKeepalive if failures persist.');
-  warning.mockRestore();
-});
+for (const lane of ['complete', 'stream'] as const) {
+  for (const reason of ['end_turn', 'refusal']) {
+    it(`${lane}: finish failure after mutation stops keepalive without breaking foreground`, async () => {
+      let terminal = 'end_turn';
+      const { a, replays, events } = adapter({ suppressOnRefusal: true, lanes: [lane] },
+        () => ({ ...answer, stop_reason: terminal }),
+        () => sdkStream([messageStart, { type: 'message_delta', delta: { stop_reason: terminal }, usage: readUsage }]));
+      const run = () => lane === 'complete' ? a.complete(request('safe')) : a.stream(request('safe'), noCallbacks);
+      await run(); expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
+      const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const finish = a.cacheKeepalive!.finish.bind(a.cacheKeepalive!);
+      vi.spyOn(a.cacheKeepalive!, 'finish').mockImplementation((...args) => { finish(...args); throw new Error('observer'); });
+      terminal = reason;
+      expect((await run()).stopReason).toBe(reason);
+      expect(a.cacheKeepalive!.getStatus()).toEqual([]);
+      expect(events).toContainEqual({ type: 'disabled', reason: 'keepalive finish bookkeeping failed; permanently stopped for this adapter; create a new adapter to restart keepalive' });
+      expect(warning).toHaveBeenCalledWith(expect.stringContaining('permanently stopped'));
+      terminal = 'end_turn'; await run();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(a.cacheKeepalive!.getStatus()).toEqual([]);
+      expect(replays()).toEqual([]);
+    });
+  }
+}
 
 for (const lane of ['complete', 'stream'] as const) {
   it(`${lane}: refresh refusal has one real-adapter receipt and cannot warm-stamp`, async () => {
@@ -435,7 +449,7 @@ for (const lane of ['complete', 'stream'] as const) {
     } });
     expect(result.stopReason).toBe('refusal');
     expect(warning).toHaveBeenCalledWith(expect.stringContaining('keepalive is now permanently stopped for this adapter'));
-    expect(events).toEqual([{ type: 'disabled', reason: 'keepalive begin bookkeeping failed' }]);
+    expect(events).toEqual([{ type: 'disabled', reason: 'keepalive begin bookkeeping failed; permanently stopped for this adapter; create a new adapter to restart keepalive' }]);
     expect(a.cacheKeepalive!.getStatus()).toEqual([]);
     reason = 'end_turn';
     await run(); // Later successful foreground calls cannot restart this keeper.
