@@ -59,9 +59,11 @@ it.each(['throw', 'reject'] as const)('isolates a diagnostic observer that %ss',
 });
 
 it('does not deliver diagnostics when suppression is off', async () => {
-  const { keeper, diagnostics } = setup(undefined, { suppressOnRefusal: false });
+  const { keeper, diagnostics, events } = setup(async () => ({ stop_reason: 'max_tokens', usage: {} }), { suppressOnRefusal: false, maxIneffective: 1 });
   keeper.record(wire(), undefined, 'stream');
   await vi.advanceTimersByTimeAsync(100);
+  expect(keeper.getStatus()).toEqual([]);
+  expect(events.map(e => e.type)).toEqual(['ineffective']);
   expect(diagnostics).toEqual([]);
 });
 
@@ -76,4 +78,34 @@ it('keeps the adapter-global consecutive limit distinct from a per-key retry bud
   expect(events.filter(e => e.type === 'refreshed')).toHaveLength(3);
   expect(events.some(e => e.type === 'disabled')).toBe(false);
   expect(keeper.getStatus()).toHaveLength(2);
+});
+
+it('does not admit an attempt after an eviction observer stops the keeper', () => {
+  const observer = vi.fn(() => keeper.stop());
+  const { keeper, qualify } = setup(undefined, { maxLineages: 1, onDiagnostic: observer });
+  qualify('a');
+  expect(keeper.getStatus()).toHaveLength(1);
+  const attempt = keeper.begin(wire('b'), undefined, 'stream');
+  expect(observer).toHaveBeenCalledTimes(1);
+  expect(attempt).toBeUndefined();
+  expect(keeper.getStatus()).toEqual([]);
+  expect((keeper as any).outcomes.size).toBe(0);
+});
+
+it('reports preparation retirement only onDiagnostic without exception payloads', async () => {
+  const send = vi.fn(async () => ok);
+  const { keeper, events, diagnostics } = setup(send);
+  const request = wire();
+  keeper.finish(keeper.begin(request, undefined, 'stream')!, 'end_turn');
+  Object.defineProperty(request.messages[0], 'toJSON', {
+    value() { throw new Error('secret prompt or credential'); },
+  });
+  await vi.advanceTimersByTimeAsync(100);
+  expect(keeper.getStatus()).toEqual([]);
+  expect(send).not.toHaveBeenCalled();
+  expect(events).toEqual([]);
+  expect(diagnostics).toEqual([{
+    type: 'diagnostic', key: cacheLineageKey(wire()),
+    reason: 'replay-preparation-failed: replay snapshot retired',
+  }]);
 });

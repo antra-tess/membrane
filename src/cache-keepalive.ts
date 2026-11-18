@@ -157,10 +157,11 @@ export interface CacheKeepaliveConfig {
    * Expired/disabled entries normally initiate no new calls; default-off replay
    * serialization can reenter stop and still send afterward (legacy behavior).
    * An in-flight sender still delivers its receipt after removal or stop.
-   * Poke serialization failures reach onEvent before any sender invocation,
-   * except opt-in preparation made obsolete by reentrant stop or replacement:
-   * those failures are silently abandoned. Still-current opt-in failures emit
-   * replay-preparation-failed, naming snapshot retirement without incrementing failures. */
+   * Default-off poke serialization failures reach onEvent before any send.
+   * Still-current opt-in preparation failures retire the snapshot and report
+   * replay-preparation-failed ONLY via onDiagnostic, without counting a failure.
+   * Configure onDiagnostic to observe these retirements; onEvent alone misses them.
+   * Preparation made obsolete by reentrant stop/replacement is silently abandoned. */
   onCall?: (call: KeepaliveCall) => void | Promise<void>;
 }
 
@@ -279,7 +280,6 @@ interface AttemptData {
   readonly sentAt: number;
   readonly purpose: 'normal' | 'maintenance';
   registered?: boolean;
-  finished?: boolean;
 }
 
 /** Raw SDK terminal allowlist, never parse fallbacks or usage inference. */
@@ -387,9 +387,8 @@ export class CacheKeepalive {
   /** Observe raw terminal metadata. Errors/cancellation must not call this as success. */
   finish(handle: KeepaliveAttempt, reason: unknown): void {
     const attempt = this.attempts.get(handle);
-    if (!attempt || this.stopped || attempt.finished) return;
-    attempt.finished = true; // Every first terminal wins, before accessors/observers reenter.
-    this.attempts.delete(handle); // Retained opaque handles must not retain prompts/headers.
+    if (!attempt || this.stopped) return;
+    this.attempts.delete(handle); // First terminal wins before reentry; release prompts/headers.
     if (reason === 'refusal') {
       // Eviction invalidates successes, not a refusal for a retained key.
       // Do not recreate forgotten identities or enlarge the bounded map.
@@ -614,7 +613,6 @@ export class CacheKeepalive {
         if (lin.ineffective >= this.cfg.maxIneffective) {
           if (this.lineages.get(key) === lin) {
             this.lineages.delete(key);
-            if (this.cfg.suppressOnRefusal) this.outcomes.delete(key);
           }
         } else {
           lin.refreshBaselineAt = startedAt;
@@ -646,7 +644,7 @@ export class CacheKeepalive {
       // Keep outcome identity so a later qualified prefix can replace it.
       if (this.cfg.suppressOnRefusal && !invoked) {
         this.lineages.delete(key);
-        message = `replay-preparation-failed: replay snapshot retired; ${message}`;
+        message = 'replay-preparation-failed: replay snapshot retired';
       }
       // Preparation failures are observable, but are not failed sends.
       if (!this.cfg.suppressOnRefusal || invoked) this.consecutiveErrors += 1;

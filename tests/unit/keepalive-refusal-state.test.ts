@@ -856,7 +856,7 @@ it('unprintable preparation errors retire the snapshot and emit a diagnostic', a
   Object.assign((k as any).lineages.values().next().value.wire, { toJSON() { throw Object.create(null); } });
   await vi.advanceTimersByTimeAsync(100);
   expect(k.getStatus()).toEqual([]);
-  expect(events).toEqual([expect.objectContaining({ type: 'diagnostic', reason: 'replay-preparation-failed: replay snapshot retired; Unprintable keepalive error' })]);
+  expect(events).toEqual([expect.objectContaining({ type: 'diagnostic', reason: 'replay-preparation-failed: replay snapshot retired' })]);
 });
 
 it('model context window terminal qualifies fresh and post-refusal attempts', () => {

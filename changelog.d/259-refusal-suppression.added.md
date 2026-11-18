@@ -92,3 +92,8 @@
   unqualified keys) and ineffective retirement with its consecutive count.
 - Apply observed foreground refusals before terminal capture runs prototype or
   property-descriptor proxy traps; throwing traps cannot leave the old key replayable.
+- Read foreground `stop_reason` once by ordinary property access, without a
+  presence check, before other terminal capture traps. The read itself can run
+  a caller getter/get trap; suppression follows the returned refusal, not that trap.
+- Preparation-retirement diagnostics omit exception text to avoid leaking payloads;
+  these notices require `onDiagnostic` and are not delivered to `onEvent`.

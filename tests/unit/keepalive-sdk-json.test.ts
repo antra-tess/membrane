@@ -98,8 +98,9 @@ it.each(['complete', 'stream'] as const)('%s real SDK rejects a pre-aborted requ
 
 it('Membrane.complete succeeds, then replay preparation rejects an onRequest root serializer that changes during spread', async () => {
   vi.useFakeTimers();
-  const observed: (KeepaliveEvent | KeepaliveDiagnostic)[] = [];
-  const { a, bodies } = setup({ checkIntervalMs: 100, onDiagnostic: event => { observed.push(event); }, onEvent: event => { observed.push(event); } });
+  const observed: KeepaliveDiagnostic[] = [];
+  const events: KeepaliveEvent[] = [];
+  const { a, bodies } = setup({ checkIntervalMs: 100, onDiagnostic: event => { observed.push(event); }, onEvent: event => { events.push(event); } });
   const membrane = new Membrane(a, { formatter: new NativeFormatter() });
   let reads = 0;
   const serialize = vi.fn(() => ({ model: message.model, max_tokens: 1024, messages: [] }));
@@ -130,8 +131,9 @@ it('Membrane.complete succeeds, then replay preparation rejects an onRequest roo
   expect(serialize).not.toHaveBeenCalled();
   expect(bodies).toHaveLength(1); // No refresh transport invocation.
   expect(a.cacheKeepalive!.getStatus()).toEqual([]);
+  expect(events).toEqual([]);
   expect(observed).toContainEqual(expect.objectContaining({
     type: 'diagnostic',
-    reason: expect.stringContaining('replay-preparation-failed: replay snapshot retired; Keepalive does not support root toJSON'),
+    reason: 'replay-preparation-failed: replay snapshot retired',
   }));
 });

@@ -68,7 +68,9 @@ rejected-send failures still accumulate in default-off mode, as do failures
 while copying response metadata (for example, throwing enumerable getters).
 With suppression enabled, replay serialization failures for a still-current snapshot
 report `replay-preparation-failed` through `onDiagnostic`, explicitly naming snapshot
-retirement, without incrementing that send-failure counter or delivering
+retirement. This notice is NOT delivered to `onEvent`: configure `onDiagnostic`
+to observe preparation retirement (as well as unknown-terminal retirement and LRU
+eviction). Without it these removals are silent. It is emitted without incrementing that send-failure counter or delivering
 a call receipt, since the sender was not invoked. They retire only the failed
 replay snapshot (retaining outcome identity), so it is not retried every timer
 check; a later qualified foreground prefix can install a new snapshot. If serialization
@@ -208,7 +210,10 @@ snapshot; finishing does not remove that snapshot or release its references.
 Retaining an unfinished handle retains attempt references despite the lineage cap.
 `record` is the legacy prefix-accounting API and is ignored entirely with suppression enabled,
 even for qualified keys; it cannot carry begin identity or ordering.
-Raw stream refusal is observed before progress callbacks or terminal parsing; a
+Terminal capture first reads `stop_reason` once by ordinary property access,
+without a presence check. That getter/get trap necessarily runs before suppression;
+a returned refusal is applied before prototype/descriptor traps and unrelated
+terminal metadata reads. Raw stream refusal is observed before progress callbacks or terminal parsing; a
 callback error still fails the foreground and closes the SDK iterator normally.
 Synchronous throws and rejected promises from event/call observers are isolated
 in both modes. This observer safety and adapter bookkeeping exception isolation

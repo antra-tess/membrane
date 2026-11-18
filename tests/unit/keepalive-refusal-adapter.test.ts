@@ -178,13 +178,18 @@ for (const lane of ['complete', 'stream'] as const) {
 
     it('does not rearm older in-flight success at the same timestamp', async () => {
       const gate = held();
-      let first = true;
+      let first = false;
+      let reason = 'end_turn';
       const { a } = adapter({ suppressOnRefusal: true, lanes: [lane] },
-        () => { if (first) { first = false; return gate.promise; } return { ...answer, stop_reason: 'refusal' }; },
+        () => { if (first) { first = false; return gate.promise; } return { ...answer, stop_reason: reason }; },
         () => { if (first) { first = false; return heldStream(gate.promise, [messageStart, ...rest]); }
-          return sdkStream([messageStart, { type: 'message_delta', delta: { stop_reason: 'refusal' }, usage: readUsage }]); });
+          return sdkStream([messageStart, { type: 'message_delta', delta: { stop_reason: reason }, usage: readUsage }]); });
       const run = () => lane === 'complete' ? a.complete(request('race')) : a.stream(request('race'), noCallbacks);
+      await run();
+      expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
+      first = true;
       const old = run();
+      reason = 'refusal';
       await run();
       gate.release(answer);
       await old;
@@ -405,6 +410,7 @@ it('raw stream refusal survives throwing progress with real generator cleanup an
     } }));
   await a.stream(request('progress'), noCallbacks);
   expect(closed).toBe(1);
+  expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
   reason = 'refusal';
   let progressCount = 0;
   // onProgress receives a classification, not the raw SDK event. The second
@@ -439,6 +445,7 @@ it('complete refusal is observed even if prefix bookkeeping throws', async () =>
   let reason = 'end_turn';
   const { a, events } = adapter({ suppressOnRefusal: true, lanes: ['complete'] }, () => ({ ...answer, stop_reason: reason }));
   await a.complete(request('prefix-error'));
+  expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
   const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
   let suppressedAtPrefix = false;
   const prefix = vi.spyOn(a.cacheKeepalive!, 'prefix').mockImplementation(() => {
@@ -790,3 +797,38 @@ it.each(['complete', 'stream'] as const)('Membrane %s reports unknown foreground
   await vi.advanceTimersByTimeAsync(100);
   expect(replays()).toEqual([]);
 });
+
+for (const lane of ['complete', 'stream'] as const) {
+  it.each(['throw', 'false'] as const)(`${lane}: terminal capture ignores a %s has trap`, async mode => {
+    let refusing = false;
+    let reads = 0;
+    const has = vi.fn(() => {
+      if (mode === 'throw') throw new Error('has trap must not run');
+      return false;
+    });
+    const terminal = () => new Proxy(lane === 'complete' ? { ...answer } : {}, {
+      has,
+      get(target, key, receiver) {
+        if (key === 'stop_reason') { reads++; return 'refusal'; }
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    const { a, replays, events } = adapter({ suppressOnRefusal: true, lanes: [lane] },
+      () => refusing ? terminal() : answer,
+      () => sdkStream([messageStart, { type: 'message_delta', delta: refusing ? terminal() : { stop_reason: 'end_turn' }, usage: readUsage }]));
+    const run = () => lane === 'complete' ? a.complete(request('has-trap'))
+      : a.stream(request('has-trap'), noCallbacks);
+    await run();
+    expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
+    refusing = true;
+    const result = await run();
+    expect(result.stopReason).toBe('refusal');
+    expect((result.raw as any).stop_reason).toBe('refusal');
+    expect(reads).toBe(1);
+    expect(has).not.toHaveBeenCalled();
+    expect(events.filter(e => e.type === 'suppressed')).toHaveLength(1);
+    expect(a.cacheKeepalive!.getStatus()).toEqual([]);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(replays()).toEqual([]);
+  });
+}

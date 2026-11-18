@@ -262,14 +262,16 @@ export function boundedProviderEvent(event: unknown): unknown {
 // observation, even for custom SDK responses with changing accessors. Copy
 // descriptors so retaining raw diagnostics does not read that accessor again.
 function captureTerminal<T extends { stop_reason?: unknown }>(terminal: T, observe: (reason: unknown) => void): T {
-  if (!('stop_reason' in terminal)) return terminal;
+  // This read can invoke a caller getter/get trap; no presence trap runs first.
   const stopReason = terminal.stop_reason;
   // Apply refusal before prototype/descriptor copying can run throwing proxy traps.
   observe(stopReason);
-  return Object.create(Object.getPrototypeOf(terminal), {
-    ...Object.getOwnPropertyDescriptors(terminal),
-    stop_reason: { value: stopReason, enumerable: true, configurable: true, writable: true },
-  });
+  const prototype = Object.getPrototypeOf(terminal);
+  const descriptors = Object.getOwnPropertyDescriptors(terminal);
+  if (stopReason !== undefined || Object.hasOwn(descriptors, 'stop_reason')) {
+    descriptors.stop_reason = { value: stopReason, enumerable: true, configurable: true, writable: true };
+  }
+  return Object.create(prototype, descriptors);
 }
 
 function sdkRequestId(holder: unknown, key: 'request_id' | '_request_id'): string | undefined {
