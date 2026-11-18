@@ -381,6 +381,7 @@ export class AnthropicAdapter implements ProviderAdapter {
   private defaultBeta: string | undefined;
   /** Holds idle agents' cached prefixes warm; undefined when disabled. */
   readonly cacheKeepalive: CacheKeepalive | undefined;
+  private readonly suppressKeepaliveOnRefusal: boolean;
   private readonly dynamicHeaders?: (ctx?: DynamicHeadersContext) => Record<string, string | number | null | undefined>;
 
   constructor(config: AnthropicAdapterConfig = {}) {
@@ -412,6 +413,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     this.client = new Anthropic(clientOptions);
     this.defaultMaxTokens = config.defaultMaxTokens ?? 4096;
 
+    this.suppressKeepaliveOnRefusal = config.cacheKeepalive?.suppressOnRefusal ?? false;
     this.cacheKeepalive = config.cacheKeepalive?.enabled === false
       ? undefined
       : new CacheKeepalive(
@@ -513,7 +515,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     try {
       const sentAt = Date.now();
       const attempt = keepaliveObservation(() => this.cacheKeepalive?.begin(
-        fullRequest as unknown as Record<string, unknown>, headers, 'complete', options?.keepalivePurpose, sentAt,
+        fullRequest as unknown as Record<string, unknown>, headers, 'complete', this.suppressKeepaliveOnRefusal ? options?.keepalivePurpose : undefined, sentAt,
       ), () => this.cacheKeepalive?.stop('keepalive begin bookkeeping failed'));
       const response = await this.createMessage(fullRequest, live, callSignal, { maxRetries: 0 });
       if (attempt && response.stop_reason === 'refusal') {
@@ -609,7 +611,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       // The cache's clock starts with the request, not at message_start.
       const sentAt = Date.now();
       const attempt = keepaliveObservation(() => this.cacheKeepalive?.begin(
-        fullRequest as unknown as Record<string, unknown>, headers, 'stream', options?.keepalivePurpose, sentAt,
+        fullRequest as unknown as Record<string, unknown>, headers, 'stream', this.suppressKeepaliveOnRefusal ? options?.keepalivePurpose : undefined, sentAt,
       ), () => this.cacheKeepalive?.stop('keepalive begin bookkeeping failed'));
       const stream = await session.client.messages.stream(anthropicRequest, {
         signal: session.signal,

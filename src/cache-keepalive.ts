@@ -248,7 +248,7 @@ interface AttemptData {
 
 /** Raw SDK terminal allowlist, never parse fallbacks or usage inference. */
 function knownTerminal(reason: unknown): boolean {
-  return typeof reason === 'string' && ['end_turn', 'stop_sequence', 'tool_use', 'max_tokens', 'pause_turn'].includes(reason);
+  return typeof reason === 'string' && ['end_turn', 'stop_sequence', 'tool_use', 'max_tokens', 'pause_turn', 'model_context_window_exceeded'].includes(reason);
 }
 
 export class CacheKeepalive {
@@ -279,6 +279,9 @@ export class CacheKeepalive {
     const key = lineageKey(wire);
     if (this.stopped) return undefined;
     let state = this.outcomes.get(key);
+    // Serialization may reenter, refuse this key, and evict its identity.
+    // Do not recreate forgotten state for an attempt older than that work.
+    if (!state && sequence !== this.sequence) return undefined;
     if (!state) state = { barrier: 0, latest: 0, qualified: false };
     this.outcomes.delete(key);
     this.outcomes.set(key, state);
@@ -473,19 +476,24 @@ export class CacheKeepalive {
         }
         response.stop_reason = stopReason;
       }
+      const durationMs = Date.now() - startedAt;
       const receiptResponse = this.cfg.suppressOnRefusal ? response : { ...res };
       reported = true;
       this.reportCall({
-        key, lane: lin.lane, startedAt, durationMs: Date.now() - startedAt,
+        key, lane: lin.lane, startedAt, durationMs,
         request: payload, outcome: 'success', response: receiptResponse,
       });
       // Successfully processed resolutions break a run of failures, even when the
       // semantic outcome cannot refresh the cache (or its snapshot is stale).
-      this.consecutiveErrors = 0;
+      if (!this.cfg.suppressOnRefusal || refused) this.consecutiveErrors = 0;
       if (refused) return;
       if (this.cfg.suppressOnRefusal) {
-        if (this.stopped || this.lineages.get(key) !== lin || this.outcomes.get(key) !== state) return;
+        if (this.stopped || this.lineages.get(key) !== lin || this.outcomes.get(key) !== state) {
+          this.consecutiveErrors = 0;
+          return;
+        }
         if (!knownTerminal(stopReason)) {
+          this.consecutiveErrors = 0;
           // Retire only the replay snapshot, not the retained refusal identity.
           // Do not invent a retry/backoff policy for an unqualified refresh.
           this.lineages.delete(key);
@@ -495,6 +503,7 @@ export class CacheKeepalive {
       }
       const read = res.usage?.cache_read_input_tokens ?? 0;
       const wrote = res.usage?.cache_creation_input_tokens ?? 0;
+      if (this.cfg.suppressOnRefusal) this.consecutiveErrors = 0;
       // Usage accessors, like receipt observers, may replace or stop this key.
       if (this.cfg.suppressOnRefusal &&
           (this.stopped || this.lineages.get(key) !== lin || this.outcomes.get(key) !== state)) return;
@@ -524,7 +533,10 @@ export class CacheKeepalive {
       lin.refreshBaselineAt = startedAt;
       this.emit({ type: 'refreshed', key, lane: lin.lane, readTokens: read, idleMs });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      let message = 'Unprintable keepalive error';
+      if (this.cfg.suppressOnRefusal) {
+        try { message = err instanceof Error ? err.message : String(err); } catch {}
+      } else message = err instanceof Error ? err.message : String(err);
       if (payload && (!this.cfg.suppressOnRefusal || (invoked && !reported))) {
         this.reportCall({
           key, lane: lin.lane, startedAt, durationMs: Date.now() - startedAt,

@@ -4,6 +4,8 @@ import { expect, it } from 'vitest';
 const startupMs = 60_000;
 const defaultExecutionMs = 30_000;
 const stuckExecutionMs = 50;
+const slowStartupMs = 5_100;
+const selfTestExecutionMs = 1_000;
 const selfTestTimeoutMs = 180_000;
 
 function runChild(script: string, executionMs = defaultExecutionMs) {
@@ -62,10 +64,10 @@ it.each([-1, -0.5, 0, 0.5, 1])('maxLineages %s returns before SDK send and keeps
 
 it('bounded-loop watchdog excludes child startup but still kills a stuck loop', async () => {
   const slowStart = await runChild(`
-    await new Promise(resolve => setTimeout(resolve, 5_100));
+    await new Promise(resolve => setTimeout(resolve, ${slowStartupMs}));
     console.log('ready');
     console.log('returned');
-  `);
+  `, selfTestExecutionMs);
   expect(slowStart.code, slowStart.stderr).toBe(0);
   expect(slowStart.stdout).toContain('returned');
   const stuck = await runChild(`console.log('ready'); while (true) {}`, stuckExecutionMs);
@@ -99,5 +101,6 @@ for (const suppression of ['{}', '{suppressOnRefusal:false}']) {
 }
 
 it('watchdog self-test budget covers both sequential startup and execution bounds plus close slack', () => {
+  expect(slowStartupMs).toBeGreaterThan(selfTestExecutionMs);
   expect(selfTestTimeoutMs).toBeGreaterThan(2 * startupMs + defaultExecutionMs + stuckExecutionMs + 10_000);
 });

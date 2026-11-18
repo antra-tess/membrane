@@ -259,3 +259,14 @@ describe('Anthropic adapter receipt integration', () => {
     expect(calls[0]).not.toHaveProperty('headers');
   });
 });
+
+it('legacy receipt duration excludes sender response getters', async () => {
+  const { ka, calls } = setup(async () => ({
+    usage,
+    get extra() { vi.setSystemTime(Date.now() + 25); return 'value'; },
+  }));
+  ka.record(wire(), undefined, 'stream');
+  await vi.advanceTimersByTimeAsync(100);
+  expect(calls).toHaveLength(1);
+  expect(calls[0].durationMs).toBe(0);
+});

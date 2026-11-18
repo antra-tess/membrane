@@ -787,3 +787,46 @@ it('normal finish cannot be replayed as refusal against newer work', () => {
   expect(k.getStatus()).toHaveLength(1);
   expect(events).toEqual([]);
 });
+
+it('serialization cannot recreate an identity evicted after a nested refusal', () => {
+  const { k, begin } = setup(undefined, { maxLineages: 1 });
+  const outerWire = wire();
+  Object.assign(outerWire.system, { toJSON() {
+    k.finish(begin(), 'refusal');
+    begin('normal', wire('other'));
+    return wire().system;
+  } });
+  const outer = k.begin(outerWire, undefined, 'stream');
+  if (outer) k.finish(outer, 'end_turn');
+  expect(k.getStatus()).toEqual([]);
+});
+
+it('repeated usage-processing errors reach the send failure threshold', async () => {
+  const usage = { get cache_read_input_tokens(): number { throw new Error('bad usage'); } };
+  const { normal, events, k } = setup(async () => ({ stop_reason: 'max_tokens', usage }), { maxConsecutiveErrors: 3 });
+  normal();
+  await vi.advanceTimersByTimeAsync(300);
+  expect(events.filter(e => e.type === 'error').map(e => e.consecutive)).toEqual([1, 2, 3]);
+  expect(events.some(e => e.type === 'disabled')).toBe(true);
+  expect(k.getStatus()).toEqual([]);
+});
+
+it('unprintable preparation errors retire the snapshot and emit a diagnostic', async () => {
+  const { k, events } = setup();
+  const w = wire();
+  k.finish(k.begin(w, undefined, 'stream')!, 'end_turn');
+  Object.assign(w, { toJSON() { throw Object.create(null); } });
+  await vi.advanceTimersByTimeAsync(100);
+  expect(k.getStatus()).toEqual([]);
+  expect(events).toEqual([expect.objectContaining({ type: 'error', error: 'Unprintable keepalive error', consecutive: 0 })]);
+});
+
+it('model context window terminal qualifies fresh and post-refusal attempts', () => {
+  const { k, begin } = setup();
+  k.finish(begin(), 'model_context_window_exceeded');
+  expect(k.getStatus()).toHaveLength(1);
+  k.finish(begin(), 'refusal');
+  expect(k.getStatus()).toEqual([]);
+  k.finish(begin(), 'model_context_window_exceeded');
+  expect(k.getStatus()).toHaveLength(1);
+});

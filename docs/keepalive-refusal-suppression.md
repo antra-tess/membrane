@@ -39,9 +39,10 @@ snapshot and emits `skipped` with reason
 `unknown-refresh-terminal`, while retaining outcome identity/barrier state. A later
 foreground prefix may register a new snapshot if the identity is still qualified.
 This is retirement, not a new retry/backoff policy; an unknown refresh is never
-resent on every timer check. Resolutions whose initial metadata processing succeeds reset consecutive
-send/response-processing errors, including refusals, empty responses and unknown
-terminals in suppression mode. Replay serialization
+resent on every timer check. Successfully processed resolutions reset consecutive send/response-processing
+errors, including refusals, empty responses and unknown terminals in suppression
+mode. For a current known-normal refresh, usage fields must also be readable
+before resetting that counter. Replay serialization
 failures emit `error` without incrementing that send-failure counter or delivering
 a call receipt, since the sender was not invoked. They retire only the failed
 replay snapshot (retaining outcome identity), so it is not retried every timer
@@ -52,7 +53,7 @@ requires a known-normal
 foreground completion too; a prefix alone never qualifies a fresh opt-in identity.
 Only a normal foreground request **begun after the accepted refusal** can rearm,
 and only with raw terminal `end_turn`, `stop_sequence`, `tool_use`, `max_tokens`
-or `pause_turn`. Missing/null/unknown terminal, transport error, cancellation,
+`pause_turn`, or `model_context_window_exceeded`. Missing/null/unknown terminal, transport error, cancellation,
 timer replay and declared maintenance do not rearm. Complete-response parse
 errors do not rearm; stream qualification precedes final response assembly
 (see the boundary below). Terminal

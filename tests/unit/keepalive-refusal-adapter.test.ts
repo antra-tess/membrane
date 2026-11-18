@@ -459,3 +459,13 @@ it('complete qualification checks caller abort even if combined-signal propagati
   expect(abort.signal.aborted).toBe(true);
   expect(a.cacheKeepalive!.getStatus()).toEqual([]);
 });
+
+it.each(['complete', 'stream'] as const)('default-off %s ignores keepalivePurpose accessors', async lane => {
+  const { a, replays, events } = adapter({ lanes: [lane] }, () => answer, () => sdkStream([messageStart, ...rest]));
+  const options = { get keepalivePurpose(): 'normal' { throw new Error('must not read'); } };
+  if (lane === 'complete') await a.complete(request('system'), options);
+  else await a.stream(request('system'), noCallbacks, options);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(replays()).toHaveLength(1);
+  expect(events.some(e => e.type === 'disabled')).toBe(false);
+});

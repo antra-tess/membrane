@@ -43,3 +43,10 @@
   toward the send-failure limit (a later qualified prefix can install a new one), and
   a foreground refusal from an evicted handle still suppresses a currently
   retained identity for its key. Default-off behavior is unchanged.
+- In opt-in mode, a failed begin permanently stops keepalive for that adapter,
+  emits `disabled` with a reason, and warns of the permanent stop.
+- With opt-in keepalive refusal suppression, reserve request order before lineage
+  serialization, honor stop during serialization, and accept only the first
+  foreground terminal observation per attempt. Background receipts use the same
+  captured terminal value as suppression classification. Default-off scheduling
+  remains unchanged.

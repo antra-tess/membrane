@@ -155,7 +155,7 @@ never do.
 npm ci                # strict lockfile install (see below)
 npm run build         # tsc
 npm test              # vitest run
-npx tsc --noEmit      # typecheck
+npm run typecheck     # typecheck
 ```
 
 Push-time CI (`ci.yml`) builds, typechecks and runs the whole suite for every
