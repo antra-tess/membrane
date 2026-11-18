@@ -215,17 +215,17 @@ it('ineligible completion preserves identity for an older in-flight refusal and 
   normal(); expect(k.getStatus()).toHaveLength(1);
 });
 
-it('unrelated excluded/ineligible traffic reports bounded outcome eviction', () => {
+it('unrelated excluded/ineligible traffic cannot evict eligible outcomes', () => {
   const { k, normal, begin, events } = setup(); normal();
   const pending = begin();
   for (let i = 0; i < 4; i++) {
     const a = k.begin({ model: `other-${i}`, messages: [] }, undefined, 'complete')!;
     k.prefix(a); k.finish(a, undefined);
   }
-  expect(k.getStatus()).toEqual([]);
-  expect((k as any).outcomes.size).toBe(4);
-  expect(events).toEqual([{ type: 'error', key: pending.key, error: 'outcome-lru-eviction: maxLineages cap exceeded', consecutive: 0 }]);
-  k.prefix(pending); k.finish(pending, 'end_turn'); expect(k.getStatus()).toEqual([]);
+  expect(k.getStatus()).toHaveLength(1);
+  expect((k as any).outcomes.size).toBe(1);
+  expect(events).toEqual([]);
+  k.prefix(pending); k.finish(pending, 'end_turn'); expect(k.getStatus()).toHaveLength(1);
 });
 
 it.each([NaN, Infinity, -Infinity])('nonfinite maxLineages %s uses the bounded default', cap => {
@@ -387,6 +387,7 @@ it('excluded-lane rearm does not unblock a pre-refusal stream handle', () => {
   k.finish(begin(), 'refusal');
   const complete = k.begin(wire(), undefined, 'complete')!;
   k.finish(complete, 'end_turn');
+  expect((k as any).outcomes.get(complete.key).qualified).toBe(true);
   k.prefix(old); k.finish(old, 'end_turn');
   expect(k.getStatus()).toEqual([]);
   const fresh = begin(); k.finish(fresh, 'end_turn');
@@ -934,9 +935,11 @@ it.each(['prefix', 'finish'])('lanes reentrancy cannot restore a refused or stop
     const lanes = ['stream'];
     lanes.includes = () => { reenter(); return true; };
     const { k, normal, begin } = setup(undefined, { lanes }); normal();
+    expect(k.getStatus()).toHaveLength(1);
     const refusing = begin(), pending = begin();
-    reenter = () => { if (action === 'stop') k.stop(); else k.finish(refusing, 'refusal'); };
+    reenter = vi.fn(() => { if (action === 'stop') k.stop(); else k.finish(refusing, 'refusal'); });
     if (operation === 'prefix') k.prefix(pending); else k.finish(pending, 'end_turn');
+    expect(reenter).toHaveBeenCalled();
     expect(k.getStatus()).toEqual([]);
   }
 });
@@ -977,7 +980,10 @@ it('begin touches an existing outcome before LRU eviction', () => {
 });
 
 it('newer ineligible prefix under a barrier prevents an older snapshot', () => {
-  const { k, begin } = setup(); k.finish(begin(), 'refusal');
+  const { k, begin, events } = setup(); k.finish(begin(), 'refusal');
+  expect(events).toContainEqual({ type: 'suppressed', key: lineageKey(wire()), source: 'foreground' });
+  expect((k as any).outcomes.get(lineageKey(wire()))).toMatchObject({ qualified: false, barrier: expect.any(Number) });
+  expect((k as any).outcomes.get(lineageKey(wire())).barrier).toBeGreaterThan(0);
   const pending = begin();
   const newer = k.begin({ ...wire(), thinking: { type: 'enabled' } }, undefined, 'stream')!;
   k.prefix(newer); k.finish(pending, 'end_turn');
@@ -1128,5 +1134,17 @@ it('stale unreadable response metadata still hits the global processing limit', 
   await vi.advanceTimersByTimeAsync(0);
   expect(calls.map(c => c.outcome)).toEqual(['error']);
   expect(events.map(e => e.type)).toEqual(['error', 'disabled']);
+  expect(k.getStatus()).toEqual([]);
+});
+
+it.each(['excluded', 'ineligible', 'maintenance'])('untracked %s refusal still suppresses a subsequently retained key', kind => {
+  const { k, normal } = setup();
+  const w = kind === 'ineligible' ? { ...wire(), thinking: { type: 'enabled' } } : wire();
+  const detached = k.begin(w, undefined, kind === 'excluded' ? 'complete' : 'stream',
+    kind === 'maintenance' ? 'maintenance' : 'normal')!;
+  expect((k as any).outcomes.size).toBe(0);
+  normal();
+  expect(k.getStatus()).toHaveLength(1);
+  k.finish(detached, 'refusal');
   expect(k.getStatus()).toEqual([]);
 });

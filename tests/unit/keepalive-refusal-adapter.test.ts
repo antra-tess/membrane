@@ -606,3 +606,23 @@ it.each([{}, { suppressOnRefusal: false }])('public adapter default-off cap evic
   await vi.advanceTimersByTimeAsync(100);
   expect(replays()).toHaveLength(4);
 });
+
+it.each([undefined, false, true])('side traffic preserves the primary stream (suppression: %s)', async suppressOnRefusal => {
+  const { a, events, replays } = adapter({ suppressOnRefusal },
+    () => ({ ...answer, stop_reason: 'max_tokens' }),
+    () => sdkStream([messageStart, ...rest]));
+  await a.stream(request('primary'), noCallbacks);
+  const keys = a.cacheKeepalive!.getStatus().map(s => s.key);
+  expect(keys).toHaveLength(1);
+  for (let i = 0; i < 5; i++) {
+    await a.complete(request(`excluded-${i}`));
+    const ineligible = request(`ineligible-${i}`);
+    ineligible.thinking = { type: 'enabled', budget_tokens: 1024 };
+    await a.stream(ineligible, noCallbacks);
+  }
+  expect(a.cacheKeepalive!.getStatus().map(s => s.key)).toEqual(keys);
+  expect(events).toEqual([]);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(replays()).toHaveLength(1);
+  expect(replays()[0].system).toEqual(request('primary').system);
+});

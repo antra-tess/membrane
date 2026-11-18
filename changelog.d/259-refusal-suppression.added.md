@@ -33,10 +33,12 @@
   fresh identities, including after eviction. Excluded-lane and fresh pending
   prefixes cannot starve successful stream qualification; finishing an already
   registered request preserves its snapshot and refresh baseline.
-- Opt-in outcome state uses a bounded all-request LRU; eviction is silent, like
-  legacy snapshot LRU eviction; `skipped` only reports ineligible-snapshot removal. Unrelated or excessive
-  concurrent traffic can invalidate in-flight handles; increase `maxLineages`
-  if needed. Ineligible prefixes preserve shared outcome identity. See
+- Opt-in outcome state is bounded; eviction emits an `onEvent` error diagnostic
+  (`outcome-lru-eviction`), unlike silent legacy snapshot eviction.
+  Only normal, eligible requests in configured lanes allocate new identities;
+  unrelated excluded/ineligible traffic cannot evict eligible lineages.
+  Excess eligible concurrency can still invalidate in-flight handles.
+  Existing keys retain cross-lane refusal/rearm observation. See
   `docs/keepalive-refusal-suppression.md` for retention tradeoffs.
 - In opt-in mode, stale failed sender invocations and reentrant error observers
   cannot bypass the existing global consecutive transport-error limit. This is

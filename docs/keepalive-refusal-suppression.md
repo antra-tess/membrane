@@ -135,19 +135,21 @@ prefix accounting but cannot clear suppression.
 State is local to each keeper (one per adapter), not shared across adapters in
 the same process. A refusal on one adapter does not suppress another adapter. At most `maxLineages` outcome identities (default four)
 are retained, including suppressed keys, separately from at most that many full
-wire snapshots. A begin that reaches outcome registration touches the outcome LRU,
-including excluded lanes and ineligible/unknown requests. A stopped keeper does
-not register; sequence-advancing reentrant serialization instead returns a
-detached handle without touching the outer key's LRU position. Unrelated traffic can therefore evict an active
-snapshot even though legacy scheduling would retain it; increase `maxLineages`
-if needed. Each opt-in outcome eviction emits `error` with the evicted key and
-`outcome-lru-eviction: maxLineages cap exceeded`, even for an identity with no
-snapshot. This diagnostic does not increment consecutive failures or disable
-the keeper. Default-off snapshot LRU eviction remains silent;
-`skipped` remains limited to removal of an ineligible snapshot. More distinct in-flight keys than the cap can
-evict attempts before they finish; sustained round-robin overload can prevent
-qualification. Increase the cap or reduce concurrency if this contention recurs. We retain this shared bound so that refused and
-in-flight keys from all lanes remain observable without unbounded state.
+wire snapshots. Only a normal request in a configured lane with an eligible
+replay shape can allocate a new outcome identity. Excluded, ineligible and
+maintenance traffic for untracked keys receives detached handles and cannot
+evict eligible lineages. Such handles can still suppress a key retained by the
+time their refusal arrives, but cannot qualify it. Requests for existing keys
+still touch the outcome LRU and observe cross-lane refusals and rearm.
+A stopped keeper does not register; sequence-advancing reentrant serialization
+also returns a detached handle.
+Each opt-in outcome eviction emits `error` with the evicted key and
+`outcome-lru-eviction: maxLineages cap exceeded`, even without a snapshot.
+This diagnostic does not increment consecutive failures or disable the keeper.
+Default-off snapshot LRU eviction remains silent; `skipped` only reports
+ineligible-snapshot removal. More eligible distinct in-flight keys than the cap
+can still evict attempts before they finish; sustained round-robin overload can
+prevent qualification. Increase the cap or reduce eligible concurrency if needed.
 Suppression has no time
 expiry while retained; it holds no wire snapshot. LRU eviction forgets both
 identity and suppression; a *new* begin after eviction is a fresh lineage, but

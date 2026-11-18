@@ -308,19 +308,24 @@ export class CacheKeepalive {
     headers = headers ? { ...headers } : undefined;
     const key = lineageKey(wire);
     if (this.stopped) return undefined;
-    let state = this.outcomes.get(key);
+    const state = this.outcomes.get(key);
+    // Only potentially schedulable foreground requests may allocate a new key.
+    // Other traffic still gets a handle: a late refusal must suppress a key
+    // retained by then, and existing identities keep cross-lane rearm semantics.
+    const admit = !!state || (purpose === 'normal' &&
+      this.cfg.lanes.includes(lane) && ineligibleReason(wire) === null);
     // Serialization may reenter, refuse, evict, and recreate this key. We cannot
     // safely adopt any resulting identity for success. Keep a detached handle:
     // its later refusal still applies to a retained key, without recreating one.
-    if (sequence !== this.sequence) {
+    if (!admit || sequence !== this.sequence) {
       const handle = Object.freeze({ key }) as KeepaliveAttempt;
       const detached = { barrier: 0, latest: 0, qualified: false };
       this.attempts.set(handle, { key, state: detached, sequence, wire, headers, lane, purpose, sentAt });
       return handle;
     }
-    if (!state) state = { barrier: 0, latest: 0, qualified: false };
+    const retained = state ?? { barrier: 0, latest: 0, qualified: false };
     this.outcomes.delete(key);
-    this.outcomes.set(key, state);
+    this.outcomes.set(key, retained);
     while (this.outcomes.size > this.cfg.maxLineages) {
       const oldest = this.outcomes.keys().next().value;
       if (oldest === undefined) break;
@@ -330,7 +335,7 @@ export class CacheKeepalive {
     }
     if (this.stopped) return undefined;
     const handle = Object.freeze({ key }) as KeepaliveAttempt;
-    this.attempts.set(handle, { key, state, sequence, wire, headers, lane, purpose, sentAt });
+    this.attempts.set(handle, { key, state: retained, sequence, wire, headers, lane, purpose, sentAt });
     return handle;
   }
 
@@ -559,7 +564,7 @@ export class CacheKeepalive {
       const wrote = this.cfg.suppressOnRefusal ? Number(rawWrote) : rawWrote;
       if (this.cfg.suppressOnRefusal) {
         for (const [field, value] of [['cache_read_input_tokens', read], ['cache_creation_input_tokens', wrote]] as const) {
-          if (!Number.isFinite(value)) throw new Error(`Non-finite keepalive usage: ${field}=${value}; sender must return a finite number`);
+          if (!Number.isFinite(value)) throw new Error(`Non-finite keepalive usage: ${field}=${value}; expected finite provider/sender cache usage`);
         }
         this.consecutiveErrors = 0;
       }
