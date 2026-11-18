@@ -135,6 +135,33 @@ for (const lane of ['complete', 'stream'] as const) {
       expect(replays()[0]).not.toHaveProperty('keepalivePurpose');
     });
 
+    it.each(['refusal', 'end_turn'])('captures a changing terminal accessor once (%s)', async firstReason => {
+      let changing = false;
+      let reads = 0;
+      const terminal = () => changing ? {
+        get stop_reason() {
+          return ++reads === 1 ? firstReason : firstReason === 'refusal' ? 'end_turn' : 'refusal';
+        },
+      } : { stop_reason: 'end_turn' };
+      const { a, events, replays } = adapter({ suppressOnRefusal: true, lanes: [lane] },
+        () => Object.defineProperties({ ...answer, _request_id: 'req-changing' }, Object.getOwnPropertyDescriptors(terminal())),
+        () => sdkStream([messageStart, { type: 'message_delta', delta: terminal(), usage: readUsage }]));
+      const run = () => lane === 'complete' ? a.complete(request('changing-terminal'))
+        : a.stream(request('changing-terminal'), noCallbacks);
+      await run();
+      expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
+      changing = true;
+      const response = await run();
+      expect(response.stopReason).toBe(firstReason);
+      expect(response.providerStopReason).toBe(firstReason);
+      expect((response.raw as any).stop_reason).toBe(firstReason);
+      expect(reads).toBe(1);
+      expect(events.some(e => e.type === 'suppressed')).toBe(firstReason === 'refusal');
+      expect(a.cacheKeepalive!.getStatus()).toHaveLength(firstReason === 'refusal' ? 0 : 1);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(replays()).toHaveLength(firstReason === 'refusal' ? 0 : 1);
+    });
+
     it('observes refusal from a disabled lane sharing a scheduled key', async () => {
       let reason = 'end_turn';
       const { a } = adapter({ suppressOnRefusal: true, lanes: [lane === 'stream' ? 'complete' : 'stream'] },
@@ -166,12 +193,18 @@ for (const lane of ['complete', 'stream'] as const) {
   });
 }
 
-it('legacy resolved refusal continues scheduling by default', async () => {
-  const { a, replays } = adapter({ lanes: ['complete'] }, () => ({ ...answer, stop_reason: 'refusal' }));
-  await a.complete(request('legacy'));
-  await vi.advanceTimersByTimeAsync(100);
-  expect(replays()).toHaveLength(1);
-});
+for (const lane of ['complete', 'stream'] as const) {
+  it(`legacy ${lane} resolved refusal continues scheduling by default`, async () => {
+    const { a, replays } = adapter({ lanes: [lane] }, () => ({ ...answer, stop_reason: 'refusal' }),
+      () => sdkStream([messageStart, { type: 'message_delta', delta: { stop_reason: 'refusal' }, usage: readUsage }]));
+    const response = lane === 'complete' ? await a.complete(request('legacy'))
+      : await a.stream(request('legacy'), noCallbacks);
+    expect(response.stopReason).toBe('refusal');
+    expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(replays()).toHaveLength(1);
+  });
+}
 
 for (const lane of ['complete', 'stream'] as const) {
   for (const suppression of [{}, { suppressOnRefusal: false }]) {
@@ -267,6 +300,7 @@ it('complete parse failure after a barrier cannot rearm, but refusal survives pa
   expect(await settle(a.complete(request('parse')))).toBeDefined();
   expect(a.cacheKeepalive!.getStatus()).toEqual([]);
   response = answer; await a.complete(request('parse'));
+  expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
   response = { ...answer, stop_reason: 'refusal', usage: undefined };
   expect(await settle(a.complete(request('parse')))).toBeDefined();
   expect(a.cacheKeepalive!.getStatus()).toEqual([]);
@@ -657,4 +691,30 @@ it.each(['throw', 'abort'] as const)('buffered local-stop suffix %s happens afte
   expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
   await vi.advanceTimersByTimeAsync(100);
   expect(replays()).toHaveLength(1);
+});
+
+it.each(['complete', 'stream'] as const)('Membrane %s suppresses refusal before a throwing usage getter', async lane => {
+  let refusing = false;
+  const usage = vi.fn(() => { throw new Error('unrelated usage getter'); });
+  const { a, replays } = adapter({ suppressOnRefusal: true, lanes: [lane] },
+    () => refusing ? Object.defineProperty({ ...answer, stop_reason: 'refusal' }, 'usage', { enumerable: true, get: usage }) : answer,
+    () => sdkStream([messageStart, refusing
+      ? Object.defineProperty({ type: 'message_delta', delta: { stop_reason: 'refusal' } }, 'usage', { enumerable: true, get: usage })
+      : rest[3]]));
+  const membrane = new Membrane(a, { formatter: new NativeFormatter() });
+  const req = {
+    messages: [{ participant: 'User', content: [{ type: 'text' as const, text: 'hi' }] }],
+    system: 'throwing usage boundary', config: { model: 'claude-opus-4-1', maxTokens: 1024 },
+    promptCaching: true, cacheTtl: '1h' as const, toolMode: 'native' as const,
+  };
+  const run = () => lane === 'complete' ? membrane.complete(req, { refusalRetries: 0 })
+    : membrane.stream(req, { onChunk: () => {}, refusalRetries: 0 });
+  await run();
+  expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
+  refusing = true;
+  await expect(run()).rejects.toThrow('unrelated usage getter');
+  expect(usage).toHaveBeenCalled();
+  expect(a.cacheKeepalive!.getStatus()).toHaveLength(0);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(replays()).toHaveLength(0);
 });

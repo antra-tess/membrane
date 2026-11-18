@@ -258,6 +258,17 @@ export function boundedProviderEvent(event: unknown): unknown {
   return { type, truncated: true, json: json.slice(0, PROVIDER_EVENT_MAX_CHARS) };
 }
 
+// Opt-in foreground bookkeeping and public/raw results must share one terminal
+// observation, even for custom SDK responses with changing accessors. Copy
+// descriptors so retaining raw diagnostics does not read that accessor again.
+function captureTerminal<T extends { stop_reason?: unknown }>(terminal: T): T {
+  const stopReason = terminal.stop_reason;
+  return Object.create(Object.getPrototypeOf(terminal), {
+    ...Object.getOwnPropertyDescriptors(terminal),
+    stop_reason: { value: stopReason, enumerable: true, configurable: true, writable: true },
+  });
+}
+
 function sdkRequestId(holder: unknown, key: 'request_id' | '_request_id'): string | undefined {
   if (holder === null || typeof holder !== 'object') return undefined;
   const id = (holder as Record<string, unknown>)[key];
@@ -518,7 +529,8 @@ export class AnthropicAdapter implements ProviderAdapter {
       const attempt = keepaliveObservation(() => this.cacheKeepalive?.begin(
         fullRequest as unknown as Record<string, unknown>, headers, 'complete', this.suppressKeepaliveOnRefusal ? options?.keepalivePurpose : undefined, sentAt,
       ), () => this.cacheKeepalive?.stop('keepalive begin bookkeeping failed; permanently stopped for this adapter; create a new adapter to restart keepalive'));
-      const response = await this.createMessage(fullRequest, live, callSignal, { maxRetries: 0 });
+      const received = await this.createMessage(fullRequest, live, callSignal, { maxRetries: 0 });
+      const response = this.suppressKeepaliveOnRefusal ? captureTerminal(received) : received;
       if (attempt && response.stop_reason === 'refusal') {
         keepaliveObservation(() => this.cacheKeepalive?.finish(attempt, 'refusal'),
           () => this.cacheKeepalive?.stop('keepalive finish bookkeeping failed; permanently stopped for this adapter; create a new adapter to restart keepalive'));
@@ -733,11 +745,17 @@ export class AnthropicAdapter implements ProviderAdapter {
         noteUnhandled(event);
       };
 
-      for await (const event of stream) {
-        // Raw refusal is authoritative even if progress/terminal processing throws.
-        if (attempt && event.type === 'message_delta' && event.delta.stop_reason === 'refusal') {
-          keepaliveObservation(() => this.cacheKeepalive?.finish(attempt, 'refusal'),
-          () => this.cacheKeepalive?.stop('keepalive finish bookkeeping failed; permanently stopped for this adapter; create a new adapter to restart keepalive'));
+      for await (const received of stream) {
+        let event = received;
+        if (this.suppressKeepaliveOnRefusal && received.type === 'message_delta') {
+          const delta = captureTerminal(received.delta);
+          // Observe and suppress before copying unrelated fields (e.g. a usage
+          // getter), just as complete does before parsing the response.
+          if (attempt && delta.stop_reason === 'refusal') {
+            keepaliveObservation(() => this.cacheKeepalive?.finish(attempt, 'refusal'),
+              () => this.cacheKeepalive?.stop('keepalive finish bookkeeping failed; permanently stopped for this adapter; create a new adapter to restart keepalive'));
+          }
+          event = { ...received, delta };
         }
         sawEvent = true;
         resetIdleTimer();

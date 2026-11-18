@@ -1133,8 +1133,16 @@ it('stale throwing replay preparation leaves replacement and emits no diagnostic
 it('stale unreadable response metadata still hits the global processing limit', async () => {
   let resolve!: (r: unknown) => void;
   const { k, normal, calls, events } = setup(() => new Promise(r => { resolve = r; }), { maxConsecutiveErrors: 1 });
-  normal(); await vi.advanceTimersByTimeAsync(100);
-  normal(); expect(k.getStatus()).toHaveLength(1);
+  const original = normal();
+  const originalSnapshot = (k as any).lineages.get(original.key);
+  expect(originalSnapshot).toBeDefined();
+  await vi.advanceTimersByTimeAsync(100);
+  const replacement = normal();
+  expect(replacement.key).toBe(original.key);
+  const replacementSnapshot = (k as any).lineages.get(replacement.key);
+  expect(replacementSnapshot).toBeDefined();
+  expect(replacementSnapshot).not.toBe(originalSnapshot);
+  expect(k.getStatus()).toHaveLength(1);
   resolve({ stop_reason: 'max_tokens', get metadata() { throw new Error('unreadable metadata'); } });
   await vi.advanceTimersByTimeAsync(0);
   expect(calls.map(c => c.outcome)).toEqual(['error']);

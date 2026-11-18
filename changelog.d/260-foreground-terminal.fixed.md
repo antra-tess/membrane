@@ -1,0 +1,1 @@
+- Capture Anthropic foreground terminal stop reasons once when refusal-aware cache keepalive is enabled, so changing SDK accessors cannot make suppression disagree with complete or stream responses. Default-off behavior is unchanged. Refusal suppression precedes unrelated response/event getters, including streamed usage.
