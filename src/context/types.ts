@@ -1,4 +1,4 @@
-import type { NormalizedMessage, NormalizedResponse, AbortedResponse, GenerationConfig, ToolDefinition } from '../types/index.js';
+import type { NormalizedMessage, NormalizedResponse, AbortedResponse, GenerationConfig, ToolDefinition, StreamOptions } from '../types/index.js';
 
 export interface CacheMarker {
   /** Message ID (from metadata.sourceId) */
@@ -204,6 +204,9 @@ export type ContextToolCallback = (
 export type ContextPreToolCallback = (content: string) => Promise<void> | void;
 
 export interface ContextStreamOptions {
+  /** Trusted non-wire keepalive purpose; declare maintenance for cache warming. */
+  keepalivePurpose?: StreamOptions['keepalivePurpose'];
+
   /** Callback for streaming chunks */
   onChunk?: (chunk: string) => void;
   

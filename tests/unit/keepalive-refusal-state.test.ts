@@ -1082,7 +1082,7 @@ it.each(['prefix', 'finish'])('lanes reentrancy cannot restore a refused or stop
   }
 });
 
-it.each(['prefix', 'finish'])('sentAt is coerced once at begin, never during %s installation', operation => {
+it.each(['prefix', 'finish'])('sentAt coercion can refuse at begin without a later %s installation', operation => {
   const { k, normal, begin } = setup(); normal();
   const refusing = begin();
   const valueOf = vi.fn(() => { k.finish(refusing, 'refusal'); return 1000; });
@@ -1091,6 +1091,18 @@ it.each(['prefix', 'finish'])('sentAt is coerced once at begin, never during %s 
   if (operation === 'prefix') k.prefix(pending); else k.finish(pending, 'end_turn');
   expect(valueOf).toHaveBeenCalledTimes(1);
   expect(k.getStatus()).toEqual([]);
+});
+
+it.each(['prefix', 'finish'])('sentAt is coerced once even when %s installs a snapshot', operation => {
+  const { k, normal } = setup(); normal();
+  vi.setSystemTime(1050);
+  expect(k.getStatus()).toEqual([expect.objectContaining({ realIdleMs: 50 })]);
+  const valueOf = vi.fn(() => 1025);
+  const pending = k.begin(wire(), undefined, 'stream', 'normal', { valueOf } as any)!;
+  expect(valueOf).toHaveBeenCalledTimes(1);
+  if (operation === 'prefix') k.prefix(pending); else k.finish(pending, 'end_turn');
+  expect(k.getStatus()).toEqual([expect.objectContaining({ realIdleMs: 25, idleMs: 25 })]);
+  expect(valueOf).toHaveBeenCalledTimes(1);
 });
 
 it('begin retains SDK-native values without replacing the caller object', () => {

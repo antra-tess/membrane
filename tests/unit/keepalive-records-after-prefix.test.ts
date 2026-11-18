@@ -14,6 +14,7 @@ import { NativeFormatter } from '../../src/formatters/native.js';
 
 const START = Date.parse('2026-10-19T00:00:00Z');
 const timing = { refreshAfterMs: 100, checkIntervalMs: 100, maxIdleMs: 10_000 };
+const suppressionModes = [{}, { suppressOnRefusal: false }, { suppressOnRefusal: true }];
 
 function request(system: string, turns = 1) {
   const hour = { type: 'ephemeral', ttl: '1h' };
@@ -139,16 +140,16 @@ describe('stream keepalive recording boundaries (default-off unless parameterize
     expect(replays()).toEqual([]);
   });
 
-  it.each([false, true])('stream transport failure after message_start (suppressOnRefusal: %s)', async suppressOnRefusal => {
+  it.each(suppressionModes)('stream transport failure after message_start (%j)', async config => {
     const overloaded = Object.assign(new Error('Overloaded'), { status: 529 });
-    const { a, replays } = adapter({ suppressOnRefusal }, () => ({ ...answer, content: [], stop_reason: 'max_tokens', usage: readUsage }),
+    const { a, replays } = adapter(config, () => ({ ...answer, content: [], stop_reason: 'max_tokens', usage: readUsage }),
       () => sdkStream([messageStart], overloaded));
     const error = await settle(a.stream(request('Resident system C'), noCallbacks));
     expect(error).toBeDefined();
     // Legacy records on provider contact; opt-in requires a qualifying terminal.
-    expect(a.cacheKeepalive!.getStatus()).toHaveLength(suppressOnRefusal ? 0 : 1);
+    expect(a.cacheKeepalive!.getStatus()).toHaveLength(config.suppressOnRefusal ? 0 : 1);
     await vi.advanceTimersByTimeAsync(200);
-    if (suppressOnRefusal) expect(replays()).toEqual([]);
+    if (config.suppressOnRefusal) expect(replays()).toEqual([]);
     else expect(replays().length).toBeGreaterThan(0);
   });
 
@@ -185,14 +186,14 @@ describe('stream keepalive recording boundaries (default-off unless parameterize
     expect(replays().map(wire => wire.messages.length)).toEqual([1, 1, 2]);
   });
 
-  it.each([false, true])('stream onProgress throws at message_start (suppressOnRefusal: %s)', async suppressOnRefusal => {
-    const { a } = adapter({ suppressOnRefusal }, () => ({ ...answer, content: [], stop_reason: 'max_tokens', usage: readUsage }),
+  it.each(suppressionModes)('stream onProgress throws at message_start (%j)', async config => {
+    const { a } = adapter(config, () => ({ ...answer, content: [], stop_reason: 'max_tokens', usage: readUsage }),
       () => sdkStream([messageStart, ...rest]));
     const onProgress = () => { throw new Error('the caller'); };
     const error = await settle(a.stream(request('Resident system J'), noCallbacks, { onProgress }));
     expect(error).toBeDefined();
     // Legacy records on provider contact; opt-in requires a qualifying terminal.
-    expect(a.cacheKeepalive!.getStatus()).toHaveLength(suppressOnRefusal ? 0 : 1);
+    expect(a.cacheKeepalive!.getStatus()).toHaveLength(config.suppressOnRefusal ? 0 : 1);
   });
 
   it('records the headers before dynamicHeaders, beta headers included, so a replay never resends a stale stamp', async () => {
@@ -453,12 +454,12 @@ describe('complete keepalive recording boundaries (default-off unless parameteri
     expect(replays().length).toBeGreaterThan(0);
   });
 
-  it.each([false, true])('complete response parsing fails (suppressOnRefusal: %s)', async suppressOnRefusal => {
-    const { a } = adapter({ lanes: ['complete'], suppressOnRefusal }, () => ({ ...answer, usage: undefined }));
+  it.each(suppressionModes)('complete response parsing fails (%j)', async config => {
+    const { a } = adapter({ ...config, lanes: ['complete'] }, () => ({ ...answer, usage: undefined }));
     const error = await settle(a.complete(request('Resident system K')));
     expect(error).toBeDefined();
     // Legacy records on provider contact; opt-in requires a qualifying terminal.
-    expect(a.cacheKeepalive!.getStatus()).toHaveLength(suppressOnRefusal ? 0 : 1);
+    expect(a.cacheKeepalive!.getStatus()).toHaveLength(config.suppressOnRefusal ? 0 : 1);
   });
 
   it('a complete() that fails leaves the earlier snapshot, its touch and its window', async () => {

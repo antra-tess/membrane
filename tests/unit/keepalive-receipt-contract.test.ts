@@ -63,6 +63,7 @@ it.each(['request', 'response'] as const)('reports %s clone loss without changin
   expect(calls).toEqual([]);
   expect(events.map(e => e.type)).toEqual(['diagnostic', 'refreshed']);
   expect(events[0]).toEqual({ type: 'diagnostic', key: k.getStatus()[0]!.key, reason: 'receipt-clone-failed: receipt dropped; make the replay request and response structured-cloneable to restore receipt delivery' });
+  expect(events[1]).toMatchObject({ type: 'refreshed', readTokens: 10 });
   expect(k.getStatus()).toHaveLength(1);
 });
 
@@ -74,7 +75,7 @@ it('reports receipt clone loss separately from the failure count', async () => {
   expect(events).toEqual([
     expect.objectContaining({ type: 'error', error: 'first', consecutive: 1 }),
     expect.objectContaining({ type: 'diagnostic', reason: 'receipt-clone-failed: receipt dropped; make the replay request and response structured-cloneable to restore receipt delivery' }),
-    expect.objectContaining({ type: 'refreshed' }),
+    expect.objectContaining({ type: 'refreshed', readTokens: 10 }),
   ]);
   expect(calls.map(c => c.outcome)).toEqual(['error']);
   expect((k as any).consecutiveErrors).toBe(0);

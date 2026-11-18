@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   processContext,
   shouldRoll,
@@ -92,6 +92,21 @@ function mockMembrane(): Membrane {
 }
 
 const zzGenerationConfig = { model: 'test-model', maxTokens: 32 };
+
+it('processContext forwards maintenance purpose to Membrane.stream', async () => {
+  const membrane = mockMembrane();
+  const stream = vi.spyOn(membrane, 'stream');
+  await processContext(
+    membrane,
+    { messages: zzAlternating(1, 40), config: zzGenerationConfig, context: baseConfig() },
+    null,
+    { keepalivePurpose: 'maintenance' },
+  );
+  expect(stream).toHaveBeenCalledExactlyOnceWith(
+    expect.anything(),
+    expect.objectContaining({ keepalivePurpose: 'maintenance' }),
+  );
+});
 
 function countCacheControlBlocks(messages: Array<{ content: unknown }>): number {
   let count = 0;

@@ -14,3 +14,5 @@
   request once serialization is fixed.
 - Opt-in `receipt-clone-failed` notices explain how to restore receipt delivery:
   make the replay request and response structured-cloneable.
+- Forward the non-wire `keepalivePurpose` stream option through
+  `processContext` so maintenance calls cannot rearm opt-in keepalive.
