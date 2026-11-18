@@ -59,9 +59,13 @@ it.each(['complete', 'stream'] as const)('%s preserves exact digits in SDK body,
   expect(a.cacheKeepalive!.getStatus()).toHaveLength(2); // Adjacent IDs must not collapse.
   await (a.cacheKeepalive as any).tick();
   expect(bodies).toHaveLength(4);
-  expect(bodies[2]).toContain('"const":9007199254740992');
-  expect(bodies[3]).toContain('"const":9007199254740993');
-  expect(bodies[3]).toContain('"id":9007199254740993');
+  for (let i = 0; i < 2; i++) {
+    // Compare the complete serialized body without parsing away rawJSON digits.
+    const expected = bodies[i].replace(/"max_tokens":32/, '"max_tokens":0')
+      .replace(/,"stream":(?:true|false)/, '');
+    expect(bodies[i + 2]).toBe(expected);
+  }
+  expect(a.cacheKeepalive!.getStatus()).toHaveLength(2);
 });
 
 it('stream leaves stream:true serialization to the SDK, without rewriting the prompt', async () => {

@@ -45,7 +45,8 @@
   replay preparation failures retire only the failed snapshot without counting
   toward the send-failure limit (a later qualified prefix can install a new one), and
   a foreground refusal from an evicted handle still suppresses a currently
-  retained identity for its key. Default-off behavior is unchanged.
+  retained identity for its key. Default-off scheduling is unchanged; shared
+  bookkeeping/observer exception isolation is described in the fixed fragment.
 - In opt-in mode, a failed begin or finish permanently stops keepalive for that adapter,
   emits `disabled` with a reason, and warns of the permanent stop.
 - With opt-in keepalive refusal suppression, reserve request order before lineage

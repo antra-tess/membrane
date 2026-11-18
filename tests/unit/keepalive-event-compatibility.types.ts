@@ -37,3 +37,9 @@ export function mutableLegacyPayload(event: KeepaliveEvent): void {
   if ('error' in event) event.error = event.error;
   if ('consecutive' in event) event.consecutive = event.consecutive;
 }
+
+// Exact equality also rejects `any`, which bidirectional assignability accepts.
+type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends
+  (<T>() => T extends B ? 1 : 2) ? true : false;
+type Assert<T extends true> = T;
+export type ExactLegacyPayload = Assert<Equal<KeepaliveEvent, LegacyEvent>>;

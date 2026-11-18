@@ -629,7 +629,7 @@ export class CacheKeepalive {
         ? { ...call, request: structuredClone(call.request), response: structuredClone(call.response) }
         : { ...call, request: structuredClone(call.request) };
     } catch {
-      if (this.cfg.suppressOnRefusal) this.emit({ type: 'error', key: call.key, error: 'receipt-clone-failed: receipt dropped; replay snapshot unchanged', consecutive: this.consecutiveErrors });
+      if (this.cfg.suppressOnRefusal) this.emit({ type: 'error', key: call.key, error: 'receipt-clone-failed: receipt dropped', consecutive: this.consecutiveErrors });
       return;
     }
     try {

@@ -40,7 +40,7 @@ it('documents request receipts as caller objects, not wire bytes, and pins rawJS
     expect(JSON.stringify(calls[0]!.request)).toContain('"id":{"rawJSON":"9007199254740993"}');
   } else {
     expect(calls).toEqual([]);
-    expect(events[0]).toMatchObject({ type: 'error', error: 'receipt-clone-failed: receipt dropped; replay snapshot unchanged', consecutive: 0 });
+    expect(events[0]).toMatchObject({ type: 'error', error: 'receipt-clone-failed: receipt dropped', consecutive: 0 });
   }
   const guide = readFileSync(new URL('../../docs/keepalive-refusal-suppression.md', import.meta.url), 'utf8');
   const api = readFileSync(new URL('../../src/cache-keepalive.ts', import.meta.url), 'utf8');
@@ -60,7 +60,7 @@ it.each(['request', 'response'] as const)('reports %s clone loss without changin
   qualify(); await tick();
   expect(calls).toEqual([]);
   expect(events.map(e => e.type)).toEqual(['error', 'refreshed']);
-  expect(events[0]).toEqual({ type: 'error', key: k.getStatus()[0]!.key, error: 'receipt-clone-failed: receipt dropped; replay snapshot unchanged', consecutive: 0 });
+  expect(events[0]).toEqual({ type: 'error', key: k.getStatus()[0]!.key, error: 'receipt-clone-failed: receipt dropped', consecutive: 0 });
   expect(k.getStatus()).toHaveLength(1);
 });
 

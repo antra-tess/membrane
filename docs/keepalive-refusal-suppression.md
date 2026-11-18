@@ -20,9 +20,10 @@ positive cache-read counters. The separate opt-in `onSuppressed` callback receiv
 notification naming foreground or refresh. The existing `KeepaliveEvent` union
 is unchanged; suppression notifications never go to
 `onEvent`. Register `onSuppressed` only when enabling suppression. Its throws
-and rejected promises are isolated. A stale non-refusal resolution only receives
-its transport receipt, not semantic state events. The guarantee that stale outcomes
-do not mutate a replacement applies only to non-refusals. A stale refusal removes even a
+and rejected promises are isolated. A stale non-refusal resolution receives no semantic state events. Readable response
+metadata produces its transport receipt; throwing metadata accessors still count
+as global processing failures and can disable the keeper, removing replacements.
+The stale-identity guarantee applies to successfully processed non-refusals. A stale refusal removes even a
 replacement installed during the await and bars all attempts begun before observation. Rejected sender invocations still count toward the global consecutive
 transport-error limit and can emit `error`/`disabled`, even after snapshot replacement.
 `onCall.outcome: 'success'` means **the sender resolved and initial response
@@ -91,8 +92,8 @@ stopped identities cannot be resurrected by their outstanding completions.
 
 `AnthropicAdapter.complete/stream` are normal foreground SDK entrypoints by
 default. Complete qualification follows response parsing. Stream qualification
-follows the observed provider terminal and stream callbacks, but precedes final
-response assembly and transformation-path parsing; an error there does not undo
+follows the observed provider terminal, stream callbacks, and block-order repair,
+but precedes final response assembly and transformation-path parsing; an error there does not undo
 qualification. Neither lane waits for downstream Membrane processing or application observers. A downstream
 callback failure does not undo a successful provider outcome. A caller using these same entrypoints for cache-warming prefill or other
 maintenance **must**
@@ -144,7 +145,8 @@ invoke a sender after its serializer calls stop. Stop
 does not cancel an in-flight sender or immediately release its payload;
 that sender can still deliver a receipt after stop.
 Idle expiry and ineffective retirement drop both snapshot and identity.
-An ineligible prefix in a configured lane removes its replay snapshot and emits
+An ineligible prefix in a configured lane, unless older than the latest accepted
+prefix for that key, removes its replay snapshot and emits
 `skipped` when one existed, without deleting the outcome identity or a retained
 refusal barrier. Excluded lanes cannot remove snapshots by prefix ineligibility.
 There is no persistence or durable tombstone format.

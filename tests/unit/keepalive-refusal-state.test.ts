@@ -300,7 +300,7 @@ it('uncloneable custom response drops its receipt without losing refresh process
   normal(); await vi.advanceTimersByTimeAsync(100);
   expect(calls).toEqual([]);
   expect(events.map(e => e.type)).toEqual(['error', 'refreshed']);
-  expect(events[0]).toMatchObject({ type: 'error', error: 'receipt-clone-failed: receipt dropped; replay snapshot unchanged', consecutive: 0 });
+  expect(events[0]).toMatchObject({ type: 'error', error: 'receipt-clone-failed: receipt dropped', consecutive: 0 });
 });
 
 
@@ -1081,4 +1081,46 @@ it('ineffective retirement precedes an observer beginning replacement work', asy
   expect(k.getStatus()).toEqual([]);
   k.prefix(replacement!); k.finish(replacement!, 'end_turn');
   expect(k.getStatus()).toHaveLength(1);
+});
+
+it.each(['max_tokens', 'refusal', 'future_stop'])('clone failure makes no snapshot claim after %s', async stop_reason => {
+  const { k, normal, calls, events } = setup(async () => ({ ...ok, stop_reason, uncloneable() {} }));
+  normal(); await vi.advanceTimersByTimeAsync(100);
+  expect(calls).toEqual([]);
+  expect(events).toContainEqual({ type: 'error', key: lineageKey(wire()), error: 'receipt-clone-failed: receipt dropped', consecutive: 0 });
+  expect(k.getStatus()).toHaveLength(stop_reason === 'max_tokens' ? 1 : 0);
+  expect(events.some(e => e.type === 'refreshed')).toBe(stop_reason === 'max_tokens');
+  expect(events.some(e => e.type === 'suppressed')).toBe(stop_reason === 'refusal');
+});
+
+it('stale throwing replay preparation leaves replacement and emits no diagnostic', async () => {
+  const send = vi.fn(async () => ok);
+  const { k, normal, calls, events } = setup(send);
+  const attempt = normal();
+  let replacement: unknown;
+  (k as any).lineages.get(attempt.key).wire.metadata = { toJSON() {
+    normal();
+    replacement = (k as any).lineages.get(attempt.key);
+    throw new Error('obsolete serializer');
+  } };
+  await vi.advanceTimersByTimeAsync(100);
+  expect(send).not.toHaveBeenCalled();
+  expect(calls).toEqual([]); expect(events).toEqual([]);
+  expect((k as any).lineages.get(attempt.key)).toBe(replacement);
+  expect(k.getStatus()).toHaveLength(1);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(events.map(e => e.type)).toEqual(['refreshed']);
+});
+
+it('stale unreadable response metadata still hits the global processing limit', async () => {
+  let resolve!: (r: unknown) => void;
+  const { k, normal, calls, events } = setup(() => new Promise(r => { resolve = r; }), { maxConsecutiveErrors: 1 });
+  normal(); await vi.advanceTimersByTimeAsync(100);
+  normal(); expect(k.getStatus()).toHaveLength(1);
+  resolve({ stop_reason: 'max_tokens', get metadata() { throw new Error('unreadable metadata'); } });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(calls.map(c => c.outcome)).toEqual(['error']);
+  expect(events.map(e => e.type)).toEqual(['error', 'disabled']);
+  expect(k.getStatus()).toEqual([]);
 });
