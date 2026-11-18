@@ -72,9 +72,11 @@ rejected-send failures still accumulate in default-off mode, as do failures
 while copying response metadata (for example, throwing enumerable getters).
 With suppression enabled, replay serialization failures for a still-current snapshot
 report `replay-preparation-failed` through `onDiagnostic`, explicitly naming snapshot
-retirement. The root-serializer guard also says to remove callable root `toJSON`;
-other preparation errors direct operators to check request serialization and send
-a new eligible foreground request, without exposing caller exception details.
+retirement. The root-serializer guard says to remove callable root `toJSON`;
+other preparation errors direct operators to check request serialization.
+Both direct operators to send a new eligible foreground request afterward:
+correcting serialization alone does not reinstall the snapshot. These notices
+do not expose caller exception details.
 This notice is NOT delivered to `onEvent`: configure `onDiagnostic`
 to observe preparation retirement (as well as unknown-terminal retirement and LRU
 eviction). Without it these removals are silent. It is emitted without incrementing that send-failure counter or delivering
@@ -120,13 +122,13 @@ ineffective count after removing the snapshot and identity. The existing
 `ineffective` event still reports the usage outcome on every ineffective refresh.
 Default-off emits none of these diagnostics.
 
-The failure limit remains adapter-global and consecutive, not a per-key retry
-budget: a successfully processed refresh of another key resets it. A key whose
-usage repeatedly fails validation can therefore retry until idle expiry when
-healthy keys interleave. Use keyed error telemetry to identify that sender/key;
-disabling the whole adapter for nonconsecutive key-local errors would also stop
-healthy cache refreshes. No per-key failure counter or automatic permanent
-quarantine is introduced by refusal suppression.
+Known limitation: the failure limit is adapter-global and consecutive, not a
+per-key retry budget. If a healthy key succeeds between failures of another
+key (send rejection or invalid usage), it resets the counter. The failing key
+can retry on every check when the refresh interval permits it. It can keep
+sending and emitting errors indefinitely if eligible foreground traffic keeps
+it from expiring. Use keyed error telemetry to identify and fix the failing key;
+there is no automatic per-key quarantine.
 When that limit is reached in opt-in mode, the `disabled` event states that all
 refreshes have stopped permanently for this keeper. Fix the cause and create a
 new adapter (or a new standalone keeper) to restart.

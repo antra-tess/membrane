@@ -10,7 +10,7 @@ import { Membrane } from '../../src/membrane.js';
 import { NativeFormatter } from '../../src/formatters/native.js';
 import { AnthropicXmlFormatter } from '../../src/formatters/anthropic-xml.js';
 import { AnthropicAdapter } from '../../src/index.js';
-import { lineageKey, type CacheKeepaliveConfig, type KeepaliveDiagnostic, type KeepaliveEvent, type KeepaliveSuppression } from '../../src/cache-keepalive.js';
+import { lineageKey, type CacheKeepaliveConfig, type KeepaliveCall, type KeepaliveDiagnostic, type KeepaliveEvent, type KeepaliveSuppression } from '../../src/cache-keepalive.js';
 
 const START = Date.parse('2026-10-19T00:00:00Z');
 const timing = { refreshAfterMs: 100, checkIntervalMs: 100, maxIdleMs: 10_000 };
@@ -267,15 +267,16 @@ for (const lane of ['complete', 'stream'] as const) {
 
 for (const lane of ['complete', 'stream'] as const) {
   it(`${lane}: refresh refusal has one real-adapter receipt and cannot warm-stamp`, async () => {
-    const calls: any[] = [];
+    const calls: KeepaliveCall[] = [];
+    const refusedRefresh = { ...answer, id: 'refresh-refusal', content: [], stop_reason: 'refusal', usage: readUsage };
     const { a, events, replays } = adapter({ suppressOnRefusal: true, lanes: [lane], onCall: c => { calls.push(c); } },
-      w => ({ ...answer, stop_reason: w.max_tokens === 0 ? 'refusal' : 'end_turn' }),
+      w => w.max_tokens === 0 ? refusedRefresh : answer,
       () => sdkStream([messageStart, ...rest]));
     if (lane === 'complete') await a.complete(request('refresher')); else await a.stream(request('refresher'), noCallbacks);
     await vi.advanceTimersByTimeAsync(100);
     expect(replays()).toHaveLength(1);
     expect(calls).toHaveLength(1);
-    expect(calls[0].outcome).toBe('success');
+    expect(calls[0]).toEqual(expect.objectContaining({ outcome: 'success', lane, response: refusedRefresh }));
     expect(events.map(e => e.type)).toEqual(['suppressed']);
     expect(a.cacheKeepalive!.getStatus()).toEqual([]);
   });
@@ -320,8 +321,18 @@ it('complete parse failure after a barrier cannot rearm, but refusal survives pa
 });
 
 it('opt-in complete deadline still aborts the SDK and cannot rearm', async () => {
-  const { a, client } = adapter({ suppressOnRefusal: true, lanes: ['complete'] }, () => ({ ...answer, stop_reason: 'refusal' }));
+  let response = answer;
+  const { a, client, events } = adapter({ suppressOnRefusal: true, lanes: ['complete'] }, () => response);
   await a.complete(request('deadline'));
+  const [snapshot] = a.cacheKeepalive!.getStatus();
+  expect(snapshot).toBeDefined();
+  response = { ...answer, stop_reason: 'refusal' };
+  await a.complete(request('deadline'));
+  expect(events).toEqual([{ type: 'suppressed', source: 'foreground', key: snapshot.key }]);
+  expect(a.cacheKeepalive!.getStatus()).toEqual([]);
+  const outcomes = (a.cacheKeepalive as any).outcomes;
+  const barrier = outcomes.get(snapshot.key).barrier;
+  expect(barrier).toBeGreaterThan(0);
   const entry = held();
   let sdkSignal!: AbortSignal;
   client.messages.create.mockImplementation((_wire: any, options: any) => new Promise((_resolve, reject) => {
@@ -331,15 +342,16 @@ it('opt-in complete deadline still aborts the SDK and cannot rearm', async () =>
   }));
   const result = settle(a.complete(request('deadline'), { timeoutMs: 20 }));
   await entry.promise;
-  expect(client.messages.create).toHaveBeenCalledTimes(2);
+  expect(client.messages.create).toHaveBeenCalledTimes(3);
   expect(sdkSignal.aborted).toBe(false);
   await vi.advanceTimersByTimeAsync(20);
   expect(sdkSignal.aborted).toBe(true);
   expect((await result as any).type).toBe('timeout');
   expect(a.cacheKeepalive!.getStatus()).toEqual([]);
-  expect(client.messages.create).toHaveBeenCalledTimes(2);
-  expect(client.messages.create.mock.calls[1][1].signal).toBe(sdkSignal);
-  expect(client.messages.create.mock.calls[1][0]).not.toHaveProperty('keepalivePurpose');
+  expect(outcomes.get(snapshot.key)).toMatchObject({ barrier, qualified: false });
+  expect(client.messages.create).toHaveBeenCalledTimes(3);
+  expect(client.messages.create.mock.calls[2][1].signal).toBe(sdkSignal);
+  expect(client.messages.create.mock.calls[2][0]).not.toHaveProperty('keepalivePurpose');
 });
 
 it.each(['complete', 'stream'] as const)('%s cannot qualify a normal terminal delivered after a combined deadline', async lane => {

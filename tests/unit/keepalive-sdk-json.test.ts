@@ -232,6 +232,6 @@ it('Membrane.complete succeeds, then replay preparation rejects an onRequest roo
   expect(events).toEqual([]);
   expect(observed).toContainEqual(expect.objectContaining({
     type: 'diagnostic',
-    reason: 'replay-preparation-failed: replay snapshot retired; remove callable root toJSON',
+    reason: 'replay-preparation-failed: replay snapshot retired; remove callable root toJSON, then send a new eligible foreground request',
   }));
 });

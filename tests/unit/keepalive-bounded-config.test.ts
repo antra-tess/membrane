@@ -5,7 +5,7 @@ import { watchdogMs } from '../helpers/watchdog.js';
 const startupMs = 60_000;
 const defaultExecutionMs = 30_000;
 const stuckExecutionMs = 50;
-const slowStartupMs = 5_100;
+const slowStartupMs = watchdogMs(5_100);
 const selfTestExecutionMs = 1_000;
 const selfTestTimeoutMs = 180_000;
 
@@ -30,6 +30,10 @@ function runChild(script: string, executionMs = defaultExecutionMs, startupBudge
     child.on('error', error => { clearTimeout(timer); reject(error); });
     child.on('close', (code, signal) => { clearTimeout(timer); resolve({ code, stdout, stderr, signal }); });
   });
+}
+
+function childFailure({ signal, stderr }: Awaited<ReturnType<typeof runChild>>) {
+  return signal ? `child terminated (${signal}): ${stderr}` : stderr;
 }
 
 // Run in a killable child: a synchronous eviction-loop regression must never
@@ -57,7 +61,7 @@ it.each([-1, -0.5, 0, 0.5, 1])('maxLineages %s returns before SDK send and keeps
     a.cacheKeepalive.stop();console.log('returned');
   `;
   const result = await runChild(script);
-  expect(result.code, result.signal ? `child terminated (${result.signal}): ${result.stderr}` : result.stderr).toBe(0);
+  expect(result.code, childFailure(result)).toBe(0);
   expect(result.stdout).toContain('ready\n');
   expect(result.stdout).toContain('returned');
 }, watchdogMs(100_000));
@@ -69,7 +73,7 @@ it('bounded-loop watchdog excludes child startup but still kills a stuck loop', 
     console.log('ready');
     console.log('returned');
   `, selfTestExecutionMs);
-  expect(slowStart.code, slowStart.stderr).toBe(0);
+  expect(slowStart.code, childFailure(slowStart)).toBe(0);
   expect(slowStart.stdout).toContain('returned');
   const stuck = await runChild(`console.log('ready'); while (true) {}`, stuckExecutionMs);
   expect(stuck.code).toBeNull();
@@ -95,14 +99,17 @@ for (const suppression of ['{}', '{suppressOnRefusal:false}']) {
       assert.equal(sends,0);
       k.stop();console.log('returned');
     `);
-    expect(result.code, result.stderr).toBe(0);
+    expect(result.code, childFailure(result)).toBe(0);
     expect(result.stdout).toContain('returned');
   }, watchdogMs(100_000));
 }
 
 it('watchdog self-test budget covers both sequential startup and execution bounds plus close slack', () => {
-  expect(slowStartupMs).toBeGreaterThan(selfTestExecutionMs);
-  expect(selfTestTimeoutMs).toBeGreaterThan(2 * startupMs + defaultExecutionMs + stuckExecutionMs + 10_000);
+  expect(slowStartupMs).toBeGreaterThan(watchdogMs(selfTestExecutionMs));
+  expect(slowStartupMs).toBeLessThan(watchdogMs(startupMs));
+  expect(watchdogMs(selfTestTimeoutMs)).toBeGreaterThan(
+    2 * watchdogMs(startupMs) + watchdogMs(selfTestExecutionMs) + watchdogMs(stuckExecutionMs) + watchdogMs(10_000),
+  );
 });
 
 it('startup watchdog kills a child that never reports ready', async () => {

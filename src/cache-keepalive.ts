@@ -712,7 +712,7 @@ export class CacheKeepalive {
       if (this.cfg.suppressOnRefusal && !invoked) {
         this.lineages.delete(key);
         message = err === ROOT_SERIALIZER_REPLAY_ERROR
-          ? 'replay-preparation-failed: replay snapshot retired; remove callable root toJSON'
+          ? 'replay-preparation-failed: replay snapshot retired; remove callable root toJSON, then send a new eligible foreground request'
           : 'replay-preparation-failed: replay snapshot retired; check request serialization (including nested values), then send a new eligible foreground request';
       }
       // Preparation failures are observable, but are not failed sends.

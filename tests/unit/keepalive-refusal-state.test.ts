@@ -227,18 +227,23 @@ it('ineligible completion preserves identity for an older in-flight refusal and 
   normal(); expect(k.getStatus()).toHaveLength(1);
 });
 
-it('unrelated excluded/ineligible traffic cannot evict eligible outcomes', () => {
-  const { k, normal, begin, events } = setup(); normal();
-  const pending = begin();
-  for (let i = 0; i < 4; i++) {
-    const a = k.begin({ model: `other-${i}`, messages: [] }, undefined, 'complete')!;
-    k.prefix(a); k.finish(a, undefined);
-  }
-  expect(k.getStatus()).toHaveLength(1);
-  expect((k as any).outcomes.size).toBe(1);
-  expect(events).toHaveLength(4);
-  expect(events.every(e => e.type === 'diagnostic' && e.reason.startsWith('unknown-foreground-terminal'))).toBe(true);
-  k.prefix(pending); k.finish(pending, 'end_turn'); expect(k.getStatus()).toHaveLength(1);
+it.each(['excluded complete', 'ineligible stream'])('%s cannot evict an eligible pending outcome', traffic => {
+  const { k, normal, begin, events } = setup(undefined, { maxLineages: 1 });
+  const retained = normal();
+  const pending = begin('normal', wire('pending'));
+  const excluded = traffic === 'excluded complete';
+  const otherWire = excluded ? wire('other') : { ...wire('other'), thinking: { type: 'enabled' } };
+  const other = k.begin(otherWire, undefined, excluded ? 'complete' : 'stream')!;
+  expect(other).toBeDefined();
+  // Both attempts are still live, so premature reservation would evict pending.
+  expect([...(k as any).pendingOutcomes.keys()]).toEqual([pending.key]);
+  k.prefix(other); k.finish(other, undefined);
+  expect(k.getStatus().map(s => s.key)).toEqual([retained.key]);
+  expect(events).toEqual([expect.objectContaining({
+    type: 'diagnostic', key: other.key, reason: expect.stringMatching(/^unknown-foreground-terminal/),
+  })]);
+  k.finish(pending, 'end_turn');
+  expect(k.getStatus().map(s => s.key)).toEqual([pending.key]);
 });
 
 it.each([NaN, Infinity, -Infinity])('nonfinite maxLineages %s uses the bounded default', cap => {
@@ -422,15 +427,18 @@ it('eviction of pending outcome identities reports the cap and invalidates old h
 });
 
 
-it('excluded-lane rearm does not unblock a pre-refusal stream handle', () => {
+it.each(['prefix', 'finish'])('excluded-lane rearm does not unblock pre-refusal stream %s', operation => {
   const { k, begin, normal } = setup(); normal();
-  const old = begin(); k.prefix(old);
+  const old = begin(); // Leave unregistered so only the barrier can block it.
   k.finish(begin(), 'refusal');
   const complete = k.begin(wire(), undefined, 'complete')!;
   k.finish(complete, 'end_turn');
   expect((k as any).outcomes.get(complete.key).qualified).toBe(true);
-  k.prefix(old); k.finish(old, 'end_turn');
   expect(k.getStatus()).toEqual([]);
+  if (operation === 'prefix') k.prefix(old);
+  else k.finish(old, 'end_turn');
+  expect(k.getStatus()).toEqual([]);
+  k.cancel(old);
   const fresh = begin(); k.finish(fresh, 'end_turn');
   expect(k.getStatus()).toHaveLength(1);
 });
@@ -660,9 +668,16 @@ it.each(['same identity', 'recreated identity'])('stale refresh refusal bars pre
 it.each(['prefix', 'finish'])('eligibility accessor refusal cannot install a snapshot from %s', operation => {
   const { k, normal, begin, events } = setup(); normal();
   const refusing = begin();
-  const w = wire();
-  const attempt = begin('normal', w);
-  Object.defineProperty((k as any).attempts.get(attempt).wire, 'tool_choice', { get() { k.finish(refusing, 'refusal'); return undefined; } });
+  const attempt = begin();
+  Object.defineProperty(k.requestForAttempt(attempt)!, 'tool_choice', {
+    get() {
+      k.finish(refusing, 'refusal');
+      const complete = k.begin(wire(), undefined, 'complete')!;
+      k.finish(complete, 'end_turn');
+      expect((k as any).outcomes.get(attempt.key).qualified).toBe(true);
+      return undefined;
+    },
+  });
   if (operation === 'prefix') k.prefix(attempt);
   else k.finish(attempt, 'end_turn');
   expect(events.at(-1)?.type).toBe('suppressed');

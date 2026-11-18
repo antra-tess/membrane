@@ -10,4 +10,5 @@
   legacy formatting; non-string messages are converted to strings.
 - With suppression enabled, keepalive notices explain how to recover from a
   replay preparation failure or a permanent stop at the consecutive failure
-  threshold.
+  threshold. After a replay snapshot is retired, send a new eligible foreground
+  request once serialization is fixed.

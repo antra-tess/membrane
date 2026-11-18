@@ -96,8 +96,13 @@ it('diagnoses and rejects root serialization that could undo the prefill budget 
   expect(send).not.toHaveBeenCalled();
   expect(k.getStatus()).toEqual([]);
   expect(events).toEqual([expect.objectContaining({
-    type: 'diagnostic', reason: 'replay-preparation-failed: replay snapshot retired; remove callable root toJSON',
+    type: 'diagnostic', reason: 'replay-preparation-failed: replay snapshot retired; remove callable root toJSON, then send a new eligible foreground request',
   })]);
+  delete wire.toJSON;
+  await tick();
+  expect(send).not.toHaveBeenCalled();
+  qualify(); await tick();
+  expect(send).toHaveBeenCalledOnce();
 });
 
 it('counts opt-in unprintable Error.message failures through disabling', async () => {
