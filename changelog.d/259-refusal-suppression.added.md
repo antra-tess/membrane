@@ -23,7 +23,9 @@
   `KeepaliveEvent` and `onEvent` remain unchanged; existing exhaustive consumers
   need no new case or compatible sibling-package release.
 - With opt-in suppression only, observe complete refusals before prefix bookkeeping
-  and do not qualify streams cancelled in final callbacks. Install refresh refusal
+  and do not qualify streams cancelled in callbacks forwarded before adapter finish.
+  Local stop-sequence suffixes may be released after qualification; callbacks that
+  throw or abort there do not undo qualification or remove the snapshot. Install refresh refusal
   barriers before receipt observers, ignore identity-free `record()` calls, and
   observe each foreground refusal handle only once.
 - With opt-in refusal suppression, nonfinite lineage caps use the bounded default.
@@ -70,3 +72,12 @@
   coerced value. Preparation errors explicitly report snapshot retirement.
 - Opt-in ineffective retirement completes before notifying observers, so a new
   same-key request begun by the observer retains a valid outcome identity.
+- With refusal suppression enabled, retain SDK-native request values without a lossy JSON parse round trip
+  (caller mutation and custom serialization are outside the identity guarantee), reject non-finite refresh usage as a processing failure, and release
+  live attempt data on stop. Default-off scheduling remains unchanged.
+- With refusal suppression enabled, honor newer ineligible prefix ordering after
+  refusal and release finished attempt data even when opaque handles are retained.
+- Add opt-in outcome-LRU eviction diagnostics, including pending identities,
+  without classifying eviction as an ineligible-snapshot skip. Default-off eviction stays silent.
+- With refusal suppression enabled, recheck stop after admission accessors and
+  measure error receipts at sender settlement, excluding later suppression observers.

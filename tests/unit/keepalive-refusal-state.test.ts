@@ -171,6 +171,11 @@ it.each(['refusal', null, 'future_stop'])('resolved %s refresh breaks consecutiv
   await vi.advanceTimersByTimeAsync(100);
   expect(send).toHaveBeenCalledTimes(3);
   expect(events.filter(e => e.type === 'error' && !e.error.startsWith('unknown-refresh-terminal')).map(e => e.consecutive)).toEqual([1, 1]);
+  if (reason !== 'refusal') {
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'error', error: 'unknown-refresh-terminal: replay snapshot retired', consecutive: 1,
+    }));
+  }
   expect(events.some(e => e.type === 'disabled')).toBe(false);
 });
 

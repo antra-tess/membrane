@@ -183,8 +183,10 @@ refusal barrier. Excluded lanes cannot remove snapshots by prefix ineligibility.
 There is no persistence or durable tombstone format.
 Low-level keeper clients must use `begin`, `prefix`, `finish` to observe outcomes.
 On failure or cancellation, low-level callers should call `finish(handle, undefined)`
-to release request/header references without qualifying the attempt. Retaining an
-unfinished handle retains those references despite the lineage cap.
+to release the attempt's request/header references without qualifying it. A prefix
+on an already-qualified key may have installed those references in its replay
+snapshot; finishing does not remove that snapshot or release its references.
+Retaining an unfinished handle retains attempt references despite the lineage cap.
 `record` is the legacy prefix-accounting API and is ignored entirely with suppression enabled,
 even for qualified keys; it cannot carry begin identity or ordering.
 Raw stream refusal is observed before progress callbacks or terminal parsing; a

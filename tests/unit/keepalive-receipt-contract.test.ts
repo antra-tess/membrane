@@ -66,6 +66,21 @@ it.each(['request', 'response'] as const)('reports %s clone loss without changin
   expect(k.getStatus()).toHaveLength(1);
 });
 
+it('reports receipt clone loss with the pre-reset failure count', async () => {
+  const send = vi.fn().mockRejectedValueOnce(new Error('first'))
+    .mockResolvedValueOnce({ ...response, custom: () => {} });
+  const { qualify, tick, events, calls, k } = setup(send);
+  qualify(); await tick(); await tick();
+  expect(events).toEqual([
+    expect.objectContaining({ type: 'error', error: 'first', consecutive: 1 }),
+    expect.objectContaining({ type: 'error', error: 'receipt-clone-failed: receipt dropped', consecutive: 1 }),
+    expect.objectContaining({ type: 'refreshed' }),
+  ]);
+  expect(calls.map(c => c.outcome)).toEqual(['error']);
+  expect((k as any).consecutiveErrors).toBe(0);
+  expect(k.getStatus()).toHaveLength(1);
+});
+
 it('does not misreport a throwing receipt observer as a clone failure', async () => {
   const { qualify, tick, events } = setup(async () => response, () => { throw new Error('observer'); });
   qualify(); await tick();

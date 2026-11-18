@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { normalize } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { expect, it } from 'vitest';
@@ -23,7 +24,7 @@ it('the effective compatibility program includes the event fixture', () => {
   ], { cwd: root, encoding: 'utf8', timeout: 30_000 });
   expect(result.error).toBeUndefined();
   expect(result.status, result.stderr).toBe(0);
-  expect(result.stdout.split(/\r?\n/)).toContain(
+  expect(result.stdout.split(/\r?\n/).map(path => normalize(path))).toContain(
     fileURLToPath(new URL('tests/unit/keepalive-event-compatibility.types.ts', root)),
   );
 });
