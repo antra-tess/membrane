@@ -76,11 +76,12 @@ it.each(['stop', 'evict', 'drop'])('old foreground and refresh cannot resurrect 
   const old = begin(); // Unregistered in-flight attempt must lose its identity.
   await vi.advanceTimersByTimeAsync(100);
   if (action === 'stop') k.stop();
-  if (action === 'evict') begin('normal', wire('other'));
+  if (action === 'evict') k.finish(begin('normal', wire('other')), 'end_turn');
   resolve(action === 'drop' ? { stop_reason: 'max_tokens', usage: {} } : ok);
   await vi.advanceTimersByTimeAsync(0);
   k.prefix(old); k.finish(old, 'end_turn');
-  expect(k.getStatus()).toEqual([]); expect(calls).toHaveLength(1);
+  expect(k.getStatus().map(s => s.key)).toEqual(action === 'evict' ? [lineageKey(wire('other'))] : []);
+  expect(calls).toHaveLength(1);
   expect(events.some(e => e.type === 'refreshed')).toBe(false);
 });
 
@@ -241,6 +242,34 @@ it.each([NaN, Infinity, -Infinity])('nonfinite maxLineages %s uses the bounded d
   expect(k.getStatus()).toHaveLength(4);
 });
 
+it.each([-1, 0, 0.5])('opt-in cap %s skips admission work and diagnostics', maxLineages => {
+  const { k, events } = setup(undefined, { maxLineages });
+  const inspect = vi.fn(() => wire().system);
+  const w = { ...wire(), get system() { return inspect(); } };
+  expect(k.begin(w, undefined, 'stream')).toBeUndefined();
+  expect(inspect).not.toHaveBeenCalled();
+  expect(events).toEqual([]);
+  expect(k.getStatus()).toEqual([]);
+});
+
+it.each(['transport error', 'unknown terminal', 'refusal', 'ineligible terminal'])(
+  '%s releases the last pending attempt without competing with retained outcomes',
+  failure => {
+    const { k, begin, normal, events } = setup(undefined, { maxLineages: 1 });
+    const qualified = normal();
+    const freshWire = wire('fresh');
+    const fresh = begin('normal', freshWire);
+    if (failure === 'ineligible terminal') Object.assign(freshWire, { thinking: { type: 'enabled' } });
+    k.prefix(fresh);
+    if (failure === 'transport error') k.cancel(fresh);
+    else k.finish(fresh, { 'unknown terminal': undefined, refusal: 'refusal', 'ineligible terminal': 'end_turn' }[failure]);
+    expect(k.requestForAttempt(fresh)).toBeUndefined();
+    expect((k as any).pendingOutcomes.size).toBe(0);
+    expect(k.getStatus().map(s => s.key)).toEqual([qualified.key]);
+    expect(events.some(e => e.type === 'diagnostic' && e.reason.startsWith('outcome-lru-eviction'))).toBe(false);
+  },
+);
+
 // Differential oracle: main 9d4dc61a src/cache-keepalive.ts record()'s
 // insertion/eviction loop, deliberately without cap normalization.
 function mainRetainedModels(maxLineages: number): string[] {
@@ -379,14 +408,14 @@ it('eviction of pending outcome identities reports the cap and invalidates old h
   const { k, begin, events } = setup(undefined, { maxLineages: 1 });
   const old = begin();
   const other = begin('normal', wire('other'));
-  expect(events).toEqual([{ type: 'diagnostic', key: old.key, reason: 'outcome-lru-eviction: maxLineages cap exceeded' }]);
+  expect(events).toEqual([{ type: 'diagnostic', key: old.key, reason: 'outcome-lru-eviction: pending maxLineages cap exceeded' }]);
   k.finish(old, 'end_turn'); expect(k.getStatus()).toEqual([]);
   k.finish(other, 'end_turn'); expect(k.getStatus()[0].key).toBe(other.key);
 });
 
 
 it('excluded-lane rearm does not unblock a pre-refusal stream handle', () => {
-  const { k, begin } = setup();
+  const { k, begin, normal } = setup(); normal();
   const old = begin(); k.prefix(old);
   k.finish(begin(), 'refusal');
   const complete = k.begin(wire(), undefined, 'complete')!;
@@ -491,16 +520,16 @@ it.each(['cycle', 'toJSON'])('replay %s preparation errors retire the snapshot w
   expect(k.getStatus()).toEqual([]);
 });
 
-it('an evicted refusal suppresses a newly retained identity and bars its pending success', () => {
+it('an evicted refusal suppresses a replacement pending identity and bars its success', () => {
   const { k, begin, normal, events } = setup(undefined, { maxLineages: 1 });
   const old = begin();
-  const oldState = (k as any).outcomes.get(old.key);
+  const oldState = (k as any).pendingOutcomes.get(old.key);
   const other = begin('normal', wire('other'));
-  expect([...(k as any).outcomes.keys()]).toEqual([other.key]);
-  expect((k as any).outcomes.has(old.key)).toBe(false);
+  expect([...(k as any).pendingOutcomes.keys()]).toEqual([other.key]);
+  expect((k as any).pendingOutcomes.has(old.key)).toBe(false);
   const pending = begin();
-  expect((k as any).outcomes.get(old.key)).not.toBe(oldState);
-  expect((k as any).outcomes.has(other.key)).toBe(false);
+  expect((k as any).pendingOutcomes.get(old.key)).not.toBe(oldState);
+  expect((k as any).pendingOutcomes.has(other.key)).toBe(false);
   k.finish(old, 'refusal');
   expect(events.at(-1)).toEqual({ type: 'suppressed', key: old.key, source: 'foreground' });
   k.prefix(pending); k.finish(pending, 'end_turn');
@@ -592,6 +621,7 @@ it.each(['same identity', 'recreated identity'])('stale refresh refusal bars pre
   await vi.advanceTimersByTimeAsync(100);
   if (identity === 'recreated identity') {
     const other = begin('normal', wire('other'));
+    k.finish(other, 'end_turn');
     expect([...(k as any).outcomes.keys()]).toEqual([other.key]);
     expect((k as any).outcomes.has(original.key)).toBe(false);
   }
@@ -687,7 +717,7 @@ it.each(['prefix', 'finish'])('eligibility accessor eviction/recreation invalida
   const w = wire(), attempt = begin('normal', w);
   let replacement: unknown;
   Object.defineProperty((k as any).attempts.get(attempt).wire, 'tool_choice', { get() {
-    begin('normal', wire('other'));
+    k.finish(begin('normal', wire('other')), 'end_turn');
     const fresh = begin(); k.finish(fresh, 'end_turn');
     replacement = (k as any).lineages.get(fresh.key);
     return undefined;
@@ -836,7 +866,7 @@ it('serialization cannot recreate an identity evicted after a nested refusal', (
     expect((k as any).outcomes.get(lineageKey(wire())).qualified).toBe(false);
     k.prefix(pending); k.finish(pending, 'end_turn');
     expect(k.getStatus()).toEqual([]);
-    begin('normal', wire('other'));
+    k.finish(begin('normal', wire('other')), 'end_turn');
     expect((k as any).outcomes.has(lineageKey(wire()))).toBe(false);
     return wire().system;
   } });
@@ -844,7 +874,7 @@ it('serialization cannot recreate an identity evicted after a nested refusal', (
   expect(serialized).toBe(1);
   expect(outer).toBeDefined();
   k.finish(outer!, 'end_turn');
-  expect(k.getStatus()).toEqual([]);
+  expect(k.getStatus().map(s => s.key)).toEqual([lineageKey(wire('other'))]);
 });
 
 it('repeated usage-processing errors reach the send failure threshold', async () => {
@@ -894,18 +924,18 @@ it('hashing cannot adopt a barrier-zero identity recreated after nested refusal 
     expect((k as any).outcomes.get(lineageKey(wire())).qualified).toBe(false);
     k.prefix(pending); k.finish(pending, 'end_turn');
     expect(k.getStatus()).toEqual([]);
-    begin('normal', wire('other'));
+    k.finish(begin('normal', wire('other')), 'end_turn');
     expect((k as any).outcomes.has(key)).toBe(false);
     begin();
-    expect((k as any).outcomes.get(key).barrier).toBe(0);
+    expect((k as any).pendingOutcomes.get(key).barrier).toBe(0);
     return wire().system;
   } });
   const outer = begin('normal', w);
   expect(outer).toBeDefined();
   k.prefix(outer); k.finish(outer, 'end_turn');
-  expect(k.getStatus()).toEqual([]);
+  expect(k.getStatus().map(s => s.key)).toEqual([lineageKey(wire('other'))]);
   k.finish(begin(), 'end_turn');
-  expect(k.getStatus()).toHaveLength(1);
+  expect(k.getStatus().map(s => s.key)).toEqual([key]);
 });
 
 it('hashing reentered by an unrelated key retains a handle for a later refusal', () => {
@@ -1008,13 +1038,14 @@ it('unknown terminal retires replay before an unrelated throwing getter', async 
 it('begin touches an existing outcome before LRU eviction', () => {
   const { k, begin } = setup(undefined, { maxLineages: 2 });
   const a = begin('normal', wire('a')), b = begin('normal', wire('b'));
-  begin('normal', wire('a')); begin('normal', wire('c'));
+  k.finish(a, 'end_turn'); k.finish(b, 'end_turn');
+  begin('normal', wire('a')); k.finish(begin('normal', wire('c')), 'end_turn');
   expect((k as any).outcomes.has(a.key)).toBe(true);
   expect((k as any).outcomes.has(b.key)).toBe(false);
 });
 
 it('newer ineligible prefix under a barrier prevents an older snapshot', () => {
-  const { k, begin, events } = setup(); k.finish(begin(), 'refusal');
+  const { k, begin, events, normal } = setup(); normal(); k.finish(begin(), 'refusal');
   expect(events).toContainEqual({ type: 'suppressed', key: lineageKey(wire()), source: 'foreground' });
   expect((k as any).outcomes.get(lineageKey(wire()))).toMatchObject({ qualified: false, barrier: expect.any(Number) });
   expect((k as any).outcomes.get(lineageKey(wire())).barrier).toBeGreaterThan(0);
@@ -1072,10 +1103,26 @@ it('outcome eviction reports removal of a live snapshot', () => {
   const { k, normal, begin, events } = setup(undefined, { maxLineages: 1 });
   normal(); expect(k.getStatus()).toHaveLength(1);
   const old = begin();
-  expect(begin('normal', wire('other'))).toBeDefined();
-  expect(k.getStatus()).toEqual([]);
+  const replacement = begin('normal', wire('other'));
+  expect(k.getStatus().map(s => s.key)).toEqual([old.key]);
+  k.finish(replacement, 'end_turn');
+  expect(k.getStatus().map(s => s.key)).toEqual([replacement.key]);
   expect(events).toEqual([{ type: 'diagnostic', key: old.key, reason: 'outcome-lru-eviction: maxLineages cap exceeded' }]);
   k.prefix(old); k.finish(old, 'end_turn');
+  expect(k.getStatus().map(s => s.key)).toEqual([replacement.key]);
+});
+
+it('a reentrant refusal from the displacement diagnostic sees the newly qualified snapshot', () => {
+  const replacement = wire('replacement');
+  let observed: string[] | undefined;
+  const { k, begin, normal } = setup(undefined, { maxLineages: 1, onDiagnostic: () => {
+    observed = k.getStatus().map(s => s.key);
+    k.finish(begin('normal', replacement), 'refusal');
+  } });
+  normal();
+  const fresh = begin('normal', replacement);
+  k.finish(fresh, 'end_turn');
+  expect(observed).toEqual([fresh.key]);
   expect(k.getStatus()).toEqual([]);
 });
 
@@ -1243,9 +1290,9 @@ it('outcome eviction leaves failure count unchanged before the next transport fa
   await vi.advanceTimersByTimeAsync(100);
   expect((k as any).consecutiveErrors).toBe(1);
   const other = begin('normal', wire('other'));
+  k.finish(other, 'end_turn');
   expect(events.at(-1)).toMatchObject({ type: 'diagnostic', reason: 'outcome-lru-eviction: maxLineages cap exceeded' });
   expect((k as any).consecutiveErrors).toBe(1);
-  k.finish(other, 'end_turn');
   await vi.advanceTimersByTimeAsync(100);
   expect(events.slice(-2)).toEqual([
     expect.objectContaining({ type: 'error', error: 'outage', consecutive: 2 }),

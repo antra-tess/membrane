@@ -80,16 +80,19 @@ it('keeps the adapter-global consecutive limit distinct from a per-key retry bud
   expect(keeper.getStatus()).toHaveLength(2);
 });
 
-it('does not admit an attempt after an eviction observer stops the keeper', () => {
+it('does not return an attempt after a pending-eviction observer stops the keeper', () => {
   const observer = vi.fn(() => keeper.stop());
   const { keeper, qualify } = setup(undefined, { maxLineages: 1, onDiagnostic: observer });
   qualify('a');
   expect(keeper.getStatus()).toHaveLength(1);
-  const attempt = keeper.begin(wire('b'), undefined, 'stream');
+  const pending = keeper.begin(wire('b'), undefined, 'stream')!;
+  expect(keeper.getStatus()).toHaveLength(1);
+  expect(observer).not.toHaveBeenCalled();
+  const attempt = keeper.begin(wire('c'), undefined, 'stream');
   expect(observer).toHaveBeenCalledTimes(1);
   expect(attempt).toBeUndefined();
+  expect(keeper.requestForAttempt(pending)).toBeUndefined();
   expect(keeper.getStatus()).toEqual([]);
-  expect((keeper as any).outcomes.size).toBe(0);
 });
 
 it('reports preparation retirement only onDiagnostic without exception payloads', async () => {

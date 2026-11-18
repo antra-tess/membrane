@@ -47,7 +47,7 @@ import { flattenRootSchemaUnion } from './anthropic-tool-schema.js';
 import { isPlainObject } from '../utils/tool-schema.js';
 import { assertTerminalEventObserved, toolUseInputFromText, toolUseInputFromValue, createCombinedSignal, isDeadlineAbort, deadlineTimeoutError, isToolCallBlock, isToolCallArgumentsDelta, progressOfAnthropicEvent, callerAbort } from './utils.js';
 import { fetchWithCredentials, validateCredential, type CredentialContext, type CredentialResolver } from './credentials.js';
-import { CacheKeepalive, type CacheKeepaliveConfig } from '../cache-keepalive.js';
+import { CacheKeepalive, type CacheKeepaliveConfig, type KeepaliveAttempt } from '../cache-keepalive.js';
 
 /**
  * Models that reject the sampling parameters (`temperature`, `top_p`,
@@ -431,7 +431,6 @@ export class AnthropicAdapter implements ProviderAdapter {
     this.client = new Anthropic(clientOptions);
     this.defaultMaxTokens = config.defaultMaxTokens ?? 4096;
 
-    this.suppressKeepaliveOnRefusal = config.cacheKeepalive?.suppressOnRefusal ?? false;
     this.cacheKeepalive = config.cacheKeepalive?.enabled === false
       ? undefined
       : new CacheKeepalive(
@@ -442,6 +441,7 @@ export class AnthropicAdapter implements ProviderAdapter {
           ),
           config.cacheKeepalive ?? {},
         );
+    this.suppressKeepaliveOnRefusal = !!this.cacheKeepalive && (config.cacheKeepalive?.suppressOnRefusal ?? false);
   }
 
   // When given a signal, the SDK gets this request's own controller's signal
@@ -530,9 +530,10 @@ export class AnthropicAdapter implements ProviderAdapter {
     // createCombinedSignal (#97): the SDK's own timeout clears once response
     // headers arrive, so it alone never bounds the request.
     const { signal: callSignal, cleanup } = createCombinedSignal(options?.signal, options?.timeoutMs);
+    let unfinished: KeepaliveAttempt | undefined;
     try {
       const sentAt = Date.now();
-      const attempt = keepaliveObservation(() => this.cacheKeepalive?.begin(
+      const attempt = unfinished = keepaliveObservation(() => this.cacheKeepalive?.begin(
         fullRequest as unknown as Record<string, unknown>, headers, 'complete', this.suppressKeepaliveOnRefusal ? options?.keepalivePurpose : undefined, sentAt,
       ), () => this.cacheKeepalive?.stop('keepalive begin bookkeeping failed; permanently stopped for this adapter; create a new adapter to restart keepalive'));
       const received = await this.createMessage(fullRequest, live, callSignal, { maxRetries: 0 });
@@ -563,6 +564,8 @@ export class AnthropicAdapter implements ProviderAdapter {
       if (isDeadlineAbort(callSignal?.reason)) throw deadlineTimeoutError(callSignal!.reason, fullRequest);
       throw this.handleError(error, fullRequest);
     } finally {
+      const attempt = unfinished;
+      if (attempt) keepaliveObservation(() => this.cacheKeepalive?.cancel(attempt));
       cleanup?.();
     }
   }
@@ -627,12 +630,13 @@ export class AnthropicAdapter implements ProviderAdapter {
 
     resetIdleTimer();
     let session: ReturnType<AnthropicAdapter['credentialSession']> | undefined;
+    let unfinished: KeepaliveAttempt | undefined;
 
     try {
       session = this.credentialSession(idleAbort.signal, onTransportActivity);
       // The cache's clock starts with the request, not at message_start.
       const sentAt = Date.now();
-      const attempt = keepaliveObservation(() => this.cacheKeepalive?.begin(
+      const attempt = unfinished = keepaliveObservation(() => this.cacheKeepalive?.begin(
         fullRequest as unknown as Record<string, unknown>, headers, 'stream', this.suppressKeepaliveOnRefusal ? options?.keepalivePurpose : undefined, sentAt,
       ), () => this.cacheKeepalive?.stop('keepalive begin bookkeeping failed; permanently stopped for this adapter; create a new adapter to restart keepalive'));
       const stream = await session.client.messages.stream(anthropicRequest, {
@@ -1009,6 +1013,9 @@ export class AnthropicAdapter implements ProviderAdapter {
       // whatever the SDK wrapped the abort in.
       if (isDeadlineAbort(callSignal?.reason)) throw deadlineTimeoutError(callSignal!.reason, fullRequest);
       throw this.handleError(session?.failure() ?? error, fullRequest);
+    } finally {
+      const attempt = unfinished;
+      if (attempt) keepaliveObservation(() => this.cacheKeepalive?.cancel(attempt));
     }
   }
 

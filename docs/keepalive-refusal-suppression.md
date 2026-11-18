@@ -160,34 +160,43 @@ Cache-warming callers through Membrane must also declare maintenance. No purpose
 
 The existing hash is model/system/tools, **not** a unique conversation or vendor
 cache-prefix identity. Messages and lane are excluded. Refusals from excluded
-lanes still suppress a shared key. A later known-normal completion from any lane
-can clear suppression, but only configured lanes can install replay snapshots.
+lanes still suppress a shared key. Once a key has qualified, a later known-normal
+completion from any lane can clear its suppression, but only configured lanes
+can install replay snapshots.
 Normal lane defaults remain stream-only. Maintenance can update already-qualified, unsuppressed
 prefix accounting but cannot clear suppression.
 
 State is local to each keeper (one per adapter), not shared across adapters in
 the same process. A refusal on one adapter does not suppress another adapter. At most `maxLineages` outcome identities (default four)
-are retained, including suppressed keys, separately from at most that many full
-wire snapshots. Only a normal request in a configured lane with an eligible
-replay shape can allocate a new outcome identity. Excluded, ineligible and
-maintenance traffic for untracked keys receives detached handles and cannot
-evict eligible lineages. Such handles can still suppress a key retained by the
-time their refusal arrives, but cannot qualify it. Requests for existing keys
-still touch the outcome LRU and observe cross-lane refusals and rearm.
+are retained after first qualification, including suppressed keys, with at most
+that many full wire snapshots. Pending first qualifications have a separate
+LRU of the same size. Only a normal request in a configured lane with an eligible
+replay shape can start tracking a new key. It competes for retained capacity only
+when it completes with a known-normal terminal and can install a snapshot.
+Transport failure, cancellation, refusal and unknown terminals on a new key
+cannot evict a qualified snapshot. Pending state is released when the last
+attached attempt settles without qualifying the key. Excluded, ineligible and
+maintenance traffic for untracked keys receives detached handles. Such handles
+can still suppress a key tracked by the time their refusal arrives, including a
+pending first qualification, but cannot qualify it. Requests for tracked keys
+still touch their LRU; a prefix on an already-qualified key can update or retire
+its snapshot even if the request later fails.
 A stopped keeper does not register; sequence-advancing reentrant serialization
 also returns a detached handle.
-Each opt-in outcome eviction reports to `onDiagnostic` with the evicted key and
-`outcome-lru-eviction: maxLineages cap exceeded`, even without a snapshot.
+An opt-in outcome eviction reports to `onDiagnostic` with the evicted key and
+`outcome-lru-eviction: maxLineages cap exceeded` for retained outcomes or
+`outcome-lru-eviction: pending maxLineages cap exceeded` for pending outcomes.
 This diagnostic does not increment consecutive failures or disable the keeper.
 Default-off snapshot LRU eviction remains silent; `skipped` only reports
 ineligible-snapshot removal. More eligible distinct in-flight keys than the cap
-can still evict attempts before they finish; sustained round-robin overload can
-prevent qualification. Increase the cap or reduce eligible concurrency if needed.
+can still invalidate pending attempts before they finish without evicting
+retained outcomes; sustained round-robin overload can prevent first qualification.
+Increase the cap or reduce eligible concurrency if needed.
 Suppression has no time
 expiry while retained; it holds no wire snapshot. LRU eviction forgets both
 identity and suppression; a *new* begin after eviction is a fresh lineage, but
 old in-flight handles remain invalid for prefix/success updates. A late refusal
-from an evicted handle still suppresses a newly retained identity for that key,
+from an evicted handle still suppresses a newly tracked identity for that key,
 without recreating forgotten keys or growing the map. Fresh identities must qualify through a
 known-normal foreground completion, so forgetting cannot let maintenance or unknown
 outcomes restore eligibility. In opt-in mode, stop permanently clears tracked maps and timers.
@@ -208,17 +217,20 @@ untracked handles (for example, a first stream without a one-hour cache marker)
 do not emit this diagnostic. Excluded lanes cannot remove snapshots by prefix ineligibility.
 There is no persistence or durable tombstone format.
 Low-level keeper clients must use `begin`, `prefix`, `finish` to observe outcomes.
-On failure or cancellation, low-level callers should call `finish(handle, undefined)`
-to release the attempt's request/header references without qualifying it. A prefix
+On failure or cancellation, low-level callers should call `cancel(handle)`
+to release the attempt's request/header references without reporting a terminal.
+Use `finish(handle, undefined)` for a delivered but missing terminal. A prefix
 on an already-qualified key may have installed those references in its replay
 snapshot; finishing does not remove that snapshot or release its references.
 Retaining an unfinished handle retains attempt references despite the lineage cap.
 `record` is the legacy prefix-accounting API and is ignored entirely with suppression enabled,
 even for qualified keys; it cannot carry begin identity or ordering.
-Terminal capture initially reads `stop_reason` by ordinary property access,
+Terminal capture (with keepalive enabled and suppression opted in) initially
+reads `stop_reason` by ordinary property access,
 without a presence check. It freezes that value in the copied terminal when it is
-non-undefined or an own or inherited property exists, including inherited getters
-initially returning undefined. Genuinely missing raw properties remain absent.
+non-undefined or an own or inherited property exists. In either case an
+initially-undefined getter becomes an own data property with value `undefined`;
+genuinely missing raw properties remain absent.
 The initial getter/get trap
 necessarily runs before suppression; a returned refusal is applied before prototype/descriptor traps and unrelated
 terminal metadata reads. Raw stream refusal is observed before progress callbacks or terminal parsing; a
@@ -242,8 +254,9 @@ persist. A failed begin or finish stops the keeper permanently for this adapter 
 `disabled` with a payload-free reason; its warning explicitly discloses that stop and directs callers to create a new adapter to restart,
 because outcome tracking may be incomplete. Prefix/legacy record failures only warn, once per failure via console.warn,
 without rate limiting or host-logger routing; state may be partially updated, and suppression is not guaranteed by such a warning.
-Finite nonpositive `maxLineages` retains no identities or snapshots (fractional caps round
-down by eviction); negative caps do not block the foreground. Only with `suppressOnRefusal: true`, NaN and either infinity
+With suppression enabled, a finite `maxLineages` below one skips outcome
+bookkeeping without scanning or eviction notices. Larger fractional caps round
+down by eviction. Only with `suppressOnRefusal: true`, NaN and either infinity
 are normalized to the default cap. With suppression unset or false, cap handling
 matches main: NaN and positive Infinity are unbounded; negative Infinity retains
 nothing. Normalization is not applied in default-off mode.
@@ -291,8 +304,9 @@ are outside this guarantee. Serialization can run more than once; keepalive does
 not promise single serialization or an owned transport snapshot. Stream
 bookkeeping retains the `onRequest` observer's `fullRequest` in both modes.
 Replacing its fields changes the replay snapshot, not the original foreground
-SDK stream request; observers should not use field replacement to rewrite that
-foreground request.
+SDK stream request. This mismatch predates suppression; with suppression opted
+in, a replacement of `system` or `tools` also changes the key against which a
+stream refusal is recorded. Observers should not replace fields on that object.
 Begin and finish bookkeeping failures stop adapter keepalive; prefix/record failures only warn.
 Opt-in replay preparation rejects callable root `toJSON` methods, which could
 otherwise override `max_tokens: 0` or message trimming after preparation. The

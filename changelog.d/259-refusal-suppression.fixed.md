@@ -4,3 +4,7 @@
   legacy scheduling policy.
 - Isolate asynchronous event observer rejections in both modes, like synchronous
   throws; this shared safety change does not alter default-off scheduling.
+- In both keepalive modes, unprintable sender errors use `Unprintable keepalive error`
+  and continue failure accounting and error/disabled notifications instead of
+  throwing during formatting. Ordinary string-valued Error messages retain
+  legacy formatting; non-string messages are converted to strings.

@@ -122,10 +122,11 @@ export interface CacheKeepaliveConfig {
   /** Which lanes to keep warm. Default ['stream'], the primary lane. */
   lanes?: KeepaliveLane[];
   /** LRU cap on tracked lineages, to bound memory: each holds a full wire
-   *  request. Default 4. Only with suppressOnRefusal, nonfinite caps use the
-   *  default. Default-off cap handling matches main (NaN/Infinity are unbounded).
-   *  Finite nonpositive caps retain nothing in either mode; default-off
-   *  negative Infinity also retains nothing. */
+   *  request. Default 4. With suppressOnRefusal, pending first qualifications
+   *  have a separate LRU of the same size and nonfinite caps use the default.
+   *  Default-off cap handling matches main (NaN/Infinity are unbounded).
+   *  Caps below one retain nothing in either mode (except opt-in -Infinity,
+   *  which uses the default). */
   maxLineages?: number;
   /** Adapter-global consecutive send/response-processing failures before disabling. Default 3.
    * A successfully processed refresh of any key resets the run; not a per-key budget.
@@ -263,7 +264,7 @@ export function lineageKey(wire: Record<string, unknown>): string {
   return h.digest('hex').slice(0, 16);
 }
 
-interface OutcomeState { barrier: number; latest: number; qualified: boolean; }
+interface OutcomeState { barrier: number; latest: number; qualified: boolean; active: number; }
 /** Request-begin identity; treat as opaque and return only to its issuing keeper. */
 export interface KeepaliveAttempt {
   readonly key: string;
@@ -273,7 +274,7 @@ export interface KeepaliveAttempt {
 interface AttemptData {
   readonly key: string;
   readonly sequence: number;
-  readonly state: OutcomeState;
+  readonly state: OutcomeState | undefined;
   readonly wire: Record<string, unknown>;
   readonly headers: Record<string, string> | undefined;
   readonly lane: KeepaliveLane;
@@ -289,6 +290,9 @@ function knownTerminal(reason: unknown): boolean {
 
 export class CacheKeepalive {
   private outcomes = new Map<string, OutcomeState>();
+  // Pending first qualifications have their own bounded LRU. A new key cannot
+  // evict a retained identity until it can install a qualified snapshot.
+  private pendingOutcomes = new Map<string, OutcomeState>();
   private sequence = 0;
   private attempts = new WeakMap<KeepaliveAttempt, AttemptData>();
   private lineages = new Map<string, Lineage>();
@@ -310,7 +314,7 @@ export class CacheKeepalive {
    * Maintenance is a trusted non-wire caller declaration, not inferred intent. */
   begin(wire: Record<string, unknown>, headers: Record<string, string> | undefined,
     lane: KeepaliveLane, purpose: 'normal' | 'maintenance' = 'normal', sentAt = Date.now()): KeepaliveAttempt | undefined {
-    if (!this.cfg.suppressOnRefusal || this.stopped) return undefined;
+    if (!this.cfg.suppressOnRefusal || this.stopped || this.cfg.maxLineages < 1) return undefined;
     // Reserve entry order before caller-owned serialization or observers reenter.
     const sequence = ++this.sequence;
     // Keep SDK-native values (including JSON.rawJSON exact numbers) intact.
@@ -319,7 +323,7 @@ export class CacheKeepalive {
     headers = headers ? { ...headers } : undefined;
     const key = lineageKey(wire);
     if (this.stopped) return undefined;
-    const state = this.outcomes.get(key);
+    const state = this.outcomeFor(key);
     // Only potentially schedulable foreground requests may allocate a new key.
     // Other traffic still gets a handle: a late refusal must suppress a key
     // retained by then, and existing identities keep cross-lane rearm semantics.
@@ -329,27 +333,25 @@ export class CacheKeepalive {
     // Serialization may reenter, refuse, evict, and recreate this key. We cannot
     // safely adopt any resulting identity for success. Keep a detached handle:
     // its later refusal still applies to a retained key, without recreating one.
-    if (!admit || sequence !== this.sequence) {
-      const handle = Object.freeze({ key }) as KeepaliveAttempt;
-      const detached = { barrier: 0, latest: 0, qualified: false };
-      this.attempts.set(handle, { key, state: detached, sequence, wire, headers, lane, purpose, sentAt });
-      if (admit && sequence !== this.sequence) this.diagnose(key, 'detached-attempt: serialization reentry prevents qualification');
-      return handle;
-    }
-    const retained = state ?? { barrier: 0, latest: 0, qualified: false };
-    this.outcomes.delete(key);
-    this.outcomes.set(key, retained);
-    while (this.outcomes.size > this.cfg.maxLineages) {
-      const oldest = this.outcomes.keys().next().value;
-      if (oldest === undefined) break;
-      this.outcomes.delete(oldest);
-      this.lineages.delete(oldest);
-      this.diagnose(oldest, 'outcome-lru-eviction: maxLineages cap exceeded');
-    }
-    if (this.stopped) return undefined;
+    const attached = admit && sequence === this.sequence
+      ? state ?? { barrier: 0, latest: 0, qualified: false, active: 0 }
+      : undefined;
     const handle = Object.freeze({ key }) as KeepaliveAttempt;
-    this.attempts.set(handle, { key, state: retained, sequence, wire, headers, lane, purpose, sentAt });
-    return handle;
+    this.attempts.set(handle, { key, state: attached, sequence, wire, headers, lane, purpose, sentAt });
+    if (!attached) {
+      if (admit) this.diagnose(key, 'detached-attempt: serialization reentry prevents qualification');
+    } else {
+      attached.active++;
+      const map = this.outcomes.has(key) ? this.outcomes : this.pendingOutcomes;
+      map.delete(key);
+      map.set(key, attached);
+      if (map.size > this.cfg.maxLineages) {
+        const oldest = map.keys().next().value!;
+        map.delete(oldest);
+        this.diagnose(oldest, 'outcome-lru-eviction: pending maxLineages cap exceeded');
+      }
+    }
+    return this.stopped ? undefined : handle;
   }
 
   /** Retained caller request; callers must not mutate it while tracked. */
@@ -357,29 +359,34 @@ export class CacheKeepalive {
     return this.attempts.get(handle)?.wire;
   }
 
-  private current(attempt: AttemptData): boolean {
-    return !this.stopped && this.outcomes.get(attempt.key) === attempt.state;
+  private outcomeFor(key: string): OutcomeState | undefined {
+    return this.outcomes.get(key) ?? this.pendingOutcomes.get(key);
+  }
+
+  private current(key: string, state: OutcomeState): boolean {
+    return !this.stopped && this.outcomeFor(key) === state;
   }
 
   /** Prefix observation orders snapshots, but cannot initially qualify an identity. */
   prefix(handle: KeepaliveAttempt): void {
     const attempt = this.attempts.get(handle);
-    if (!attempt || !this.current(attempt) ||
-        attempt.sequence <= attempt.state.barrier || attempt.sequence < attempt.state.latest) return;
+    const state = attempt?.state;
+    if (!attempt || !state || !this.current(attempt.key, state) ||
+        attempt.sequence <= state.barrier || attempt.sequence < state.latest) return;
     if (!this.cfg.lanes.includes(attempt.lane)) return;
     const reason = ineligibleReason(attempt.wire);
     // Caller-owned eligibility accessors may reenter and finish this handle.
-    if (this.attempts.get(handle) !== attempt || !this.current(attempt) || attempt.sequence <= attempt.state.barrier ||
-        attempt.sequence < attempt.state.latest) return;
+    if (this.attempts.get(handle) !== attempt || !this.current(attempt.key, state) ||
+        attempt.sequence <= state.barrier || attempt.sequence < state.latest) return;
     if (reason) {
-      attempt.state.latest = attempt.sequence;
+      state.latest = attempt.sequence;
       if (this.lineages.delete(attempt.key)) this.emit({ type: 'skipped', key: attempt.key, reason });
       else this.diagnose(attempt.key, `ineligible-prefix: ${reason}; older snapshots barred`);
       return;
     }
     // A pending prefix with no snapshot must not starve completed requests.
-    if (attempt.state.qualified && !attempt.registered) {
-      attempt.state.latest = attempt.sequence;
+    if (state.qualified && !attempt.registered) {
+      state.latest = attempt.sequence;
       this.installSnapshot(attempt.wire, attempt.headers, attempt.lane, attempt.sentAt, attempt.key, null);
       attempt.registered = true;
     }
@@ -390,10 +397,32 @@ export class CacheKeepalive {
     const attempt = this.attempts.get(handle);
     if (!attempt || this.stopped) return;
     this.attempts.delete(handle); // First terminal wins before reentry; release prompts/headers.
+    try {
+      this.finishAttempt(attempt, reason);
+    } finally {
+      this.releaseAttempt(attempt);
+    }
+  }
+
+  /** End a failed or cancelled attempt without recording a provider terminal. */
+  cancel(handle: KeepaliveAttempt): void {
+    const attempt = this.attempts.get(handle);
+    if (!attempt) return;
+    this.attempts.delete(handle);
+    this.releaseAttempt(attempt);
+  }
+
+  private releaseAttempt({ key, state }: AttemptData): void {
+    if (state && --state.active === 0 && this.pendingOutcomes.get(key) === state) {
+      this.pendingOutcomes.delete(key);
+    }
+  }
+
+  private finishAttempt(attempt: AttemptData, reason: unknown): void {
     if (reason === 'refusal') {
-      // Eviction invalidates successes, not a refusal for a retained key.
+      // Eviction invalidates successes, not a refusal for a currently tracked key.
       // Do not recreate forgotten identities or enlarge the bounded map.
-      const state = this.outcomes.get(attempt.key);
+      const state = this.outcomeFor(attempt.key);
       if (state) this.suppress(attempt.key, state, 'foreground');
       return;
     }
@@ -401,19 +430,35 @@ export class CacheKeepalive {
       this.diagnose(attempt.key, 'unknown-foreground-terminal: completion cannot qualify or rearm keepalive');
       return;
     }
-    if (!this.current(attempt) || attempt.purpose !== 'normal' ||
-        attempt.sequence <= attempt.state.barrier) return;
+    const { key, state } = attempt;
+    if (!state || !this.current(key, state) || attempt.purpose !== 'normal' ||
+        attempt.sequence <= state.barrier) return;
     const included = this.cfg.lanes.includes(attempt.lane);
-    const needsSnapshot = included && attempt.sequence >= attempt.state.latest && !attempt.registered;
+    const needsSnapshot = included && attempt.sequence >= state.latest && !attempt.registered;
     const eligibility = needsSnapshot ? ineligibleReason(attempt.wire) : null;
     // Last check after all caller-controlled work, immediately before mutation.
-    if (!this.current(attempt) || attempt.sequence <= attempt.state.barrier) return;
-    attempt.state.qualified = true;
+    if (!this.current(key, state) || attempt.sequence <= state.barrier) return;
+    const install = needsSnapshot && attempt.sequence >= state.latest;
+    let evicted: string | undefined;
+    if (this.pendingOutcomes.get(key) === state) {
+      if (!install || eligibility) return;
+      this.pendingOutcomes.delete(key);
+      this.outcomes.set(key, state);
+      if (this.outcomes.size > this.cfg.maxLineages) {
+        evicted = this.outcomes.keys().next().value!;
+        this.outcomes.delete(evicted);
+        this.lineages.delete(evicted);
+      }
+    }
+    state.qualified = true;
     // Keep the last refusal sequence after rearm: an older handle stays barred.
-    if (!needsSnapshot || attempt.sequence < attempt.state.latest) return;
-    attempt.state.latest = attempt.sequence;
-    this.installSnapshot(attempt.wire, attempt.headers, attempt.lane, attempt.sentAt, attempt.key, eligibility);
-    attempt.registered = true;
+    if (install) {
+      state.latest = attempt.sequence;
+      this.installSnapshot(attempt.wire, attempt.headers, attempt.lane, attempt.sentAt, key, eligibility);
+    }
+    // Notify only after promotion and installation, so reentry cannot undo a
+    // refusal or replacement observed from the diagnostic callback.
+    if (evicted !== undefined) this.diagnose(evicted, 'outcome-lru-eviction: maxLineages cap exceeded');
   }
 
   private suppress(key: string, state: OutcomeState, source: 'foreground' | 'refresh'): void {
@@ -555,7 +600,7 @@ export class CacheKeepalive {
       // snapshot or outcome identity was replaced during the sender await.
       const stopReason = this.cfg.suppressOnRefusal ? res.stop_reason : undefined;
       const refused = this.cfg.suppressOnRefusal && stopReason === 'refusal';
-      const currentState = this.outcomes.get(key);
+      const currentState = this.outcomeFor(key);
       if (refused && !this.stopped && currentState) this.suppress(key, currentState, 'refresh');
       // Retire unknown terminals before unrelated response getters can throw.
       const unknown = this.cfg.suppressOnRefusal && !refused && !knownTerminal(stopReason);
@@ -725,6 +770,7 @@ export class CacheKeepalive {
     }
     this.lineages.clear();
     this.outcomes.clear();
+    this.pendingOutcomes.clear();
     this.attempts = new WeakMap();
     if (reason && !wasStopped) {
       this.disabledReported = true;

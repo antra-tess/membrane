@@ -5,7 +5,7 @@
  * starts at a request's send.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { APIUserAbortError } from '@anthropic-ai/sdk';
+import { APIUserAbortError, BadRequestError } from '@anthropic-ai/sdk';
 import { Membrane } from '../../src/membrane.js';
 import { NativeFormatter } from '../../src/formatters/native.js';
 import { AnthropicXmlFormatter } from '../../src/formatters/anthropic-xml.js';
@@ -342,6 +342,25 @@ it('opt-in complete deadline still aborts the SDK and cannot rearm', async () =>
   expect(client.messages.create.mock.calls[1][0]).not.toHaveProperty('keepalivePurpose');
 });
 
+it.each(['complete', 'stream'] as const)('%s cannot qualify a normal terminal delivered after a combined deadline', async lane => {
+  const gate = held();
+  const { a, client } = adapter({ suppressOnRefusal: true, lanes: [lane] },
+    () => gate.promise, () => heldStream(gate.promise, [messageStart, ...rest]));
+  const options = { timeoutMs: 20 }; // No caller signal can independently block qualification.
+  const pending = lane === 'complete' ? a.complete(request('late-normal'), options)
+    : a.stream(request('late-normal'), noCallbacks, options);
+  const send = lane === 'complete' ? client.messages.create : client.messages.stream;
+  expect(send).toHaveBeenCalledTimes(1);
+  const { signal } = send.mock.calls[0][1];
+  expect(signal.aborted).toBe(false);
+  await vi.advanceTimersByTimeAsync(20);
+  expect(signal.aborted).toBe(true);
+  gate.release(answer); // Fake SDK ignores the abort and delivers a normal terminal.
+  expect((await pending).providerStopReason).toBe('end_turn');
+  expect(a.cacheKeepalive!.getStatus()).toEqual([]);
+  expect((a.cacheKeepalive as any).pendingOutcomes.size).toBe(0);
+});
+
 for (const lane of ['complete', 'stream'] as const) {
   for (const action of ['replace', 'drop', 'stop', 'evict']) {
     it(`${lane}: old SDK completion cannot resurrect ${action}d identity`, async () => {
@@ -400,18 +419,17 @@ for (const lane of ['complete', 'stream'] as const) {
       const aKey = lineageKey({ model: request('A').model, system: request('A').system });
       const bKey = lineageKey({ model: request('B').model, system: request('B').system });
       expect((a.cacheKeepalive as any).outcomes.has(aKey)).toBe(true);
-      reason = undefined; await run('B'); // Evict A with no known-normal success.
+      reason = 'end_turn'; await run('B'); // Only a successful replacement evicts A.
       expect([...(a.cacheKeepalive as any).outcomes.keys()]).toEqual([bKey]);
       expect(events.some(e => e.type === 'skipped')).toBe(false);
       reason = mode === 'maintenance' ? 'max_tokens' : undefined;
       await run('A', options);
-      await vi.advanceTimersByTimeAsync(100);
-      expect(replays()).toHaveLength(0);
-      expect(a.cacheKeepalive!.getStatus()).toEqual([]);
+      expect(a.cacheKeepalive!.getStatus().map(s => s.key)).toEqual([bKey]);
       expect((a.cacheKeepalive as any).outcomes.size).toBe(1);
       reason = 'max_tokens'; await run('A'); // Honest normal-default declaration.
       await vi.advanceTimersByTimeAsync(100);
       expect(replays()).toHaveLength(1); // Actual adapter refresh sender, not status alone.
+      expect(replays()[0].system).toEqual(request('A').system);
     });
   }
 }
@@ -642,24 +660,29 @@ it.each([false, true])('public adapter reports outcome-cap eviction (existing sn
   const { a, events, replays } = adapter({ suppressOnRefusal: true, lanes: ['complete'] },
     w => w.max_tokens === 0 ? { ...answer, stop_reason: 'max_tokens' }
       : holding ? gates[next++]!.promise : answer);
-  const key = lineageKey({ model: request('key-0').model, system: request('key-0').system });
+  const keyFor = (system: string) => lineageKey({ model: request(system).model, system: request(system).system });
+  const key = keyFor('qualified');
   if (qualified) {
-    await a.complete(request('key-0'));
+    await a.complete(request('qualified'));
     expect(a.cacheKeepalive!.getStatus().map(s => s.key)).toEqual([key]);
   }
   holding = true;
   const pending = gates.map((_, i) => a.complete(request(`key-${i}`)));
   expect(next).toBe(5);
-  expect(events).toEqual([{
-    type: 'diagnostic', key, reason: 'outcome-lru-eviction: maxLineages cap exceeded',
-  }]);
-  expect(a.cacheKeepalive!.getStatus()).toEqual([]);
-  // Both success qualification and refusal observation lose the evicted identity.
+  const pendingEviction = {
+    type: 'diagnostic', key: keyFor('key-0'), reason: 'outcome-lru-eviction: pending maxLineages cap exceeded',
+  };
+  expect(events).toEqual([pendingEviction]);
+  expect(a.cacheKeepalive!.getStatus().map(s => s.key)).toEqual(qualified ? [key] : []);
+  // The evicted pending refusal does not recreate its identity. Only the four
+  // successful terminals compete with any already-qualified snapshot.
   gates.forEach((gate, i) => gate.release({ ...answer, stop_reason: i === 0 ? 'refusal' : 'end_turn' }));
   await Promise.all(pending);
   expect(a.cacheKeepalive!.getStatus()).toHaveLength(4);
   expect(a.cacheKeepalive!.getStatus().some(s => s.key === key)).toBe(false);
-  expect(events).toHaveLength(1); // No misleading skipped or suppression event.
+  expect(events).toEqual(qualified ? [pendingEviction, {
+    type: 'diagnostic', key, reason: 'outcome-lru-eviction: maxLineages cap exceeded',
+  }] : [pendingEviction]);
   await vi.advanceTimersByTimeAsync(100);
   expect(replays()).toHaveLength(4); // Diagnostic did not disable the keeper.
 });
@@ -875,30 +898,75 @@ it('opt-in message_start updates a qualified replay even when the stream later f
   expect(replays()[0].messages[1].content[0].text).toBe('turn 1');
 });
 
-it.each(['complete', 'stream'] as const)('%s freezes inherited initially-undefined terminal getters', async lane => {
+it.each(['complete', 'stream'] as const)('%s failures before a prefix cannot evict a qualified stream', async lane => {
+  const httpError = new BadRequestError(400, undefined, 'rejected before prefix', new Headers());
+  let fail = false;
+  const { a, events, replays } = adapter({ suppressOnRefusal: true, lanes: ['stream', lane] },
+    wire => {
+      if (wire.max_tokens === 0) return { ...answer, stop_reason: 'max_tokens' };
+      throw httpError;
+    },
+    () => fail ? sdkStream([], httpError) : sdkStream([messageStart, ...rest]));
+  await a.stream(request('retained'), noCallbacks);
+  const before = a.cacheKeepalive!.getStatus();
+  expect(before).toHaveLength(1);
+  fail = true;
+  for (let i = 0; i < 4; i++) {
+    const distinct = request(`failed-${i}`);
+    await expect(lane === 'stream' ? a.stream(distinct, noCallbacks) : a.complete(distinct))
+      .rejects.toThrow('rejected before prefix');
+  }
+  expect(a.cacheKeepalive!.getStatus()).toEqual(before);
+  expect((a.cacheKeepalive as any).pendingOutcomes.size).toBe(0);
+  expect(events).toEqual([]);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(replays()).toHaveLength(1);
+  expect(replays()[0].system).toEqual(request('retained').system);
+});
+
+it.each([
+  ['complete', 'own'], ['complete', 'inherited'], ['stream', 'own'], ['stream', 'inherited'],
+] as const)('%s freezes %s initially-undefined terminal getters', async (lane, property) => {
   let changing = false;
   let reads = 0;
   const terminal = () => {
     const value: any = lane === 'complete' ? { ...answer } : {};
     delete value.stop_reason;
-    return Object.setPrototypeOf(value, { get stop_reason() {
+    const getter = { get stop_reason() {
       return ++reads === 1 ? undefined : 'refusal';
-    } });
+    } };
+    return property === 'own' ? Object.defineProperties(value, Object.getOwnPropertyDescriptors(getter))
+      : Object.setPrototypeOf(value, getter);
   };
   const { a, events, replays } = adapter({ suppressOnRefusal: true, lanes: [lane] },
     () => changing ? terminal() : answer,
     () => sdkStream([messageStart, { type: 'message_delta', delta: changing ? terminal() : { stop_reason: 'end_turn' }, usage: readUsage }]));
-  const run = () => lane === 'complete' ? a.complete(request('inherited')) : a.stream(request('inherited'), noCallbacks);
+  const run = () => lane === 'complete' ? a.complete(request('undefined-terminal'))
+    : a.stream(request('undefined-terminal'), noCallbacks);
   await run();
   expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
   changing = true;
   const result = await run();
   expect(reads).toBe(1);
-  expect(result.stopReason).not.toBe('refusal');
+  expect(result.stopReason).toBe('end_turn');
+  expect(result.providerStopReason).toBeUndefined();
   expect(events).toContainEqual(expect.objectContaining({ type: 'diagnostic', reason: 'unknown-foreground-terminal: completion cannot qualify or rearm keepalive' }));
   // An unknown terminal keeps an already-qualified identity, but public parsing
   // must agree with bookkeeping rather than inventing a later refusal.
   expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
   await vi.advanceTimersByTimeAsync(100);
   expect(replays()).toHaveLength(1);
+});
+
+it.each(['complete', 'stream'] as const)('%s preserves legacy terminal shape when keepalive is disabled', async lane => {
+  const response = Object.defineProperty({ ...answer }, 'stop_reason', { value: 'end_turn', enumerable: false });
+  const delta = Object.defineProperty({}, 'stop_reason', { value: 'end_turn' });
+  const { a } = adapter({ enabled: false, suppressOnRefusal: true, lanes: [lane] },
+    () => response, () => sdkStream([messageStart, { type: 'message_delta', delta, usage: readUsage }]));
+  expect(a.cacheKeepalive).toBeUndefined();
+  const result = lane === 'complete' ? await a.complete(request('disabled'))
+    : await a.stream(request('disabled'), noCallbacks);
+  expect(result.providerStopReason).toBe('end_turn');
+  if (lane === 'complete') expect(result.raw).toBe(response);
+  else expect((result.raw as any).provider_events.message_delta.delta).toEqual({});
 });

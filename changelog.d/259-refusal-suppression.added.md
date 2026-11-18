@@ -29,18 +29,22 @@
   barriers before receipt observers, ignore identity-free `record()` calls, and
   observe each foreground refusal handle only once.
 - With opt-in refusal suppression, nonfinite lineage caps use the bounded default.
+  Finite caps below one skip opt-in admission without scans or eviction diagnostics.
   With suppression unset or false, cap handling matches main without normalization
   (NaN and positive Infinity are unbounded; negative Infinity retains nothing).
 - Opt-in refusal suppression requires known-normal foreground completion for
   fresh identities, including after eviction. Excluded-lane and fresh pending
   prefixes cannot starve successful stream qualification; finishing an already
   registered request preserves its snapshot and refresh baseline.
-- Opt-in outcome state is bounded; eviction emits an `onDiagnostic` notice
-  (`outcome-lru-eviction`), unlike silent legacy snapshot eviction.
-  Only normal, eligible requests in configured lanes allocate new identities;
-  unrelated excluded/ineligible traffic cannot evict eligible lineages.
-  Excess eligible concurrency can still invalidate in-flight handles.
-  Existing keys retain cross-lane refusal/rearm observation. See
+- Opt-in outcome state is bounded. Pending first qualifications have a separate
+  LRU with the same cap as the retained outcomes. Only a known-normal foreground
+  terminal that can install a new snapshot can displace a retained outcome.
+  Unqualified, failed and cancelled attempts release pending state when the
+  last handle settles. Low-level callers can use `cancel(handle)` to release a
+  handle without recording a terminal. Excess concurrency can still invalidate
+  pending handles without touching existing snapshots. Both LRUs emit
+  `outcome-lru-eviction` diagnostics; default-off snapshot eviction remains silent.
+  Previously qualified keys retain cross-lane refusal/rearm observation. See
   `docs/keepalive-refusal-suppression.md` for retention tradeoffs.
 - In opt-in mode, stale send/response-processing failures and reentrant error observers
   cannot bypass the existing global consecutive failure limit. This is
@@ -64,11 +68,6 @@
   changing refresh accounting. Response copies include own enumerable fields only.
 - Opt-in replays reject callable root `toJSON` methods to protect the prefill-only
   token budget and message trimming. Foreground serialization is unchanged.
-- In both modes, unprintable error messages use `Unprintable keepalive error`
-  and continue failure accounting/notifications instead of throwing during formatting.
-  Ordinary string-valued Error messages retain their legacy formatting; non-string
-  Error messages are stringified in both modes, unlike the legacy pass-through
-  (for example, numeric `42` becomes `"42"` in the event error field).
 - Opt-in success receipt latency stops at sender resolution, excluding response
   copying and synchronous observers. Nonfinite usage errors name the field and
   coerced value. Preparation errors explicitly report snapshot retirement.
@@ -79,11 +78,13 @@
   live attempt data on stop. Default-off scheduling remains unchanged.
 - With refusal suppression enabled, honor newer ineligible prefix ordering after
   refusal and release finished attempt data even when opaque handles are retained.
-- Add opt-in outcome-LRU eviction diagnostics, including pending identities,
-  without classifying eviction as an ineligible-snapshot skip. Default-off eviction stays silent.
 - With refusal suppression enabled, recheck stop after admission accessors and
   measure error receipts at sender settlement, excluding later suppression observers.
-- Capture Anthropic foreground terminal stop reasons when refusal-aware cache keepalive is enabled. Own and inherited properties (including initially-undefined inherited getters) and non-undefined values are frozen for subsequent parsing. Default-off behavior is unchanged. Refusal suppression precedes unrelated response/event getters, including streamed usage.
+- Capture Anthropic foreground terminal stop reasons only when keepalive is
+  enabled and refusal suppression is opted in. Own and inherited properties
+  (including initially-undefined getters) and non-undefined values are frozen
+  for subsequent parsing. Refusal suppression precedes unrelated response/event
+  getters, including streamed usage.
 - Opt-in idle expiry is rechecked for each lineage after earlier refreshes settle and immediately before send, after replay preparation.
 - Foreground terminal capture preserves missing raw `stop_reason` properties.
 - Reasoned operator stops emit no duplicate failure-threshold `disabled` event.
@@ -100,8 +101,6 @@
   a caller getter/get trap; suppression follows the returned refusal, not that trap.
 - Preparation-retirement diagnostics omit exception text to avoid leaking payloads;
   these notices require `onDiagnostic` and are not delivered to `onEvent`.
-- Guard keepalive error string conversion in both modes so unprintable sender
-  rejections still produce failure accounting and error/disabled notifications.
 - Opt-in prefixes cannot undo a reentrant finish of the same handle. A newer
   ineligible prefix for a retained identity without a snapshot reports `ineligible-prefix` via
   `onDiagnostic`, explaining why older successes cannot install a snapshot. Detached untracked
