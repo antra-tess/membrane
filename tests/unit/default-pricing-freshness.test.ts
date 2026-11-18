@@ -88,7 +88,6 @@ describe('Anthropic 5.x rows match the published price page (2026-11-18)', () =>
     ['claude-fable-5-1', usd(10, 50, 12.50, 0.25)],
     ['claude-mythos-5-1', usd(10, 50, 12.50, 0.25)],
     ['claude-mythos-5', usd(10, 50, 12.50, 1)],
-    // Its price-page rate for prompts up to 100,000 tokens; the table has no field for the higher rate above that.
     // Priced by prompt length; the over-100k row is on the page too.
     ['claude-haiku-5-5', {
       ...usd(0.10, 0.50, 0.125, 0.01),
