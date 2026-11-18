@@ -1,5 +1,5 @@
 - Add opt-in `cacheKeepalive.suppressOnRefusal` for direct Anthropic keepalive:
-  suspend shared keys on observed semantic refusals and rearm only after a new,
+  suspend shared keys within each adapter, not across adapter instances, on observed semantic refusals and rearm only after a new,
   known-normal foreground completion. Legacy behavior remains the default.
 - Low-level keeper callers enabling suppression must migrate from `record` alone
   to `begin`/`prefix`/`finish`, and senders must return raw `stop_reason` alongside

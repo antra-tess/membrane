@@ -104,7 +104,8 @@ can clear suppression, but only configured lanes can install replay snapshots.
 Normal lane defaults remain stream-only. Maintenance can update already-qualified, unsuppressed
 prefix accounting but cannot clear suppression.
 
-State is process-local. At most `maxLineages` outcome identities (default four)
+State is local to each keeper (one per adapter), not shared across adapters in
+the same process. A refusal on one adapter does not suppress another adapter. At most `maxLineages` outcome identities (default four)
 are retained, including suppressed keys, separately from at most that many full
 wire snapshots. Every request begin touches the outcome LRU, including excluded
 lanes and
@@ -178,3 +179,7 @@ qualify or update a snapshot: intervening work may have refused and evicted its
 identity. Its handle still reports a later refusal against a currently retained
 key. This conservatively excludes even unrelated serialization reentry from
 successful qualification; ordinary subsequent requests can qualify normally.
+
+With suppression enabled, `begin` captures an owned JSON wire copy and numeric
+send time before hashing. Later caller mutation cannot change the replay identity.
+Serialization failure stops adapter keepalive rather than weakening refusal tracking.

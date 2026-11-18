@@ -428,10 +428,10 @@ for (const lane of ['complete', 'stream'] as const) {
     let serializations = 0;
     const result = await run({ onRequest: (w: any) => {
       const original = w.system;
-      w.system = { toJSON() {
+      Object.defineProperty(w.system, 'toJSON', { value() {
         if (++serializations === 1) throw new Error('custom serialization');
-        return original;
-      } };
+        return [...original];
+      } });
     } });
     expect(result.stopReason).toBe('refusal');
     expect(warning).toHaveBeenCalledWith(expect.stringContaining('keepalive is now permanently stopped for this adapter'));
@@ -484,4 +484,27 @@ it('normal stream qualifies before input-transformation response assembly throws
   expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
   await vi.advanceTimersByTimeAsync(100);
   expect(replays()).toHaveLength(1);
+});
+
+it('stream keeper tracks the SDK wire, not replaced onRequest fields', async () => {
+  const { a, replays } = adapter({ suppressOnRefusal: true }, () => answer,
+    () => sdkStream([messageStart, ...rest]));
+  await a.stream(request('actual'), noCallbacks, {
+    onRequest: (wire: any) => { wire.system = [{ type: 'text', text: 'observer replacement' }]; wire.model = 'observer-model'; },
+  });
+  await vi.advanceTimersByTimeAsync(100);
+  expect(replays()).toHaveLength(1);
+  expect(replays()[0].model).toBe('claude-opus-4-1');
+  expect(replays()[0].system[0].text).toBe('actual');
+});
+
+it('stream checks caller abort when combined-signal propagation is blocked', async () => {
+  const abort = new AbortController();
+  abort.signal.addEventListener('abort', e => e.stopImmediatePropagation());
+  const { a } = adapter({ suppressOnRefusal: true }, () => answer,
+    () => sdkStream([messageStart, ...rest]));
+  await settle(a.stream(request('blocked-abort'), { onChunk: () => abort.abort() } as any,
+    { signal: abort.signal, timeoutMs: 1000 }));
+  expect(abort.signal.aborted).toBe(true);
+  expect(a.cacheKeepalive!.getStatus()).toEqual([]);
 });

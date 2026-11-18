@@ -611,7 +611,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       // The cache's clock starts with the request, not at message_start.
       const sentAt = Date.now();
       const attempt = keepaliveObservation(() => this.cacheKeepalive?.begin(
-        fullRequest as unknown as Record<string, unknown>, headers, 'stream', this.suppressKeepaliveOnRefusal ? options?.keepalivePurpose : undefined, sentAt,
+        (this.suppressKeepaliveOnRefusal ? anthropicRequest : fullRequest) as unknown as Record<string, unknown>, headers, 'stream', this.suppressKeepaliveOnRefusal ? options?.keepalivePurpose : undefined, sentAt,
       ), () => this.cacheKeepalive?.stop('keepalive begin bookkeeping failed'));
       const stream = await session.client.messages.stream(anthropicRequest, {
         signal: session.signal,

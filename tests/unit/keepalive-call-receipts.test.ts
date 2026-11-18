@@ -269,4 +269,6 @@ it('legacy receipt duration excludes sender response getters', async () => {
   await vi.advanceTimersByTimeAsync(100);
   expect(calls).toHaveLength(1);
   expect(calls[0].durationMs).toBe(0);
+  expect(calls[0]).toMatchObject({ outcome: 'success', response: { extra: 'value' } });
+  expect(Date.now()).toBe(START + 125);
 });

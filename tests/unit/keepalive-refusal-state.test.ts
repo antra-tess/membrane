@@ -99,8 +99,8 @@ it('older success cannot replace a newer snapshot even without refusal', () => {
   vi.advanceTimersByTime(10);
   k.prefix(old); k.finish(old, 'end_turn');
   expect(k.getStatus()[0].realIdleMs).toBe(10);
-  // Exact wire identity is more meaningful than the shared timestamp.
-  expect((k as any).lineages.get(old.key).wire).toBe(newerWire);
+  // The owned wire content is more meaningful than the shared timestamp.
+  expect((k as any).lineages.get(old.key).wire).toEqual(newerWire);
 });
 
 it('retained suppression is bounded and blocks an ineligible prefix', () => {
@@ -139,9 +139,9 @@ it('fresh identities require known-normal completion, not pending-prefix order',
   const oldWire = wire(), newerWire = wire();
   const old = begin('normal', oldWire), newer = begin('normal', newerWire); k.prefix(newer);
   k.finish(old, 'end_turn');
-  expect((k as any).lineages.get(old.key).wire).toBe(oldWire);
+  expect((k as any).lineages.get(old.key).wire).toEqual(oldWire);
   k.finish(newer, 'end_turn');
-  expect((k as any).lineages.get(newer.key).wire).toBe(newerWire);
+  expect((k as any).lineages.get(newer.key).wire).toEqual(newerWire);
 });
 
 it.each(['refusal', null, 'future_stop'])('resolved %s refresh breaks consecutive transport failures', async reason => {
@@ -424,7 +424,7 @@ it('record-only pre-refusal wire cannot replace a qualified post-barrier snapsho
   k.record(oldWire, undefined, 'stream');
   // Nor may a record-only ineligible request delete the qualified snapshot.
   k.record({ ...oldWire, thinking: { type: 'enabled' } }, undefined, 'stream');
-  expect((k as any).lineages.get(fresh.key).wire).toBe(freshWire);
+  expect((k as any).lineages.get(fresh.key).wire).toEqual(freshWire);
   await vi.advanceTimersByTimeAsync(100);
   expect(send.mock.calls[0][0].messages).toEqual(freshWire.messages);
 });
@@ -467,8 +467,9 @@ it.each(['cycle', 'toJSON'])('replay %s preparation errors retire the snapshot w
   const w: Record<string, unknown> = wire();
   const a = begin('normal', w as ReturnType<typeof wire>); k.finish(a, 'end_turn');
   await vi.advanceTimersByTimeAsync(100);
-  if (failure === 'cycle') w.circular = w;
-  else w.toJSON = () => { throw new Error('cannot serialize'); };
+  const owned = (k as any).lineages.get(a.key).wire; // Internal fault injection.
+  if (failure === 'cycle') owned.circular = owned;
+  else owned.toJSON = () => { throw new Error('cannot serialize'); };
   await vi.advanceTimersByTimeAsync(300);
   expect(send).toHaveBeenCalledTimes(1);
   expect(calls.map(c => c.outcome)).toEqual(['error']);
@@ -608,7 +609,7 @@ it.each(['prefix', 'finish'])('eligibility accessor refusal cannot install a sna
   const refusing = begin();
   const w = wire();
   const attempt = begin('normal', w);
-  Object.defineProperty(w, 'tool_choice', { get() { k.finish(refusing, 'refusal'); return undefined; } });
+  Object.defineProperty((k as any).attempts.get(attempt).wire, 'tool_choice', { get() { k.finish(refusing, 'refusal'); return undefined; } });
   if (operation === 'prefix') k.prefix(attempt);
   else k.finish(attempt, 'end_turn');
   expect(events.at(-1)?.type).toBe('suppressed');
@@ -665,7 +666,7 @@ it.each(['prefix', 'finish'])('eligibility accessor eviction/recreation invalida
   const { k, begin, normal } = setup(undefined, { maxLineages: 1 }); normal();
   const w = wire(), attempt = begin('normal', w);
   let replacement: unknown;
-  Object.defineProperty(w, 'tool_choice', { get() {
+  Object.defineProperty((k as any).attempts.get(attempt).wire, 'tool_choice', { get() {
     begin('normal', wire('other'));
     const fresh = begin(); k.finish(fresh, 'end_turn');
     replacement = (k as any).lineages.get(fresh.key);
@@ -679,7 +680,7 @@ it.each(['prefix', 'finish'])('eligibility accessor eviction/recreation invalida
 it.each(['prefix', 'finish'])('eligibility accessor stop invalidates %s', operation => {
   const { k, begin, normal } = setup(); normal();
   const w = wire(), attempt = begin('normal', w);
-  Object.defineProperty(w, 'tool_choice', { get() { k.stop(); return undefined; } });
+  Object.defineProperty((k as any).attempts.get(attempt).wire, 'tool_choice', { get() { k.stop(); return undefined; } });
   if (operation === 'prefix') k.prefix(attempt); else k.finish(attempt, 'end_turn');
   expect(k.getStatus()).toEqual([]);
 });
@@ -687,12 +688,12 @@ it.each(['prefix', 'finish'])('eligibility accessor stop invalidates %s', operat
 it('eligibility accessor newer prefix cannot be overwritten by the outer prefix', () => {
   const { k, begin, normal } = setup(); normal();
   const w = wire(), attempt = begin('normal', w), freshWire = wire();
-  Object.defineProperty(w, 'tool_choice', { get() {
+  Object.defineProperty((k as any).attempts.get(attempt).wire, 'tool_choice', { get() {
     const fresh = begin('normal', freshWire); k.prefix(fresh);
     return undefined;
   } });
   k.prefix(attempt);
-  expect((k as any).lineages.get(attempt.key).wire).toBe(freshWire);
+  expect((k as any).lineages.get(attempt.key).wire).toEqual(freshWire);
 });
 
 it.each(['replace', 'refusal', 'stop'])('successful replay serialization %s prevents obsolete send', async action => {
@@ -706,7 +707,7 @@ it.each(['replace', 'refusal', 'stop'])('successful replay serialization %s prev
     if (action === 'stop') k.stop();
     return wire();
   });
-  w.toJSON = serialize;
+  (k as any).lineages.values().next().value.wire.toJSON = serialize; // Internal fault injection.
   await vi.advanceTimersByTimeAsync(100);
   expect(serialize).toHaveBeenCalledTimes(1);
   expect(send).not.toHaveBeenCalled();
@@ -815,7 +816,7 @@ it('unprintable preparation errors retire the snapshot and emit a diagnostic', a
   const { k, events } = setup();
   const w = wire();
   k.finish(k.begin(w, undefined, 'stream')!, 'end_turn');
-  Object.assign(w, { toJSON() { throw Object.create(null); } });
+  Object.assign((k as any).lineages.values().next().value.wire, { toJSON() { throw Object.create(null); } });
   await vi.advanceTimersByTimeAsync(100);
   expect(k.getStatus()).toEqual([]);
   expect(events).toEqual([expect.objectContaining({ type: 'error', error: 'Unprintable keepalive error', consecutive: 0 })]);
@@ -900,4 +901,88 @@ it.each([{}, { suppressOnRefusal: false }])('default-off preserves main per-reso
     expect(k.getStatus()).toHaveLength(1);
     k.stop();
   }
+});
+
+it.each(['prefix', 'finish'])('lanes reentrancy cannot restore a refused or stopped snapshot via %s', operation => {
+  for (const action of ['refusal', 'stop']) {
+    let reenter = () => {};
+    const lanes = ['stream'];
+    lanes.includes = () => { reenter(); return true; };
+    const { k, normal, begin } = setup(undefined, { lanes }); normal();
+    const refusing = begin(), pending = begin();
+    reenter = () => { if (action === 'stop') k.stop(); else k.finish(refusing, 'refusal'); };
+    if (operation === 'prefix') k.prefix(pending); else k.finish(pending, 'end_turn');
+    expect(k.getStatus()).toEqual([]);
+  }
+});
+
+it.each(['prefix', 'finish'])('sentAt is coerced once at begin, never during %s installation', operation => {
+  const { k, normal, begin } = setup(); normal();
+  const refusing = begin();
+  const valueOf = vi.fn(() => { k.finish(refusing, 'refusal'); return 1000; });
+  const pending = k.begin(wire(), undefined, 'stream', 'normal', { valueOf } as any)!;
+  expect(valueOf).toHaveBeenCalledTimes(1);
+  if (operation === 'prefix') k.prefix(pending); else k.finish(pending, 'end_turn');
+  expect(valueOf).toHaveBeenCalledTimes(1);
+  expect(k.getStatus()).toEqual([]);
+});
+
+it('owned wire keeps replay identity stable after mutation and stateful toJSON', async () => {
+  const send = vi.fn(async (_wire: any) => ok);
+  const { k } = setup(send);
+  const w = wire(); let reads = 0;
+  Object.assign(w.system, { toJSON() { return ++reads === 1 ? wire().system : [{ type: 'text', text: 'drift' }]; } });
+  const a = k.begin(w, undefined, 'stream')!;
+  w.model = 'changed'; w.system[0].text = 'changed';
+  k.finish(a, 'end_turn');
+  await vi.advanceTimersByTimeAsync(100);
+  expect(reads).toBe(1);
+  expect(lineageKey(send.mock.calls[0][0])).toBe(a.key);
+  expect(send.mock.calls[0][0].system).toEqual(wire().system);
+});
+
+it('unknown terminal retires replay before an unrelated throwing getter', async () => {
+  const send = vi.fn(async () => ({ stop_reason: 'future_stop', get extra() { throw new Error('extra'); } }));
+  const { k, normal, events } = setup(send); normal();
+  await vi.advanceTimersByTimeAsync(300);
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(k.getStatus()).toEqual([]);
+  expect(events).toContainEqual({ type: 'skipped', key: lineageKey(wire()), reason: 'unknown-refresh-terminal' });
+});
+
+it('begin touches an existing outcome before LRU eviction', () => {
+  const { k, begin } = setup(undefined, { maxLineages: 2 });
+  const a = begin('normal', wire('a')), b = begin('normal', wire('b'));
+  begin('normal', wire('a')); begin('normal', wire('c'));
+  expect((k as any).outcomes.has(a.key)).toBe(true);
+  expect((k as any).outcomes.has(b.key)).toBe(false);
+});
+
+it('ineligible prefix under a barrier does not starve an older normal completion', () => {
+  const { k, begin } = setup(); k.finish(begin(), 'refusal');
+  const pending = begin();
+  const newer = k.begin({ ...wire(), thinking: { type: 'enabled' } }, undefined, 'stream')!;
+  k.prefix(newer); k.finish(pending, 'end_turn');
+  expect(k.getStatus()).toHaveLength(1);
+});
+
+it('non-enumerable uncloneable terminal does not poison a receipt', async () => {
+  const response = { usage: ok.usage };
+  Object.defineProperty(response, 'stop_reason', { value: Symbol('unknown') });
+  const { normal, calls } = setup(async () => response); normal();
+  await vi.advanceTimersByTimeAsync(100);
+  expect(calls).toHaveLength(1);
+  expect(calls[0]).toMatchObject({ outcome: 'success', response: { usage: ok.usage } });
+});
+
+it.each(['excluded', 'registered'])('finish does not rescan discarded eligibility for %s attempts', kind => {
+  const { k, normal } = setup(); normal();
+  const a = k.begin(wire(), undefined, kind === 'excluded' ? 'complete' : 'stream')!;
+  if (kind === 'registered') k.prefix(a);
+  const owned = (k as any).attempts.get(a).wire;
+  const messages = owned.messages;
+  const read = vi.fn(() => messages);
+  Object.defineProperty(owned, 'messages', { get: read }); // Internal scan instrumentation.
+  k.finish(a, 'end_turn');
+  expect(read).not.toHaveBeenCalled();
 });

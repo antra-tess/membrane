@@ -110,7 +110,8 @@ export interface CacheKeepaliveConfig {
   /** Consecutive send/response-processing failures before disabling. Default 3.
    * Suppression mode counts usage access/coercion failures, but not replay preparation.
    * Default-off matches legacy: preparation/send failures accumulate, but a resolved
-   * send resets the counter before usage processing, so those later errors restart at 1. */
+   * send resets the counter after receipt copying and before usage processing, so
+   * usage errors restart at 1; throwing enumerable response getters precede that reset. */
   maxConsecutiveErrors?: number;
   /**
    * The number of pokes of a lineage in a row coming back without a cache read
@@ -278,6 +279,13 @@ export class CacheKeepalive {
     if (!this.cfg.suppressOnRefusal || this.stopped) return undefined;
     // Reserve entry order before caller-owned serialization or observers reenter.
     const sequence = ++this.sequence;
+    // Capture caller values once, then hash and replay the same owned JSON.
+    wire = JSON.parse(JSON.stringify(wire));
+    if (!wire || typeof wire !== 'object' || Array.isArray(wire)) {
+      throw new Error('Keepalive request must serialize to a JSON object');
+    }
+    sentAt = Number(sentAt);
+    headers = headers ? { ...headers } : undefined;
     const key = lineageKey(wire);
     if (this.stopped) return undefined;
     let state = this.outcomes.get(key);
@@ -346,11 +354,14 @@ export class CacheKeepalive {
     }
     if (!this.current(attempt) || attempt.purpose !== 'normal' || !knownTerminal(reason) ||
         attempt.sequence <= attempt.state.barrier) return;
-    const eligibility = ineligibleReason(attempt.wire);
+    const included = this.cfg.lanes.includes(attempt.lane);
+    const needsSnapshot = included && attempt.sequence >= attempt.state.latest && !attempt.registered;
+    const eligibility = needsSnapshot ? ineligibleReason(attempt.wire) : null;
+    // Last check after all caller-controlled work, immediately before mutation.
     if (!this.current(attempt) || attempt.sequence <= attempt.state.barrier) return;
     attempt.state.qualified = true;
     // Keep the last refusal sequence after rearm: an older handle stays barred.
-    if (!this.cfg.lanes.includes(attempt.lane) || attempt.sequence < attempt.state.latest || attempt.registered) return;
+    if (!needsSnapshot || attempt.sequence < attempt.state.latest) return;
     attempt.state.latest = attempt.sequence;
     this.installSnapshot(attempt.wire, attempt.headers, attempt.lane, attempt.sentAt, attempt.key, eligibility);
     attempt.registered = true;
@@ -474,6 +485,12 @@ export class CacheKeepalive {
       const refused = this.cfg.suppressOnRefusal && stopReason === 'refusal';
       const currentState = this.outcomes.get(key);
       if (refused && !this.stopped && currentState) this.suppress(key, currentState, 'refresh');
+      // Retire unknown terminals before unrelated response getters can throw.
+      const unknown = this.cfg.suppressOnRefusal && !refused && !knownTerminal(stopReason);
+      if (unknown && !this.stopped && this.lineages.get(key) === lin && this.outcomes.get(key) === state) {
+        this.lineages.delete(key);
+        this.emit({ type: 'skipped', key, reason: 'unknown-refresh-terminal' });
+      }
       // Do not invoke a caller-owned terminal getter a second time while copying.
       // Keep legacy spread semantics unchanged when suppression is off.
       const response: Record<string, unknown> = {};
@@ -482,7 +499,6 @@ export class CacheKeepalive {
           Object.defineProperty(response, key, { value: key === 'stop_reason' ? stopReason :
             (res as Record<string, unknown>)[key], enumerable: true, configurable: true, writable: true });
         }
-        response.stop_reason = stopReason;
       }
       const durationMs = Date.now() - startedAt;
       const receiptResponse = this.cfg.suppressOnRefusal ? response : { ...res };
@@ -498,14 +514,6 @@ export class CacheKeepalive {
       if (this.cfg.suppressOnRefusal) {
         if (this.stopped || this.lineages.get(key) !== lin || this.outcomes.get(key) !== state) {
           this.consecutiveErrors = 0;
-          return;
-        }
-        if (!knownTerminal(stopReason)) {
-          this.consecutiveErrors = 0;
-          // Retire only the replay snapshot, not the retained refusal identity.
-          // Do not invent a retry/backoff policy for an unqualified refresh.
-          this.lineages.delete(key);
-          this.emit({ type: 'skipped', key, reason: 'unknown-refresh-terminal' });
           return;
         }
       }

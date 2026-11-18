@@ -3,6 +3,7 @@ import { expect, it } from 'vitest';
 
 it('publish and contributor typechecks run the exhaustive event compatibility fixture', () => {
   const read = (path: string) => readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
+  expect(read('.github/workflows/ci.yml')).toMatch(/name: Type-check\s+run: npm run typecheck/);
   expect(read('.github/workflows/publish.yml')).toMatch(/name: Type-check\s+run: npm run typecheck/);
   expect(read('CONTRIBUTING.md')).toMatch(/npm run typecheck\s+# typecheck/);
   const pkg = JSON.parse(read('package.json'));
