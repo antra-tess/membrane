@@ -107,6 +107,7 @@ import {
   TurnUsageAccumulator,
   calculateCacheHitRatio,
   normalizeUsageToCacheExcluded,
+  sumCacheCreation1h,
   warnUnconvertibleProviderItem,
 } from './utils/usage.js';
 import {
@@ -1977,7 +1978,7 @@ export class Membrane {
     messages.sort((a, b) => a - b);
     const injectedPairs = [...injected.values()].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
     const usage: RoundUsage = {};
-    const counts = ['inputTokens', 'outputTokens', 'cacheCreationTokens', 'cacheReadTokens', 'thinkingTokens'] as const;
+    const counts = ['inputTokens', 'outputTokens', 'cacheCreationTokens', 'cacheCreation1hTokens', 'cacheReadTokens', 'thinkingTokens'] as const;
     for (const field of counts) {
       const value = input.usage?.[field];
       if (typeof value === 'number' && !(input.unreported as readonly string[] | undefined)?.includes(field)) usage[field] = value;
@@ -2645,12 +2646,12 @@ export class Membrane {
     next.attempts += add.attempts;
     next.inputTokens += add.inputTokens;
     next.outputTokens += add.outputTokens;
+    const split = sumCacheCreation1h(next, add);
     if (add.cacheCreationTokens != null) {
       next.cacheCreationTokens = (next.cacheCreationTokens ?? 0) + add.cacheCreationTokens;
     }
-    if (add.cacheCreation1hTokens != null) {
-      next.cacheCreation1hTokens = (next.cacheCreation1hTokens ?? 0) + add.cacheCreation1hTokens;
-    }
+    delete next.cacheCreation1hTokens;
+    if (split.cacheCreation1hTokens != null) next.cacheCreation1hTokens = split.cacheCreation1hTokens;
     if (add.cacheReadTokens != null) {
       next.cacheReadTokens = (next.cacheReadTokens ?? 0) + add.cacheReadTokens;
     }

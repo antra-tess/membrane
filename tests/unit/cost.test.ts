@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { calculateCost, type CostableUsage } from '../../src/utils/cost.js';
-import { getDefaultPricing } from '../../src/registry/default-pricing.js';
+import { getDefaultPricing, PRICING_TABLE } from '../../src/registry/default-pricing.js';
 import type { ModelPricing } from '../../src/types/provider.js';
 
 const PRICING: ModelPricing = {
@@ -143,13 +143,18 @@ describe('getDefaultPricing', () => {
   });
 
   it('gives every Anthropic row a 1-hour write rate of twice its input rate', () => {
-    for (const id of [
-      'claude-fable-5-1-20260601', 'claude-mythos-5-2', 'claude-opus-5-5', 'claude-sonnet-5',
-      'claude-opus-4-7', 'claude-haiku-5-5', 'claude-haiku-4-5-20251001', 'claude-3-5-haiku-20241022',
-    ]) {
-      const row = getDefaultPricing(id)!;
-      expect(row.cacheWrite1hPerMillion, id).toBeCloseTo(row.inputPerMillion * 2, 10);
-      expect(row.cacheWritePerMillion, id).toBeCloseTo(row.inputPerMillion * 1.25, 10);
+    // The one row the page never listed with a 1-hour column.
+    const noPageFigure = new Set(['claude-3-5-sonnet']);
+    const claudeRows = PRICING_TABLE.filter((row) => row.prefix.startsWith('claude-') && row.pricing !== null);
+    expect(claudeRows.length).toBeGreaterThan(20);
+    for (const row of claudeRows) {
+      const pricing = row.pricing!;
+      expect(pricing.cacheWritePerMillion, row.prefix).toBeCloseTo(pricing.inputPerMillion * 1.25, 10);
+      if (noPageFigure.has(row.prefix)) {
+        expect(pricing.cacheWrite1hPerMillion, row.prefix).toBeUndefined();
+      } else {
+        expect(pricing.cacheWrite1hPerMillion, row.prefix).toBeCloseTo(pricing.inputPerMillion * 2, 10);
+      }
     }
   });
 });

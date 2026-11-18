@@ -827,12 +827,30 @@ export class AnthropicAdapter implements ProviderAdapter {
             output_tokens: number;
             cache_creation_input_tokens?: number | null;
             cache_read_input_tokens?: number | null;
+            cache_creation?: Record<string, unknown> | null;
           };
           outputTokens = deltaUsage.output_tokens ?? 0;
           if (typeof deltaUsage.output_tokens === 'number') outputReported = true;
           // message_delta carries cumulative cache metrics — use as authoritative
           if (deltaUsage.cache_creation_input_tokens != null) {
+            const totalChanged = deltaUsage.cache_creation_input_tokens !== cacheCreationTokens;
             cacheCreationTokens = deltaUsage.cache_creation_input_tokens;
+            // The TTL split is authoritative with the total it came with. A
+            // delta that brings its own breakdown replaces message_start's; one
+            // that changes the total without a breakdown leaves the split
+            // unknown, so message_start's share is not reported against a
+            // total it does not describe.
+            if (deltaUsage.cache_creation) {
+              hasCacheCreationBreakdown = true;
+              cacheCreation5mTokens = typeof deltaUsage.cache_creation.ephemeral_5m_input_tokens === 'number'
+                ? deltaUsage.cache_creation.ephemeral_5m_input_tokens : 0;
+              cacheCreation1hTokens = typeof deltaUsage.cache_creation.ephemeral_1h_input_tokens === 'number'
+                ? deltaUsage.cache_creation.ephemeral_1h_input_tokens : 0;
+            } else if (totalChanged) {
+              hasCacheCreationBreakdown = false;
+              cacheCreation5mTokens = undefined;
+              cacheCreation1hTokens = undefined;
+            }
           }
           if (deltaUsage.cache_read_input_tokens != null) {
             cacheReadTokens = deltaUsage.cache_read_input_tokens;

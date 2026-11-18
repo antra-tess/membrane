@@ -34,6 +34,24 @@ export function normalizeUsageToCacheExcluded(
   return { ...usage, inputTokens: Math.max(0, usage.inputTokens - cacheReadTokens - cacheCreationTokens) };
 }
 
+/**
+ * The 1-hour share of two cache-write totals summed. A part's share is known
+ * when it reports one, or when it wrote nothing; the sum's share is known only
+ * when both parts' are, so a round that wrote with no TTL split makes the
+ * aggregate's split unknown (absent) rather than counting its writes as short.
+ * Absent when neither part reported a share.
+ */
+export function sumCacheCreation1h(
+  a: { cacheCreationTokens?: number; cacheCreation1hTokens?: number },
+  b: { cacheCreationTokens?: number; cacheCreation1hTokens?: number },
+): { cacheCreation1hTokens?: number } {
+  if (a.cacheCreation1hTokens == null && b.cacheCreation1hTokens == null) return {};
+  const known = (p: { cacheCreationTokens?: number; cacheCreation1hTokens?: number }) =>
+    p.cacheCreation1hTokens != null || !((p.cacheCreationTokens ?? 0) > 0);
+  if (!known(a) || !known(b)) return {};
+  return { cacheCreation1hTokens: (a.cacheCreation1hTokens ?? 0) + (b.cacheCreation1hTokens ?? 0) };
+}
+
 export function calculateCacheHitRatio(
   usage: { inputTokens: number; cacheCreationTokens?: number; cacheReadTokens?: number },
 ): number {
@@ -91,12 +109,12 @@ export class TurnUsageAccumulator {
 
     this.tokens.inputTokens += usage.inputTokens;
     this.tokens.outputTokens += usage.outputTokens;
+    const split = sumCacheCreation1h(this.tokens, usage);
     if (usage.cacheCreationTokens != null) {
       this.tokens.cacheCreationTokens = (this.tokens.cacheCreationTokens ?? 0) + usage.cacheCreationTokens;
     }
-    if (usage.cacheCreation1hTokens != null) {
-      this.tokens.cacheCreation1hTokens = (this.tokens.cacheCreation1hTokens ?? 0) + usage.cacheCreation1hTokens;
-    }
+    delete this.tokens.cacheCreation1hTokens;
+    if (split.cacheCreation1hTokens != null) this.tokens.cacheCreation1hTokens = split.cacheCreation1hTokens;
     if (usage.cacheReadTokens != null) {
       this.tokens.cacheReadTokens = (this.tokens.cacheReadTokens ?? 0) + usage.cacheReadTokens;
     }

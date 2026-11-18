@@ -90,7 +90,9 @@ export interface ModelPricing {
    * Cost per million cache write tokens written with a 1-hour TTL (Anthropic
    * bills these at 2× base input, against 1.25× for 5 minutes). Applied to
    * {@link CallUsage.cacheCreation1hTokens}; unset means those tokens fall
-   * back to `cacheWritePerMillion`, which under-estimates them.
+   * back to `cacheWritePerMillion`, which under-estimates them. Read only
+   * beside `cacheWritePerMillion`: a row with this rate alone has no rate for
+   * its short-TTL writes, and cache writes stay unpriced as they were.
    */
   cacheWrite1hPerMillion?: number;
   

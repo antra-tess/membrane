@@ -4,7 +4,7 @@ export const DEFAULT_PRICING_LAST_VERIFIED = '2026-08-25';
 
 export const GOOGLE_PRICING_LAST_VERIFIED = '2026-10-14';
 
-export const ANTHROPIC_PRICING_LAST_VERIFIED = '2026-11-09';
+export const ANTHROPIC_PRICING_LAST_VERIFIED = '2026-11-18';
 
 /**
  * Google states when a rate changes as a date ("through November 30, 2026",
@@ -142,14 +142,16 @@ export const PRICING_TABLE: readonly PricingRow[] = [
     pricing: { inputPerMillion: 1, outputPerMillion: 5, cacheWritePerMillion: 1.25, cacheWrite1hPerMillion: 2, cacheReadPerMillion: 0.10, currency: 'USD', asOf: ANTHROPIC_PRICING_LAST_VERIFIED },
   },
   {
-    // Retired except on Bedrock and Google Cloud.
+    // Retired except on Bedrock and Google Cloud; no longer on the page. The
+    // 1-hour rate is the page's figure from the last copy that listed it.
     prefix: 'claude-3-5-haiku',
     pricing: { inputPerMillion: 0.80, outputPerMillion: 4, cacheWritePerMillion: 1, cacheWrite1hPerMillion: 1.6, cacheReadPerMillion: 0.08, currency: 'USD', asOf: '2026-10-19' },
   },
   {
-    // Fully retired: the last published rate, not a current one.
+    // Fully retired: the last published rate, not a current one. No 1-hour
+    // rate was ever read from the page for it, so none is given here.
     prefix: 'claude-3-5-sonnet',
-    pricing: { inputPerMillion: 3, outputPerMillion: 15, cacheWritePerMillion: 3.75, cacheWrite1hPerMillion: 6, cacheReadPerMillion: 0.30, currency: 'USD', asOf: '2025-07-01' },
+    pricing: { inputPerMillion: 3, outputPerMillion: 15, cacheWritePerMillion: 3.75, cacheReadPerMillion: 0.30, currency: 'USD', asOf: '2025-07-01' },
   },
 
   // OpenAI — https://platform.openai.com/docs/pricing (standard tier).
