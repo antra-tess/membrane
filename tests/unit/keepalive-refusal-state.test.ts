@@ -595,7 +595,10 @@ it.each(['same identity', 'recreated identity'])('stale refresh refusal bars pre
     expect([...(k as any).outcomes.keys()]).toEqual([other.key]);
     expect((k as any).outcomes.has(original.key)).toBe(false);
   }
-  const replacement = normal();
+  normal(); // Establish a qualified replacement identity before its pending prefix.
+  const replacement = begin();
+  expect(replacement).toBeDefined();
+  k.prefix(replacement);
   if (identity === 'recreated identity') expect((k as any).outcomes.get(original.key)).not.toBe(originalState);
   else expect((k as any).outcomes.get(original.key)).toBe(originalState);
   const pending = begin();
@@ -819,13 +822,20 @@ it('normal finish cannot be replayed as refusal against newer work', () => {
 });
 
 it('serialization cannot recreate an identity evicted after a nested refusal', () => {
-  const { k, begin } = setup(undefined, { maxLineages: 1 });
+  const { k, begin, normal } = setup(undefined, { maxLineages: 1 });
+  normal();
+  expect(k.getStatus()).toHaveLength(1);
+  const pending = begin();
+  expect(pending).toBeDefined();
   const outerWire = wire();
   let serialized = 0;
   Object.assign(outerWire.system, { toJSON() {
     serialized++;
     k.finish(begin(), 'refusal');
+    expect(k.getStatus()).toEqual([]);
     expect((k as any).outcomes.get(lineageKey(wire())).qualified).toBe(false);
+    k.prefix(pending); k.finish(pending, 'end_turn');
+    expect(k.getStatus()).toEqual([]);
     begin('normal', wire('other'));
     expect((k as any).outcomes.has(lineageKey(wire()))).toBe(false);
     return wire().system;
@@ -869,13 +879,21 @@ it('model context window terminal qualifies fresh and post-refusal attempts', ()
 
 
 it('hashing cannot adopt a barrier-zero identity recreated after nested refusal and eviction', () => {
-  const { k, begin, events } = setup(undefined, { maxLineages: 1 });
+  const { k, begin, normal, events } = setup(undefined, { maxLineages: 1 });
+  normal();
+  expect(k.getStatus()).toHaveLength(1);
+  const pending = begin();
+  expect(pending).toBeDefined();
   const key = lineageKey(wire());
   const w = wire();
   Object.assign(w.system, { toJSON() {
     const refusing = begin();
     k.finish(refusing, 'refusal');
     expect(events).toContainEqual({ type: 'suppressed', key, source: 'foreground' });
+    expect(k.getStatus()).toEqual([]);
+    expect((k as any).outcomes.get(lineageKey(wire())).qualified).toBe(false);
+    k.prefix(pending); k.finish(pending, 'end_turn');
+    expect(k.getStatus()).toEqual([]);
     begin('normal', wire('other'));
     expect((k as any).outcomes.has(key)).toBe(false);
     begin();
@@ -883,6 +901,7 @@ it('hashing cannot adopt a barrier-zero identity recreated after nested refusal 
     return wire().system;
   } });
   const outer = begin('normal', w);
+  expect(outer).toBeDefined();
   k.prefix(outer); k.finish(outer, 'end_turn');
   expect(k.getStatus()).toEqual([]);
   k.finish(begin(), 'end_turn');
@@ -1332,4 +1351,26 @@ it('newer ineligible prefix diagnoses why an older first success is barred', () 
   expect(k.getStatus()).toEqual([]);
   expect(events).toEqual([{ type: 'diagnostic', key: a.key,
     reason: 'ineligible-prefix: legacy-thinking-budget; older snapshots barred' }]);
+});
+
+// Preparation can run caller code even when the lineage was live at tick entry.
+it.each([false, true])('pre-send idle cutoff after preparation (suppression: %s)', async suppressOnRefusal => {
+  const send = vi.fn(async () => ok);
+  const { k, normal, events, calls } = setup(send, { suppressOnRefusal, maxIdleMs: 150 });
+  if (suppressOnRefusal) normal(); else k.record(wire(), undefined, 'stream');
+  const retained = (k as any).lineages.values().next().value.wire;
+  Object.defineProperty(retained, 'metadata', { enumerable: true, get() {
+    vi.setSystemTime(1150);
+    return {};
+  } });
+  await vi.advanceTimersByTimeAsync(100);
+  expect(send).toHaveBeenCalledTimes(suppressOnRefusal ? 0 : 1);
+  expect(calls).toHaveLength(suppressOnRefusal ? 0 : 1);
+  if (suppressOnRefusal) {
+    expect(k.getStatus()).toEqual([]);
+    expect((k as any).outcomes.size).toBe(0);
+    expect(events).toEqual([{ type: 'expired', key: lineageKey(wire()), idleMs: 150 }]);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(send).not.toHaveBeenCalled();
+  }
 });

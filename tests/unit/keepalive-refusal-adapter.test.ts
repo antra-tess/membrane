@@ -5,6 +5,7 @@
  * starts at a request's send.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { APIUserAbortError } from '@anthropic-ai/sdk';
 import { Membrane } from '../../src/membrane.js';
 import { NativeFormatter } from '../../src/formatters/native.js';
 import { AnthropicXmlFormatter } from '../../src/formatters/anthropic-xml.js';
@@ -321,14 +322,24 @@ it('complete parse failure after a barrier cannot rearm, but refusal survives pa
 it('opt-in complete deadline still aborts the SDK and cannot rearm', async () => {
   const { a, client } = adapter({ suppressOnRefusal: true, lanes: ['complete'] }, () => ({ ...answer, stop_reason: 'refusal' }));
   await a.complete(request('deadline'));
+  const entry = held();
+  let sdkSignal!: AbortSignal;
   client.messages.create.mockImplementation((_wire: any, options: any) => new Promise((_resolve, reject) => {
-    options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+    sdkSignal = options.signal;
+    options.signal.addEventListener('abort', () => reject(new APIUserAbortError()), { once: true });
+    entry.release(undefined);
   }));
   const result = settle(a.complete(request('deadline'), { timeoutMs: 20 }));
+  await entry.promise;
+  expect(client.messages.create).toHaveBeenCalledTimes(2);
+  expect(sdkSignal.aborted).toBe(false);
   await vi.advanceTimersByTimeAsync(20);
+  expect(sdkSignal.aborted).toBe(true);
   expect((await result as any).type).toBe('timeout');
   expect(a.cacheKeepalive!.getStatus()).toEqual([]);
-  expect(client.messages.create.mock.calls.at(-1)[0]).not.toHaveProperty('keepalivePurpose');
+  expect(client.messages.create).toHaveBeenCalledTimes(2);
+  expect(client.messages.create.mock.calls[1][1].signal).toBe(sdkSignal);
+  expect(client.messages.create.mock.calls[1][0]).not.toHaveProperty('keepalivePurpose');
 });
 
 for (const lane of ['complete', 'stream'] as const) {
@@ -557,16 +568,24 @@ it('normal stream qualifies before input-transformation response assembly throws
   expect(replays()).toHaveLength(1);
 });
 
-it('stream keeper tracks the SDK wire, not replaced onRequest fields', async () => {
-  const { a, replays } = adapter({ suppressOnRefusal: true }, () => answer,
+it.each([false, true])('stream keeper honors onRequest replacements (suppression: %s)', async suppressOnRefusal => {
+  const { a, client, replays } = adapter({ suppressOnRefusal }, () => answer,
     () => sdkStream([messageStart, ...rest]));
   await a.stream(request('actual'), noCallbacks, {
-    onRequest: (wire: any) => { wire.system = [{ type: 'text', text: 'observer replacement' }]; wire.model = 'observer-model'; },
+    onRequest: (wire: any) => {
+      wire.system = [{ type: 'text', text: 'observer replacement', cache_control: { type: 'ephemeral', ttl: '1h' } }];
+      wire.messages = [{ role: 'user', content: 'redacted' }];
+      wire.model = 'observer-model';
+    },
   });
+  // Observer replacement changes bookkeeping in both modes, not the SDK wire.
+  expect(client.messages.stream.mock.calls[0][0].system[0].text).toBe('actual');
+  expect(client.messages.stream.mock.calls[0][0].messages[0].content).not.toBe('redacted');
   await vi.advanceTimersByTimeAsync(100);
   expect(replays()).toHaveLength(1);
-  expect(replays()[0].model).toBe('claude-opus-4-1');
-  expect(replays()[0].system[0].text).toBe('actual');
+  expect(replays()[0].model).toBe('observer-model');
+  expect(replays()[0].system[0].text).toBe('observer replacement');
+  expect(replays()[0].messages).toEqual([{ role: 'user', content: 'redacted' }]);
 });
 
 it('stream checks caller abort when combined-signal propagation is blocked', async () => {
@@ -854,4 +873,32 @@ it('opt-in message_start updates a qualified replay even when the stream later f
   expect(replays()).toHaveLength(1);
   expect(replays()[0].messages).toHaveLength(2);
   expect(replays()[0].messages[1].content[0].text).toBe('turn 1');
+});
+
+it.each(['complete', 'stream'] as const)('%s freezes inherited initially-undefined terminal getters', async lane => {
+  let changing = false;
+  let reads = 0;
+  const terminal = () => {
+    const value: any = lane === 'complete' ? { ...answer } : {};
+    delete value.stop_reason;
+    return Object.setPrototypeOf(value, { get stop_reason() {
+      return ++reads === 1 ? undefined : 'refusal';
+    } });
+  };
+  const { a, events, replays } = adapter({ suppressOnRefusal: true, lanes: [lane] },
+    () => changing ? terminal() : answer,
+    () => sdkStream([messageStart, { type: 'message_delta', delta: changing ? terminal() : { stop_reason: 'end_turn' }, usage: readUsage }]));
+  const run = () => lane === 'complete' ? a.complete(request('inherited')) : a.stream(request('inherited'), noCallbacks);
+  await run();
+  expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
+  changing = true;
+  const result = await run();
+  expect(reads).toBe(1);
+  expect(result.stopReason).not.toBe('refusal');
+  expect(events).toContainEqual(expect.objectContaining({ type: 'diagnostic', reason: 'unknown-foreground-terminal: completion cannot qualify or rearm keepalive' }));
+  // An unknown terminal keeps an already-qualified identity, but public parsing
+  // must agree with bookkeeping rather than inventing a later refusal.
+  expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
+  await vi.advanceTimersByTimeAsync(100);
+  expect(replays()).toHaveLength(1);
 });

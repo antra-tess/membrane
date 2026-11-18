@@ -259,8 +259,8 @@ export function boundedProviderEvent(event: unknown): unknown {
 }
 
 // Capture the opt-in terminal observation for bookkeeping and public/raw results.
-// Copy descriptors without rereading own accessors. An inherited undefined result
-// stays inherited to preserve missing raw properties; later reads can differ.
+// Copy descriptors without rereading accessors, including inherited undefined
+// values, while preserving genuinely missing raw properties.
 function captureTerminal<T extends { stop_reason?: unknown }>(terminal: T, observe: (reason: unknown) => void): T {
   // This read can invoke a caller getter/get trap; no presence trap runs first.
   const stopReason = terminal.stop_reason;
@@ -268,7 +268,8 @@ function captureTerminal<T extends { stop_reason?: unknown }>(terminal: T, obser
   observe(stopReason);
   const prototype = Object.getPrototypeOf(terminal);
   const descriptors = Object.getOwnPropertyDescriptors(terminal);
-  if (stopReason !== undefined || Object.hasOwn(descriptors, 'stop_reason')) {
+  if (stopReason !== undefined || Object.hasOwn(descriptors, 'stop_reason') ||
+      (prototype !== null && 'stop_reason' in prototype)) {
     descriptors.stop_reason = { value: stopReason, enumerable: true, configurable: true, writable: true };
   }
   return Object.create(prototype, descriptors);
@@ -632,7 +633,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       // The cache's clock starts with the request, not at message_start.
       const sentAt = Date.now();
       const attempt = keepaliveObservation(() => this.cacheKeepalive?.begin(
-        (this.suppressKeepaliveOnRefusal ? { ...anthropicRequest, stream: true } : fullRequest) as unknown as Record<string, unknown>, headers, 'stream', this.suppressKeepaliveOnRefusal ? options?.keepalivePurpose : undefined, sentAt,
+        fullRequest as unknown as Record<string, unknown>, headers, 'stream', this.suppressKeepaliveOnRefusal ? options?.keepalivePurpose : undefined, sentAt,
       ), () => this.cacheKeepalive?.stop('keepalive begin bookkeeping failed; permanently stopped for this adapter; create a new adapter to restart keepalive'));
       const stream = await session.client.messages.stream(anthropicRequest, {
         signal: session.signal,

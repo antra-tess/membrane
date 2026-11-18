@@ -83,8 +83,8 @@
   without classifying eviction as an ineligible-snapshot skip. Default-off eviction stays silent.
 - With refusal suppression enabled, recheck stop after admission accessors and
   measure error receipts at sender settlement, excluding later suppression observers.
-- Capture Anthropic foreground terminal stop reasons when refusal-aware cache keepalive is enabled. Own properties and non-undefined values are frozen for subsequent parsing; inherited getters initially returning undefined remain inherited and can disagree with bookkeeping on later reads. Default-off behavior is unchanged. Refusal suppression precedes unrelated response/event getters, including streamed usage.
-- Opt-in idle expiry is rechecked for each lineage after earlier refreshes settle.
+- Capture Anthropic foreground terminal stop reasons when refusal-aware cache keepalive is enabled. Own and inherited properties (including initially-undefined inherited getters) and non-undefined values are frozen for subsequent parsing. Default-off behavior is unchanged. Refusal suppression precedes unrelated response/event getters, including streamed usage.
+- Opt-in idle expiry is rechecked for each lineage after earlier refreshes settle and immediately before send, after replay preparation.
 - Foreground terminal capture preserves missing raw `stop_reason` properties.
 - Reasoned operator stops emit no duplicate failure-threshold `disabled` event.
 - Opt-in eligible attempts detached by serialization reentry emit a
@@ -103,5 +103,9 @@
 - Guard keepalive error string conversion in both modes so unprintable sender
   rejections still produce failure accounting and error/disabled notifications.
 - Opt-in prefixes cannot undo a reentrant finish of the same handle. A newer
-  ineligible prefix without a snapshot reports `ineligible-prefix` via
-  `onDiagnostic`, explaining why older successes cannot install a snapshot.
+  ineligible prefix for a retained identity without a snapshot reports `ineligible-prefix` via
+  `onDiagnostic`, explaining why older successes cannot install a snapshot. Detached untracked
+  ineligible attempts do not emit this notice.
+
+- Stream replay bookkeeping honors `onRequest` field replacements in both modes;
+  these replacements do not alter the original foreground SDK stream request.

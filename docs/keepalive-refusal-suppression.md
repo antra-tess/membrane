@@ -217,11 +217,9 @@ Retaining an unfinished handle retains attempt references despite the lineage ca
 even for qualified keys; it cannot carry begin identity or ordering.
 Terminal capture initially reads `stop_reason` by ordinary property access,
 without a presence check. It freezes that value in the copied terminal when it is
-non-undefined or an own property exists. To preserve missing raw properties, an
-inherited getter returning undefined is not frozen: parsing and complete-path
-checks can read it again and disagree with bookkeeping. If it later returns
-`refusal`, an existing qualified replay can remain eligible. Changing inherited
-getters are outside the single-observation guarantee. The initial getter/get trap
+non-undefined or an own or inherited property exists, including inherited getters
+initially returning undefined. Genuinely missing raw properties remain absent.
+The initial getter/get trap
 necessarily runs before suppression; a returned refusal is applied before prototype/descriptor traps and unrelated
 terminal metadata reads. Raw stream refusal is observed before progress callbacks or terminal parsing; a
 callback error still fails the foreground and closes the SDK iterator normally.
@@ -290,7 +288,11 @@ For immutable, ordinary JSON objects, hashed system/tools values are the values
 sent by the SDK. Caller mutation while tracked, getters, and custom/stateful
 `toJSON` serialization (including root serializers that replace identity fields)
 are outside this guarantee. Serialization can run more than once; keepalive does
-not promise single serialization or an owned transport snapshot.
+not promise single serialization or an owned transport snapshot. Stream
+bookkeeping retains the `onRequest` observer's `fullRequest` in both modes.
+Replacing its fields changes the replay snapshot, not the original foreground
+SDK stream request; observers should not use field replacement to rewrite that
+foreground request.
 Begin and finish bookkeeping failures stop adapter keepalive; prefix/record failures only warn.
 Opt-in replay preparation rejects callable root `toJSON` methods, which could
 otherwise override `max_tokens: 0` or message trimming after preparation. The

@@ -532,8 +532,18 @@ export class CacheKeepalive {
       }
       if (Array.isArray(recorded.messages)) payload.messages = messagesForRefresh(recorded.messages);
       delete payload.stream;
-      if (this.cfg.suppressOnRefusal &&
-          (this.stopped || this.lineages.get(key) !== lin || this.outcomes.get(key) !== state)) return;
+      if (this.cfg.suppressOnRefusal) {
+        if (this.stopped || this.lineages.get(key) !== lin || this.outcomes.get(key) !== state) return;
+        // Replay preparation can run caller serializers/accessors and cross the
+        // idle cutoff. Check again after all preparation, immediately before send.
+        const expiryNow = Date.now();
+        if (expiryNow - lin.lastRealAt >= this.cfg.maxIdleMs) {
+          this.lineages.delete(key);
+          this.outcomes.delete(key);
+          this.emit({ type: 'expired', key, idleMs: expiryNow - lin.lastRealAt });
+          return;
+        }
+      }
       invoked = true;
       const resolved = await this.send(payload, lin.headers);
       if (this.cfg.suppressOnRefusal) settledDurationMs = Date.now() - startedAt;
