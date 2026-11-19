@@ -70,7 +70,7 @@ export function modelTakesToolOrSystemChanges(model: string): boolean {
     const rest = after(prefix);
     if (rest === '') return true;
     if (rest === undefined || !/^[-@:]/.test(rest)) return false;
-    const number = /^-(\d+)(?!\d)/.exec(rest)?.[1];
+    const number = /^-(\d+)/.exec(rest)?.[1];
     return number === undefined || number === '0' || number.length === 8;
   };
   const namesFamily = (prefix: string) => {

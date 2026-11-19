@@ -485,8 +485,11 @@ export class Membrane {
    * rules of its own, which this doesn't answer.
    */
   takesToolOrSystemChanges(model: string, options: { formatter?: PrefillFormatter } = {}): boolean {
-    return Boolean(this.resolveActiveFormatter(options.formatter).rendersSystemChanges && this.adapter.sendsSystemChanges)
-      && modelTakesToolOrSystemChanges(model);
+    return this.sendsSystemChanges(this.resolveActiveFormatter(options.formatter)) && modelTakesToolOrSystemChanges(model);
+  }
+
+  private sendsSystemChanges(formatter: PrefillFormatter): boolean {
+    return Boolean(formatter.rendersSystemChanges && this.adapter.sendsSystemChanges);
   }
 
   /**
@@ -1915,7 +1918,7 @@ export class Membrane {
     if (fidelity && !activeFormatter.reportsAlterations) fidelity.uninstrumented = true;
     const messages = convertMcpMedia(nativeLoopMessages ?? request.messages);
     if (
-      !(activeFormatter.rendersSystemChanges && this.adapter.sendsSystemChanges) &&
+      !this.sendsSystemChanges(activeFormatter) &&
       messages.some((message) => message.content.some((block) => block.type === 'system_change'))
     ) {
       throw systemChangeRefusedError(
