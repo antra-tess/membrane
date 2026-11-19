@@ -485,16 +485,15 @@ export class Membrane {
    * rules of its own, which this doesn't answer.
    */
   takesToolOrSystemChanges(model: string, options: { formatter?: PrefillFormatter } = {}): boolean {
-    return this.resolveActiveFormatter(options.formatter).rendersSystemChanges === true
-      && this.adapter.sendsSystemChanges === true
+    return Boolean(this.resolveActiveFormatter(options.formatter).rendersSystemChanges && this.adapter.sendsSystemChanges)
       && modelTakesToolOrSystemChanges(model);
   }
 
   /**
    * A copy of the prices that this membrane gives a request to `model` as of
-   * now: the registry's, else the built-in table's. A response that names
-   * another model as the one that served it is priced at that model's
-   * prices. Undefined where neither prices `model`.
+   * now: the registry's, else the built-in table's. Undefined where neither
+   * prices `model`. A response's cost line looks up the model that served it
+   * first, so where another model served the request, its prices can differ.
    */
   pricingFor(model: string): ModelPricing | undefined {
     const pricing = this.resolvePricing(model);

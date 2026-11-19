@@ -44,9 +44,9 @@ export function supportsAssistantPrefill(model: string): boolean {
  * system text: a request carrying one gets a 400 that `isSystemChangeRefusal`
  * knows. Sonnet 5, Opus 4.7, 4.6 and 4.5, Sonnet 4.6 and 4.5 and Haiku 4.5
  * refused one in runs in October 2026, and the Claude models before them are
- * taken to refuse, unrun. A model row names that model and its dated, Vertex
- * and gateway ids, but not a later minor version; a family row names every
- * model of its generation. A model that no row names is taken to take one,
+ * taken to refuse, unrun. A model row names that model, its `-0` alias and
+ * its dated, Vertex and gateway ids, but not a later minor version; a family
+ * row names every model of its generation. A model that no row names is taken to take one,
  * so a new model is tried.
  */
 const NO_TOOL_OR_SYSTEM_CHANGE_MODELS = [
@@ -55,11 +55,9 @@ const NO_TOOL_OR_SYSTEM_CHANGE_MODELS = [
   'claude-opus-4-6',
   'claude-opus-4-5',
   'claude-opus-4-1',
-  'claude-opus-4-0',
   'claude-opus-4',
   'claude-sonnet-4-6',
   'claude-sonnet-4-5',
-  'claude-sonnet-4-0',
   'claude-sonnet-4',
   'claude-haiku-4-5',
 ];
@@ -70,7 +68,10 @@ export function modelTakesToolOrSystemChanges(model: string): boolean {
   const after = (prefix: string) => (id.startsWith(prefix) ? id.slice(prefix.length) : undefined);
   const namesModel = (prefix: string) => {
     const rest = after(prefix);
-    return rest === '' || (rest !== undefined && /^[-@:]/.test(rest) && !/^-\d{1,2}(?!\d)/.test(rest));
+    if (rest === '') return true;
+    if (rest === undefined || !/^[-@:]/.test(rest)) return false;
+    const number = /^-(\d+)(?!\d)/.exec(rest)?.[1];
+    return number === undefined || number === '0' || number.length === 8;
   };
   const namesFamily = (prefix: string) => {
     const rest = after(prefix);

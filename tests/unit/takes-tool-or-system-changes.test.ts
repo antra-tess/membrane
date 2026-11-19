@@ -30,6 +30,8 @@ describe('takesToolOrSystemChanges', () => {
     const membrane = sending();
     for (const model of [
       'claude-sonnet-5',
+      'claude-sonnet-5-0',
+      'anthropic/claude-sonnet-5.0',
       'claude-sonnet-5-20260115',
       'claude-opus-4-7',
       'claude-opus-4-6',
@@ -39,6 +41,7 @@ describe('takesToolOrSystemChanges', () => {
       'claude-sonnet-4-6',
       'anthropic/claude-sonnet-4.6',
       'us.anthropic.claude-sonnet-4-6-v1:0',
+      'bedrock:claude-sonnet-4-6',
       'claude-sonnet-4-5',
       'claude-haiku-4-5',
     ]) expect(membrane.takesToolOrSystemChanges(model), model).toBe(false);
@@ -82,7 +85,7 @@ describe('takesToolOrSystemChanges', () => {
 
   it('tries a model that no run covers, a later minor version of a refusing model included', () => {
     const membrane = sending();
-    for (const model of ['claude-sonnet-5-1', 'claude-opus-4-9', 'claude-haiku-4-6', 'claude-fable-5-2', 'claude-mythos-5', 'claude-opus-6', 'claude-10', 'zz-unknown-model']) {
+    for (const model of ['claude-sonnet-5-1', 'claude-sonnet-5-100', 'claude-opus-4-9', 'claude-haiku-4-6', 'claude-fable-5-2', 'claude-mythos-5', 'claude-opus-6', 'claude-opus-45', 'claude-10', 'claude-30', 'zz-unknown-model']) {
       expect(membrane.takesToolOrSystemChanges(model), model).toBe(true);
     }
   });
@@ -135,6 +138,16 @@ describe('pricingFor', () => {
     first.inputPerMillion = before + 1000;
     expect(membrane.pricingFor('claude-opus-5')?.inputPerMillion).toBe(before);
     expect(getDefaultPricing('claude-opus-5')?.inputPerMillion).toBe(before);
+  });
+
+  it("gives a copy of the registry's prices too, so a change to it changes no later price", () => {
+    const own: ModelPricing = { inputPerMillion: 7, outputPerMillion: 9, currency: 'USD' };
+    const membrane = new Membrane(adapter(true), { registry: registry({ 'claude-opus-5': own }) });
+    const first = membrane.pricingFor('claude-opus-5');
+    if (!first) throw new Error('the registry prices claude-opus-5');
+    first.inputPerMillion = 1000;
+    expect(own.inputPerMillion).toBe(7);
+    expect(membrane.pricingFor('claude-opus-5')?.inputPerMillion).toBe(7);
   });
 
   it('gives nothing for a model that neither prices', () => {
