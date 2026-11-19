@@ -608,7 +608,7 @@ export class Membrane {
           tries = 0;
           discardedUsage = this.mergeDiscardedAttempts(
             discardedUsage,
-            this.discardedAttemptFrom(response.usage, request.config.model, response.details.model.actual)
+            this.discardedAttemptFrom(response.usage, request.config.model, response.details.model.actual, providerResponse.unreportedUsage)
           );
           continue;
         }
@@ -2245,7 +2245,7 @@ export class Membrane {
       // is the served model's business, which the adapter reports.
       discardedUsage = this.mergeDiscardedAttempts(
         discardedUsage,
-        this.discardedAttemptFrom(result.usage, normalizedRequest.config.model, result.model)
+        this.discardedAttemptFrom(result.usage, normalizedRequest.config.model, result.model, result.unreportedUsage)
       );
       onRetrying!({
         attempt: retried,
@@ -2704,11 +2704,14 @@ export class Membrane {
     return next;
   }
 
-  /** One abandoned attempt, priced as the single request it was. */
+  /** One abandoned attempt, priced as the single request it was — unless the
+   *  provider left a count unreported: its 0 is a default, not an observation,
+   *  so the attempt carries no cost and the attempts' sum has none either. */
   private discardedAttemptFrom(
     usage: DetailedUsage | BasicUsage | undefined,
     model: string,
     servedModel?: string,
+    unreported?: ReadonlyArray<'inputTokens' | 'outputTokens'>,
   ): DiscardedAttemptsUsage {
     const detailed = (usage ?? { inputTokens: 0, outputTokens: 0 }) as DetailedUsage;
     const attempt: DiscardedAttemptsUsage = {
@@ -2719,6 +2722,7 @@ export class Membrane {
       ...(detailed.cacheCreation1hTokens != null ? { cacheCreation1hTokens: detailed.cacheCreation1hTokens } : {}),
       ...(detailed.cacheReadTokens != null ? { cacheReadTokens: detailed.cacheReadTokens } : {}),
     };
+    if (unreported !== undefined && unreported.length > 0) return attempt;
     const estimatedCost = this.estimateCost(attempt, model, servedModel);
     return estimatedCost ? { ...attempt, estimatedCost } : attempt;
   }
