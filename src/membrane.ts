@@ -2238,9 +2238,12 @@ export class Membrane {
       }
       retried++;
       tries = 0;
+      // Priced from the caller's model and the served one, as complete() and
+      // the turn's own rounds are: the model a beforeRequest hook substituted
+      // is the served model's business, which the adapter reports.
       discardedUsage = this.mergeDiscardedAttempts(
         discardedUsage,
-        this.discardedAttemptFrom(result.usage, finalRequest.model, result.model)
+        this.discardedAttemptFrom(result.usage, normalizedRequest.config.model, result.model)
       );
       onRetrying!({
         attempt: retried,

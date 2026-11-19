@@ -12,5 +12,5 @@ export {
   type ToolParseOptions,
 } from './tool-parser.js';
 
-export { calculateCost, promptTokens, ratesFor } from './cost.js';
+export { calculateCost, promptTokens, ratesFor, addCostBreakdowns } from './cost.js';
 export type { CostableUsage } from './cost.js';
