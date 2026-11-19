@@ -14,7 +14,8 @@ import { GeminiAdapter } from '../../src/providers/gemini.js';
 import { OpenRouterAdapter } from '../../src/providers/openrouter.js';
 import { OpenAIAdapter } from '../../src/providers/openai.js';
 import { BedrockAdapter } from '../../src/providers/bedrock.js';
-import { MembraneError, classifyError } from '../../src/types/errors.js';
+import { OpenAIResponsesAPIAdapter } from '../../src/providers/openai-responses-api.js';
+import { MembraneError, classifyError, contextLengthError, errorFromThrown, rateLimitError } from '../../src/types/errors.js';
 import type { ProviderRequest } from '../../src/types/provider.js';
 
 const request: ProviderRequest = { model: 'zz-model-1', messages: [{ role: 'user', content: 'zz-prompt' }], maxTokens: 16 };
@@ -592,5 +593,182 @@ describe("every shape of a provider's own message, and nothing else, types the e
     const billing = await failure(new OpenAIAdapter({ apiKey: 'zz-key-openai' }));
     expect(billing.retryable).toBe(false);
     expect(billing.retryAfterMs).toBeUndefined();
+  });
+});
+
+describe('a context overflow keeps the prompt count its refusal states, as a number only', () => {
+  const anthropicBody = (message: string) => ({ type: 'error', error: { type: 'invalid_request_error', message } });
+
+  it('anthropic: "prompt is too long: N tokens > M maximum" states N', () => {
+    const error = anthropicHandled(new Anthropic.APIError(400, anthropicBody('prompt is too long: 210123 tokens > 200000 maximum'), undefined, undefined as never));
+    expect(error.type).toBe('context_length');
+    expect(error.promptTokens).toBe(210123);
+  });
+
+  it('anthropic: "input length and `max_tokens` exceed context limit: N + K > M" states N, the input', () => {
+    const error = anthropicHandled(new Anthropic.APIError(400, anthropicBody(
+      'input length and `max_tokens` exceed context limit: 196738 + 8192 > 200000, decrease input length or `max_tokens` and try again',
+    ), undefined, undefined as never));
+    expect(error.type).toBe('context_length');
+    expect(error.promptTokens).toBe(196738);
+  });
+
+  it('gemini: "The input token count (N) exceeds …" states N', async () => {
+    stubHttpFailure(400, {
+      error: { code: 400, message: 'The input token count (1150231) exceeds the maximum number of input tokens allowed (1048576).', status: 'INVALID_ARGUMENT' },
+    });
+    const error = await failure(new GeminiAdapter({ apiKey: 'zz-key-gemini' }));
+    expect(error.type).toBe('context_length');
+    expect(error.promptTokens).toBe(1150231);
+  });
+
+  it("openrouter: an upstream Anthropic refusal's count, from the body's metadata.raw", async () => {
+    stubHttpFailure(400, {
+      error: {
+        code: 400,
+        message: 'Provider returned error',
+        metadata: { provider_name: 'Anthropic', raw: JSON.stringify(anthropicBody('prompt is too long: 210123 tokens > 200000 maximum')) },
+      },
+    });
+    const error = await failure(new OpenRouterAdapter({ apiKey: 'zz-key-openrouter' }));
+    expect(error.type).toBe('context_length');
+    expect(error.promptTokens).toBe(210123);
+  });
+
+  it('a refusal that went through no adapter, as a thrown provider message, states its count too', () => {
+    const error = errorFromThrown(new Error('prompt is too long: 212000 tokens > 200000 maximum'));
+    expect(error.type).toBe('context_length');
+    expect(error.promptTokens).toBe(212000);
+  });
+
+  it("a count too large to hold exactly isn't kept", () => {
+    expect(errorFromThrown(new Error('prompt is too long: 99999999999999999999 tokens > 200000 maximum')).promptTokens).toBeUndefined();
+  });
+
+  it("isn't read from a body without a message of its own, which the error's message renders and which can echo the request", async () => {
+    stubHttpFailure(400, { error: { code: 'context_length_exceeded', param: 'messages', input: 'prompt is too long: 5 tokens > 3 maximum' } });
+    const error = await failure(new OpenAIAdapter({ apiKey: 'zz-key-openai' }));
+    expect(error.type).toBe('context_length');
+    expect(error.message).toContain('5 tokens > 3 maximum');
+    expect(error.promptTokens).toBeUndefined();
+  });
+
+  it("openai's long form, \"… However, your messages resulted in N tokens.\", states N", async () => {
+    stubHttpFailure(400, {
+      error: {
+        message: "This model's maximum context length is 128000 tokens. However, your messages resulted in 130112 tokens. Please reduce the length of the messages.",
+        type: 'invalid_request_error',
+        code: 'context_length_exceeded',
+      },
+    });
+    const error = await failure(new OpenAIAdapter({ apiKey: 'zz-key-openai' }));
+    expect(error.type).toBe('context_length');
+    expect(error.promptTokens).toBe(130112);
+  });
+
+  it("openai's older form, \"However, you requested N tokens (… in the messages, … in the completion)\", states no total of the prompt", async () => {
+    stubHttpFailure(400, {
+      error: {
+        message: "This model's maximum context length is 4097 tokens. However, you requested 4200 tokens (3200 in the messages, 1000 in the completion). Please reduce the length of the messages or completion.",
+        code: 'context_length_exceeded',
+      },
+    });
+    const error = await failure(new OpenAIAdapter({ apiKey: 'zz-key-openai' }));
+    expect(error.type).toBe('context_length');
+    expect(error.promptTokens).toBeUndefined();
+  });
+
+  it("openai's current form, \"Your input exceeds the context window of this model\", states no count", async () => {
+    stubHttpFailure(400, { error: { message: 'Your input exceeds the context window of this model. Please adjust your input and try again.', code: 'context_length_exceeded' } });
+    const error = await failure(new OpenAIAdapter({ apiKey: 'zz-key-openai' }));
+    expect(error.type).toBe('context_length');
+    expect(error.promptTokens).toBeUndefined();
+  });
+
+  it("openai: \"This model's maximum context length is M tokens.\" states no count", async () => {
+    stubHttpFailure(400, { error: { message: "This model's maximum context length is 128000 tokens.", code: 'context_length_exceeded' } });
+    const error = await failure(new OpenAIAdapter({ apiKey: 'zz-key-openai' }));
+    expect(error.type).toBe('context_length');
+    expect(error.promptTokens).toBeUndefined();
+  });
+
+  it('the Responses API: context_length_exceeded with "input is too large" states no count', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      'data: {"type":"error","error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"input is too large"}}\n\n',
+      { headers: { 'Content-Type': 'text/event-stream' } },
+    )));
+    const adapter = new OpenAIResponsesAPIAdapter({ mode: 'subscription', credentials: async () => ({ token: 'zz-token' }), baseURL: 'https://example.test/codex' });
+    let caught: unknown;
+    try {
+      await adapter.complete({ ...request, model: 'zz-model-1' });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(MembraneError);
+    expect((caught as MembraneError).type).toBe('context_length');
+    expect((caught as MembraneError).promptTokens).toBeUndefined();
+  });
+
+  it('bedrock: "Input is too long for requested model." states no count', async () => {
+    stubHttpFailure(400, { message: 'Input is too long for requested model.' }, { 'x-amzn-ErrorType': 'ValidationException:http://internal.amazon.com/coral/com.amazon.bedrock/' });
+    const error = await failure(new BedrockAdapter({ accessKeyId: 'zz-access-key', secretAccessKey: 'zz-secret-key', region: 'zz-region-1' }));
+    expect(error.type).toBe('context_length');
+    expect(error.promptTokens).toBeUndefined();
+  });
+
+  it("isn't read from an error that isn't a context overflow, though its words state a count", () => {
+    expect(rateLimitError('prompt is too long: 210123 tokens > 200000 maximum').promptTokens).toBeUndefined();
+  });
+
+  it("isn't read from an upstream body with no message of its own, which can echo the request", async () => {
+    stubHttpFailure(400, {
+      error: {
+        code: 400,
+        message: 'Provider returned error: the context window was exceeded',
+        metadata: { provider_name: 'Anthropic', raw: JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', input: 'prompt is too long: 5 tokens > 3 maximum' } }) },
+      },
+    });
+    const error = await failure(new OpenRouterAdapter({ apiKey: 'zz-key-openrouter' }));
+    expect(error.type).toBe('context_length');
+    expect(error.promptTokens).toBeUndefined();
+  });
+
+  async function renderedEcho(): Promise<MembraneError> {
+    stubHttpFailure(400, { error: { code: 'context_length_exceeded', param: 'messages', input: 'prompt is too long: 5 tokens > 3 maximum' } });
+    return failure(new OpenAIAdapter({ apiKey: 'zz-key-openai' }));
+  }
+
+  it('an error with none keeps none through a copy and a JSON round trip, though its message renders a count', async () => {
+    const none = await renderedEcho();
+    expect(none.promptTokens).toBeUndefined();
+    expect(new MembraneError(none.toErrorInfo()).promptTokens).toBeUndefined();
+    expect(new MembraneError(JSON.parse(JSON.stringify(none.toErrorInfo()))).promptTokens).toBeUndefined();
+  });
+
+  it('a stated count survives a JSON round trip', () => {
+    const stated = anthropicHandled(new Anthropic.APIError(400, anthropicBody('prompt is too long: 210123 tokens > 200000 maximum'), undefined, undefined as never));
+    expect(new MembraneError(JSON.parse(JSON.stringify(stated.toErrorInfo()))).promptTokens).toBe(210123);
+  });
+
+  it('classifyError gives a thrown provider message the count that wrapping it gives', () => {
+    const thrown = new Error('prompt is too long: 210123 tokens > 200000 maximum');
+    expect(classifyError(thrown).type).toBe('context_length');
+    expect(classifyError(thrown).promptTokens).toBe(210123);
+  });
+
+  it("an error that isn't a context overflow takes no count, though one is given", () => {
+    expect(new MembraneError({ type: 'invalid_request', message: 'zz', retryable: false, rawError: undefined, promptTokens: 5 }).promptTokens).toBeUndefined();
+  });
+
+  it('contextLengthError reads the count from the provider text it is given', () => {
+    expect(contextLengthError('prompt is too long: 210123 tokens > 200000 maximum').promptTokens).toBe(210123);
+  });
+
+  it('a copy keeps it, and a copy of an error with none reads none from its text', () => {
+    const stated = anthropicHandled(new Anthropic.APIError(400, anthropicBody('prompt is too long: 210123 tokens > 200000 maximum'), undefined, undefined as never));
+    expect(new MembraneError(stated.toErrorInfo()).promptTokens).toBe(210123);
+    expect(classifyError(stated).promptTokens).toBe(210123);
+    const none = new MembraneError({ ...stated.toErrorInfo(), promptTokens: undefined, message: 'prompt is too long: 5 tokens > 3 maximum' });
+    expect(none.promptTokens).toBeUndefined();
   });
 });
