@@ -27,7 +27,7 @@ import type {
   BlockEvent,
   StreamEmission,
 } from './types.js';
-import { normalizeToolPairs, mergeConsecutiveRoles } from './normalize-tool-pairs.js';
+import { isCacheableBlock, normalizeToolPairs, mergeConsecutiveRoles } from './normalize-tool-pairs.js';
 import { imageForRequest, toolResultContentForRequest } from '../utils/image-media.js';
 import { convertMcpMedia } from '../utils/mcp-media.js';
 import { assertCacheMarkersWithinLimit, countWireCacheMarkers } from '../utils/cache-marker-budget.js';
@@ -45,8 +45,7 @@ export function withoutEmptySystemText(
 /** Anthropic rejects cache_control on thinking and redacted_thinking blocks. */
 export function lastCacheableBlockIndex(blocks: Array<Record<string, unknown>>): number {
   for (let k = blocks.length - 1; k >= 0; k--) {
-    const t = blocks[k]?.type as string | undefined;
-    if (t !== 'thinking' && t !== 'redacted_thinking') return k;
+    if (isCacheableBlock(blocks[k]!)) return k;
   }
   return -1;
 }
@@ -331,10 +330,11 @@ export class NativeFormatter implements PrefillFormatter {
     const normalized = normalizeToolPairs(providerMessages, {
       pendingToolCallIds: options.pendingToolCallIds,
       onEvent: options.onNormalize,
-      onBlockRewritten: (original, replacement) => {
+      onBlockDropped: followed.onBlockDropped,
+      onBlockReplaced: (original, replacement) => {
         const at = origin.get(original as object);
         if (at !== undefined) origin.set(replacement as object, at);
-        followed.onBlockRewritten?.(original, replacement);
+        followed.onBlockReplaced?.(original, replacement);
       },
       leadingUserText: options.prefillUserMessage,
     });

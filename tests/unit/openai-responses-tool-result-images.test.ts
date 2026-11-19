@@ -55,12 +55,13 @@ describe('tool results carrying images (Responses)', () => {
           content: [{ type: 'image', source: { type: 'url', url: 'https://example.com/a.png' } }],
         }],
       },
+      { type: 'function_call', call_id: 'call_3', name: 'shot', arguments: '{}' },
     ] as any);
     expect(items).toEqual([{
       type: 'function_call_output',
       call_id: 'call_3',
       output: [{ type: 'input_image', image_url: 'https://example.com/a.png' }],
-    }]);
+    }, { type: 'function_call', call_id: 'call_3', name: 'shot', arguments: '{}' }]);
   });
 
   it('helper: the string form for strings and image-free arrays; placeholder for unusable image sources', () => {

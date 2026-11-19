@@ -404,6 +404,9 @@ describe('data: URLs', () => {
       { role: 'user', content: [{ type: 'text', text: 'also' }, { type: 'input_image', image_url: NOTES_URL }, { type: 'image', image_url: NOTES_URL }, { type: 'image', image_url: '' }] },
       { type: 'function_call_output', call_id: 'c1', output: [{ type: 'input_image', image_url: NOTES_URL }, { type: 'input_image', image_url: REMOTE }] },
       { role: 'user', content: [{ type: 'tool_result', toolUseId: 'c2', content: [{ type: 'input_image', image_url: NOTES_URL }, notes()] }] },
+      // the calls the two outputs answer, so neither is left out as a result without its call
+      { type: 'function_call', call_id: 'c1', name: 'shot', arguments: '{}' },
+      { type: 'function_call', call_id: 'c2', name: 'shot', arguments: '{}' },
     ] as any) as any[];
     expect(items[0]).toEqual(validAsGiven);
     expect(items[1].content).toEqual([{ type: 'input_text', text: 'look' }, { type: 'input_text', text: expect.stringContaining(SAID) }]);
@@ -520,6 +523,7 @@ describe('the Responses transport', () => {
     const items = normalizeResponsesInput([
       { role: 'user', content: [{ type: 'image', source: { type: 'base64', mediaType: 'image/png', data: '' } }, { type: 'image', image_url: '' }] },
       { role: 'user', content: [{ type: 'tool_result', toolUseId: 'c1', content: [notes()] }] },
+      { type: 'function_call', call_id: 'c1', name: 'shot', arguments: '{}' },
     ] as any) as any[];
     expect(items[0].content).toEqual([{ type: 'input_text', text: expect.stringContaining('it came without its data') }]);
     expect(items[1].output).toEqual([{ type: 'input_text', text: expect.stringContaining(SAID) }]);
@@ -709,6 +713,7 @@ describe('round reports name a message whose image became the placeholder', () =
       { type: 'function_call_output', call_id: 'c1', output: [nested, { type: 'input_image', image_url: REMOTE }] },
       { role: 'user', content: [result] },
       { role: 'user', content: [nativeResult] },
+      ...['c1', 'c2', 'c3'].map((id) => ({ type: 'function_call', call_id: id, name: 'shot', arguments: '{}' })),
     ] as any, (block) => heard.push(block));
     expect(heard).toHaveLength(6);
     for (const block of [image, mixed, part, nested, result, nativeResult]) expect(heard).toContain(block);

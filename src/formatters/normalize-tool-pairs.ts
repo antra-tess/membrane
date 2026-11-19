@@ -16,6 +16,8 @@
 import type { ProviderTurnMessage as LooseProviderMessage } from './types.js';
 import type { NormalizeEvent } from './types.js';
 import { MembraneError } from '../types/errors.js';
+import { hasNonEmptyText } from '../utils/empty-text.js';
+import { sentOnTheWire } from '../utils/anthropic-wire-blocks.js';
 
 /**
  * Block shape used internally and exposed for callers that want to
@@ -32,8 +34,8 @@ const NORMALIZE_EVENT_REWRITES_PREFIX: Record<NormalizeEvent['kind'], boolean> =
   tool_result_hoisted: false,
   interloper_deferred: false,
   synthetic_pending_result: true,
-  orphan_tool_result_textified: true,
-  stray_tool_result_textified: true,
+  orphan_tool_result_dropped: true,
+  stray_tool_result_dropped: true,
   pending_in_flight: false,
   leading_user_synthesized: false,
 };
@@ -54,16 +56,26 @@ export interface NormalizeOptions {
   /** See `BuildOptions.onNormalize`. */
   onEvent?: (event: NormalizeEvent) => void;
   /**
-   * Hears each input block the normalizer rewrote as a new object with
-   * different content: a tool_result textified because it was an orphan or
-   * a duplicate. For a caller that follows its blocks by object identity
-   * (request fidelity). A tool_result spelled `toolUseId` is also copied to
+   * Hears each input block the normalizer left out: a tool_result whose call
+   * is in none of the messages, or a second result for a call that already
+   * has one. For a caller that follows its blocks by object identity
+   * (request fidelity). A tool_result spelled `toolUseId` is copied to
    * rename the key, without calling this.
    */
-  onBlockRewritten?: (original: ProviderBlock, replacement: ProviderBlock) => void;
+  onBlockDropped?: (original: ProviderBlock) => void;
+  /**
+   * Hears each block the normalizer put in an input block's place: a copy of
+   * the last cacheable block before a dropped one, taking the dropped block's
+   * cache marker, and the leading text a user turn holds once drops have
+   * emptied it, or the first pending result that fills it, in place of the
+   * last block dropped from it. For a caller that follows its blocks by
+   * object identity.
+   */
+  onBlockReplaced?: (original: ProviderBlock, replacement: ProviderBlock) => void;
   /**
    * Text of the synthetic user envelope prepended when the first envelope is
-   * assistant. `[continuing]` when absent, empty or only whitespace.
+   * assistant, and of a user turn that dropped results have emptied.
+   * `[continuing]` when absent, empty or only whitespace.
    */
   leadingUserText?: string;
 }
@@ -125,13 +137,43 @@ export function normalizeToolPairs(
 
   envelopes = hoistMatchingResults(envelopes, onEvent);
 
-  envelopes = repairStrayResults(envelopes, onEvent, options.onBlockRewritten);
+  // Each envelope a result was dropped from, with the last one dropped.
+  const droppedFrom = new Map<Envelope, ProviderBlock>();
+  const drop: Drop = (envelopes, at, before, block, event) => {
+    droppedFrom.set(envelopes[at]!, block);
+    onEvent(event);
+    options.onBlockDropped?.(block);
+    const marker = cacheMarkerOf(block);
+    if (marker) moveCacheMarker(envelopes, at, before, marker, options.onBlockReplaced);
+  };
 
-  const orphanRes = resolveOrphans(envelopes, pending, onEvent, options.onBlockRewritten);
+  envelopes = repairStrayResults(envelopes, onEvent, drop);
+
+  const orphanRes = resolveOrphans(envelopes, pending, onEvent, drop);
   envelopes = orphanRes.envelopes;
   const ready = orphanRes.ready;
+  const synthesized = orphanRes.synthesized;
 
   envelopes = evictInterlopers(envelopes, onEvent);
+
+  // Anthropic rejects a text block that is only whitespace.
+  const leadingText = options.leadingUserText?.trim() ? options.leadingUserText : '[continuing]';
+  // A drop that empties a user turn, or leaves it nothing the wire sends,
+  // leaves the turn in place, holding the leading case's text: removing it
+  // would merge the assistant turns around it, or end the request on the
+  // assistant, which the API reads as a prefill.
+  // A turn the drops emptied that pending results then filled stands in the
+  // last dropped block's place through the first of them.
+  for (const [envelope, last] of droppedFrom) {
+    if (envelope.role !== 'user') continue;
+    if (envelope.content.some(sentOnTheWire)) {
+      if (envelope.content.every((block) => synthesized.has(block))) options.onBlockReplaced?.(last, envelope.content[0]!);
+      continue;
+    }
+    const held: ProviderBlock = { type: 'text', text: leadingText };
+    envelope.content.push(held);
+    options.onBlockReplaced?.(last, held);
+  }
 
   envelopes = envelopes.filter((e) => e.content.length > 0);
 
@@ -139,8 +181,6 @@ export function normalizeToolPairs(
   if (envelopes.length > 0 && envelopes[0]!.role === 'assistant') {
     const originalFirstRole = input[0]!.role;
     const leadingBlockTypes = envelopes[0]!.content.map((b) => b.type);
-    // Anthropic rejects a text block that is only whitespace.
-    const leadingText = options.leadingUserText?.trim() ? options.leadingUserText : '[continuing]';
     envelopes.unshift({ role: 'user', content: [{ type: 'text', text: leadingText }] });
     onEvent({ kind: 'leading_user_synthesized', originalFirstRole, leadingBlockTypes });
   }
@@ -451,10 +491,71 @@ function hoistMatchingResults(
   return envelopes;
 }
 
+/**
+ * Leave out a result: `before` is what its envelope, `envelopes[at]`, keeps
+ * ahead of it.
+ */
+type Drop = (
+  envelopes: Envelope[],
+  at: number,
+  before: ProviderBlock[],
+  block: ProviderBlock,
+  event: NormalizeEvent,
+) => void;
+
+/**
+ * A dropped result's cache marker, as a textified result carried it: its
+ * own, or else the last one inside its content.
+ */
+function cacheMarkerOf(block: ProviderBlock): unknown {
+  if (block.cache_control) return block.cache_control;
+  const content = (block as { content?: unknown }).content;
+  if (!Array.isArray(content)) return undefined;
+  for (let i = content.length - 1; i >= 0; i--) {
+    const marker = (content[i] as { cache_control?: unknown } | null)?.cache_control;
+    if (marker) return marker;
+  }
+  return undefined;
+}
+
+/** Thinking blocks can't carry a cache marker. */
+export function isCacheableBlock(block: Record<string, unknown> | null | undefined): boolean {
+  return block?.type !== 'thinking' && block?.type !== 'redacted_thinking';
+}
+
+/**
+ * A dropped block's cache marker goes to the last cacheable block before it
+ * that the wire keeps, so the request still caches the prefix the marker
+ * asked for, unless that block carries a marker of its own already. One
+ * inside its content doesn't count: the wire sends a block nested in a
+ * result without its marker. With nothing such before it in the messages,
+ * the marker goes too.
+ */
+function moveCacheMarker(
+  envelopes: Envelope[],
+  at: number,
+  before: ProviderBlock[],
+  marker: unknown,
+  onBlockReplaced: NormalizeOptions['onBlockReplaced'],
+): void {
+  const earlier = [before, ...envelopes.slice(0, at).reverse().map((envelope) => envelope.content)];
+  for (const blocks of earlier) {
+    for (let k = blocks.length - 1; k >= 0; k--) {
+      const target = blocks[k]!;
+      if (!isCacheableBlock(target) || (target.type === 'text' && !hasNonEmptyText(target.text))) continue;
+      if (target.cache_control) return;
+      const copy = { ...target, cache_control: marker };
+      blocks[k] = copy;
+      onBlockReplaced?.(target, copy);
+      return;
+    }
+  }
+}
+
 function repairStrayResults(
   envelopes: Envelope[],
   onEvent: (e: NormalizeEvent) => void,
-  onBlockRewritten?: NormalizeOptions['onBlockRewritten'],
+  drop: Drop,
 ): Envelope[] {
   const callEnvelopesOfId = new Map<string, number[]>();
   for (let i = 0; i < envelopes.length; i++) {
@@ -494,7 +595,7 @@ function repairStrayResults(
           kept.push(block);
           continue;
         }
-        kept.push(textifyDuplicateResult(block, id, i, 'duplicate_in_cycle', onEvent, onBlockRewritten));
+        drop(envelopes, i, kept, block, { kind: 'stray_tool_result_dropped', toolUseId: id !== '' ? id : '<missing>', fromEnvelope: i, reason: 'duplicate_in_cycle' });
         continue;
       }
       const calls = callEnvelopesOfId.get(id);
@@ -528,59 +629,11 @@ function repairStrayResults(
         continue;
       }
 
-      kept.push(textifyDuplicateResult(block, id, i, 'cycle_closed', onEvent, onBlockRewritten));
+      drop(envelopes, i, kept, block, { kind: 'stray_tool_result_dropped', toolUseId: id !== '' ? id : '<missing>', fromEnvelope: i, reason: 'cycle_closed' });
     }
     env.content = kept;
   }
   return envelopes;
-}
-
-function textifyDuplicateResult(
-  block: ProviderBlock,
-  toolUseId: string,
-  fromEnvelope: number,
-  reason: 'cycle_closed' | 'duplicate_in_cycle',
-  onEvent: (e: NormalizeEvent) => void,
-  onBlockRewritten?: NormalizeOptions['onBlockRewritten'],
-): ProviderBlock {
-  const textified = textifyResult(block, `duplicate tool_result for ${toolUseId}`);
-  onEvent({
-    kind: 'stray_tool_result_textified',
-    toolUseId,
-    fromEnvelope,
-    recoveredChars: textified.recoveredChars,
-    reason,
-  });
-  onBlockRewritten?.(block, textified.block);
-  return textified.block;
-}
-
-function textifyResult(
-  block: ProviderBlock,
-  provenance: string,
-): { block: ProviderBlock; recoveredChars: number } {
-  const recovered = renderResultContent(block);
-  const label = block.is_error === true ? `${provenance}, an error` : provenance;
-  const marker = resultCacheMarker(block);
-  return {
-    block: {
-      type: 'text',
-      text: `[${label}]: ${recovered}`,
-      ...(marker ? { cache_control: marker } : {}),
-    },
-    recoveredChars: recovered.length,
-  };
-}
-
-function resultCacheMarker(block: ProviderBlock): unknown {
-  if (block.cache_control) return block.cache_control;
-  const content = (block as { content?: unknown }).content;
-  if (!Array.isArray(content)) return undefined;
-  for (let i = content.length - 1; i >= 0; i--) {
-    const marker = (content[i] as { cache_control?: unknown } | null)?.cache_control;
-    if (marker) return marker;
-  }
-  return undefined;
 }
 
 function evictInterlopers(
@@ -613,15 +666,18 @@ function evictInterlopers(
 interface OrphanResolution {
   envelopes: Envelope[];
   ready: boolean;
+  /** The `[pending]` results this normalization made, which no input block is. */
+  synthesized: ReadonlySet<ProviderBlock>;
 }
 
 function resolveOrphans(
   envelopes: Envelope[],
   pending: ReadonlySet<string>,
   onEvent: (e: NormalizeEvent) => void,
-  onBlockRewritten?: NormalizeOptions['onBlockRewritten'],
+  drop: Drop,
 ): OrphanResolution {
   let ready = true;
+  const synthesized = new Set<ProviderBlock>();
 
   const allUseIds = new Set<string>();
   for (const env of envelopes) {
@@ -632,23 +688,16 @@ function resolveOrphans(
       }
     }
   }
-  for (const env of envelopes) {
+  for (let i = 0; i < envelopes.length; i++) {
+    const env = envelopes[i]!;
     if (env.role !== 'user') continue;
-    env.content = env.content.map((block) => {
-      if (block.type !== 'tool_result') return block;
-      const id = getToolUseId(block);
-      if (typeof id !== 'string' || !allUseIds.has(id)) {
-        const textified = textifyResult(block, `orphan tool_result for ${id ?? '<missing>'}`);
-        onEvent({
-          kind: 'orphan_tool_result_textified',
-          toolUseId: id ?? '<missing>',
-          recoveredChars: textified.recoveredChars,
-        });
-        onBlockRewritten?.(block, textified.block);
-        return textified.block;
-      }
-      return block;
-    });
+    const kept: ProviderBlock[] = [];
+    for (const block of env.content) {
+      const id = block.type === 'tool_result' ? getToolUseId(block) : undefined;
+      if (block.type !== 'tool_result' || (typeof id === 'string' && allUseIds.has(id))) kept.push(block);
+      else drop(envelopes, i, kept, block, { kind: 'orphan_tool_result_dropped', toolUseId: typeof id === 'string' && id !== '' ? id : '<missing>' });
+    }
+    env.content = kept;
   }
 
   for (let i = 0; i < envelopes.length; i++) {
@@ -680,6 +729,7 @@ function resolveOrphans(
         continue;
       }
       const synth = syntheticToolResult(useId);
+      synthesized.add(synth);
       nextEnv.content.splice(callOrderInsertionIndex(nextEnv, useIds, useIdIndex), 0, synth);
       onEvent({
         kind: 'synthetic_pending_result',
@@ -689,7 +739,7 @@ function resolveOrphans(
     }
   }
 
-  return { envelopes, ready };
+  return { envelopes, ready, synthesized };
 }
 
 function callOrderInsertionIndex(
@@ -863,53 +913,6 @@ function withCanonicalResultId(block: ProviderBlock): ProviderBlock {
     return { ...rest, tool_use_id: toolUseId } as ProviderBlock;
   }
   return rest as ProviderBlock;
-}
-
-function renderResultContent(block: ProviderBlock): string {
-  const content = (block as { content?: unknown }).content;
-  if (typeof content === 'string') return content;
-  if (content === null || content === undefined) return '';
-  if (!Array.isArray(content)) return renderResultPart(content);
-  return content
-    .map(renderResultPart)
-    .filter((part) => part !== '')
-    .join('\n');
-}
-
-function renderResultPart(part: unknown): string {
-  if (part === null || part === undefined) return '';
-  if (typeof part !== 'object') return JSON.stringify(part);
-  const fields = part as Record<string, unknown>;
-  if (fields.type === 'text' && typeof fields.text === 'string') return fields.text;
-  return inlineDataPlaceholder(fields) ?? JSON.stringify(fields);
-}
-
-const INLINE_DATA_LABELS: ReadonlyMap<unknown, string> = new Map([
-  ['image', 'Image'],
-  ['generated_image', 'Image'],
-  ['document', 'Document'],
-  ['audio', 'Audio'],
-  ['video', 'Video'],
-]);
-
-function inlineDataPlaceholder(part: Record<string, unknown>): string | undefined {
-  const label = INLINE_DATA_LABELS.get(part.type);
-  if (label === undefined) return undefined;
-  const source = part.source as Record<string, unknown> | null | undefined;
-  // Anthropic's wire form keeps the data in `source` (a text source's data is
-  // text, not bytes); MCP-style and generated images keep it on the part itself.
-  const holder =
-    source !== null && typeof source === 'object' && typeof source.data === 'string'
-      ? source.type === 'text' ? undefined : source
-      : typeof part.data === 'string' ? part : undefined;
-  if (holder === undefined) return undefined;
-  const data = holder.data as string;
-  const mediaType =
-    [holder.media_type, holder.mediaType, holder.mimeType].find(
-      (value): value is string => typeof value === 'string' && value !== '',
-    ) ?? 'unknown';
-  const sizeKb = Math.round((data.length * 0.75) / 1024);
-  return `[${label}: ${mediaType}, ~${sizeKb}KB, not shown to you]`;
 }
 
 function collectToolUseIds(env: Envelope): string[] {

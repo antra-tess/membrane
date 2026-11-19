@@ -1,6 +1,7 @@
 /**
  * A request that carries no system change builds as it did before system changes could carry effort: each request
- * of the corpus builds to the form `native-build-corpus.golden.json` records, which membrane `74c345c2e346` built.
+ * of the corpus builds to the form `native-build-corpus.golden.json` records, which membrane `74c345c2e346` built,
+ * but for the orphan result: a result without its call is left out now, and its turn holds `[continuing]`.
  */
 
 import { readFileSync } from 'node:fs';
