@@ -42,7 +42,7 @@ function stubResponse(usage: unknown) {
 }
 
 describe('OpenAI Responses cache writes', () => {
-  it('reach normalized usage as cacheCreationTokens', async () => {
+  it('reach the adapter\'s usage as cacheCreationTokens, inside inputTokens as the API counts them', async () => {
     stubResponse(GUIDE_USAGE);
     const adapter = new OpenAIResponsesAPIAdapter({ apiKey: 'sk-test' });
     const response = await adapter.complete({ model: 'gpt-5.6-sol', messages: [], maxTokens: 10 });
@@ -76,11 +76,17 @@ describe('OpenAI Responses cache writes', () => {
     expect(response.usage).toEqual({ inputTokens: 12_000, outputTokens: 25, cacheReadTokens: 4_000, cacheCreationTokens: 7_000 });
   });
 
-  it('stay absent when the provider reports no write', async () => {
+  it('stay absent when the provider reports no write, with or without input_tokens_details', async () => {
     stubResponse({ input_tokens: 100, output_tokens: 25, input_tokens_details: { cached_tokens: 40 } });
     const adapter = new OpenAIResponsesAPIAdapter({ apiKey: 'sk-test' });
-    const response = await adapter.complete({ model: 'gpt-5.6-sol', messages: [], maxTokens: 10 });
-    expect(response.usage).toEqual({ inputTokens: 100, outputTokens: 25, cacheReadTokens: 40 });
+    const withDetails = await adapter.complete({ model: 'gpt-5.6-sol', messages: [], maxTokens: 10 });
+    expect(withDetails.usage).toEqual({ inputTokens: 100, outputTokens: 25, cacheReadTokens: 40 });
+    expect('cacheCreationTokens' in withDetails.usage).toBe(false);
+    stubResponse({ input_tokens: 100, output_tokens: 25 });
+    const noDetails = await adapter.complete({ model: 'gpt-5.6-sol', messages: [], maxTokens: 10 });
+    expect(noDetails.usage).toEqual({ inputTokens: 100, outputTokens: 25 });
+    expect('cacheCreationTokens' in noDetails.usage).toBe(false);
+    expect('cacheReadTokens' in noDetails.usage).toBe(false);
   });
 
   it('leave 1,000 ordinary input tokens after normalization, and are priced at 1.25× input', async () => {
@@ -121,5 +127,12 @@ describe('OpenAI rows', () => {
     expect(cost.input).toBeCloseTo(0.015, 12);
     expect(cost.cacheWrite).toBeCloseTo(0.035, 12);
     expect(cost.total).toBeCloseTo(0.05, 12);
+  });
+
+  it('under a caller\'s own row with no write rate, the write is unpriced — calculateCost has no input-rate fallback by design', () => {
+    // The rule the ModelPricing doc states: a row for a cache-inclusive provider carries a write rate.
+    const own = calculateCost({ inputTokens: 3_000, outputTokens: 0, cacheCreationTokens: 7_000 }, { inputPerMillion: 5, outputPerMillion: 15, currency: 'USD' });
+    expect(own.cacheWrite).toBeUndefined();
+    expect(own.total).toBeCloseTo(0.015, 12);
   });
 });
