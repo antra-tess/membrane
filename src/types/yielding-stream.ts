@@ -63,6 +63,8 @@ export interface RoundUsage {
   inputTokens?: number;
   outputTokens?: number;
   cacheCreationTokens?: number;
+  /** The 1-hour-TTL share of cacheCreationTokens, when the provider reported the split (see CallUsage). */
+  cacheCreation1hTokens?: number;
   cacheReadTokens?: number;
   /** Thinking tokens, already inside outputTokens (see DetailedUsage.thinkingTokens). */
   thinkingTokens?: number;

@@ -63,9 +63,11 @@ describe('default pricing rows match the published price pages (2026-08-25)', ()
   });
 });
 
-describe('Anthropic 5.x rows match the published price page (2026-11-09)', () => {
+describe('Anthropic 5.x rows match the published price page (2026-11-18)', () => {
+  // The page prices a 1-hour cache write at 2× base input for every model.
   const usd = (input: number, output: number, cacheWrite: number, cacheRead: number) => ({
     inputPerMillion: input, outputPerMillion: output, cacheWritePerMillion: cacheWrite,
+    cacheWrite1hPerMillion: input * 2,
     cacheReadPerMillion: cacheRead, currency: 'USD', asOf: ANTHROPIC_PRICING_LAST_VERIFIED,
   });
   const rows: Array<[string, ReturnType<typeof usd>]> = [
@@ -111,7 +113,7 @@ describe('pricing freshness is machine-readable', () => {
   it('dates every Anthropic row the page lists to the Anthropic reading, and each retired one to the last date that confirmed it', () => {
     const retired: Record<string, string> = { 'claude-3-5-sonnet': '2025-07-01', 'claude-3-5-haiku': '2026-10-19' };
     const anthropic = PRICING_TABLE.filter((row) => row.prefix.startsWith('claude-') && row.pricing !== null);
-    expect(ANTHROPIC_PRICING_LAST_VERIFIED).toBe('2026-11-09');
+    expect(ANTHROPIC_PRICING_LAST_VERIFIED).toBe('2026-11-18');
     for (const row of anthropic) {
       const expected = retired[row.prefix] ?? ANTHROPIC_PRICING_LAST_VERIFIED;
       expect(`${row.prefix}: ${row.pricing?.asOf}`).toBe(`${row.prefix}: ${expected}`);

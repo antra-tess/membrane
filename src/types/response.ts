@@ -25,6 +25,14 @@ export interface CallUsage extends BasicUsage {
   /** Tokens used for cache creation */
   cacheCreationTokens?: number;
 
+  /**
+   * Of `cacheCreationTokens`, those written with a 1-hour TTL; the rest were
+   * written with the short TTL. Set only when the provider reports the split
+   * (Anthropic's `usage.cache_creation.ephemeral_1h_input_tokens`), so a
+   * missing value means "unknown", not zero.
+   */
+  cacheCreation1hTokens?: number;
+
   /** Tokens read from cache */
   cacheReadTokens?: number;
 
