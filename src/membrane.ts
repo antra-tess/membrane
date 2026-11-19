@@ -77,8 +77,12 @@ import {
   hasImageInToolResults,
   formatToolResultsForSplitTurn,
   attachSplitResults,
+  parseLastToolBlock,
+  verdictsAfter,
+  type ToolBlockVerdict,
   type ProviderImageBlock,
   type SplitResultsRound,
+  type ToolBlockDefectKind,
 } from './utils/tool-parser.js';
 import { IncrementalXmlParser, type ProcessChunkResult } from './utils/stream-parser.js';
 import type { ChunkMeta, BlockEvent, MembraneBlockType, MembraneBlock } from './types/streaming.js';
@@ -273,7 +277,16 @@ function toolCallOf(block: ToolUseContent): ToolCall {
     name: block.name,
     input: block.input,
     ...(block.unparseableInput !== undefined ? { unparseableInput: block.unparseableInput } : {}),
+    ...(block.unparseableReason !== undefined ? { unparseableReason: block.unparseableReason } : {}),
   };
+}
+
+function verdictsAfterPrefill(
+  text: string,
+  prefillLength: number,
+  xmlToolProtocol: boolean,
+): ReadonlyMap<number, ToolBlockVerdict> | undefined {
+  return xmlToolProtocol ? verdictsAfter(text, prefillLength) : undefined;
 }
 
 function isBuildRefusal(error: unknown): error is MembraneError {
@@ -1247,7 +1260,8 @@ export class Membrane {
         initialBlockType,
         lastStopSequence,
         lastProviderStopReason,
-        splitRounds
+        splitRounds,
+        verdictsAfterPrefill(fullAccumulated, initialPrefillLength, xmlToolProtocol)
       );
 
       if (providerImageBlocks.length > 0) {
@@ -1264,6 +1278,7 @@ export class Membrane {
       if (this.isCancellation(error, signal)) {
         const fullAccumulated = parser.getAccumulated();
         const newContent = fullAccumulated.slice(initialPrefillLength);
+        const verdicts = verdictsAfterPrefill(fullAccumulated, initialPrefillLength, xmlToolProtocol);
 
         return this.buildAbortedResponse(
           newContent,
@@ -1272,7 +1287,7 @@ export class Membrane {
           executedToolResults,
           this.abortOutcome(error, signal),
           xmlToolProtocol
-            ? attachSplitResults(parseAccumulatedIntoBlocks(newContent, { tools: request.tools, ...(initialBlockType ? { startInsideBlock: initialBlockType } : {}) }), splitRounds).blocks
+            ? attachSplitResults(parseAccumulatedIntoBlocks(newContent, { tools: request.tools, verdicts, ...(initialBlockType ? { startInsideBlock: initialBlockType } : {}) }), splitRounds).blocks
             : streamedThinking.content(newContent, (value, context) => formatter.parseContentBlocks(value, request.tools, context))
         );
       }
@@ -1617,6 +1632,7 @@ export class Membrane {
             name: restoreToolName(item.name, tools),
             ...toolUseInputFromValue(item.input),
             ...(item.unparseableInput !== undefined ? { unparseableInput: item.unparseableInput } : {}),
+            ...(item.unparseableInput !== undefined && item.unparseableReason !== undefined ? { unparseableReason: item.unparseableReason } : {}),
             ...(item.rawItem ? { rawItem: item.rawItem } : {}),
           });
         } else if (item.type === 'thinking') {
@@ -2340,6 +2356,7 @@ export class Membrane {
             name,
             ...toolUseInputFromValue(block.input),
             ...(block.unparseableInput !== undefined ? { unparseableInput: block.unparseableInput } : {}),
+            ...(block.unparseableInput !== undefined && block.unparseableReason !== undefined ? { unparseableReason: block.unparseableReason } : {}),
           };
           content.push(toolUse);
           toolCalls.push(toolCallOf(toolUse));
@@ -2385,12 +2402,18 @@ export class Membrane {
     }
 
     let emptyToolBlocks = 0;
+    const malformedToolBlocks: ToolBlockDefectKind[] = [];
     if (xmlToolProtocol && toolCalls.length === 0 && rawAssistantText.includes('<function_calls>')) {
-      const parsed = parseToolCalls(rawAssistantText, { tools: request.tools });
+      // A provider can drop or slice the closing tag's stop, and nothing here
+      // checks it locally, so the parse reads through the first closing tag only.
+      const close = rawAssistantText.indexOf('</function_calls>');
+      const read = close === -1 ? rawAssistantText : rawAssistantText.slice(0, close + '</function_calls>'.length);
+      const { parsed, defect } = parseLastToolBlock(read, { tools: request.tools });
       if (parsed?.calls.length) {
         for (const tc of parsed.calls) {
           toolCalls.push(tc);
         }
+        if (defect) malformedToolBlocks.push(defect);
       } else if (parsed) {
         emptyToolBlocks = 1;
       }
@@ -2398,7 +2421,7 @@ export class Membrane {
     const unclosedToolBlock = xmlToolProtocol && endsWithPartialToolBlock(rawAssistantText);
 
     let stopReason = this.mapStopReason(providerResponse.stopReason);
-    if (xmlToolProtocol) this.reportToolParseDiagnostics({ unclosedToolBlock, emptyToolBlocks }, stopReason);
+    if (xmlToolProtocol) this.reportToolParseDiagnostics({ unclosedToolBlock, emptyToolBlocks, malformedToolBlocks }, stopReason);
     const endTurnTools = xmlToolProtocol
       ? undefined
       : this.toolUseWithEndTurn(content, stopReason, providerResponse, 0);
@@ -2454,7 +2477,7 @@ export class Membrane {
       unclosedToolBlock: boolean;
       emptyToolBlocks: number;
       splicedToolBlocks?: number;
-      unclosedInvokeHeads?: number;
+      malformedToolBlocks?: readonly ToolBlockDefectKind[];
     },
     stopReason: StopReason
   ): void {
@@ -2480,17 +2503,17 @@ export class Membrane {
     if (diagnostics.splicedToolBlocks) {
       warnLog.warn(
         `[membrane] ${diagnostics.splicedToolBlocks} tool block(s) spanned a second ` +
-        `<function_calls> opener and were re-anchored to the innermost one — an ` +
-        `earlier truncated block is present in this conversation's assistant text.`
+        `<function_calls> opener and were re-anchored to the innermost one, and refused: ` +
+        `an earlier block in this conversation's assistant text was cut off, a value held the tag, or text before the block named it.`
       );
     }
 
-    if (diagnostics.unclosedInvokeHeads) {
+    if (diagnostics.malformedToolBlocks?.length) {
       warnLog.warn(
-        `[membrane] ${diagnostics.unclosedInvokeHeads} <invoke> head(s) were left ` +
-        `unclosed and swallowed the invoke that followed — nothing was dispatched ` +
-        `under an unclosed head's name, and the call it absorbed was re-anchored ` +
-        `and ran with its own parameters.`
+        `[membrane] ${diagnostics.malformedToolBlocks.length} function_calls block(s) were ` +
+        `refused (${diagnostics.malformedToolBlocks.join(', ')}): each of their calls is ` +
+        `marked unparseableInput, with its reason in unparseableReason and input {}, for ` +
+        `the executor to refuse.`
       );
     }
   }
@@ -2515,6 +2538,7 @@ export class Membrane {
     triggeredSequence?: string,
     providerStopReason?: string,
     splitRounds: readonly SplitResultsRound[] = [],
+    verdicts?: ReadonlyMap<number, ToolBlockVerdict>,
   ): NormalizedResponse {
     const usage = turnUsage.total;
     let finalContent: ContentBlock[];
@@ -2530,6 +2554,7 @@ export class Membrane {
     } else {
       const parseOptions = {
         tools: request.tools,
+        verdicts,
         ...(startInsideBlock ? { startInsideBlock } : {}),
       };
       const parsed = parseAccumulatedIntoBlocks(accumulated, parseOptions);
@@ -2988,10 +3013,12 @@ export class Membrane {
     };
 
     const abortedPartial = () => {
-      const newContent = parser.getAccumulated().slice(initialPrefillLength);
+      const fullAccumulated = parser.getAccumulated();
+      const newContent = fullAccumulated.slice(initialPrefillLength);
+      const verdicts = verdictsAfterPrefill(fullAccumulated, initialPrefillLength, xmlToolProtocol);
       return {
         partialContent: xmlToolProtocol
-          ? attachSplitResults(parseAccumulatedIntoBlocks(newContent, { tools: request.tools, ...(initialBlockType ? { startInsideBlock: initialBlockType } : {}) }), splitRounds).blocks
+          ? attachSplitResults(parseAccumulatedIntoBlocks(newContent, { tools: request.tools, verdicts, ...(initialBlockType ? { startInsideBlock: initialBlockType } : {}) }), splitRounds).blocks
           : streamedThinking.content(newContent, (value, context) => formatter.parseContentBlocks(value, request.tools, context)),
         rawAssistantText: newContent,
         toolCalls: [...executedToolCalls],
@@ -3428,7 +3455,8 @@ export class Membrane {
         initialBlockType,
         lastStopSequence,
         lastProviderStopReason,
-        splitRounds
+        splitRounds,
+        verdictsAfterPrefill(fullAccumulated, initialPrefillLength, xmlToolProtocol)
       );
 
       this.mergeProviderThinkingBlocks(response.content, providerThinkingBlocks);

@@ -156,7 +156,26 @@ describe('F3/K8 · a tool block left open by a length stop', () => {
 });
 
 describe('F8 · a function_calls block that parses to zero invokes', () => {
-  it('warns when a block yields no calls', async () => {
+  it('warns when a block of prose alone yields no calls', async () => {
+    const logger = new RecordingLogger();
+    const response = await streamOnce(
+      makeMembrane(
+        [
+          {
+            text: `zz_bot: here goes\n${FUNCTION_CALLS_OPEN}\nzz no invoke here\n</function_calls>`,
+            stopReason: 'stop_sequence',
+            stopSequence: '</function_calls>',
+          },
+        ],
+        logger
+      )
+    );
+
+    expect(response.toolCalls).toEqual([]);
+    expect(logger.warnings.some((w) => w.includes('zero tool calls'))).toBe(true);
+  });
+
+  it('refuses a block whose only invoke has no name: its one call is named "" and marked', async () => {
     const logger = new RecordingLogger();
     const response = await streamOnce(
       makeMembrane(
@@ -171,7 +190,9 @@ describe('F8 · a function_calls block that parses to zero invokes', () => {
       )
     );
 
-    expect(response.toolCalls).toEqual([]);
-    expect(logger.warnings.some((w) => w.includes('zero tool calls'))).toBe(true);
+    expect(response.toolCalls.map((c) => [c.name, c.input])).toEqual([['', {}]]);
+    expect(response.toolCalls[0]?.unparseableInput).toContain('zz_no_name_attribute');
+    expect(response.toolCalls[0]?.unparseableReason).toBe("invoke 1's opening tag can't be read");
+    expect(logger.warnings.some((w) => w.includes('were refused (stray-tag)'))).toBe(true);
   });
 });

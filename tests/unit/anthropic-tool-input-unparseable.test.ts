@@ -158,3 +158,34 @@ describe('membrane parseProviderContent', () => {
     expect(toolUse.unparseableInput).toBe(truncatedArguments);
   });
 });
+
+class ReasonedToolCallAdapter extends TruncatedToolCallAdapter {
+  override async complete(request: ProviderRequest, options?: ProviderRequestOptions): Promise<ProviderResponse> {
+    return this.withReason(await super.complete(request, options));
+  }
+
+  override async stream(request: ProviderRequest, callbacks: StreamCallbacks, options?: ProviderRequestOptions): Promise<ProviderResponse> {
+    return this.withReason(await super.stream(request, callbacks, options));
+  }
+
+  private withReason(response: ProviderResponse): ProviderResponse {
+    const content = (response.content as unknown as Array<Record<string, unknown>>).map((block) => ({ ...block, unparseableReason: 'zz why it was refused' }));
+    return { ...response, content } as unknown as ProviderResponse;
+  }
+}
+
+describe('an adapter\'s tool_use block that carries unparseableReason', () => {
+  it('keeps it on the stream path\'s content', async () => {
+    const response: any = await new Membrane(new ReasonedToolCallAdapter()).stream(createRequest(), { onChunk: () => {} });
+    const toolUse = response.content.find((b: any) => b.type === 'tool_use');
+    expect(toolUse.unparseableInput).toBe(truncatedArguments);
+    expect(toolUse.unparseableReason).toBe('zz why it was refused');
+  });
+
+  it('keeps it on complete()\'s content and call', async () => {
+    const response: any = await new Membrane(new ReasonedToolCallAdapter()).complete(createRequest());
+    const toolUse = response.content.find((b: any) => b.type === 'tool_use');
+    expect(toolUse.unparseableReason).toBe('zz why it was refused');
+    expect(response.toolCalls[0].unparseableReason).toBe('zz why it was refused');
+  });
+});
