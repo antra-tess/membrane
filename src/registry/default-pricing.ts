@@ -193,9 +193,13 @@ export const PRICING_TABLE: readonly PricingRow[] = [
     pricing: { inputPerMillion: 0.20, outputPerMillion: 1.25, cacheReadPerMillion: 0.02, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
   },
   {
-    // Under 272K context.
+    // The model page: "prompts with >272K input tokens are priced at 2x input
+    // and 1.5x output", as for gpt-5.5; no long-context rate for cached input.
     prefix: 'gpt-5.4',
-    pricing: { inputPerMillion: 2.50, outputPerMillion: 15, cacheReadPerMillion: 0.25, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
+    pricing: {
+      inputPerMillion: 2.50, outputPerMillion: 15, cacheReadPerMillion: 0.25, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED,
+      longPrompt: { overTokens: 272_000, inputPerMillion: 5, outputPerMillion: 22.50 },
+    },
   },
   {
     prefix: 'gpt-5.2',

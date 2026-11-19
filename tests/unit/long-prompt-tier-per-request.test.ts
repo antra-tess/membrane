@@ -68,7 +68,7 @@ describe('long-prompt tier, per request', () => {
   });
 
   /** Refuses `refusals` times, each attempt served by the model `served(n)` names, then answers. */
-  function refusing(refusals: number, served: (attempt: number) => string): ProviderAdapter & { calls: number } {
+  function refusing(refusals: number, served: (attempt: number) => string): ProviderAdapter & { calls: number; response: () => ProviderResponse } {
     return new class implements ProviderAdapter {
       readonly name = 'zz-tier-served';
       calls = 0;
@@ -113,6 +113,34 @@ describe('long-prompt tier, per request', () => {
     const reversed = refusing(2, (n) => (n === 2 ? HAIKU : 'zz-unpriced-served'));
     const again = await new Membrane(reversed).complete(request('zz-unpriced'), { refusalRetries: 2 });
     expect(again.details.usage.discardedAttempts!.estimatedCost).toBeUndefined();
+    // Priced, unpriced, priced: the sum does not come back with the third.
+    const three = refusing(3, (n) => (n === 2 ? 'zz-unpriced-served' : HAIKU));
+    const thrice = await new Membrane(three).complete(request('zz-unpriced'), { refusalRetries: 3 });
+    expect(thrice.details.usage.discardedAttempts).toMatchObject({ attempts: 3 });
+    expect(thrice.details.usage.discardedAttempts!.estimatedCost).toBeUndefined();
+  });
+
+  it('prices no attempt whose provider left a usage count unreported, so the attempts carry no sum', async () => {
+    const adapter = refusing(2, () => HAIKU);
+    const original = adapter.response.bind(adapter);
+    adapter.response = () => {
+      const r = original();
+      // The first refusal came with no usage: zeros kept for accounting, marked unreported.
+      if (adapter.calls === 1) Object.assign(r, { usage: { inputTokens: 0, outputTokens: 0 }, unreportedUsage: ['inputTokens', 'outputTokens'] });
+      return r;
+    };
+    const response = await new Membrane(adapter).complete(request(HAIKU), { refusalRetries: 2 });
+    const discarded = response.details.usage.discardedAttempts!;
+    expect(discarded).toMatchObject({ attempts: 2, inputTokens: 60_000 });
+    expect(discarded.estimatedCost).toBeUndefined();
+  });
+
+  it('pricingFor gives a copy whose tier is the caller\'s own', () => {
+    const membrane = new Membrane(refusing(0, () => HAIKU));
+    const copy = membrane.pricingFor(HAIKU)!;
+    copy.longPrompt!.inputPerMillion = 999;
+    expect(membrane.pricingFor(HAIKU)!.longPrompt!.inputPerMillion).toBe(0.50);
+    expect(getDefaultPricing(HAIKU)!.longPrompt!.inputPerMillion).toBe(0.50);
   });
 
   it('prices each abandoned attempt on its own prompt at the streaming refusal-retry site too', async () => {
@@ -131,7 +159,7 @@ describe('long-prompt tier, per request', () => {
   it("prices an abandoned attempt from the caller's model when a beforeRequest hook sent another and the served one is unpriced, at the streaming site", async () => {
     // The caller's registry prices zz-caller; the hook sends zz-hooked (unpriced); the adapter reports an unpriced served model.
     const registry: ModelRegistry = {
-      getPricing: (id) => (id === 'zz-caller' ? { inputPerMillion: 1, outputPerMillion: 2, currency: 'USD' } : undefined),
+      getPricing: (id: string) => (id === 'zz-caller' ? { inputPerMillion: 1, outputPerMillion: 2, currency: 'USD' } : undefined),
       getCapabilities: () => undefined,
       getQuirks: () => undefined,
       getModel: () => undefined,

@@ -141,6 +141,16 @@ describe('calculateCost', () => {
       expect(short.cacheRead).toBeUndefined();
     });
 
+    it('leaves a write unpriced when only the tier\'s 1-hour rate is set and no short rate anywhere', () => {
+      const oneHourOnly: ModelPricing = {
+        inputPerMillion: 1, outputPerMillion: 2, currency: 'USD',
+        longPrompt: { overTokens: 100_000, cacheWrite1hPerMillion: 30 },
+      };
+      const usage: CostableUsage = { inputTokens: 200_000, outputTokens: 0, cacheCreationTokens: 2_000, cacheCreation1hTokens: 1_000 };
+      expect(calculateCost(usage, oneHourOnly).cacheWrite).toBeUndefined();
+      expect(calculateCost({ ...usage, inputTokens: 1_000 }, oneHourOnly).cacheWrite).toBeUndefined();
+    });
+
     it('is ignored by a row without one', () => {
       const cost = calculateCost({ inputTokens: 5_000_000, outputTokens: 0 }, PRICING);
       expect(cost.input).toBeCloseTo(15, 10);
@@ -230,6 +240,11 @@ describe('getDefaultPricing', () => {
     expect(over('gpt-5.5', 272_000).input).toBeCloseTo(272_000 * 5 / 1_000_000, 10);
     expect(over('gpt-5.5', 272_001).output).toBeCloseTo(45, 10);
     expect(over('gpt-5.5', 272_001).input).toBeCloseTo(272_001 * 10 / 1_000_000, 10);
+    // gpt-5.4: the same rule, $2.50/$15 → $5/$22.50.
+    expect(over('gpt-5.4', 272_000).output).toBeCloseTo(15, 10);
+    expect(over('gpt-5.4', 272_001).output).toBeCloseTo(22.50, 10);
+    expect(over('gpt-5.4', 272_001).input).toBeCloseTo(272_001 * 5 / 1_000_000, 10);
+    expect(calculateCost({ inputTokens: 272_001, outputTokens: 0, cacheReadTokens: 1_000_000 }, getDefaultPricing('gpt-5.4')!).cacheRead).toBeCloseTo(0.25, 10);
     expect(calculateCost({ inputTokens: 272_001, outputTokens: 0, cacheReadTokens: 1_000_000 }, getDefaultPricing('gpt-5.5')!).cacheRead).toBeCloseTo(0.50, 10);
     // Gemini Pro: >200k, input and output and the cached-input rate; at 200k the base.
     expect(over('gemini-3.1-pro-preview', 200_000).output).toBeCloseTo(12, 10);
