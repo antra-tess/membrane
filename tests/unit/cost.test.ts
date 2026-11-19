@@ -126,6 +126,21 @@ describe('calculateCost', () => {
       expect(calculateCost(usage, tiered).cacheWrite).toBeCloseTo((1_000 * 3.75 + 1_000 * 6) / 1_000_000, 10);
     });
 
+    it('applies tier cache rates a base row without cache rates lacks', () => {
+      const bare: ModelPricing = {
+        inputPerMillion: 1, outputPerMillion: 2, currency: 'USD',
+        longPrompt: { overTokens: 100_000, cacheWritePerMillion: 5, cacheReadPerMillion: 0.5 },
+      };
+      const usage: CostableUsage = { inputTokens: 200_000, outputTokens: 0, cacheCreationTokens: 1_000, cacheReadTokens: 1_000 };
+      const cost = calculateCost(usage, bare);
+      expect(cost.cacheWrite).toBeCloseTo(0.005, 10);
+      expect(cost.cacheRead).toBeCloseTo(0.0005, 10);
+      // Under the threshold the base row has no cache rates, so neither cost is priced.
+      const short = calculateCost({ ...usage, inputTokens: 1_000 }, bare);
+      expect(short.cacheWrite).toBeUndefined();
+      expect(short.cacheRead).toBeUndefined();
+    });
+
     it('is ignored by a row without one', () => {
       const cost = calculateCost({ inputTokens: 5_000_000, outputTokens: 0 }, PRICING);
       expect(cost.input).toBeCloseTo(15, 10);
@@ -197,6 +212,13 @@ describe('getDefaultPricing', () => {
       calculateCost({ inputTokens: promptTokens, outputTokens: 1_000_000 }, getDefaultPricing(id)!);
     // Haiku 5.5: $0.10/$0.50 up to 100k, $0.50/$2.50 over.
     expect(over('claude-haiku-5-5', 100_000).output).toBeCloseTo(0.50, 10);
+    expect(over('claude-haiku-5-5', 100_000).input).toBeCloseTo(100_000 * 0.10 / 1_000_000, 10);
+    // At exactly 100,000 counted with reads and both write buckets: every component at the base rate.
+    const atWithCache = calculateCost({ inputTokens: 97_000, outputTokens: 1_000, cacheCreationTokens: 2_000, cacheCreation1hTokens: 1_000, cacheReadTokens: 1_000 }, getDefaultPricing('claude-haiku-5-5')!);
+    expect(atWithCache.input).toBeCloseTo(97_000 * 0.10 / 1_000_000, 10);
+    expect(atWithCache.output).toBeCloseTo(1_000 * 0.50 / 1_000_000, 10);
+    expect(atWithCache.cacheWrite).toBeCloseTo((1_000 * 0.125 + 1_000 * 0.20) / 1_000_000, 10);
+    expect(atWithCache.cacheRead).toBeCloseTo(1_000 * 0.01 / 1_000_000, 10);
     expect(over('claude-haiku-5-5', 100_001).output).toBeCloseTo(2.50, 10);
     expect(over('claude-haiku-5-5', 100_001).input).toBeCloseTo(100_001 * 0.50 / 1_000_000, 10);
     // Haiku's long tier writes: $0.625 short, $1 for the 1-hour bucket, $0.05 reads (base $0.125 / $0.20 / $0.01).
@@ -205,6 +227,7 @@ describe('getDefaultPricing', () => {
     expect(haikuLong.cacheRead).toBeCloseTo(0.05, 10);
     // gpt-5.5: 2x input, 1.5x output over 272k; cached input unchanged.
     expect(over('gpt-5.5', 272_000).output).toBeCloseTo(30, 10);
+    expect(over('gpt-5.5', 272_000).input).toBeCloseTo(272_000 * 5 / 1_000_000, 10);
     expect(over('gpt-5.5', 272_001).output).toBeCloseTo(45, 10);
     expect(over('gpt-5.5', 272_001).input).toBeCloseTo(272_001 * 10 / 1_000_000, 10);
     expect(calculateCost({ inputTokens: 272_001, outputTokens: 0, cacheReadTokens: 1_000_000 }, getDefaultPricing('gpt-5.5')!).cacheRead).toBeCloseTo(0.50, 10);
@@ -216,6 +239,7 @@ describe('getDefaultPricing', () => {
     expect(over('gemini-3.1-pro-preview-customtools', 200_001).output).toBeCloseTo(18, 10);
     expect(calculateCost({ inputTokens: 200_001, outputTokens: 0, cacheReadTokens: 1_000_000 }, getDefaultPricing('gemini-3.1-pro-preview')!).cacheRead).toBeCloseTo(0.40, 10);
     expect(over('gemini-2.5-pro', 200_000).output).toBeCloseTo(10, 10);
+    expect(over('gemini-2.5-pro', 200_000).input).toBeCloseTo(200_000 * 1.25 / 1_000_000, 10);
     expect(over('gemini-2.5-pro', 200_001).output).toBeCloseTo(15, 10);
     expect(over('gemini-2.5-pro', 200_001).input).toBeCloseTo(200_001 * 2.50 / 1_000_000, 10);
     expect(calculateCost({ inputTokens: 200_001, outputTokens: 0, cacheReadTokens: 1_000_000 }, getDefaultPricing('gemini-2.5-pro')!).cacheRead).toBeCloseTo(0.25, 10);
