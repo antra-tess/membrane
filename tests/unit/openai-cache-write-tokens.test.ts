@@ -114,9 +114,16 @@ describe('OpenAI rows', () => {
       const row = getDefaultPricing(id)!;
       expect(row.cacheWritePerMillion, id).toBeCloseTo(row.inputPerMillion * 1.25, 12);
     }
-    for (const id of ['gpt-5.5', 'gpt-5.4-mini', 'gpt-5.4-nano', 'gpt-5.4', 'gpt-5.2', 'gpt-5.1', 'gpt-5-mini', 'gpt-5-nano', 'gpt-5', 'gpt-4o-mini', 'gpt-4o-2024-05-13', 'gpt-4o']) {
+    // Each id with its own row's input rate, so a removed or renamed row can't pass on a
+    // prefix neighbour's equal rates (gpt-5.1 and gpt-5 are priced the same, and are the one pair this can't tell apart).
+    const earlier: Record<string, number> = {
+      'gpt-5.5': 5, 'gpt-5.4-mini': 0.75, 'gpt-5.4-nano': 0.20, 'gpt-5.4': 2.50, 'gpt-5.2': 1.75, 'gpt-5.1': 1.25,
+      'gpt-5-mini': 0.25, 'gpt-5-nano': 0.05, 'gpt-5': 1.25, 'gpt-4o-mini': 0.15, 'gpt-4o-2024-05-13': 5, 'gpt-4o': 2.50,
+    };
+    for (const [id, inputPerMillion] of Object.entries(earlier)) {
       const row = getDefaultPricing(id)!;
-      expect(row.cacheWritePerMillion, id).toBe(row.inputPerMillion);
+      expect(row.inputPerMillion, id).toBe(inputPerMillion);
+      expect(row.cacheWritePerMillion, id).toBe(inputPerMillion);
     }
   });
 
