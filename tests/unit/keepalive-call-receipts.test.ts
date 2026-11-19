@@ -81,7 +81,7 @@ describe('keepalive terminal call receipts', () => {
     expect(ka.getStatus()).toEqual([]);
   });
 
-  it('reports failed sends exactly once and preserves the error and breaker behavior', async () => {
+  it('reports failed sends exactly once and preserves the error, and drops the lineage at the failure cap', async () => {
     const error = Object.assign(new Error('Upstream failed'), { status: 503 });
     const send = vi.fn().mockRejectedValue(error);
     const { ka, calls, events } = setup(send, { maxConsecutiveErrors: 2 });
@@ -95,7 +95,8 @@ describe('keepalive terminal call receipts', () => {
       expect(call.request.max_tokens).toBe(0);
       expect(call).not.toHaveProperty('headers');
     }
-    expect(events.map(e => e.type)).toEqual(['error', 'error', 'disabled']);
+    expect(events.map(e => e.type)).toEqual(['error', 'error', 'skipped']);
+    expect(events[2]).toMatchObject({ reason: 'failure-cap' });
     expect(ka.getStatus()).toEqual([]);
   });
 
@@ -159,7 +160,8 @@ describe('keepalive terminal call receipts', () => {
     await vi.advanceTimersByTimeAsync(200);
     expect(send).not.toHaveBeenCalled();
     expect(calls).toEqual([]);
-    expect(events.map(event => event.type)).toEqual(['error', 'disabled']);
+    expect(events.map(event => event.type)).toEqual(['error', 'skipped']);
+    expect(events[1]).toMatchObject({ reason: 'failure-cap' });
     expect(ka.getStatus()).toEqual([]);
   });
 
@@ -212,10 +214,10 @@ describe('Anthropic adapter receipt integration', () => {
     expect(metadataToJSON).toHaveBeenCalledTimes(2);
   });
 
-  it('reports one terminal receipt for a poke with an SDK-internal HTTP retry', async () => {
+  it('reports one terminal receipt for a poke whose 401 the adapter resends with refreshed credentials', async () => {
     const calls: KeepaliveCall[] = [];
     const requests: any[] = [];
-    let httpCalls = 0;
+    const authorizations: string[] = [];
     const terminal = {
       id: 'poke_response', type: 'message', role: 'assistant', model: 'claude-sonnet-4-5',
       content: [], stop_reason: 'max_tokens', stop_sequence: null, usage,
@@ -223,16 +225,16 @@ describe('Anthropic adapter receipt integration', () => {
     };
     vi.stubGlobal('fetch', vi.fn(async (_input, init) => {
       requests.push(JSON.parse(init.body));
-      httpCalls++;
-      if (httpCalls === 2) {
-        return new Response(JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'Try again' } }), {
-          status: 429, headers: { 'content-type': 'application/json', 'retry-after-ms': '20' },
+      authorizations.push(new Headers(init.headers).get('authorization') ?? '');
+      if (requests.length === 2) {
+        return new Response(JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: 'zz expired' } }), {
+          status: 401, headers: { 'content-type': 'application/json' },
         });
       }
       return new Response(JSON.stringify(terminal), { headers: { 'content-type': 'application/json' } });
     }));
     const adapter = new AnthropicAdapter({
-      apiKey: 'test-key',
+      credentials: async ({ forceRefresh }) => ({ token: forceRefresh ? 'zz-new' : 'zz-old' }),
       cacheKeepalive: {
         lanes: ['complete'], refreshAfterMs: 100, checkIntervalMs: 100, maxIdleMs: 1000,
         onCall: call => { calls.push(call); },
@@ -246,11 +248,11 @@ describe('Anthropic adapter receipt integration', () => {
     });
     expect(calls).toEqual([]);
     await vi.advanceTimersByTimeAsync(150);
-    expect(httpCalls).toBe(3);
+    expect(requests).toHaveLength(3);
+    expect(authorizations.slice(1)).toEqual(['Bearer zz-old', 'Bearer zz-new']);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({
-      outcome: 'success', lane: 'complete', response: terminal,
-      startedAt: START + 100, durationMs: 20,
+      outcome: 'success', lane: 'complete', response: terminal, startedAt: START + 100,
     });
     const { stream: _stream, ...seed } = requests[0];
     expect(requests[1]).toEqual({ ...seed, max_tokens: 0 });

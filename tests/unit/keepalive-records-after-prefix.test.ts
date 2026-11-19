@@ -158,7 +158,7 @@ describe('the stream lane records a request at message_start', () => {
     expect(client.messages.stream.mock.calls.filter(([wire]: any[]) => isRefused(wire))).toHaveLength(3);
     await a.stream(request('Resident system H'), noCallbacks);
     await vi.advanceTimersByTimeAsync(1000);
-    expect(events.filter(e => e.type === 'error' || e.type === 'disabled')).toEqual([]);
+    expect(events.filter(e => e.type === 'error')).toEqual([]);
     expect(replays().filter(isRefused)).toEqual([]);
     expect(events.filter(e => e.type === 'refreshed').length).toBeGreaterThan(3);
     expect(a.cacheKeepalive!.getStatus()).toHaveLength(1);
@@ -309,7 +309,7 @@ describe('the touch counts from the send', () => {
     expect(replays()).toHaveLength(2);
   });
 
-  it('a refresh that fails 40 ms after its send backs off from the failure, not its send', async () => {
+  it('a refresh that fails 40 ms after its send leaves the touch at the real call, so the next check tries again', async () => {
     let hold: ReturnType<typeof held> | undefined;
     const { a, events } = adapter(fine, async wire => {
       if (wire.max_tokens === 0 && hold) {
@@ -325,13 +325,15 @@ describe('the touch counts from the send', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(events.filter(e => e.type === 'error')).toHaveLength(1);
     const [lineage] = a.cacheKeepalive!.getStatus();
-    expect(lineage!.idleMs).toBe(0);
+    expect(lineage!.idleMs).toBe(140);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(events.filter(e => e.type === 'error')).toHaveLength(2);
   });
 
-  it('a call sent before another on its lineage but recorded after it: its touch is its own send, its window the later call\'s', async () => {
+  it('a call sent before another on its lineage but recorded after it changes nothing: the later call\'s snapshot, touch and window stay', async () => {
     const first = held();
     let calls = 0;
-    const { a } = adapter(fine, replayAnswer,
+    const { a, replays } = adapter(fine, replayAnswer,
       () => ++calls === 1 ? heldStream(first.promise, [messageStart, ...rest]) : sdkStream([messageStart, ...rest]));
     const older = a.stream(request('Resident system X', 2), noCallbacks);
     await vi.advanceTimersByTimeAsync(80);
@@ -341,8 +343,11 @@ describe('the touch counts from the send', () => {
     await older;
     const [lineage, ...others] = a.cacheKeepalive!.getStatus();
     expect(others).toEqual([]);
-    expect(lineage!.idleMs).toBe(90);
+    expect(lineage!.idleMs).toBe(10);
     expect(lineage!.realIdleMs).toBe(10);
+    await vi.advanceTimersByTimeAsync(90);
+    expect(replays()).toHaveLength(1);
+    expect(replays()[0].messages).toHaveLength(1);
   });
 });
 
