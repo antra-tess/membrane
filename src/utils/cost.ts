@@ -69,10 +69,12 @@ function cacheWriteCost(usage: CostableUsage, shortRate: number, oneHourRate: nu
 
 /**
  * Every input token the request was billed for: fresh, cache-written and
- * cache-read. Correct for cache-excluded counts, which every adapter that
- * declares a `usageCacheConvention` is normalized to before costing; an
- * adapter that declares none is not normalized, and a cache-inclusive count
- * from one would put its reads in the sum twice.
+ * cache-read. Correct for cache-excluded counts, which an adapter declaring
+ * `usageCacheConvention` 'cache-inclusive' or 'cache-excluded' is normalized
+ * to before costing; one declaring 'unknown' (openai-compatible,
+ * openai-completions, openrouter) passes its counts through as they are, and
+ * a cache-inclusive count from one puts its reads in this sum twice — as it
+ * already put them in the input cost twice.
  */
 export function promptTokens(usage: CostableUsage): number {
   return usage.inputTokens + (usage.cacheCreationTokens ?? 0) + (usage.cacheReadTokens ?? 0);
@@ -98,10 +100,11 @@ export function ratesFor(usage: CostableUsage, pricing: ModelPricing): ModelPric
 
 /**
  * The cost of ONE request's usage, in cache-excluded counts (`inputTokens`
- * without the cached span, as every adapter that declares a cache convention
- * is normalized to before costing). A sum of several requests' counts is not
- * one request: the long-prompt tier is chosen per request, so price each and
- * add the breakdowns (`addCostBreakdowns`).
+ * without the cached span, as an adapter declaring 'cache-inclusive' or
+ * 'cache-excluded' is normalized to before costing; see `promptTokens`). A
+ * sum of several requests' counts is not one request: the long-prompt tier
+ * is chosen per request, so price each and add the breakdowns
+ * (`addCostBreakdowns`, exported with this).
  */
 export function calculateCost(usage: CostableUsage, basePricing: ModelPricing): CostBreakdown {
   const pricing = ratesFor(usage, basePricing);
