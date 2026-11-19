@@ -14,6 +14,7 @@ import type {
   NormalizedMessage,
   StreamCallbacks,
   ModelRegistry,
+  ModelPricing,
   MembraneConfig,
   MembraneLogger,
   StreamOptions,
@@ -116,6 +117,7 @@ import {
 import { convertMcpMedia } from './utils/mcp-media.js';
 import { isEffortOnlyMessage } from './utils/empty-text.js';
 import { getDefaultPricing } from './registry/default-pricing.js';
+import { modelTakesToolOrSystemChanges } from './registry/model-capabilities.js';
 import { FidelityNotes, isRawItemCarrier, requestFingerprint, type MessageOrigin } from './utils/fidelity.js';
 
 /** Anthropic's thinking-binding controls, as a thinking config carries them. */
@@ -466,6 +468,37 @@ export class Membrane {
     this.retrySettings = membraneRetrySettings(resolveRetryConfig(config.retry));
     this.config = config;
     this.formatter = config.formatter ?? new AnthropicXmlFormatter();
+  }
+
+  /**
+   * Whether a request to `model` can carry a `system_change` block that
+   * changes tools or system text (SystemChangeContent): the formatter that
+   * the request goes through renders one, the adapter sends one, and the
+   * model isn't one that refuses one (`modelTakesToolOrSystemChanges`).
+   * `options.formatter` is the request's own formatter, as in `complete` and
+   * `stream`. Where the formatter or the adapter makes this false, membrane
+   * refuses such a request before it is sent. Where the model does, the model
+   * refused one in a run or comes before the models that did. Where it is
+   * true, the formatter still refuses a change that it can't place, and a
+   * model that no run covers may refuse one with a 400 that
+   * `systemChangeRefused` marks. A block that changes only the effort has
+   * rules of its own, which this doesn't answer.
+   */
+  takesToolOrSystemChanges(model: string, options: { formatter?: PrefillFormatter } = {}): boolean {
+    return this.resolveActiveFormatter(options.formatter).rendersSystemChanges === true
+      && this.adapter.sendsSystemChanges === true
+      && modelTakesToolOrSystemChanges(model);
+  }
+
+  /**
+   * A copy of the prices that this membrane gives a request to `model` as of
+   * now: the registry's, else the built-in table's. A response that names
+   * another model as the one that served it is priced at that model's
+   * prices. Undefined where neither prices `model`.
+   */
+  pricingFor(model: string): ModelPricing | undefined {
+    const pricing = this.resolvePricing(model);
+    return pricing && { ...pricing };
   }
 
   /**
@@ -2732,7 +2765,7 @@ export class Membrane {
   private resolvePricing(
     requestedModel: string,
     actualModel?: string
-  ): import('./types/provider.js').ModelPricing | undefined {
+  ): ModelPricing | undefined {
     const servedModel = actualModel && actualModel !== requestedModel ? actualModel : undefined;
     const fromRegistry = (modelId: string | undefined) =>
       modelId === undefined ? undefined : runCallerCode(() => this.registry?.getPricing(modelId));
