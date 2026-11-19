@@ -500,7 +500,9 @@ export class Membrane {
    */
   pricingFor(model: string): ModelPricing | undefined {
     const pricing = this.resolvePricing(model);
-    return pricing && { ...pricing };
+    // A copy the caller may change, its tier included: the row's own tier
+    // object must not be shared out of the registry or the built-in table.
+    return pricing && { ...pricing, ...(pricing.longPrompt ? { longPrompt: { ...pricing.longPrompt } } : {}) };
   }
 
   /**

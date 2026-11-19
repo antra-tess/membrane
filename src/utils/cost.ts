@@ -71,8 +71,10 @@ function cacheWriteCost(usage: CostableUsage, shortRate: number, oneHourRate: nu
  * Every input token the request was billed for: fresh, cache-written and
  * cache-read. Correct for cache-excluded counts, which an adapter declaring
  * `usageCacheConvention` 'cache-inclusive' or 'cache-excluded' is normalized
- * to before costing; one declaring 'unknown' (openai-compatible,
- * openai-completions, openrouter) passes its counts through as they are, and
+ * to before costing, as is a response that declares one itself (OpenRouter
+ * does, for an OpenAI-shaped cached usage); an adapter declaring 'unknown'
+ * (openai-compatible, openai-completions, openrouter) whose response
+ * declares none passes its counts through as they are, and
  * a cache-inclusive count from one puts its reads in this sum twice — as it
  * already put them in the input cost twice.
  */
