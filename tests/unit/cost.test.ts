@@ -235,7 +235,7 @@ describe('getDefaultPricing', () => {
     const haikuLong = calculateCost({ inputTokens: 100_001, outputTokens: 0, cacheCreationTokens: 2_000, cacheCreation1hTokens: 1_000, cacheReadTokens: 1_000_000 }, getDefaultPricing('claude-haiku-5-5')!);
     expect(haikuLong.cacheWrite).toBeCloseTo((1_000 * 0.625 + 1_000 * 1) / 1_000_000, 10);
     expect(haikuLong.cacheRead).toBeCloseTo(0.05, 10);
-    // gpt-5.5: 2x input, 1.5x output over 272k; cached input unchanged.
+    // gpt-5.5: 2x input, 2x cached input, 1.5x output over 272k (the pricing page's long-context column).
     expect(over('gpt-5.5', 272_000).output).toBeCloseTo(30, 10);
     expect(over('gpt-5.5', 272_000).input).toBeCloseTo(272_000 * 5 / 1_000_000, 10);
     expect(over('gpt-5.5', 272_001).output).toBeCloseTo(45, 10);
@@ -244,8 +244,17 @@ describe('getDefaultPricing', () => {
     expect(over('gpt-5.4', 272_000).output).toBeCloseTo(15, 10);
     expect(over('gpt-5.4', 272_001).output).toBeCloseTo(22.50, 10);
     expect(over('gpt-5.4', 272_001).input).toBeCloseTo(272_001 * 5 / 1_000_000, 10);
-    expect(calculateCost({ inputTokens: 272_001, outputTokens: 0, cacheReadTokens: 1_000_000 }, getDefaultPricing('gpt-5.4')!).cacheRead).toBeCloseTo(0.25, 10);
-    expect(calculateCost({ inputTokens: 272_001, outputTokens: 0, cacheReadTokens: 1_000_000 }, getDefaultPricing('gpt-5.5')!).cacheRead).toBeCloseTo(0.50, 10);
+    expect(calculateCost({ inputTokens: 272_001, outputTokens: 0, cacheReadTokens: 1_000_000 }, getDefaultPricing('gpt-5.4')!).cacheRead).toBeCloseTo(0.50, 10);
+    // The four newest OpenAI rows: the same column, 2× / 2× cached / 1.5×.
+    for (const [id, inp, cached, out] of [['gpt-6-astra', 20, 2.00, 75], ['gpt-5.6-sol', 8, 0.80, 30], ['gpt-5.6-terra', 4, 0.40, 18], ['gpt-5.6-luna', 0.40, 0.04, 1.80]] as const) {
+      expect(over(id, 272_001).input, id).toBeCloseTo(272_001 * inp / 1_000_000, 10);
+      expect(over(id, 272_001).output, id).toBeCloseTo(out, 10);
+      expect(calculateCost({ inputTokens: 272_001, outputTokens: 0, cacheReadTokens: 1_000_000 }, getDefaultPricing(id)!).cacheRead, id).toBeCloseTo(cached, 10);
+      expect(over(id, 272_000).input, id).toBeCloseTo(272_000 * getDefaultPricing(id)!.inputPerMillion / 1_000_000, 10);
+    }
+    expect(calculateCost({ inputTokens: 272_001, outputTokens: 0, cacheReadTokens: 1_000_000 }, getDefaultPricing('gpt-5.5')!).cacheRead).toBeCloseTo(1.00, 10);
+    // At the threshold counted with the reads (reads are prompt length too): the base cached rate.
+    expect(calculateCost({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 272_000 }, getDefaultPricing('gpt-5.5')!).cacheRead).toBeCloseTo(272_000 * 0.50 / 1_000_000, 10);
     // Gemini Pro: >200k, input and output and the cached-input rate; at 200k the base.
     expect(over('gemini-3.1-pro-preview', 200_000).output).toBeCloseTo(12, 10);
     expect(over('gemini-3.1-pro-preview', 200_000).input).toBeCloseTo(200_000 * 2 / 1_000_000, 10);

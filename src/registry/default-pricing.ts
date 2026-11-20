@@ -159,29 +159,54 @@ export const PRICING_TABLE: readonly PricingRow[] = [
   // OpenAI — https://platform.openai.com/docs/pricing (standard tier).
   // "Cached input" is OpenAI's rate for the automatically cached prompt prefix.
   {
+    // OpenAI's pricing page, long-context column ("Short context: ≤272K input
+    // tokens. Long context: >272K input tokens"): 2× input, 2× cached input,
+    // 1.5× output, for the full request.
     prefix: 'gpt-6-astra',
-    pricing: { inputPerMillion: 10, outputPerMillion: 50, cacheReadPerMillion: 1.00, currency: 'USD', asOf: '2026-09-06' },
+    pricing: {
+      inputPerMillion: 10, outputPerMillion: 50, cacheReadPerMillion: 1.00, currency: 'USD', asOf: '2026-09-06',
+      longPrompt: { overTokens: 272_000, inputPerMillion: 20, outputPerMillion: 75, cacheReadPerMillion: 2.00 },
+    },
   },
   {
+    // OpenAI's pricing page, long-context column ("Short context: ≤272K input
+    // tokens. Long context: >272K input tokens"): 2× input, 2× cached input,
+    // 1.5× output, for the full request.
     prefix: 'gpt-5.6-sol',
-    pricing: { inputPerMillion: 4, outputPerMillion: 20, cacheReadPerMillion: 0.40, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
+    pricing: {
+      inputPerMillion: 4, outputPerMillion: 20, cacheReadPerMillion: 0.40, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED,
+      longPrompt: { overTokens: 272_000, inputPerMillion: 8, outputPerMillion: 30, cacheReadPerMillion: 0.80 },
+    },
   },
   {
+    // OpenAI's pricing page, long-context column ("Short context: ≤272K input
+    // tokens. Long context: >272K input tokens"): 2× input, 2× cached input,
+    // 1.5× output, for the full request.
     prefix: 'gpt-5.6-terra',
-    pricing: { inputPerMillion: 2, outputPerMillion: 12, cacheReadPerMillion: 0.20, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
+    pricing: {
+      inputPerMillion: 2, outputPerMillion: 12, cacheReadPerMillion: 0.20, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED,
+      longPrompt: { overTokens: 272_000, inputPerMillion: 4, outputPerMillion: 18, cacheReadPerMillion: 0.40 },
+    },
   },
   {
+    // OpenAI's pricing page, long-context column ("Short context: ≤272K input
+    // tokens. Long context: >272K input tokens"): 2× input, 2× cached input,
+    // 1.5× output, for the full request.
     prefix: 'gpt-5.6-luna',
-    pricing: { inputPerMillion: 0.20, outputPerMillion: 1.20, cacheReadPerMillion: 0.02, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
+    pricing: {
+      inputPerMillion: 0.20, outputPerMillion: 1.20, cacheReadPerMillion: 0.02, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED,
+      longPrompt: { overTokens: 272_000, inputPerMillion: 0.40, outputPerMillion: 1.80, cacheReadPerMillion: 0.04 },
+    },
   },
   {
-    // The model page: "prompts with >272K input tokens are priced at 2x input
-    // and 1.5x output". It states no long-context rate for cached input, so
-    // that one stays at the base rate.
+    // OpenAI's pricing page, long-context column: $10 / $1.00 cached / $45
+    // over 272K. The model page says "prompts with >272K input tokens are
+    // priced at 2x input and 1.5x output for the full session for standard,
+    // batch, and flex"; the pricing page gives the cached-input rate too.
     prefix: 'gpt-5.5',
     pricing: {
       inputPerMillion: 5, outputPerMillion: 30, cacheReadPerMillion: 0.50, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED,
-      longPrompt: { overTokens: 272_000, inputPerMillion: 10, outputPerMillion: 45 },
+      longPrompt: { overTokens: 272_000, inputPerMillion: 10, outputPerMillion: 45, cacheReadPerMillion: 1.00 },
     },
   },
   {
@@ -193,12 +218,12 @@ export const PRICING_TABLE: readonly PricingRow[] = [
     pricing: { inputPerMillion: 0.20, outputPerMillion: 1.25, cacheReadPerMillion: 0.02, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
   },
   {
-    // The model page: "prompts with >272K input tokens are priced at 2x input
-    // and 1.5x output", as for gpt-5.5; no long-context rate for cached input.
+    // OpenAI's pricing page, long-context column: $5 / $0.50 cached / $22.50
+    // over 272K; the model page's sentence is gpt-5.5's.
     prefix: 'gpt-5.4',
     pricing: {
       inputPerMillion: 2.50, outputPerMillion: 15, cacheReadPerMillion: 0.25, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED,
-      longPrompt: { overTokens: 272_000, inputPerMillion: 5, outputPerMillion: 22.50 },
+      longPrompt: { overTokens: 272_000, inputPerMillion: 5, outputPerMillion: 22.50, cacheReadPerMillion: 0.50 },
     },
   },
   {

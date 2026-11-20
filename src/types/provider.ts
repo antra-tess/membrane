@@ -77,9 +77,11 @@ export type UsageCacheConvention = 'cache-excluded' | 'cache-inclusive' | 'unkno
  * length is every input token the request was billed for: fresh input, cache
  * writes and cache reads together (Anthropic's definition for Haiku 5.5; the
  * natural reading of "prompt" for Google's and OpenAI's tiers, which don't say).
- * Each request is priced on its own. A rate left unset keeps the row's base
- * rate, which is how OpenAI's long-context tier, stated for input and output
- * only, is written.
+ * Each request is priced on its own: Anthropic says so; OpenAI's model pages
+ * say the long rates apply "for the full session" (gpt-5.5, gpt-5.4) or "for
+ * the full request" (gpt-5.6), which this library reads as the whole request
+ * whose prompt crossed the line, not the tokens past it and not a
+ * conversation. A rate left unset keeps the row's base rate.
  */
 export interface LongPromptPricing {
   /** Prompts strictly longer than this many tokens take these rates. */
