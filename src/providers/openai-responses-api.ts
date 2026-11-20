@@ -64,7 +64,7 @@ export interface OpenAIResponsesAPIResponse {
     input_tokens?: number;
     output_tokens?: number;
     total_tokens?: number;
-    input_tokens_details?: { cached_tokens?: number } | null;
+    input_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number } | null;
     output_tokens_details?: { reasoning_tokens?: number } | null;
   } | null;
   [key: string]: unknown;
@@ -181,9 +181,10 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
   readonly reportsContentAlterations = true;
 
   /**
-   * Reads `usage.input_tokens_details.cached_tokens` from OpenAI's automatic
-   * prompt caching, whose cached span is a subset of the input count on
-   * /v1/chat/completions; no cache hit has confirmed it on /v1/responses.
+   * Reads `usage.input_tokens_details.cached_tokens` and `cache_write_tokens`
+   * from OpenAI's automatic prompt caching. Both are inside `input_tokens`:
+   * the prompt-caching guide's example has 12,000 input tokens of which 4,000
+   * are reads and 7,000 writes, "1,000 input tokens are ordinary input".
    */
   readonly usageCacheConvention = 'cache-inclusive' as const;
 
@@ -552,6 +553,10 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
     const outputItems = Array.isArray(response.output) ? response.output : [];
     const content = this.outputToContent(outputItems);
     const cachedTokens = response.usage?.input_tokens_details?.cached_tokens;
+    // Billed at 1.25× input on GPT-5.6 and later, as input before (the
+    // 30-minute cache; 12-hour writes at 2.5× are a bucket this count does
+    // not yet split out).
+    const writtenTokens = response.usage?.input_tokens_details?.cache_write_tokens;
 
     return {
       content,
@@ -563,6 +568,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
         inputTokens: response.usage?.input_tokens ?? 0,
         outputTokens: response.usage?.output_tokens ?? 0,
         ...(typeof cachedTokens === 'number' ? { cacheReadTokens: cachedTokens } : {}),
+        ...(typeof writtenTokens === 'number' ? { cacheCreationTokens: writtenTokens } : {}),
       },
       ...unreportedUsage(response.usage?.input_tokens, response.usage?.output_tokens),
       model: response.model ?? requestedModel,

@@ -82,7 +82,12 @@ export interface ModelPricing {
   /**
    * Cost per million cache write tokens — the provider's shortest cache TTL
    * (Anthropic's 5-minute bucket). Also the rate for every write when the
-   * usage report does not say which TTL a write had.
+   * usage report does not say which TTL a write had. Unset, writes are not
+   * priced (`calculateCost` has no input-rate fallback, by design — see its
+   * test). So a row for a provider whose adapter reports writes inside its
+   * input count (OpenAI's Responses API) must carry one, or the writes the
+   * normalization takes out of `inputTokens` are priced nowhere: the input
+   * rate itself where the provider charges nothing extra for a write.
    */
   cacheWritePerMillion?: number;
 

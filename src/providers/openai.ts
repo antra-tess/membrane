@@ -532,7 +532,8 @@ export class OpenAIAdapter implements ProviderAdapter {
       usage: {
         inputTokens: response.usage?.prompt_tokens ?? 0,
         outputTokens: response.usage?.completion_tokens ?? 0,
-        // OpenAI has no separate cache-creation count: its caching is automatic.
+        // Chat Completions usage has no cache-creation count (the Responses API reports one:
+        // input_tokens_details.cache_write_tokens, read in openai-responses-api.ts).
         ...(typeof cachedTokens === 'number' ? { cacheReadTokens: cachedTokens } : {}),
       },
       ...unreportedUsage(response.usage?.prompt_tokens, response.usage?.completion_tokens),
