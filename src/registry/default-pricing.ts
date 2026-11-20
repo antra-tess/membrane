@@ -176,24 +176,48 @@ export const PRICING_TABLE: readonly PricingRow[] = [
     pricing: { inputPerMillion: 10, outputPerMillion: 50, cacheWritePerMillion: 10, cacheReadPerMillion: 1.00, currency: 'USD', asOf: '2026-11-22' },
   },
   {
+    // OpenAI's pricing page, long-context column ("Short context: ≤272K input
+    // tokens. Long context: >272K input tokens"): 2× input, 2× cached input,
+    // 1.5× output, for the full request.
     prefix: 'gpt-6-astra',
-    pricing: { inputPerMillion: 10, outputPerMillion: 50, cacheWritePerMillion: 12.5, cacheWrite1hPerMillion: 25, cacheReadPerMillion: 1.00, currency: 'USD', asOf: '2026-09-06' },
+    pricing: {
+      inputPerMillion: 10, outputPerMillion: 50, cacheWritePerMillion: 12.5, cacheWrite1hPerMillion: 25, cacheReadPerMillion: 1.00, currency: 'USD', asOf: '2026-09-06',
+      longPrompt: { overTokens: 272_000, inputPerMillion: 20, outputPerMillion: 75, cacheReadPerMillion: 2.00 },
+    },
   },
   {
     prefix: 'gpt-6.1-sol',
     pricing: { inputPerMillion: 2, outputPerMillion: 10, cacheReadPerMillion: 0.10, currency: 'USD', asOf: '2026-11-09' },
   },
   {
+    // OpenAI's pricing page, long-context column ("Short context: ≤272K input
+    // tokens. Long context: >272K input tokens"): 2× input, 2× cached input,
+    // 1.5× output, for the full request.
     prefix: 'gpt-5.6-sol',
-    pricing: { inputPerMillion: 4, outputPerMillion: 20, cacheWritePerMillion: 5, cacheWrite1hPerMillion: 10, cacheReadPerMillion: 0.40, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
+    pricing: {
+      inputPerMillion: 4, outputPerMillion: 20, cacheWritePerMillion: 5, cacheWrite1hPerMillion: 10, cacheReadPerMillion: 0.40, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED,
+      longPrompt: { overTokens: 272_000, inputPerMillion: 8, outputPerMillion: 30, cacheReadPerMillion: 0.80 },
+    },
   },
   {
+    // OpenAI's pricing page, long-context column ("Short context: ≤272K input
+    // tokens. Long context: >272K input tokens"): 2× input, 2× cached input,
+    // 1.5× output, for the full request.
     prefix: 'gpt-5.6-terra',
-    pricing: { inputPerMillion: 2, outputPerMillion: 12, cacheWritePerMillion: 2.5, cacheWrite1hPerMillion: 5, cacheReadPerMillion: 0.20, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
+    pricing: {
+      inputPerMillion: 2, outputPerMillion: 12, cacheWritePerMillion: 2.5, cacheWrite1hPerMillion: 5, cacheReadPerMillion: 0.20, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED,
+      longPrompt: { overTokens: 272_000, inputPerMillion: 4, outputPerMillion: 18, cacheReadPerMillion: 0.40 },
+    },
   },
   {
+    // OpenAI's pricing page, long-context column ("Short context: ≤272K input
+    // tokens. Long context: >272K input tokens"): 2× input, 2× cached input,
+    // 1.5× output, for the full request.
     prefix: 'gpt-5.6-luna',
-    pricing: { inputPerMillion: 0.20, outputPerMillion: 1.20, cacheWritePerMillion: 0.25, cacheWrite1hPerMillion: 0.50, cacheReadPerMillion: 0.02, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
+    pricing: {
+      inputPerMillion: 0.20, outputPerMillion: 1.20, cacheWritePerMillion: 0.25, cacheWrite1hPerMillion: 0.50, cacheReadPerMillion: 0.02, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED,
+      longPrompt: { overTokens: 272_000, inputPerMillion: 0.40, outputPerMillion: 1.80, cacheReadPerMillion: 0.04 },
+    },
   },
   {
     // Cyber (Trusted Access) configuration of GPT-5.6: the page's "Specialized
@@ -207,13 +231,15 @@ export const PRICING_TABLE: readonly PricingRow[] = [
   // tenth of a 5.6 model's rates and a write rate that isn't 1.25×.
   { prefix: 'gpt-5.6', pricing: null },
   {
-    // The model page: "prompts with >272K input tokens are priced at 2x input
-    // and 1.5x output". It states no long-context rate for cached input or for
-    // a cache write, so those stay at the base rates.
+    // OpenAI's pricing page, long-context column: $10 / $1.00 cached / $45
+    // over 272K. The model page says "prompts with >272K input tokens are
+    // priced at 2x input and 1.5x output for the full session for standard,
+    // batch, and flex"; the pricing page gives the cached-input rate too.
+    // The tier carries no write rate, so a cache write keeps the base one.
     prefix: 'gpt-5.5',
     pricing: {
       inputPerMillion: 5, outputPerMillion: 30, cacheWritePerMillion: 5, cacheReadPerMillion: 0.50, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED,
-      longPrompt: { overTokens: 272_000, inputPerMillion: 10, outputPerMillion: 45 },
+      longPrompt: { overTokens: 272_000, inputPerMillion: 10, outputPerMillion: 45, cacheReadPerMillion: 1.00 },
     },
   },
   {
@@ -225,12 +251,12 @@ export const PRICING_TABLE: readonly PricingRow[] = [
     pricing: { inputPerMillion: 0.20, outputPerMillion: 1.25, cacheWritePerMillion: 0.20, cacheReadPerMillion: 0.02, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
   },
   {
-    // The model page: "prompts with >272K input tokens are priced at 2x input
-    // and 1.5x output", as for gpt-5.5; no long-context rate for cached input.
+    // OpenAI's pricing page, long-context column: $5 / $0.50 cached / $22.50
+    // over 272K; the model page's sentence is gpt-5.5's.
     prefix: 'gpt-5.4',
     pricing: {
       inputPerMillion: 2.50, outputPerMillion: 15, cacheWritePerMillion: 2.50, cacheReadPerMillion: 0.25, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED,
-      longPrompt: { overTokens: 272_000, inputPerMillion: 5, outputPerMillion: 22.50 },
+      longPrompt: { overTokens: 272_000, inputPerMillion: 5, outputPerMillion: 22.50, cacheReadPerMillion: 0.50 },
     },
   },
   {
