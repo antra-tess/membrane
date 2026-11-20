@@ -67,7 +67,49 @@ function cacheWriteCost(usage: CostableUsage, shortRate: number, oneHourRate: nu
   return (short * shortRate + oneHour * (oneHourRate ?? shortRate)) / 1_000_000;
 }
 
-export function calculateCost(usage: CostableUsage, pricing: ModelPricing): CostBreakdown {
+/**
+ * Every input token the request was billed for: fresh, cache-written and
+ * cache-read. Correct for cache-excluded counts, which an adapter declaring
+ * `usageCacheConvention` 'cache-inclusive' or 'cache-excluded' is normalized
+ * to before costing, as is a response that declares one itself (OpenRouter
+ * does, for an OpenAI-shaped cached usage); an adapter declaring 'unknown'
+ * (openai-compatible, openai-completions, openrouter) whose response
+ * declares none passes its counts through as they are, and
+ * a cache-inclusive count from one puts its reads in this sum twice — as it
+ * already put them in the input cost twice.
+ */
+export function promptTokens(usage: CostableUsage): number {
+  return usage.inputTokens + (usage.cacheCreationTokens ?? 0) + (usage.cacheReadTokens ?? 0);
+}
+
+/**
+ * The rate card this request is billed at: the row's base rates, or, where
+ * the row has a long-prompt tier and the prompt is longer than its threshold,
+ * the tier's rates with any it leaves unset taken from the base.
+ */
+export function ratesFor(usage: CostableUsage, pricing: ModelPricing): ModelPricing {
+  const tier = pricing.longPrompt;
+  if (!tier || !(promptTokens(usage) > tier.overTokens)) return pricing;
+  return {
+    ...pricing,
+    inputPerMillion: tier.inputPerMillion ?? pricing.inputPerMillion,
+    outputPerMillion: tier.outputPerMillion ?? pricing.outputPerMillion,
+    ...(tier.cacheWritePerMillion != null ? { cacheWritePerMillion: tier.cacheWritePerMillion } : {}),
+    ...(tier.cacheWrite1hPerMillion != null ? { cacheWrite1hPerMillion: tier.cacheWrite1hPerMillion } : {}),
+    ...(tier.cacheReadPerMillion != null ? { cacheReadPerMillion: tier.cacheReadPerMillion } : {}),
+  };
+}
+
+/**
+ * The cost of ONE request's usage, in cache-excluded counts (`inputTokens`
+ * without the cached span, as an adapter declaring 'cache-inclusive' or
+ * 'cache-excluded' is normalized to before costing; see `promptTokens`). A
+ * sum of several requests' counts is not one request: the long-prompt tier
+ * is chosen per request, so price each and add the breakdowns
+ * (`addCostBreakdowns`, exported with this).
+ */
+export function calculateCost(usage: CostableUsage, basePricing: ModelPricing): CostBreakdown {
+  const pricing = ratesFor(usage, basePricing);
   const input = usage.inputTokens * pricing.inputPerMillion / 1_000_000;
   const output = usage.outputTokens * pricing.outputPerMillion / 1_000_000;
   const cacheWrite = pricing.cacheWritePerMillion != null

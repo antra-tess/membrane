@@ -102,7 +102,7 @@ import {
 } from './formatters/normalize-tool-pairs.js';
 import { YieldingStreamImpl } from './yielding-stream.js';
 import { classifyFailure, membraneRetrySettings, retryDecision, type RetrySettings } from './retry.js';
-import { calculateCost, warnUnpricedModel } from './utils/cost.js';
+import { addCostBreakdowns, calculateCost, warnUnpricedModel } from './utils/cost.js';
 import { isAnthropicServerBlock } from './utils/anthropic-server-blocks.js';
 import {
   TurnUsageAccumulator,
@@ -500,7 +500,9 @@ export class Membrane {
    */
   pricingFor(model: string): ModelPricing | undefined {
     const pricing = this.resolvePricing(model);
-    return pricing && { ...pricing };
+    // A copy the caller may change, its tier included: the row's own tier
+    // object must not be shared out of the registry or the built-in table.
+    return pricing && { ...pricing, ...(pricing.longPrompt ? { longPrompt: { ...pricing.longPrompt } } : {}) };
   }
 
   /**
@@ -606,14 +608,13 @@ export class Membrane {
           tries = 0;
           discardedUsage = this.mergeDiscardedAttempts(
             discardedUsage,
-            this.discardedAttemptFrom(response.usage)
+            this.discardedAttemptFrom(response.usage, request.config.model, response.details.model.actual, providerResponse.unreportedUsage)
           );
           continue;
         }
 
         if (discardedUsage) {
-          response.details.usage.discardedAttempts =
-            this.pricedDiscardedAttempts(discardedUsage, request.config.model);
+          response.details.usage.discardedAttempts = discardedUsage;
         }
         if (retryDelaysMs.length > 0) response.details.timing.retryDelaysMs = retryDelaysMs;
 
@@ -2239,9 +2240,12 @@ export class Membrane {
       }
       retried++;
       tries = 0;
+      // Priced from the caller's model and the served one, as complete() and
+      // the turn's own rounds are: the model a beforeRequest hook substituted
+      // is the served model's business, which the adapter reports.
       discardedUsage = this.mergeDiscardedAttempts(
         discardedUsage,
-        this.discardedAttemptFrom(result.usage)
+        this.discardedAttemptFrom(result.usage, normalizedRequest.config.model, result.model, result.unreportedUsage)
       );
       onRetrying!({
         attempt: retried,
@@ -2681,6 +2685,13 @@ export class Membrane {
     next.attempts += add.attempts;
     next.inputTokens += add.inputTokens;
     next.outputTokens += add.outputTokens;
+    // Each attempt was priced as the request it was (its own long-prompt
+    // tier); the sum carries a cost only while every attempt has one.
+    const summed = carry
+      ? (carry.estimatedCost && add.estimatedCost ? addCostBreakdowns(carry.estimatedCost, add.estimatedCost) : undefined)
+      : add.estimatedCost;
+    delete next.estimatedCost;
+    if (summed) next.estimatedCost = summed;
     const split = sumCacheCreation1h(next, add);
     if (add.cacheCreationTokens != null) {
       next.cacheCreationTokens = (next.cacheCreationTokens ?? 0) + add.cacheCreationTokens;
@@ -2693,9 +2704,17 @@ export class Membrane {
     return next;
   }
 
-  private discardedAttemptFrom(usage: DetailedUsage | BasicUsage | undefined): DiscardedAttemptsUsage {
+  /** One abandoned attempt, priced as the single request it was — unless the
+   *  provider left a count unreported: its 0 is a default, not an observation,
+   *  so the attempt carries no cost and the attempts' sum has none either. */
+  private discardedAttemptFrom(
+    usage: DetailedUsage | BasicUsage | undefined,
+    model: string,
+    servedModel?: string,
+    unreported?: ReadonlyArray<'inputTokens' | 'outputTokens'>,
+  ): DiscardedAttemptsUsage {
     const detailed = (usage ?? { inputTokens: 0, outputTokens: 0 }) as DetailedUsage;
-    return {
+    const attempt: DiscardedAttemptsUsage = {
       attempts: 1,
       inputTokens: detailed.inputTokens ?? 0,
       outputTokens: detailed.outputTokens ?? 0,
@@ -2703,15 +2722,9 @@ export class Membrane {
       ...(detailed.cacheCreation1hTokens != null ? { cacheCreation1hTokens: detailed.cacheCreation1hTokens } : {}),
       ...(detailed.cacheReadTokens != null ? { cacheReadTokens: detailed.cacheReadTokens } : {}),
     };
-  }
-
-  private pricedDiscardedAttempts(
-    discarded: DiscardedAttemptsUsage | undefined,
-    model: string
-  ): DiscardedAttemptsUsage | undefined {
-    if (!discarded) return undefined;
-    const estimatedCost = this.estimateCost(discarded, model);
-    return estimatedCost ? { ...discarded, estimatedCost } : discarded;
+    if (unreported !== undefined && unreported.length > 0) return attempt;
+    const estimatedCost = this.estimateCost(attempt, model, servedModel);
+    return estimatedCost ? { ...attempt, estimatedCost } : attempt;
   }
 
   private mapStopReason(adapterReason: string): StopReason {
@@ -3777,9 +3790,7 @@ export class Membrane {
           stop: this.buildStopInfo(lastStopReason, lastProviderStopReason, lastStopSequence),
           usage: {
             ...totalUsage,
-            ...(discardedUsage
-              ? { discardedAttempts: this.pricedDiscardedAttempts(discardedUsage, request.config.model) }
-              : {}),
+            ...(discardedUsage ? { discardedAttempts: discardedUsage } : {}),
           },
           timing: {
             totalDurationMs: durationMs,
