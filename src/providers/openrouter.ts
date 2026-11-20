@@ -1,4 +1,4 @@
-import { unreportedUsage } from '../utils/usage.js';
+import { cacheCreation1h, unreportedUsage } from '../utils/usage.js';
 import { assertMessagePrefillSupported } from './request-capabilities.js';
 
 import type {
@@ -104,6 +104,7 @@ interface OpenRouterResponse {
     total_tokens: number;
     /** Anthropic prompt caching (when using Claude models with cache_control) */
     cache_creation_input_tokens?: number;
+    cache_creation?: { ephemeral_5m_input_tokens?: number; ephemeral_1h_input_tokens?: number } | null;
     cache_read_input_tokens?: number;
     prompt_tokens_details?: {
       cached_tokens?: number;
@@ -615,6 +616,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
         inputTokens: response.usage?.prompt_tokens ?? 0,
         outputTokens: response.usage?.completion_tokens ?? 0,
         cacheCreationTokens: cacheCreationTokens ?? undefined,
+        ...cacheCreation1h(response.usage?.cache_creation),
         cacheReadTokens: cacheReadTokens ?? undefined,
         cacheConvention,
       },
@@ -647,6 +649,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
         inputTokens: streamUsage?.prompt_tokens ?? 0,
         outputTokens: streamUsage?.completion_tokens ?? 0,
         cacheCreationTokens: cacheCreationTokens ?? undefined,
+        ...cacheCreation1h(streamUsage?.cache_creation),
         cacheReadTokens: cacheReadTokens ?? undefined,
         cacheConvention,
       },

@@ -1,4 +1,4 @@
-import { unreportedUsage } from '../utils/usage.js';
+import { cacheCreation1h, unreportedUsage } from '../utils/usage.js';
 import { assertMessagePrefillSupported } from './request-capabilities.js';
 
 import Anthropic, { type ClientOptions } from '@anthropic-ai/sdk';
@@ -731,7 +731,7 @@ export class AnthropicAdapter implements ProviderAdapter {
             cacheCreation5mTokens = typeof cacheCreation.ephemeral_5m_input_tokens === 'number'
               ? cacheCreation.ephemeral_5m_input_tokens : 0;
             cacheCreation1hTokens = typeof cacheCreation.ephemeral_1h_input_tokens === 'number'
-              ? cacheCreation.ephemeral_1h_input_tokens : 0;
+              ? cacheCreation.ephemeral_1h_input_tokens : undefined;
           }
           inferenceGeo = typeof usage.inference_geo === 'string' ? usage.inference_geo : undefined;
           serviceTier = typeof usage.service_tier === 'string' ? usage.service_tier : undefined;
@@ -816,12 +816,30 @@ export class AnthropicAdapter implements ProviderAdapter {
             output_tokens: number;
             cache_creation_input_tokens?: number | null;
             cache_read_input_tokens?: number | null;
+            cache_creation?: Record<string, unknown> | null;
           };
           outputTokens = deltaUsage.output_tokens ?? 0;
           if (typeof deltaUsage.output_tokens === 'number') outputReported = true;
           // message_delta carries cumulative cache metrics — use as authoritative
           if (deltaUsage.cache_creation_input_tokens != null) {
+            const totalChanged = deltaUsage.cache_creation_input_tokens !== cacheCreationTokens;
             cacheCreationTokens = deltaUsage.cache_creation_input_tokens;
+            // The TTL split is authoritative with the total it came with. A
+            // delta that brings its own breakdown replaces message_start's; one
+            // that changes the total without a breakdown leaves the split
+            // unknown, so message_start's share is not reported against a
+            // total it does not describe.
+            if (deltaUsage.cache_creation) {
+              hasCacheCreationBreakdown = true;
+              cacheCreation5mTokens = typeof deltaUsage.cache_creation.ephemeral_5m_input_tokens === 'number'
+                ? deltaUsage.cache_creation.ephemeral_5m_input_tokens : 0;
+              cacheCreation1hTokens = typeof deltaUsage.cache_creation.ephemeral_1h_input_tokens === 'number'
+                ? deltaUsage.cache_creation.ephemeral_1h_input_tokens : undefined;
+            } else if (totalChanged) {
+              hasCacheCreationBreakdown = false;
+              cacheCreation5mTokens = undefined;
+              cacheCreation1hTokens = undefined;
+            }
           }
           if (deltaUsage.cache_read_input_tokens != null) {
             cacheReadTokens = deltaUsage.cache_read_input_tokens;
@@ -875,6 +893,7 @@ export class AnthropicAdapter implements ProviderAdapter {
           inputTokens,
           outputTokens,
           cacheCreationTokens,
+          ...(hasCacheCreationBreakdown && cacheCreation1hTokens != null ? { cacheCreation1hTokens } : {}),
           cacheReadTokens,
         },
         ...unreportedUsage(inputReported ? inputTokens : undefined, outputReported ? outputTokens : undefined),
@@ -1071,6 +1090,7 @@ export class AnthropicAdapter implements ProviderAdapter {
         inputTokens: response.usage.input_tokens,
         outputTokens: response.usage.output_tokens,
         cacheCreationTokens: (response.usage as any).cache_creation_input_tokens,
+        ...cacheCreation1h((response.usage as any).cache_creation),
         cacheReadTokens: (response.usage as any).cache_read_input_tokens,
       },
       ...unreportedUsage(response.usage?.input_tokens, response.usage?.output_tokens),

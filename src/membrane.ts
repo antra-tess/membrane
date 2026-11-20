@@ -14,6 +14,7 @@ import type {
   NormalizedMessage,
   StreamCallbacks,
   ModelRegistry,
+  ModelPricing,
   MembraneConfig,
   MembraneLogger,
   StreamOptions,
@@ -107,6 +108,7 @@ import {
   TurnUsageAccumulator,
   calculateCacheHitRatio,
   normalizeUsageToCacheExcluded,
+  sumCacheCreation1h,
   warnUnconvertibleProviderItem,
 } from './utils/usage.js';
 import {
@@ -115,6 +117,7 @@ import {
 import { convertMcpMedia } from './utils/mcp-media.js';
 import { isEffortOnlyMessage } from './utils/empty-text.js';
 import { getDefaultPricing } from './registry/default-pricing.js';
+import { modelTakesToolOrSystemChanges } from './registry/model-capabilities.js';
 import { FidelityNotes, isRawItemCarrier, requestFingerprint, type MessageOrigin } from './utils/fidelity.js';
 
 /** Anthropic's thinking-binding controls, as a thinking config carries them. */
@@ -465,6 +468,39 @@ export class Membrane {
     this.retrySettings = membraneRetrySettings(resolveRetryConfig(config.retry));
     this.config = config;
     this.formatter = config.formatter ?? new AnthropicXmlFormatter();
+  }
+
+  /**
+   * Whether a request to `model` can carry a `system_change` block that
+   * changes tools or system text (SystemChangeContent): the formatter that
+   * the request goes through renders one, the adapter sends one, and the
+   * model isn't one that refuses one (`modelTakesToolOrSystemChanges`).
+   * `options.formatter` is the request's own formatter, as in `complete` and
+   * `stream`. Where the formatter or the adapter makes this false, membrane
+   * refuses such a request before it is sent. Where the model does, the model
+   * refused one in a run or comes before the models that did. Where it is
+   * true, the formatter still refuses a change that it can't place, and a
+   * model that no run covers may refuse one with a 400 that
+   * `systemChangeRefused` marks. A block that changes only the effort has
+   * rules of its own, which this doesn't answer.
+   */
+  takesToolOrSystemChanges(model: string, options: { formatter?: PrefillFormatter } = {}): boolean {
+    return this.sendsSystemChanges(this.resolveActiveFormatter(options.formatter)) && modelTakesToolOrSystemChanges(model);
+  }
+
+  private sendsSystemChanges(formatter: PrefillFormatter): boolean {
+    return Boolean(formatter.rendersSystemChanges && this.adapter.sendsSystemChanges);
+  }
+
+  /**
+   * A copy of the prices that this membrane gives a request to `model` as of
+   * now: the registry's, else the built-in table's. Undefined where neither
+   * prices `model`. A response's cost line looks up the model that served it
+   * first, so where another model served the request, its prices can differ.
+   */
+  pricingFor(model: string): ModelPricing | undefined {
+    const pricing = this.resolvePricing(model);
+    return pricing && { ...pricing };
   }
 
   /**
@@ -1882,7 +1918,7 @@ export class Membrane {
     if (fidelity && !activeFormatter.reportsAlterations) fidelity.uninstrumented = true;
     const messages = convertMcpMedia(nativeLoopMessages ?? request.messages);
     if (
-      !(activeFormatter.rendersSystemChanges && this.adapter.sendsSystemChanges) &&
+      !this.sendsSystemChanges(activeFormatter) &&
       messages.some((message) => message.content.some((block) => block.type === 'system_change'))
     ) {
       throw systemChangeRefusedError(
@@ -1977,7 +2013,7 @@ export class Membrane {
     messages.sort((a, b) => a - b);
     const injectedPairs = [...injected.values()].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
     const usage: RoundUsage = {};
-    const counts = ['inputTokens', 'outputTokens', 'cacheCreationTokens', 'cacheReadTokens', 'thinkingTokens'] as const;
+    const counts = ['inputTokens', 'outputTokens', 'cacheCreationTokens', 'cacheCreation1hTokens', 'cacheReadTokens', 'thinkingTokens'] as const;
     for (const field of counts) {
       const value = input.usage?.[field];
       if (typeof value === 'number' && !(input.unreported as readonly string[] | undefined)?.includes(field)) usage[field] = value;
@@ -2407,6 +2443,8 @@ export class Membrane {
       inputTokens: providerResponse.usage.inputTokens,
       outputTokens: providerResponse.usage.outputTokens,
       cacheCreationTokens: providerResponse.usage.cacheCreationTokens,
+      ...(providerResponse.usage.cacheCreation1hTokens != null
+        ? { cacheCreation1hTokens: providerResponse.usage.cacheCreation1hTokens } : {}),
       cacheReadTokens: providerResponse.usage.cacheReadTokens,
       thinkingTokens: providerResponse.usage.thinkingTokens,
       estimatedCost: this.estimateCost(providerResponse.usage, request.config.model, providerResponse.model),
@@ -2643,9 +2681,12 @@ export class Membrane {
     next.attempts += add.attempts;
     next.inputTokens += add.inputTokens;
     next.outputTokens += add.outputTokens;
+    const split = sumCacheCreation1h(next, add);
     if (add.cacheCreationTokens != null) {
       next.cacheCreationTokens = (next.cacheCreationTokens ?? 0) + add.cacheCreationTokens;
     }
+    delete next.cacheCreation1hTokens;
+    if (split.cacheCreation1hTokens != null) next.cacheCreation1hTokens = split.cacheCreation1hTokens;
     if (add.cacheReadTokens != null) {
       next.cacheReadTokens = (next.cacheReadTokens ?? 0) + add.cacheReadTokens;
     }
@@ -2659,6 +2700,7 @@ export class Membrane {
       inputTokens: detailed.inputTokens ?? 0,
       outputTokens: detailed.outputTokens ?? 0,
       ...(detailed.cacheCreationTokens != null ? { cacheCreationTokens: detailed.cacheCreationTokens } : {}),
+      ...(detailed.cacheCreation1hTokens != null ? { cacheCreation1hTokens: detailed.cacheCreation1hTokens } : {}),
       ...(detailed.cacheReadTokens != null ? { cacheReadTokens: detailed.cacheReadTokens } : {}),
     };
   }
@@ -2725,7 +2767,7 @@ export class Membrane {
   private resolvePricing(
     requestedModel: string,
     actualModel?: string
-  ): import('./types/provider.js').ModelPricing | undefined {
+  ): ModelPricing | undefined {
     const servedModel = actualModel && actualModel !== requestedModel ? actualModel : undefined;
     const fromRegistry = (modelId: string | undefined) =>
       modelId === undefined ? undefined : runCallerCode(() => this.registry?.getPricing(modelId));

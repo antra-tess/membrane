@@ -12,6 +12,17 @@ Releases up to and including 0.5.75 predate this file; for their contents see
 
 ## Unreleased
 
+## 0.10.4 — 2026-11-19
+
+### Added
+
+- `Membrane.takesToolOrSystemChanges(model, { formatter })` says whether a request to `model` can carry a `system_change` block that changes tools or system text: the request's formatter renders one, the adapter sends one, and the model isn't one that refuses one. Sonnet 5, Opus 4.7, 4.6 and 4.5, Sonnet 4.6 and 4.5, and Haiku 4.5 refused one in runs in October 2026, and the Claude models before them are taken to refuse, unrun. Every other model is taken to take one, a new one included, so a caller tries it and catches a refusal by `systemChangeRefused`. A block that changes only the effort has rules of its own, which this doesn't answer.
+- `Membrane.pricingFor(model)` gives a copy of the prices that the membrane gives a request to `model` as of now: the registry's, else the built-in table's. It is undefined where neither prices `model`. A response's cost line looks up the model that served it first, so where another model served the request, its prices can differ.
+
+### Fixed
+
+- Cache writes made with a 1-hour TTL are now priced at Anthropic's 1-hour rate (2× input) instead of the 5-minute rate (1.25× input). The adapter carries the provider's `cache_creation.ephemeral_1h_input_tokens` split into `usage.cacheCreation1hTokens` (streaming and non-streaming), `calculateCost` prices that share at the new `ModelPricing.cacheWrite1hPerMillion`, and every built-in Anthropic row carries it but the retired `claude-3-5-sonnet`'s, for which no 1-hour rate was read. Rows without the field, and usage without the split, are priced as before.
+
 ## 0.10.3 — 2026-11-10
 
 ### Changed

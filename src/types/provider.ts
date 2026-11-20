@@ -80,14 +80,26 @@ export interface ModelPricing {
   outputPerMillion: number;
   
   /**
-   * Cost per million cache write tokens. Unset, writes are not priced
-   * (`calculateCost` has no input-rate fallback, by design — see its test).
-   * So a row for a provider whose adapter reports writes inside its input
-   * count (OpenAI's Responses API) must carry one, or the writes the
+   * Cost per million cache write tokens — the provider's shortest cache TTL
+   * (Anthropic's 5-minute bucket). Also the rate for every write when the
+   * usage report does not say which TTL a write had. Unset, writes are not
+   * priced (`calculateCost` has no input-rate fallback, by design — see its
+   * test). So a row for a provider whose adapter reports writes inside its
+   * input count (OpenAI's Responses API) must carry one, or the writes the
    * normalization takes out of `inputTokens` are priced nowhere: the input
    * rate itself where the provider charges nothing extra for a write.
    */
   cacheWritePerMillion?: number;
+
+  /**
+   * Cost per million cache write tokens written with a 1-hour TTL (Anthropic
+   * bills these at 2× base input, against 1.25× for 5 minutes). Applied to
+   * {@link CallUsage.cacheCreation1hTokens}; unset means those tokens fall
+   * back to `cacheWritePerMillion`, which under-estimates them. Read only
+   * beside `cacheWritePerMillion`: a row with this rate alone has no rate for
+   * its short-TTL writes, and cache writes stay unpriced as they were.
+   */
+  cacheWrite1hPerMillion?: number;
   
   /** Cost per million cache read tokens */
   cacheReadPerMillion?: number;
@@ -484,6 +496,11 @@ export interface ProviderResponse {
     inputTokens: number;
     outputTokens: number;
     cacheCreationTokens?: number;
+    /**
+     * Of `cacheCreationTokens`, those written with a 1-hour TTL. Set only when
+     * the provider reports the split. See {@link CallUsage.cacheCreation1hTokens}.
+     */
+    cacheCreation1hTokens?: number;
     cacheReadTokens?: number;
 
     /**
