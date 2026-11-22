@@ -158,26 +158,41 @@ export const PRICING_TABLE: readonly PricingRow[] = [
   // "Cached input" is OpenAI's rate for the automatically cached prompt prefix.
   // A write to the cache is a token the API also counts as input, so every row
   // carries a write rate: from GPT-5.6 on 1.25× input for the 30-minute cache
-  // (prompt-caching guide), and the input rate itself on earlier models, which
-  // charge nothing extra for a write. A row without one would leave written
-  // tokens unpriced, since the adapter's cache-inclusive usage takes them out
-  // of the input count.
+  // and 2.5× input for the 12-hour cache (prompt-caching guide; the Responses
+  // API reports the split, carried in cacheCreation1hTokens), and the input
+  // rate itself on earlier models and on the specialized models whose page
+  // row shows no write price, which charge nothing extra for a write. A row
+  // without one would leave written tokens unpriced, since the adapter's
+  // cache-inclusive usage takes them out of the input count. The four GPT-5.6
+  // and GPT-6 rows are the standard tier under 272K context, as the gpt-5.5
+  // and gpt-5.4 rows below; above it OpenAI doubles input and write rates.
+  {
+    // Legal configuration of GPT-6 Astra: the same input and output as
+    // gpt-6-astra, no write price on the page, so write = input. Its own row,
+    // or the prefix rule prices it by gpt-6-astra's 1.25× write.
+    prefix: 'gpt-6-astra-law',
+    pricing: { inputPerMillion: 10, outputPerMillion: 50, cacheWritePerMillion: 10, cacheReadPerMillion: 1.00, currency: 'USD', asOf: '2026-11-22' },
+  },
   {
     prefix: 'gpt-6-astra',
-    pricing: { inputPerMillion: 10, outputPerMillion: 50, cacheWritePerMillion: 12.5, cacheReadPerMillion: 1.00, currency: 'USD', asOf: '2026-09-06' },
+    pricing: { inputPerMillion: 10, outputPerMillion: 50, cacheWritePerMillion: 12.5, cacheWrite1hPerMillion: 25, cacheReadPerMillion: 1.00, currency: 'USD', asOf: '2026-09-06' },
   },
   {
     prefix: 'gpt-5.6-sol',
-    pricing: { inputPerMillion: 4, outputPerMillion: 20, cacheWritePerMillion: 5, cacheReadPerMillion: 0.40, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
+    pricing: { inputPerMillion: 4, outputPerMillion: 20, cacheWritePerMillion: 5, cacheWrite1hPerMillion: 10, cacheReadPerMillion: 0.40, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
   },
   {
     prefix: 'gpt-5.6-terra',
-    pricing: { inputPerMillion: 2, outputPerMillion: 12, cacheWritePerMillion: 2.5, cacheReadPerMillion: 0.20, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
+    pricing: { inputPerMillion: 2, outputPerMillion: 12, cacheWritePerMillion: 2.5, cacheWrite1hPerMillion: 5, cacheReadPerMillion: 0.20, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
   },
   {
     prefix: 'gpt-5.6-luna',
-    pricing: { inputPerMillion: 0.20, outputPerMillion: 1.20, cacheWritePerMillion: 0.25, cacheReadPerMillion: 0.02, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
+    pricing: { inputPerMillion: 0.20, outputPerMillion: 1.20, cacheWritePerMillion: 0.25, cacheWrite1hPerMillion: 0.50, cacheReadPerMillion: 0.02, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
   },
+  // Any other GPT-5.6 id (a bare gpt-5.6, a variant the table has no row for)
+  // is unpriced and warns, rather than falling through to the gpt-5 row at a
+  // tenth of a 5.6 model's rates and a write rate that isn't 1.25×.
+  { prefix: 'gpt-5.6', pricing: null },
   {
     // Under 272K context; the long-context tier costs more and this table has
     // no field for context-dependent rates.

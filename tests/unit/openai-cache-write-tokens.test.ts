@@ -7,14 +7,18 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OpenAIResponsesAPIAdapter } from '../../src/providers/openai-responses-api.js';
+import { OpenAIAdapter } from '../../src/providers/openai.js';
+import { stubFetchWithSseLines } from '../helpers/sse-fixtures.js';
+import { resetUnpricedModelWarnings } from '../../src/utils/cost.js';
 import { Membrane } from '../../src/membrane.js';
 import { OpenAIResponsesFormatter } from '../../src/formatters/openai-responses.js';
 import { getDefaultPricing } from '../../src/registry/default-pricing.js';
 import { calculateCost } from '../../src/utils/cost.js';
 
-afterEach(() => { vi.unstubAllGlobals(); });
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); resetUnpricedModelWarnings(); });
 
-// The guide's own example: 12,000 input, 4,000 read, 7,000 written, 1,000 ordinary.
+// The guide's own example: 12,000 input, 4,000 read, 7,000 written (3,000 for 30 minutes,
+// 4,000 for 12 hours), 1,000 ordinary.
 const GUIDE_USAGE = {
   input_tokens: 12_000,
   output_tokens: 25,
@@ -47,8 +51,16 @@ describe('OpenAI Responses cache writes', () => {
     const adapter = new OpenAIResponsesAPIAdapter({ apiKey: 'sk-test' });
     const response = await adapter.complete({ model: 'gpt-5.6-sol', messages: [], maxTokens: 10 });
     expect(response.usage).toEqual({
-      inputTokens: 12_000, outputTokens: 25, cacheReadTokens: 4_000, cacheCreationTokens: 7_000,
+      inputTokens: 12_000, outputTokens: 25, cacheReadTokens: 4_000, cacheCreationTokens: 7_000, cacheCreation1hTokens: 4_000,
     });
+  });
+
+  it('carry no long-TTL count when the provider reports no split', async () => {
+    stubResponse({ input_tokens: 12_000, output_tokens: 25, input_tokens_details: { cached_tokens: 4_000, cache_write_tokens: 7_000 } });
+    const adapter = new OpenAIResponsesAPIAdapter({ apiKey: 'sk-test' });
+    const response = await adapter.complete({ model: 'gpt-5.6-sol', messages: [], maxTokens: 10 });
+    expect(response.usage).toEqual({ inputTokens: 12_000, outputTokens: 25, cacheReadTokens: 4_000, cacheCreationTokens: 7_000 });
+    expect('cacheCreation1hTokens' in response.usage).toBe(false);
   });
 
   it('keep a reported zero as zero', async () => {
@@ -73,7 +85,7 @@ describe('OpenAI Responses cache writes', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(sse, { status: 200 })));
     const adapter = new OpenAIResponsesAPIAdapter({ apiKey: 'sk-test' });
     const response = await adapter.stream({ model: 'gpt-5.6-sol', messages: [], maxTokens: 10 }, { onChunk: () => {} });
-    expect(response.usage).toEqual({ inputTokens: 12_000, outputTokens: 25, cacheReadTokens: 4_000, cacheCreationTokens: 7_000 });
+    expect(response.usage).toEqual({ inputTokens: 12_000, outputTokens: 25, cacheReadTokens: 4_000, cacheCreationTokens: 7_000, cacheCreation1hTokens: 4_000 });
   });
 
   it('stay absent when the provider reports no write, with or without input_tokens_details', async () => {
@@ -89,8 +101,9 @@ describe('OpenAI Responses cache writes', () => {
     expect('cacheReadTokens' in noDetails.usage).toBe(false);
   });
 
-  it('leave 1,000 ordinary input tokens after normalization, and are priced at 1.25× input', async () => {
-    stubResponse(GUIDE_USAGE);
+  it('leave 1,000 ordinary input tokens after normalization, and 30-minute writes are priced at 1.25× input', async () => {
+    // The guide's counts with every write a 30-minute one: the 1.25× case alone.
+    stubResponse({ ...GUIDE_USAGE, input_tokens_details: { cached_tokens: 4_000, cache_write_tokens: 7_000, cache_write_tokens_details: { ttl_30m_tokens: 7_000, ttl_12h_tokens: 0 } } });
     const membrane = new Membrane(new OpenAIResponsesAPIAdapter({ apiKey: 'sk-test' }), {
       formatter: new OpenAIResponsesFormatter(), assistantParticipant: 'Sol',
     });
@@ -106,6 +119,70 @@ describe('OpenAI Responses cache writes', () => {
     expect(cost.cacheRead).toBeCloseTo(4_000 * 0.40 / 1e6, 12);
     expect(cost.total).toBeCloseTo((1_000 * 4 + 7_000 * 5 + 4_000 * 0.40 + 25 * 20) / 1e6, 12);
   });
+
+  it('price the guide\'s own example as the guide does: 12-hour writes at 2.5× input, 30-minute at 1.25×', async () => {
+    stubResponse(GUIDE_USAGE);
+    const membrane = new Membrane(new OpenAIResponsesAPIAdapter({ apiKey: 'sk-test' }), {
+      formatter: new OpenAIResponsesFormatter(), assistantParticipant: 'Sol',
+    });
+    const response = await membrane.complete({
+      messages: [{ participant: 'User', content: [{ type: 'text', text: 'hi' }] }],
+      config: { model: 'gpt-5.6-sol', maxTokens: 10 },
+    });
+    expect(response.usage).toMatchObject({ inputTokens: 1_000, cacheReadTokens: 4_000, cacheCreationTokens: 7_000, cacheCreation1hTokens: 4_000 });
+    const cost = response.usage.estimatedCost!;
+    // gpt-5.6-sol: $4 input, $5 write (30 min), $10 write (12 h), $0.40 read, $20 output.
+    // The guide: 1,000 × $4 + 3,000 × $5 + 4,000 × $10 + 4,000 × $0.40 = $0.0606 on the input side.
+    expect(cost.cacheWrite).toBeCloseTo((3_000 * 5 + 4_000 * 10) / 1e6, 12);
+    expect(cost.input + cost.cacheWrite! + cost.cacheRead!).toBeCloseTo(0.0606, 12);
+    expect(cost.total).toBeCloseTo((1_000 * 4 + 3_000 * 5 + 4_000 * 10 + 4_000 * 0.40 + 25 * 20) / 1e6, 12);
+  });
+});
+
+// Chat Completions reports the same write count under prompt_tokens_details (API reference),
+// without the TTL split.
+const CHAT_USAGE = {
+  prompt_tokens: 12_000, completion_tokens: 25, total_tokens: 12_025,
+  prompt_tokens_details: { cached_tokens: 4_000, cache_write_tokens: 7_000 },
+};
+function stubChatResponse(usage: unknown) {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+    new Response(JSON.stringify({
+      id: 'chatcmpl_cw', object: 'chat.completion', model: 'gpt-5.6-sol',
+      choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+      usage,
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+  ));
+}
+const chatRequest = { model: 'gpt-5.6-sol', maxTokens: 10, messages: [{ role: 'user', content: 'hi' }] } as any;
+
+describe('OpenAI Chat Completions cache writes', () => {
+  it('reach the adapter\'s usage as cacheCreationTokens, inside inputTokens as the API counts them', async () => {
+    stubChatResponse(CHAT_USAGE);
+    const response = await new OpenAIAdapter({ apiKey: 'sk-test' }).complete(chatRequest);
+    expect(response.usage).toEqual({ inputTokens: 12_000, outputTokens: 25, cacheReadTokens: 4_000, cacheCreationTokens: 7_000 });
+  });
+
+  it('keep a reported zero as zero, and stay absent when the field is not reported', async () => {
+    stubChatResponse({ prompt_tokens: 100, completion_tokens: 25, prompt_tokens_details: { cached_tokens: 40, cache_write_tokens: 0 } });
+    const zero = await new OpenAIAdapter({ apiKey: 'sk-test' }).complete(chatRequest);
+    expect(zero.usage).toEqual({ inputTokens: 100, outputTokens: 25, cacheReadTokens: 40, cacheCreationTokens: 0 });
+    stubChatResponse({ prompt_tokens: 100, completion_tokens: 25, prompt_tokens_details: { cached_tokens: 40 } });
+    const absent = await new OpenAIAdapter({ apiKey: 'sk-test' }).complete(chatRequest);
+    expect(absent.usage).toEqual({ inputTokens: 100, outputTokens: 25, cacheReadTokens: 40 });
+    expect('cacheCreationTokens' in absent.usage).toBe(false);
+  });
+
+  it('are read from a stream\'s usage frame too', async () => {
+    stubFetchWithSseLines([
+      '{"choices":[{"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}',
+      '{"choices":[{"delta":{},"finish_reason":"stop"}]}',
+      JSON.stringify({ choices: [], usage: CHAT_USAGE }),
+      '[DONE]',
+    ]);
+    const response = await new OpenAIAdapter({ apiKey: 'sk-test' }).stream(chatRequest, { onChunk: () => {} } as any);
+    expect(response.usage).toEqual({ inputTokens: 12_000, outputTokens: 25, cacheReadTokens: 4_000, cacheCreationTokens: 7_000 });
+  });
 });
 
 describe('OpenAI rows', () => {
@@ -113,7 +190,15 @@ describe('OpenAI rows', () => {
     for (const id of ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
       const row = getDefaultPricing(id)!;
       expect(row.cacheWritePerMillion, id).toBeCloseTo(row.inputPerMillion * 1.25, 12);
+      expect(row.cacheWrite1hPerMillion, id).toBeCloseTo(row.inputPerMillion * 2.5, 12);
     }
+    // The legal configuration shares gpt-6-astra's input and output; its page row has no write price.
+    const law = getDefaultPricing('gpt-6-astra-law')!;
+    expect(law).toMatchObject({ inputPerMillion: 10, outputPerMillion: 50, cacheWritePerMillion: 10 });
+    expect(law.cacheWrite1hPerMillion).toBeUndefined();
+    // A GPT-5.6 id without a row is unpriced, not priced as gpt-5.
+    expect(getDefaultPricing('gpt-5.6')).toBeUndefined();
+    expect(getDefaultPricing('gpt-5.6-cyber')).toBeUndefined();
     // Each id with its own row's input rate, so a removed or renamed row can't pass on a
     // prefix neighbour's equal rates (gpt-5.1 and gpt-5 are priced the same, and are the one pair this can't tell apart).
     const earlier: Record<string, number> = {
@@ -134,6 +219,24 @@ describe('OpenAI rows', () => {
     expect(cost.input).toBeCloseTo(0.015, 12);
     expect(cost.cacheWrite).toBeCloseTo(0.035, 12);
     expect(cost.total).toBeCloseTo(0.05, 12);
+  });
+
+  it('a write under a caller\'s own row with no write rate is unpriced by design, and Membrane says so once per model', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    stubChatResponse(CHAT_USAGE);
+    const own = { inputPerMillion: 5, outputPerMillion: 15, currency: 'USD' as const };
+    const membrane = new Membrane(new OpenAIAdapter({ apiKey: 'sk-test' }), {
+      formatter: new OpenAIResponsesFormatter(), assistantParticipant: 'Sol',
+      registry: { getPricing: () => own } as any,
+    });
+    const call = () => membrane.complete({ messages: [{ participant: 'User', content: [{ type: 'text', text: 'hi' }] }], config: { model: 'gpt-5.6-sol', maxTokens: 10 } });
+    const first = await call();
+    expect(first.usage.estimatedCost!.cacheWrite).toBeUndefined();
+    stubChatResponse(CHAT_USAGE);
+    await call();
+    const ours = warn.mock.calls.filter(([line]) => String(line).includes('no\n cacheWritePerMillion'.replace('\n', '')) || String(line).includes('cacheWritePerMillion'));
+    expect(ours).toHaveLength(1);
+    expect(String(ours[0][0])).toContain('gpt-5.6-sol');
   });
 
   it('under a caller\'s own row with no write rate, the write is unpriced — calculateCost has no input-rate fallback by design', () => {

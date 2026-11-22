@@ -5,7 +5,7 @@ export interface CostableUsage {
   inputTokens: number;
   outputTokens: number;
   cacheCreationTokens?: number;
-  /** Of cacheCreationTokens, those written with a 1-hour TTL (see CallUsage). */
+  /** Of cacheCreationTokens, those written with the provider's longer TTL: Anthropic's 1 hour, OpenAI's 12 hours (see CallUsage). */
   cacheCreation1hTokens?: number;
   cacheReadTokens?: number;
 }
@@ -22,8 +22,22 @@ export function warnUnpricedModel(modelId: string): void {
   );
 }
 
+const warnedUnpricedWrites = new Set<string>();
+
+/** A row without `cacheWritePerMillion` prices no cache write (by design, no input-rate fallback); said once per model, so the silence isn't silent. */
+export function warnUnpricedCacheWrite(modelId: string): void {
+  if (warnedUnpricedWrites.has(modelId)) return;
+  warnedUnpricedWrites.add(modelId);
+  console.warn(
+    `[membrane:cost] model "${modelId}" wrote to the prompt cache, but its pricing row has no`
+    + ' cacheWritePerMillion, so estimatedCost leaves the written tokens out (this is NOT a cost of'
+    + ' zero). Add a write rate to the row: the input rate where the provider charges nothing extra.'
+  );
+}
+
 export function resetUnpricedModelWarnings(): void {
   warnedUnpricedModels.clear();
+  warnedUnpricedWrites.clear();
 }
 
 export function addCostBreakdowns(

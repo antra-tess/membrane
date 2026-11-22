@@ -64,7 +64,12 @@ export interface OpenAIResponsesAPIResponse {
     input_tokens?: number;
     output_tokens?: number;
     total_tokens?: number;
-    input_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number } | null;
+    input_tokens_details?: {
+      cached_tokens?: number;
+      cache_write_tokens?: number;
+      /** The split of `cache_write_tokens` by TTL (prompt-caching guide); 12-hour writes bill at 2.5× input. */
+      cache_write_tokens_details?: { ttl_30m_tokens?: number; ttl_12h_tokens?: number } | null;
+    } | null;
     output_tokens_details?: { reasoning_tokens?: number } | null;
   } | null;
   [key: string]: unknown;
@@ -557,6 +562,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
     // 30-minute cache; 12-hour writes at 2.5× are a bucket this count does
     // not yet split out).
     const writtenTokens = response.usage?.input_tokens_details?.cache_write_tokens;
+    const written12h = response.usage?.input_tokens_details?.cache_write_tokens_details?.ttl_12h_tokens;
 
     return {
       content,
@@ -569,6 +575,9 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
         outputTokens: response.usage?.output_tokens ?? 0,
         ...(typeof cachedTokens === 'number' ? { cacheReadTokens: cachedTokens } : {}),
         ...(typeof writtenTokens === 'number' ? { cacheCreationTokens: writtenTokens } : {}),
+        // The long-TTL slot: Anthropic's 1-hour writes and OpenAI's 12-hour writes are both
+        // "the provider's longer TTL at its higher rate" (cacheWrite1hPerMillion).
+        ...(typeof writtenTokens === 'number' && typeof written12h === 'number' ? { cacheCreation1hTokens: written12h } : {}),
       },
       ...unreportedUsage(response.usage?.input_tokens, response.usage?.output_tokens),
       model: response.model ?? requestedModel,

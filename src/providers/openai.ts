@@ -68,6 +68,8 @@ interface OpenAIResponse {
     /** OpenAI prompt caching details (automatic for prompts ≥1024 tokens) */
     prompt_tokens_details?: {
       cached_tokens?: number;
+      /** Prompt tokens written to the cache, inside `prompt_tokens` as `cached_tokens` is (API reference). */
+      cache_write_tokens?: number;
       audio_tokens?: number;
     };
     completion_tokens_details?: {
@@ -523,6 +525,7 @@ export class OpenAIAdapter implements ProviderAdapter {
     const message = choice?.message;
 
     const cachedTokens = response.usage?.prompt_tokens_details?.cached_tokens;
+    const writtenTokens = response.usage?.prompt_tokens_details?.cache_write_tokens;
 
     return {
       content: this.messageToContent(message),
@@ -532,9 +535,11 @@ export class OpenAIAdapter implements ProviderAdapter {
       usage: {
         inputTokens: response.usage?.prompt_tokens ?? 0,
         outputTokens: response.usage?.completion_tokens ?? 0,
-        // Chat Completions usage has no cache-creation count (the Responses API reports one:
-        // input_tokens_details.cache_write_tokens, read in openai-responses-api.ts).
+        // Chat Completions reports a prompt-cache write as prompt_tokens_details.cache_write_tokens,
+        // inside prompt_tokens, as the Responses API does in input_tokens_details (openai-responses-api.ts).
+        // Only the Responses API reports the 30-minute / 12-hour split.
         ...(typeof cachedTokens === 'number' ? { cacheReadTokens: cachedTokens } : {}),
+        ...(typeof writtenTokens === 'number' ? { cacheCreationTokens: writtenTokens } : {}),
       },
       ...unreportedUsage(response.usage?.prompt_tokens, response.usage?.completion_tokens),
       model: response.model ?? requestedModel,
@@ -551,6 +556,7 @@ export class OpenAIAdapter implements ProviderAdapter {
     rawRequest?: unknown
   ): ProviderResponse {
     const cachedTokens = streamUsage?.prompt_tokens_details?.cached_tokens;
+    const writtenTokens = streamUsage?.prompt_tokens_details?.cache_write_tokens;
 
     return {
       content: this.messageToContent(message),
@@ -561,6 +567,7 @@ export class OpenAIAdapter implements ProviderAdapter {
         inputTokens: streamUsage?.prompt_tokens ?? 0,
         outputTokens: streamUsage?.completion_tokens ?? 0,
         ...(typeof cachedTokens === 'number' ? { cacheReadTokens: cachedTokens } : {}),
+        ...(typeof writtenTokens === 'number' ? { cacheCreationTokens: writtenTokens } : {}),
       },
       ...unreportedUsage(streamUsage?.prompt_tokens, streamUsage?.completion_tokens),
       model: requestedModel,
