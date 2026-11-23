@@ -1,9 +1,13 @@
 /**
- * OpenAI's Responses API reports a prompt-cache write as
- * `usage.input_tokens_details.cache_write_tokens`, inside `input_tokens`, and
- * bills it at 1.25× input from GPT-5.6 on (prompt-caching guide). The adapter
- * carries it as `cacheCreationTokens`; membrane's cache-inclusive
- * normalization takes it out of `inputTokens`; the GPT-5.6+ rows price it.
+ * OpenAI reports a prompt-cache write inside the input count — the Responses
+ * API as `usage.input_tokens_details.cache_write_tokens` (with a 30-minute /
+ * 12-hour split), Chat Completions as `usage.prompt_tokens_details.
+ * cache_write_tokens` — and from GPT-5.6 on bills it at 1.25× input for the
+ * 30-minute cache and 2.5× for the 12-hour cache (prompt-caching guide); earlier
+ * models and gpt-6-astra-law charge the input rate. The adapters carry the
+ * total as `cacheCreationTokens` and the 12-hour part as `cacheCreation1hTokens`;
+ * membrane's cache-inclusive normalization takes them out of `inputTokens`; the
+ * rows price them, and a row without a write rate is warned about once.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OpenAIResponsesAPIAdapter } from '../../src/providers/openai-responses-api.js';
@@ -12,6 +16,8 @@ import { stubFetchWithSseLines } from '../helpers/sse-fixtures.js';
 import { resetUnpricedModelWarnings } from '../../src/utils/cost.js';
 import { Membrane } from '../../src/membrane.js';
 import { OpenAIResponsesFormatter } from '../../src/formatters/openai-responses.js';
+import { NativeFormatter } from '../../src/formatters/native.js';
+import { TurnUsageAccumulator } from '../../src/utils/usage.js';
 import { getDefaultPricing } from '../../src/registry/default-pricing.js';
 import { calculateCost } from '../../src/utils/cost.js';
 
@@ -186,7 +192,7 @@ describe('OpenAI Chat Completions cache writes', () => {
 });
 
 describe('OpenAI rows', () => {
-  it('price a write at 1.25× input from GPT-5.6 on, and at the input rate before', () => {
+  it('price a 30-minute write at 1.25× and a 12-hour write at 2.5× input from GPT-5.6 on; at the input rate before, and on gpt-6-astra-law', () => {
     for (const id of ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
       const row = getDefaultPricing(id)!;
       expect(row.cacheWritePerMillion, id).toBeCloseTo(row.inputPerMillion * 1.25, 12);
@@ -226,17 +232,37 @@ describe('OpenAI rows', () => {
     stubChatResponse(CHAT_USAGE);
     const own = { inputPerMillion: 5, outputPerMillion: 15, currency: 'USD' as const };
     const membrane = new Membrane(new OpenAIAdapter({ apiKey: 'sk-test' }), {
-      formatter: new OpenAIResponsesFormatter(), assistantParticipant: 'Sol',
+      formatter: new NativeFormatter(), assistantParticipant: 'Sol',
       registry: { getPricing: () => own } as any,
     });
     const call = () => membrane.complete({ messages: [{ participant: 'User', content: [{ type: 'text', text: 'hi' }] }], config: { model: 'gpt-5.6-sol', maxTokens: 10 } });
     const first = await call();
     expect(first.usage.estimatedCost!.cacheWrite).toBeUndefined();
+    // The request the chat adapter sent carried the message (the formatter and adapter are a real pair).
+    const sent = JSON.parse(String((vi.mocked(fetch).mock.calls[0]![1] as RequestInit).body));
+    expect(JSON.stringify(sent.messages)).toContain('hi');
+    const ours = () => warn.mock.calls.filter(([line]) => String(line).startsWith('[membrane:cost] model "gpt-5.6-sol" wrote to the prompt cache'));
+    expect(ours()).toHaveLength(1);
     stubChatResponse(CHAT_USAGE);
     await call();
-    const ours = warn.mock.calls.filter(([line]) => String(line).includes('no\n cacheWritePerMillion'.replace('\n', '')) || String(line).includes('cacheWritePerMillion'));
+    expect(ours()).toHaveLength(1);
+  });
+
+  it('on the round path, each round is priced on its own row, the long-TTL split survives the sum, and a bare row is warned about once', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const sol = getDefaultPricing('gpt-5.6-sol')!;
+    const bare = { inputPerMillion: 5, outputPerMillion: 15, currency: 'USD' as const };
+    const turn = new TurnUsageAccumulator('gpt-5.6-sol', (served) => (served === 'bare-model' ? bare : sol));
+    turn.addRound('gpt-5.6-sol', { inputTokens: 1_000, outputTokens: 10, cacheReadTokens: 4_000, cacheCreationTokens: 7_000, cacheCreation1hTokens: 4_000 });
+    turn.addRound('gpt-5.6-sol', { inputTokens: 500, outputTokens: 10, cacheCreationTokens: 2_000, cacheCreation1hTokens: 0 });
+    const two = turn.total;
+    expect(two).toMatchObject({ cacheCreationTokens: 9_000, cacheCreation1hTokens: 4_000 });
+    // Round 1: 3,000 × $5 + 4,000 × $10; round 2: 2,000 × $5.
+    expect(two.estimatedCost!.cacheWrite).toBeCloseTo((3_000 * 5 + 4_000 * 10 + 2_000 * 5) / 1e6, 12);
+    turn.addRound('bare-model', { inputTokens: 100, outputTokens: 1, cacheCreationTokens: 50 });
+    turn.addRound('bare-model', { inputTokens: 100, outputTokens: 1, cacheCreationTokens: 50 });
+    const ours = warn.mock.calls.filter(([line]) => String(line).startsWith('[membrane:cost] model "bare-model" wrote to the prompt cache'));
     expect(ours).toHaveLength(1);
-    expect(String(ours[0][0])).toContain('gpt-5.6-sol');
   });
 
   it('under a caller\'s own row with no write rate, the write is unpriced — calculateCost has no input-rate fallback by design', () => {

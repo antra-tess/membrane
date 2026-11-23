@@ -96,7 +96,8 @@ export interface ModelPricing {
    * Anthropic's 1 hour (2× base input, against 1.25× for 5 minutes), OpenAI's
    * 12 hours on the Responses API (2.5× input, against 1.25× for 30 minutes).
    * Applied to {@link CallUsage.cacheCreation1hTokens}; unset means those
-   * tokens fall back to `cacheWritePerMillion`, which under-estimates them. Read only
+   * tokens fall back to `cacheWritePerMillion`, which under-estimates them
+   * where the long rate is higher. Read only
    * beside `cacheWritePerMillion`: a row with this rate alone has no rate for
    * its short-TTL writes, and cache writes stay unpriced as they were.
    */

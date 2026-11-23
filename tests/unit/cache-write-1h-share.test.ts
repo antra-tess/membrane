@@ -1,5 +1,6 @@
 /**
- * The 1-hour share of cache writes (`cacheCreation1hTokens`) on its way from
+ * The long-TTL share of cache writes (`cacheCreation1hTokens`: Anthropic's
+ * 1-hour, OpenAI's 12-hour) on its way from
  * the provider's usage report to the turn's totals: summed where the writes
  * are summed, unknown where any part wrote without a split, and taken from
  * the usage event it describes.
