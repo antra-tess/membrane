@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PRICING_TABLE, getDefaultPricing } from '../../src/registry/default-pricing.js';
+import { RATE_FIELDS } from '../helpers/pricing-source.js';
 import {
   comparePricing, perMillion, prefixNames, pricingFromSource, sameFigure, sameRate, sourceIdFor, tableIdFor,
   type SourceModel, type SourceSnapshot, type TablePricing,
@@ -244,6 +245,7 @@ describe('the built-in pricing table against the source snapshot', () => {
     it(`${row.prefix} matches ${sourceId}`, () => {
       expect(rowOf(effective(row.prefix), row.prefix), `${row.prefix} resolves to its own row`).toBe(row);
       const source = pricingFromSource(model);
+      expect(source.unreadable, `${sourceId} carries a rate this reading can't take`).toEqual([]);
       expect(source.furtherTiers, `${sourceId} has more tiers than the table's one longPrompt`).toBe(0);
       const differences = comparePricing(effective(row.prefix), source);
       const unexplained = differences.filter((d) => {
@@ -297,6 +299,8 @@ describe('the built-in pricing table against the source snapshot', () => {
   it('lists no known sibling that is gone, has its own row, or is priced at its base rates', () => {
     const now = new Set(siblingsFound().map((f) => f.model.id));
     expect(KNOWN_SIBLINGS.filter((k) => !now.has(k.sourceId)).map((k) => k.sourceId)).toEqual([]);
+    const ids = KNOWN_SIBLINGS.map((k) => k.sourceId);
+    expect(ids.filter((id, i) => ids.indexOf(id) !== i), 'a sibling listed twice').toEqual([]);
   });
 
   it('has a row, a null row or a KNOWN_UNPRICED entry for every source model the prefix mapping covers', () => {
@@ -341,8 +345,11 @@ describe('reading the source', () => {
     const e = pricingFromSource(explicit);
     expect(e.cacheWritePerMillion).toBeCloseTo(1.25, 12);
     expect(e.longPrompt?.cacheWritePerMillion, 'a tier that omits its write under an explicit base write inherits it').toBeCloseTo(1.25, 12);
-    const unreadable: SourceModel = { id: 'openai/u', context_length: 1, pricing: { prompt: '0.000001', completion: '0.00001', input_cache_write: 'invalid' } };
-    expect('cacheWritePerMillion' in pricingFromSource(unreadable), 'an unreadable write rate is not read as the prompt rate').toBe(false);
+    const unreadable: SourceModel = { id: 'openai/u', context_length: 1, pricing: { prompt: '0.000001', completion: '0.00001', input_cache_write: 'invalid', overrides: [{ min_prompt_tokens: 272_000, prompt: 'invalid' }] } };
+    const u = pricingFromSource(unreadable);
+    expect('cacheWritePerMillion' in u, 'an unreadable write rate is not read as the prompt rate').toBe(false);
+    expect(u.longPrompt?.inputPerMillion, 'an unreadable tier rate does not fall back to the base').toBeUndefined();
+    expect(u.unreadable).toEqual(['cacheWritePerMillion', 'longPrompt.inputPerMillion']);
   });
 
   it('a second override is counted, not read, and a tier rate the override leaves out is the base rate', () => {
@@ -364,14 +371,23 @@ describe('reading the source', () => {
     expect(sameRate(0.0833, 1 / 12)).toBe(false);
   });
 
-  it('prefixNames picks, for every source id, the row whose rates getDefaultPricing returns', () => {
-    for (const model of snapshot.models) {
-      const id = tableIdFor(model.id);
+  it('prefixNames picks, for every source id and the boundary cases, the row whose rates getDefaultPricing returns', () => {
+    const boundary = ['gpt-5.4-2026-03-05', 'gpt-5.40', 'gpt-5.3-codex', 'gpt-5', 'gpt-5-', 'claude-3-5-haiku-20241022', 'gemini-3.1-pro-preview-customtools'];
+    for (const id of [...snapshot.models.map((m) => tableIdFor(m.id)), ...boundary]) {
       if (!id) continue;
       const byHelper = PRICING_TABLE.filter((r) => prefixNames(r.prefix, id)).sort((a, b) => b.prefix.length - a.prefix.length)[0];
       const expected = byHelper === undefined || byHelper.pricing === null ? undefined : effective(byHelper.prefix);
       expect(getDefaultPricing(id, AT), `${id}: helper picks ${byHelper?.prefix ?? 'no row'}`).toBe(expected);
     }
+  });
+
+  it('RATE_FIELDS names every …PerMillion field of ModelPricing (tsconfig type-checks src/ alone, so this is checked here)', () => {
+    const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'types', 'provider.ts'), 'utf8');
+    const block = source.slice(source.indexOf('export interface ModelPricing {'));
+    const body = block.slice(0, block.indexOf('\n}'));
+    const fields = [...body.matchAll(/^\s+(\w+PerMillion)\??: number/gm)].map((m) => m[1]).sort();
+    expect(fields.length).toBeGreaterThan(0);
+    expect(fields).toEqual([...RATE_FIELDS].sort());
   });
 
   it('prefixNames is the table\'s rule', () => {
@@ -381,7 +397,7 @@ describe('reading the source', () => {
     expect(prefixNames('claude-3-', 'claude-3-5')).toBe(true);
   });
 
-  it('tableIdFor and sourceIdFor are each other\'s inverse on the ids the table uses', () => {
+  it('tableIdFor and sourceIdFor are each other\'s inverse on the table\'s prefixes (not on every id: a dated or non-gpt id has no prefix)', () => {
     for (const prefix of ['claude-haiku-5-5', 'claude-3-5-haiku', 'gpt-5.4', 'gemini-3.8-flash']) expect(tableIdFor(sourceIdFor(prefix)!)).toBe(prefix);
     expect(tableIdFor('openai/gpt-5:batch')).toBeNull();
     expect(tableIdFor('mistralai/x')).toBeNull();

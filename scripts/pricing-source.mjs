@@ -32,12 +32,13 @@ const readAtArg = readAtIndex === -1 ? undefined : args[readAtIndex + 1];
 if (readAtIndex !== -1 && !fromStdin) fail(2, '--read-at goes with --stdin: a fetched list is read now');
 if (fromStdin && (readAtArg === undefined || readAtArg.startsWith('--'))) fail(2, '--stdin needs --read-at INSTANT: when the saved response was read, as an ISO 8601 instant in UTC (2026-11-20T14:05:00Z)');
 if (fromStdin && !isInstant(readAtArg)) fail(2, `--read-at ${readAtArg} isn't an ISO 8601 instant in UTC (2026-11-20T14:05:00Z); the date alone can't place the read on either side of a provider's scheduled change`);
-if (args.some((a, i) => !a.startsWith('--') && !(i > 0 && args[i - 1] === '--read-at'))) fail(2, 'a positional argument: the options are --stdin and --read-at INSTANT');
+const positional = args.find((a, i) => !a.startsWith('--') && !(i > 0 && args[i - 1] === '--read-at'));
+if (positional !== undefined) fail(2, `unexpected argument ${JSON.stringify(positional)}: run as \`node scripts/pricing-source.mjs\` or \`node scripts/pricing-source.mjs --stdin --read-at INSTANT\``);
 
 function fail(code, message) { console.error(message); process.exit(code); }
 /** An ISO 8601 instant in UTC (2026-11-20T14:05:00Z) that comes back as itself: no 2026-02-30. */
 function isInstant(s) {
-  if (typeof s !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?Z$/.test(s)) return false;
+  if (typeof s !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?Z$/.test(s)) return false; // at most milliseconds: Date.parse keeps no more
   const ms = Date.parse(s);
   return Number.isFinite(ms) && new Date(ms).toISOString().startsWith(s.slice(0, 16));
 }
@@ -58,7 +59,11 @@ const RATE_KEYS = ['prompt', 'completion', 'input_cache_read', 'input_cache_writ
 
 function trimPricing(id, pricing) {
   const out = {};
-  for (const key of RATE_KEYS) if (pricing?.[key] !== undefined) out[key] = pricing[key];
+  for (const key of RATE_KEYS) {
+    if (pricing?.[key] === undefined) continue;
+    if (typeof pricing[key] !== 'string') fail(1, `${id}: pricing.${key} is ${JSON.stringify(pricing[key])}, not the per-token string the list has always carried; the snapshot is left as it was`);
+    out[key] = pricing[key];
+  }
   if (Array.isArray(pricing?.overrides)) {
     const tiers = [];
     for (const o of pricing.overrides) {
@@ -68,7 +73,11 @@ function trimPricing(id, pricing) {
         continue;
       }
       const t = { min_prompt_tokens: o.min_prompt_tokens };
-      for (const key of RATE_KEYS) if (o[key] !== undefined) t[key] = o[key];
+      for (const key of RATE_KEYS) {
+        if (o[key] === undefined) continue;
+        if (typeof o[key] !== 'string') fail(1, `${id}: an override's ${key} is ${JSON.stringify(o[key])}, not a per-token string; the snapshot is left as it was`);
+        t[key] = o[key];
+      }
       tiers.push(t);
     }
     if (tiers.length > 0) out.overrides = tiers;
@@ -81,7 +90,10 @@ const list = await readList();
 if (!Array.isArray(list?.data)) fail(1, `the response has no model list (${JSON.stringify(list).slice(0, 200)}); the snapshot is left as it was`);
 const models = list.data
   .filter((m) => typeof m?.id === 'string' && PROVIDERS.some((p) => m.id.startsWith(p)))
-  .map((m) => ({ id: m.id, context_length: m.context_length ?? null, pricing: trimPricing(m.id, m.pricing) }))
+  .map((m) => {
+    if (m.context_length !== undefined && m.context_length !== null && typeof m.context_length !== 'number') fail(1, `${m.id}: context_length is ${JSON.stringify(m.context_length)}, not a number; the snapshot is left as it was`);
+    return { id: m.id, context_length: m.context_length ?? null, pricing: trimPricing(m.id, m.pricing) };
+  })
   .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)); // JavaScript's string order (UTF-16 code units), the same on every host
 for (const provider of PROVIDERS) {
   if (!models.some((m) => m.id.startsWith(provider))) fail(1, `the response has no ${provider} model among its ${list.data.length}; the snapshot is left as it was`);

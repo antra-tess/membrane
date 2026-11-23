@@ -70,7 +70,9 @@ export type TablePricing = ModelPricing & { longPrompt?: LongTier };
  *  source leaves out or can't be read as a number is `undefined` here — never
  *  0 — so a missing or malformed rate shows as a difference. A tier rate the
  *  override leaves out is the base rate, as the table's own tier rule has it
- *  (an unset tier rate keeps the row's base rate). One provider rule: OpenAI
+ *  (an unset tier rate keeps the row's base rate); a rate that is present and
+ *  can't be read is `undefined` and named in `unreadable`, at the base and at
+ *  the tier alike, and never falls back. One provider rule: OpenAI
  *  lists no `input_cache_write` for the models whose page shows no write
  *  price, and bills their writes as input (#266), so for `openai/` an *absent*
  *  write rate reads as the prompt rate — at the base, and at a tier whose base
@@ -86,15 +88,20 @@ export interface SourcePricing {
   longPrompt?: LongTier;
   /** Overrides past the first: the table has one tier, so a second is reported, not read. */
   furtherTiers: number;
+  /** Fields the source carries but this reading couldn't take as a rate (`"invalid"`, a negative, a number
+   *  where a string belongs), base and tier (`longPrompt.…`): a row with any is not compared, it fails. */
+  unreadable: string[];
 }
 
 /**
- * The source's id for a table prefix: the provider from the prefix's first
+ * The source's id for a *table prefix*: the provider from the prefix's first
  * word, and Anthropic's dotted version (`claude-haiku-5-5` →
  * `anthropic/claude-haiku-5.5`, `claude-3-5-haiku` → `anthropic/claude-3.5-haiku`).
  * Every prefix of the three providers gets an id; whether the source carries a
  * model under it is the snapshot's to say. `null` for a prefix of no provider
- * the source covers.
+ * the source covers. It is not the inverse of `tableIdFor` on every id: a
+ * dated Anthropic id (`claude-sonnet-4-5-20250929`) or an OpenAI id outside
+ * `gpt-` has no table prefix, and this takes table prefixes alone.
  */
 export function sourceIdFor(prefix: string): string | null {
   if (prefix.startsWith('claude-')) {
@@ -118,24 +125,28 @@ export function perMillion(rate: unknown): number | undefined {
 
 export const RATE_FIELDS = ['inputPerMillion', 'outputPerMillion', 'cacheReadPerMillion', 'cacheWritePerMillion', 'cacheWrite1hPerMillion'] as const;
 export type RateField = (typeof RATE_FIELDS)[number];
-/** Every numeric field of ModelPricing is a rate this module compares: a new one fails to compile here until it is added above. */
-type NumericKeys<T> = { [K in keyof T]-?: NonNullable<T[K]> extends number ? K : never }[keyof T];
-type RateFieldsMissing = Exclude<NumericKeys<ModelPricing>, RateField>;
-const _everyRateFieldCompared: RateFieldsMissing extends never ? true : RateFieldsMissing = true;
-void _everyRateFieldCompared;
+// Every `…PerMillion` field of ModelPricing has to be in RATE_FIELDS; the test
+// file checks that at run time against src/types/provider.ts, since tsconfig
+// type-checks src/ alone and nothing compiles this file.
 
 /** What the table's row would read, taken from the source model. */
 export function pricingFromSource(model: SourceModel): SourcePricing {
   const p = model.pricing;
   const openai = model.id.startsWith('openai/');
-  const out: SourcePricing = { furtherTiers: 0 };
-  const base: Partial<Record<RateField, number>> = {
-    inputPerMillion: perMillion(p.prompt),
-    outputPerMillion: perMillion(p.completion),
-    cacheReadPerMillion: perMillion(p.input_cache_read),
-    cacheWritePerMillion: perMillion(p.input_cache_write),
-    cacheWrite1hPerMillion: perMillion(p.input_cache_write_1h),
+  const out: SourcePricing = { furtherTiers: 0, unreadable: [] };
+  const SOURCE_KEY: Record<RateField, keyof SourceOverride & keyof SourceModel['pricing']> = {
+    inputPerMillion: 'prompt', outputPerMillion: 'completion', cacheReadPerMillion: 'input_cache_read',
+    cacheWritePerMillion: 'input_cache_write', cacheWrite1hPerMillion: 'input_cache_write_1h',
   };
+  const read = (holder: Record<string, unknown>, field: RateField, at: string): number | undefined => {
+    const raw = holder[SOURCE_KEY[field]];
+    if (raw === undefined) return undefined;
+    const n = perMillion(raw);
+    if (n === undefined) out.unreadable.push(at);
+    return n;
+  };
+  const base: Partial<Record<RateField, number>> = {};
+  for (const field of RATE_FIELDS) base[field] = read(p as Record<string, unknown>, field, field);
   const writeAbsent = p.input_cache_write === undefined;
   if (openai && writeAbsent) base.cacheWritePerMillion = base.inputPerMillion;
   for (const field of RATE_FIELDS) {
@@ -146,13 +157,15 @@ export function pricingFromSource(model: SourceModel): SourcePricing {
   const tier = tiers[0];
   if (tier !== undefined) {
     const long: LongTier = { overTokens: tier.min_prompt_tokens };
-    const rate = (over: string | undefined, fallback: number | undefined) => perMillion(over) ?? fallback;
-    const li = rate(tier.prompt, base.inputPerMillion), lo = rate(tier.completion, base.outputPerMillion);
-    const lr = rate(tier.input_cache_read, base.cacheReadPerMillion);
-    const lw = tier.input_cache_write !== undefined
-      ? perMillion(tier.input_cache_write)
+    const t = tier as unknown as Record<string, unknown>;
+    // A tier rate the override leaves out is the base rate; one it carries is read, and stays undefined if unreadable.
+    const rate = (field: RateField, fallback: number | undefined) => (t[SOURCE_KEY[field]] === undefined ? fallback : read(t, field, `longPrompt.${field}`));
+    const li = rate('inputPerMillion', base.inputPerMillion), lo = rate('outputPerMillion', base.outputPerMillion);
+    const lr = rate('cacheReadPerMillion', base.cacheReadPerMillion);
+    const lw = t.input_cache_write !== undefined
+      ? read(t, 'cacheWritePerMillion', 'longPrompt.cacheWritePerMillion')
       : openai && writeAbsent ? li : base.cacheWritePerMillion;
-    const lw1 = rate(tier.input_cache_write_1h, base.cacheWrite1hPerMillion);
+    const lw1 = rate('cacheWrite1hPerMillion', base.cacheWrite1hPerMillion);
     if (li !== undefined) long.inputPerMillion = li;
     if (lo !== undefined) long.outputPerMillion = lo;
     if (lr !== undefined) long.cacheReadPerMillion = lr;
