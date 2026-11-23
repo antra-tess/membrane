@@ -1,7 +1,8 @@
-import type { ModelPricing } from '../types/provider.js';
+import type { ModelPricing } from '../../src/types/provider.js';
 
 /**
- * The built-in pricing table checked against a source (#270).
+ * The built-in pricing table checked against a source (#270). A test helper,
+ * not part of the package.
  *
  * The table is typed by hand from the providers' pricing pages, and each row
  * has to be found and re-read when a provider changes a rate, adds a column
@@ -12,10 +13,11 @@ import type { ModelPricing } from '../types/provider.js';
  * the long-prompt tiers — in one shape. A snapshot of it is checked in
  * (`tests/fixtures/openrouter-models.json`, refreshed by hand with
  * `scripts/pricing-source.mjs`), and a test compares each row's rates in
- * effect on the snapshot's date to it, so a divergence is a failing test with
- * the two figures rather than a page nobody happened to re-read. The check is
- * as current as the snapshot: a provider's change after it is caught at the
- * next refresh, not before.
+ * effect at the snapshot's instant to it, so a divergence is a failing test
+ * with the two figures rather than a page nobody happened to re-read. The
+ * check is as current as the snapshot: a provider's change after it is caught
+ * at the next refresh, not before. The test also looks the other way, from the
+ * source to the table, for the models the table has no row for.
  *
  * OpenRouter is not the authority — the provider's own page is. The point is
  * that a difference becomes visible and a refresh mechanical: the snapshot is
@@ -46,6 +48,7 @@ export interface SourceModel {
 
 export interface SourceSnapshot {
   source: string;
+  /** The instant the list was read, ISO 8601 with a time: the table's dated changes are evaluated at it. */
   readAt: string;
   models: SourceModel[];
 }
@@ -67,7 +70,10 @@ export type TablePricing = ModelPricing & { longPrompt?: LongTier };
  *  source leaves out or can't be read as a number is `undefined` here — never
  *  0 — so a missing or malformed rate shows as a difference. A tier rate the
  *  override leaves out is the base rate, as the table's own tier rule has it
- *  (an unset tier rate keeps the row's base rate). */
+ *  (an unset tier rate keeps the row's base rate). One provider rule: OpenAI
+ *  lists no `input_cache_write` for the models whose page shows no write
+ *  price, and bills their writes as input (#266), so for `openai/` a missing
+ *  write rate reads as the prompt rate, at the base and at the tier. */
 export interface SourcePricing {
   inputPerMillion?: number;
   outputPerMillion?: number;
@@ -97,27 +103,32 @@ export function sourceIdFor(prefix: string): string | null {
   return null;
 }
 
-/** A per-token rate string as dollars per million, or undefined when it isn't a finite number. */
-export function perMillion(rate: string | undefined): number | undefined {
-  if (rate === undefined) return undefined;
+/** A per-token rate string as dollars per million. `undefined` — never 0 —
+ *  for anything that isn't a string holding a finite, non-negative number:
+ *  an absent field, `null`, a blank, a word, a negative. */
+export function perMillion(rate: unknown): number | undefined {
+  if (typeof rate !== 'string' || rate.trim() === '') return undefined;
   const n = Number(rate);
-  if (!Number.isFinite(n)) return undefined;
+  if (!Number.isFinite(n) || n < 0) return undefined;
   return n * 1_000_000;
 }
 
-const RATE_FIELDS = ['inputPerMillion', 'outputPerMillion', 'cacheReadPerMillion', 'cacheWritePerMillion', 'cacheWrite1hPerMillion'] as const;
+export const RATE_FIELDS = ['inputPerMillion', 'outputPerMillion', 'cacheReadPerMillion', 'cacheWritePerMillion', 'cacheWrite1hPerMillion'] as const;
+export type RateField = (typeof RATE_FIELDS)[number];
 
 /** What the table's row would read, taken from the source model. */
 export function pricingFromSource(model: SourceModel): SourcePricing {
   const p = model.pricing;
+  const openai = model.id.startsWith('openai/');
   const out: SourcePricing = { furtherTiers: 0 };
-  const base = {
+  const base: Partial<Record<RateField, number>> = {
     inputPerMillion: perMillion(p.prompt),
     outputPerMillion: perMillion(p.completion),
     cacheReadPerMillion: perMillion(p.input_cache_read),
     cacheWritePerMillion: perMillion(p.input_cache_write),
     cacheWrite1hPerMillion: perMillion(p.input_cache_write_1h),
   };
+  if (openai && base.cacheWritePerMillion === undefined) base.cacheWritePerMillion = base.inputPerMillion;
   for (const field of RATE_FIELDS) {
     const v = base[field];
     if (v !== undefined) out[field] = v;
@@ -129,7 +140,8 @@ export function pricingFromSource(model: SourceModel): SourcePricing {
     const rate = (over: string | undefined, fallback: number | undefined) => perMillion(over) ?? fallback;
     const li = rate(tier.prompt, base.inputPerMillion), lo = rate(tier.completion, base.outputPerMillion);
     const lr = rate(tier.input_cache_read, base.cacheReadPerMillion);
-    const lw = rate(tier.input_cache_write, base.cacheWritePerMillion), lw1 = rate(tier.input_cache_write_1h, base.cacheWrite1hPerMillion);
+    const lw = perMillion(tier.input_cache_write) ?? (openai ? li : base.cacheWritePerMillion);
+    const lw1 = rate(tier.input_cache_write_1h, base.cacheWrite1hPerMillion);
     if (li !== undefined) long.inputPerMillion = li;
     if (lo !== undefined) long.outputPerMillion = lo;
     if (lr !== undefined) long.cacheReadPerMillion = lr;
@@ -149,7 +161,7 @@ export interface PricingDifference {
 }
 
 /** The table's tier as the rates it charges: an unset tier rate is the base rate. */
-function effectiveTier(table: TablePricing): LongTier | undefined {
+export function effectiveTier(table: TablePricing): LongTier | undefined {
   const t = table.longPrompt;
   if (!t) return undefined;
   const out: LongTier = { overTokens: t.overTokens };
@@ -164,19 +176,22 @@ function effectiveTier(table: TablePricing): LongTier | undefined {
 export function comparePricing(table: TablePricing, source: SourcePricing): PricingDifference[] {
   const out: PricingDifference[] = [];
   for (const field of RATE_FIELDS) {
-    if (!same(table[field], source[field])) out.push({ field, table: table[field], source: source[field] });
+    if (!sameRate(table[field], source[field])) out.push({ field, table: table[field], source: source[field] });
   }
   const t = effectiveTier(table), s = source.longPrompt;
   if (!t && !s) return out;
-  if (!same(t?.overTokens, s?.overTokens)) out.push({ field: 'longPrompt.overTokens', table: t?.overTokens, source: s?.overTokens });
+  // A token threshold is an integer: equal or not.
+  if (t?.overTokens !== s?.overTokens) out.push({ field: 'longPrompt.overTokens', table: t?.overTokens, source: s?.overTokens });
   for (const field of RATE_FIELDS) {
-    if (!same(t?.[field], s?.[field])) out.push({ field: `longPrompt.${field}`, table: t?.[field], source: s?.[field] });
+    if (!sameRate(t?.[field], s?.[field])) out.push({ field: `longPrompt.${field}`, table: t?.[field], source: s?.[field] });
   }
   return out;
 }
 
-/** Equal to within a millionth of the larger: a page's $0.0833 and a table's 1/12 agree. */
-function same(a: number | undefined, b: number | undefined): boolean {
+/** Two rates are the same to within a millionth of the larger: enough for the
+ *  float noise of a per-token string × 1e6 (`"0.0000004"` → 0.39999999999999997),
+ *  not enough to pass a rounded figure for an exact one ($0.0833 is not 1/12). */
+export function sameRate(a: number | undefined, b: number | undefined): boolean {
   if (a === undefined || b === undefined) return a === b;
   return Math.abs(a - b) <= Math.max(Math.abs(a), Math.abs(b)) * 1e-6;
 }
@@ -194,4 +209,14 @@ export function tableIdFor(sourceId: string): string | null {
   if (provider === 'openai') return name.startsWith('gpt-') ? name : null;
   if (provider === 'google') return name.startsWith('gemini-') ? name : null;
   return null;
+}
+
+/** The table's prefix rule, as `getDefaultPricing` applies it (default-pricing.ts
+ *  `prefixNames`): the prefix names the id when the id is the prefix, or starts
+ *  with it and what follows isn't a digit (so `gpt-5.4` names `gpt-5.4-2026-03-05`
+ *  and not `gpt-5.40`), or the prefix ends in a dash. Kept beside the table's
+ *  own so a change there fails a test here. */
+export function prefixNames(prefix: string, id: string): boolean {
+  if (!id.startsWith(prefix)) return false;
+  return prefix.endsWith('-') || !/^\d/.test(id.slice(prefix.length));
 }

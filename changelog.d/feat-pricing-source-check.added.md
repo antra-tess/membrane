@@ -1,11 +1,1 @@
-- The built-in pricing table is checked against a source: `tests/fixtures/openrouter-models.json`
-  is a snapshot of OpenRouter's public model list (base rates, cache reads and writes, the
-  1-hour write, and the long-prompt overrides, for every Anthropic, OpenAI and Google model),
-  refreshed by hand with `node scripts/pricing-source.mjs`, and
-  `tests/unit/default-pricing-source.test.ts` compares each priced row's rates in effect on
-  the snapshot's date to it, failing with both figures on a difference that isn't a listed
-  known gap (an open PR, a choice the table makes, or a source error checked against the
-  provider's page), on a row the source lost, and on a known gap that is gone. It also lists
-  the source models the prefix rule prices by another model's row at other rates. The check
-  is as current as the snapshot: a provider's change is caught at the next refresh, as a
-  failing test with the two figures, rather than by someone re-reading the page.
+- **A check of the built-in pricing table against a source, in the repository** (#270, steps 1 and 2; nothing here ships in the package). `tests/fixtures/openrouter-models.json` is a snapshot of OpenRouter's public model list — per-token rates, long-prompt overrides and context length for the models under `anthropic/`, `openai/` and `google/`, with the instant it was read — refreshed by hand with `scripts/pricing-source.mjs`. `tests/unit/default-pricing-source.test.ts` compares every priced row the source carries (43 of 50; the 7 it doesn't are listed by name) with the source's reading of the same model, field by field, at the snapshot's instant; a difference fails with both figures unless it is a listed known gap, and a listed gap fails when it closes or when either figure moves. The same test looks the other way: every source model the prefix mapping covers has a row, a `pricing: null` row or a `KNOWN_UNPRICED` entry, asserted for equality, and the models the prefix rule prices by another model's row at other base rates are listed (#269). OpenRouter is a check, not the authority: three places where it disagrees with a provider's page are listed as source errors with the page that decided them.
