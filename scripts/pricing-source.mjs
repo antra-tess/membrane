@@ -26,6 +26,7 @@ const flags = new Set(args.filter((a) => a.startsWith('--')));
 const known = new Set(['--stdin', '--read-at']);
 for (const f of flags) if (!known.has(f)) fail(2, `unknown option ${f}; the options are --stdin and --read-at INSTANT`);
 const fromStdin = flags.has('--stdin');
+if (args.filter((a) => a === '--read-at').length > 1) fail(2, '--read-at given twice; give the one instant the saved response was read at');
 const readAtIndex = args.indexOf('--read-at');
 const readAtArg = readAtIndex === -1 ? undefined : args[readAtIndex + 1];
 if (readAtIndex !== -1 && !fromStdin) fail(2, '--read-at goes with --stdin: a fetched list is read now');
@@ -61,7 +62,7 @@ function trimPricing(id, pricing) {
   if (Array.isArray(pricing?.overrides)) {
     const tiers = [];
     for (const o of pricing.overrides) {
-      if (typeof o.min_prompt_tokens !== 'number') {
+      if (o === null || typeof o !== 'object' || typeof o.min_prompt_tokens !== 'number') {
         // An override the table has no field for (not a prompt-length tier): said, not kept.
         console.error(`${id}: an override without min_prompt_tokens is left out: ${JSON.stringify(o)}`);
         continue;
@@ -81,7 +82,7 @@ if (!Array.isArray(list?.data)) fail(1, `the response has no model list (${JSON.
 const models = list.data
   .filter((m) => typeof m?.id === 'string' && PROVIDERS.some((p) => m.id.startsWith(p)))
   .map((m) => ({ id: m.id, context_length: m.context_length ?? null, pricing: trimPricing(m.id, m.pricing) }))
-  .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)); // by code point, the same on every host
+  .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)); // JavaScript's string order (UTF-16 code units), the same on every host
 for (const provider of PROVIDERS) {
   if (!models.some((m) => m.id.startsWith(provider))) fail(1, `the response has no ${provider} model among its ${list.data.length}; the snapshot is left as it was`);
 }

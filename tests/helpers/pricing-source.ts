@@ -8,9 +8,9 @@ import type { ModelPricing } from '../../src/types/provider.js';
  * has to be found and re-read when a provider changes a rate, adds a column
  * (the 1-hour cache write, the long-prompt tiers) or adds a model. OpenRouter's
  * public model list carries, for every model under the three providers the
- * table prices, every field the table has — base rates, cache reads and
+ * table prices, the fields the table has — base rates, cache reads and
  * writes, the 1-hour write, and `overrides` keyed by `min_prompt_tokens` for
- * the long-prompt tiers — in one shape. A snapshot of it is checked in
+ * the long-prompt tiers — in one shape, for the models it carries them for. A snapshot of it is checked in
  * (`tests/fixtures/openrouter-models.json`, refreshed by hand with
  * `scripts/pricing-source.mjs`), and a test compares each row's rates in
  * effect at the snapshot's instant to it, so a divergence is a failing test
@@ -72,8 +72,11 @@ export type TablePricing = ModelPricing & { longPrompt?: LongTier };
  *  override leaves out is the base rate, as the table's own tier rule has it
  *  (an unset tier rate keeps the row's base rate). One provider rule: OpenAI
  *  lists no `input_cache_write` for the models whose page shows no write
- *  price, and bills their writes as input (#266), so for `openai/` a missing
- *  write rate reads as the prompt rate, at the base and at the tier. */
+ *  price, and bills their writes as input (#266), so for `openai/` an *absent*
+ *  write rate reads as the prompt rate — at the base, and at a tier whose base
+ *  write was absent too; a tier that omits its write under an explicit base
+ *  write inherits that, as the table's tier rule has it. A write rate that is
+ *  present but unreadable stays `undefined`, so it shows as a difference. */
 export interface SourcePricing {
   inputPerMillion?: number;
   outputPerMillion?: number;
@@ -115,6 +118,11 @@ export function perMillion(rate: unknown): number | undefined {
 
 export const RATE_FIELDS = ['inputPerMillion', 'outputPerMillion', 'cacheReadPerMillion', 'cacheWritePerMillion', 'cacheWrite1hPerMillion'] as const;
 export type RateField = (typeof RATE_FIELDS)[number];
+/** Every numeric field of ModelPricing is a rate this module compares: a new one fails to compile here until it is added above. */
+type NumericKeys<T> = { [K in keyof T]-?: NonNullable<T[K]> extends number ? K : never }[keyof T];
+type RateFieldsMissing = Exclude<NumericKeys<ModelPricing>, RateField>;
+const _everyRateFieldCompared: RateFieldsMissing extends never ? true : RateFieldsMissing = true;
+void _everyRateFieldCompared;
 
 /** What the table's row would read, taken from the source model. */
 export function pricingFromSource(model: SourceModel): SourcePricing {
@@ -128,7 +136,8 @@ export function pricingFromSource(model: SourceModel): SourcePricing {
     cacheWritePerMillion: perMillion(p.input_cache_write),
     cacheWrite1hPerMillion: perMillion(p.input_cache_write_1h),
   };
-  if (openai && base.cacheWritePerMillion === undefined) base.cacheWritePerMillion = base.inputPerMillion;
+  const writeAbsent = p.input_cache_write === undefined;
+  if (openai && writeAbsent) base.cacheWritePerMillion = base.inputPerMillion;
   for (const field of RATE_FIELDS) {
     const v = base[field];
     if (v !== undefined) out[field] = v;
@@ -140,7 +149,9 @@ export function pricingFromSource(model: SourceModel): SourcePricing {
     const rate = (over: string | undefined, fallback: number | undefined) => perMillion(over) ?? fallback;
     const li = rate(tier.prompt, base.inputPerMillion), lo = rate(tier.completion, base.outputPerMillion);
     const lr = rate(tier.input_cache_read, base.cacheReadPerMillion);
-    const lw = perMillion(tier.input_cache_write) ?? (openai ? li : base.cacheWritePerMillion);
+    const lw = tier.input_cache_write !== undefined
+      ? perMillion(tier.input_cache_write)
+      : openai && writeAbsent ? li : base.cacheWritePerMillion;
     const lw1 = rate(tier.input_cache_write_1h, base.cacheWrite1hPerMillion);
     if (li !== undefined) long.inputPerMillion = li;
     if (lo !== undefined) long.outputPerMillion = lo;
@@ -188,6 +199,11 @@ export function comparePricing(table: TablePricing, source: SourcePricing): Pric
   return out;
 }
 
+/** Two figures of one field are the same: a token threshold exactly, a rate to a millionth (see sameRate). */
+export function sameFigure(field: string, a: number | undefined, b: number | undefined): boolean {
+  return field.endsWith('overTokens') ? a === b : sameRate(a, b);
+}
+
 /** Two rates are the same to within a millionth of the larger: enough for the
  *  float noise of a per-token string × 1e6 (`"0.0000004"` → 0.39999999999999997),
  *  not enough to pass a rounded figure for an exact one ($0.0833 is not 1/12). */
@@ -198,16 +214,17 @@ export function sameRate(a: number | undefined, b: number | undefined): boolean 
 
 /** The table id a source model would be looked up by: the provider dropped,
  *  Anthropic's dots back to dashes (`anthropic/claude-haiku-5.5` →
- *  `claude-haiku-5-5`). `null` for an OpenRouter variant (`:batch`, `:free`,
- *  `:nitro`), which is OpenRouter's own id syntax and not a provider's model
- *  id, and for a provider the table doesn't carry. */
+ *  `claude-haiku-5-5`). Every model of the three providers gets one, whatever
+ *  its name (`openai/o3` → `o3`), since a caller can ask for any of them and
+ *  the table answers or doesn't. `null` for an OpenRouter variant (`:batch`,
+ *  `:free`, `:nitro`), which is OpenRouter's own id syntax and not a
+ *  provider's model id, and for a provider the table doesn't carry. */
 export function tableIdFor(sourceId: string): string | null {
   if (sourceId.includes(':')) return null;
   const slash = sourceId.indexOf('/');
   const provider = sourceId.slice(0, slash), name = sourceId.slice(slash + 1);
-  if (provider === 'anthropic') return name.startsWith('claude-') ? name.replace(/\./g, '-') : null;
-  if (provider === 'openai') return name.startsWith('gpt-') ? name : null;
-  if (provider === 'google') return name.startsWith('gemini-') ? name : null;
+  if (provider === 'anthropic') return name.replace(/\./g, '-');
+  if (provider === 'openai' || provider === 'google') return name;
   return null;
 }
 

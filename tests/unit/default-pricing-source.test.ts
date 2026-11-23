@@ -4,7 +4,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PRICING_TABLE, getDefaultPricing } from '../../src/registry/default-pricing.js';
 import {
-  comparePricing, perMillion, prefixNames, pricingFromSource, sameRate, sourceIdFor, tableIdFor,
+  comparePricing, perMillion, prefixNames, pricingFromSource, sameFigure, sameRate, sourceIdFor, tableIdFor,
   type SourceModel, type SourceSnapshot, type TablePricing,
 } from '../helpers/pricing-source.js';
 
@@ -154,7 +154,7 @@ const KNOWN_SIBLINGS: Sibling[] = [
   { sourceId: 'openai/gpt-5.5-pro', row: 'gpt-5.5', table: [5, 30], source: [30, 180], why: '#269: no -pro row; the -pro sibling at 6x the row\'s rates' },
 ];
 
-/** Source models the table has no row for at all (not even `pricing: null`): unpriced, warned about per process. #249 (the GPT-6.x and Gemini 4 families), and the rest by reason. */
+/** Source models of the three providers the table has no row for at all (not even `pricing: null`): unpriced, warned about per process. #249 (the GPT-6.x and Gemini 4 families), and the rest by reason. 44 at the 2026-11-23 snapshot. */
 const KNOWN_UNPRICED: string[] = [
   // #249: the current GPT-6.x and Gemini 4 families, and OpenAI's -pro siblings of them.
   'gpt-6-sol', 'gpt-6-sol-pro', 'gpt-6-luna', 'gpt-6-luna-pro',
@@ -167,8 +167,13 @@ const KNOWN_UNPRICED: string[] = [
   'gemini-nano-banana-2.1', 'gemini-omni-1.1-flash', 'gemini-omni-1.2-flash', 'gpt-audio', 'gpt-audio-mini',
   // Open-weight models: OpenRouter's rate is a host's, not OpenAI's.
   'gpt-oss-120b', 'gpt-oss-20b', 'gpt-oss-safeguard-20b',
-  // Older OpenAI models the table never carried, and an alias.
+  // Older OpenAI models the table never carried (six), and an alias.
   'gpt-3.5-turbo-0613', 'gpt-3.5-turbo-16k', 'gpt-4', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano', 'gpt-chat-latest',
+  // OpenAI's o-series: the table has gpt- rows only.
+  'o3', 'o3-pro',
+  // Google's open-weight Gemma models (OpenRouter's rate is a host's) and the Lyria music models, priced by the second.
+  'gemma-2-27b-it', 'gemma-3-12b-it', 'gemma-3-27b-it', 'gemma-3-4b-it', 'gemma-4-26b-a4b-it', 'gemma-4-31b-it',
+  'lyria-3-clip-preview', 'lyria-3-pro-preview',
 ];
 
 /** A rate for a message: the float noise of a per-token string × 1e6 trimmed. */
@@ -243,7 +248,7 @@ describe('the built-in pricing table against the source snapshot', () => {
       const differences = comparePricing(effective(row.prefix), source);
       const unexplained = differences.filter((d) => {
         const g = KNOWN_GAPS.find((k) => k.prefix === row.prefix && k.field === d.field);
-        return !g || !sameRate(g.table, d.table) || !sameRate(g.source, d.source);
+        return !g || !sameFigure(d.field, g.table, d.table) || !sameFigure(d.field, g.source, d.source);
       });
       const lines = unexplained.map((d) => {
         const g = KNOWN_GAPS.find((k) => k.prefix === row.prefix && k.field === d.field);
@@ -254,15 +259,24 @@ describe('the built-in pricing table against the source snapshot', () => {
     });
   }
 
-  it('lists no known gap the table no longer has', () => {
+  it('lists each known gap once, with a reason, and none the table no longer has or whose figures moved', () => {
     const stale: string[] = [];
+    const seen = new Set<string>();
     for (const g of KNOWN_GAPS) {
+      const key = `${g.prefix} ${g.field}`;
+      if (seen.has(key)) stale.push(`${key}: listed twice`);
+      seen.add(key);
+      if (g.why.trim() === '') stale.push(`${key}: no reason`);
       const row = priced.find((r) => r.prefix === g.prefix);
       const model = row && sourceModelOf(row.prefix);
-      if (!row || !model) { stale.push(`${g.prefix}: no such row or source model`); continue; }
+      if (!row || !model) { stale.push(`${key}: no such row or source model`); continue; }
       const d = comparePricing(effective(row.prefix), pricingFromSource(model)).find((x) => x.field === g.field);
-      if (!d) stale.push(`${g.prefix} ${g.field}: no difference now (${g.why})`);
+      if (!d) stale.push(`${key}: no difference now (${g.why})`);
+      else if (!sameFigure(g.field, g.table, d.table) || !sameFigure(g.field, g.source, d.source)) {
+        stale.push(`${key}: listed as table ${show(g.table)}, source ${show(g.source)}; now table ${show(d.table)}, source ${show(d.source)}`);
+      }
     }
+    for (const k of KNOWN_SIBLINGS) if (k.why.trim() === '') stale.push(`${k.sourceId}: no reason`);
     expect(stale).toEqual([]);
   });
 
@@ -295,17 +309,17 @@ describe('the built-in pricing table against the source snapshot', () => {
   });
 
   if (process.env.PRICING_SOURCE_DUMP) {
-    it('DUMP: the three lists as the snapshot has them', () => {
+    it('DUMP: the three lists as the snapshot has them (the reasons are yours to write; an empty one fails)', () => {
       const gaps: string[] = [];
       for (const row of priced) {
         const model = sourceModelOf(row.prefix);
         if (!model) continue;
         for (const d of comparePricing(effective(row.prefix), pricingFromSource(model))) {
-          gaps.push(`  gap('${row.prefix}', '${d.field}', ${lit(d.table)}, ${lit(d.source)}, ''),`);
+          gaps.push(`  gap(${JSON.stringify(row.prefix)}, ${JSON.stringify(d.field)}, ${lit(d.table)}, ${lit(d.source)}, ''),`);
         }
       }
-      const sibs = siblingsFound().map((f) => `  { sourceId: '${f.model.id}', row: '${f.row}', table: [${lit(f.table[0])}, ${lit(f.table[1])}], source: [${lit(f.source[0])}, ${lit(f.source[1])}], why: '' },`);
-      const unp = unpricedFound().map((id) => `  '${id}',`);
+      const sibs = siblingsFound().map((f) => `  { sourceId: ${JSON.stringify(f.model.id)}, row: ${JSON.stringify(f.row)}, table: [${lit(f.table[0])}, ${lit(f.table[1])}], source: [${lit(f.source[0])}, ${lit(f.source[1])}], why: '' },`);
+      const unp = unpricedFound().map((id) => `  ${JSON.stringify(id)},`);
       console.log(`__GAPS__\n${gaps.join('\n')}\n__SIBLINGS__\n${sibs.join('\n')}\n__UNPRICED__\n${unp.join('\n')}\n__END__`);
     });
   }
@@ -323,8 +337,12 @@ describe('reading the source', () => {
     expect(pricingFromSource(openai)).toMatchObject({ cacheWritePerMillion: 1, longPrompt: { overTokens: 272_000, inputPerMillion: 2, cacheWritePerMillion: 2 } });
     const google: SourceModel = { id: 'google/x', context_length: 1, pricing: { prompt: '0.000001', completion: '0.00001' } };
     expect('cacheWritePerMillion' in pricingFromSource(google)).toBe(false);
-    const explicit: SourceModel = { id: 'openai/y', context_length: 1, pricing: { prompt: '0.000001', completion: '0.00001', input_cache_write: '0.00000125' } };
-    expect(pricingFromSource(explicit).cacheWritePerMillion).toBeCloseTo(1.25, 12);
+    const explicit: SourceModel = { id: 'openai/y', context_length: 1, pricing: { prompt: '0.000001', completion: '0.00001', input_cache_write: '0.00000125', overrides: [{ min_prompt_tokens: 272_000, prompt: '0.000002' }] } };
+    const e = pricingFromSource(explicit);
+    expect(e.cacheWritePerMillion).toBeCloseTo(1.25, 12);
+    expect(e.longPrompt?.cacheWritePerMillion, 'a tier that omits its write under an explicit base write inherits it').toBeCloseTo(1.25, 12);
+    const unreadable: SourceModel = { id: 'openai/u', context_length: 1, pricing: { prompt: '0.000001', completion: '0.00001', input_cache_write: 'invalid' } };
+    expect('cacheWritePerMillion' in pricingFromSource(unreadable), 'an unreadable write rate is not read as the prompt rate').toBe(false);
   });
 
   it('a second override is counted, not read, and a tier rate the override leaves out is the base rate', () => {
@@ -346,6 +364,16 @@ describe('reading the source', () => {
     expect(sameRate(0.0833, 1 / 12)).toBe(false);
   });
 
+  it('prefixNames picks, for every source id, the row whose rates getDefaultPricing returns', () => {
+    for (const model of snapshot.models) {
+      const id = tableIdFor(model.id);
+      if (!id) continue;
+      const byHelper = PRICING_TABLE.filter((r) => prefixNames(r.prefix, id)).sort((a, b) => b.prefix.length - a.prefix.length)[0];
+      const expected = byHelper === undefined || byHelper.pricing === null ? undefined : effective(byHelper.prefix);
+      expect(getDefaultPricing(id, AT), `${id}: helper picks ${byHelper?.prefix ?? 'no row'}`).toBe(expected);
+    }
+  });
+
   it('prefixNames is the table\'s rule', () => {
     expect(prefixNames('gpt-5.4', 'gpt-5.4-2026-03-05')).toBe(true);
     expect(prefixNames('gpt-5.4', 'gpt-5.40')).toBe(false);
@@ -357,5 +385,7 @@ describe('reading the source', () => {
     for (const prefix of ['claude-haiku-5-5', 'claude-3-5-haiku', 'gpt-5.4', 'gemini-3.8-flash']) expect(tableIdFor(sourceIdFor(prefix)!)).toBe(prefix);
     expect(tableIdFor('openai/gpt-5:batch')).toBeNull();
     expect(tableIdFor('mistralai/x')).toBeNull();
+    expect(tableIdFor('openai/o3')).toBe('o3');
+    expect(tableIdFor('google/gemma-3-4b-it')).toBe('gemma-3-4b-it');
   });
 });
