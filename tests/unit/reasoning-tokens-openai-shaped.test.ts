@@ -54,13 +54,23 @@ describe('reasoning tokens reach thinkingTokens, inside outputTokens as the API 
     expect(streamed.usage).toEqual({ inputTokens: 100, outputTokens: 60, thinkingTokens: 40 });
   });
 
-  it('OpenRouterAdapter, whole response, beside the cache fields it already reads', async () => {
-    stubChat({ ...chatUsage, prompt_tokens_details: { cached_tokens: 30 } }, 'openai/gpt-5.6-sol');
-    const whole = await new OpenRouterAdapter({ apiKey: 'or-test' }).complete({ ...chatRequest, model: 'openai/gpt-5.6-sol' });
+  it('OpenRouterAdapter, whole response and stream, beside the cache fields it already reads', async () => {
+    const usage = { ...chatUsage, prompt_tokens_details: { cached_tokens: 30 } };
+    const request = { ...chatRequest, model: 'openai/gpt-5.6-sol' };
+    stubChat(usage, 'openai/gpt-5.6-sol');
+    const whole = await new OpenRouterAdapter({ apiKey: 'or-test' }).complete(request);
     expect(whole.usage).toMatchObject({ inputTokens: 100, outputTokens: 60, thinkingTokens: 40, cacheReadTokens: 30 });
+    stubFetchWithSseLines([
+      '{"choices":[{"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}',
+      '{"choices":[{"delta":{},"finish_reason":"stop"}]}',
+      JSON.stringify({ choices: [], usage }),
+      '[DONE]',
+    ]);
+    const streamed = await new OpenRouterAdapter({ apiKey: 'or-test' }).stream(request, { onChunk: () => {} } as any);
+    expect(streamed.usage).toMatchObject({ inputTokens: 100, outputTokens: 60, thinkingTokens: 40, cacheReadTokens: 30 });
   });
 
-  it('OpenAIResponsesAPIAdapter, whole response', async () => {
+  it('OpenAIResponsesAPIAdapter, whole response and stream', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
       id: 'resp_r', model: 'gpt-5.6-sol', status: 'completed',
       output: [{ type: 'message', id: 'msg_r', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'ok' }] }],
@@ -68,6 +78,12 @@ describe('reasoning tokens reach thinkingTokens, inside outputTokens as the API 
     }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
     const whole = await new OpenAIResponsesAPIAdapter({ apiKey: 'sk-test' }).complete({ model: 'gpt-5.6-sol', messages: [], maxTokens: 10 });
     expect(whole.usage).toEqual({ inputTokens: 100, outputTokens: 60, thinkingTokens: 40 });
+    stubFetchWithSseLines([
+      '{"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_r","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok"}]}}',
+      '{"type":"response.completed","response":{"id":"resp_r","model":"gpt-5.6-sol","status":"completed","output":[],"usage":{"input_tokens":100,"output_tokens":60,"total_tokens":160,"output_tokens_details":{"reasoning_tokens":40}}}}',
+    ]);
+    const streamed = await new OpenAIResponsesAPIAdapter({ apiKey: 'sk-test' }).stream({ model: 'gpt-5.6-sol', messages: [], maxTokens: 10 }, { onChunk: () => {} } as any);
+    expect(streamed.usage).toEqual({ inputTokens: 100, outputTokens: 60, thinkingTokens: 40 });
   });
 
   it('stays absent when the API reports no reasoning count, and a reported zero is zero', async () => {
