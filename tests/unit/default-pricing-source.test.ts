@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { PRICING_TABLE, getDefaultPricing } from '../../src/registry/default-pricing.js';
 import { RATE_FIELDS } from '../helpers/pricing-source.js';
 import {
-  comparePricing, perMillion, prefixNames, pricingFromSource, sameFigure, sameRate, sourceIdFor, tableIdFor,
+  bareSourceId, comparePricing, perMillion, prefixNames, pricingFromSource, sameFigure, sameRate, sourceIdFor, tableIdFor,
   type SourceModel, type SourceSnapshot, type TablePricing,
 } from '../helpers/pricing-source.js';
 
@@ -155,7 +155,7 @@ const KNOWN_SIBLINGS: Sibling[] = [
   { sourceId: 'openai/gpt-5.5-pro', row: 'gpt-5.5', table: [5, 30], source: [30, 180], why: '#269: no -pro row; the -pro sibling at 6x the row\'s rates' },
 ];
 
-/** Source models of the three providers the table has no row for at all (not even `pricing: null`): unpriced, warned about per process. #249 (the GPT-6.x and Gemini 4 families), and the rest by reason. 44 at the 2026-11-23 snapshot. */
+/** Source models of the three providers the table has no row for at all (not even `pricing: null`): unpriced, warned about per process. #249 (the GPT-6.x and Gemini 4 families), and the rest by reason. 47 at the 2026-11-23 snapshot, three of them seen under a variant alone. */
 const KNOWN_UNPRICED: string[] = [
   // #249: the current GPT-6.x and Gemini 4 families, and OpenAI's -pro siblings of them.
   'gpt-6-sol', 'gpt-6-sol-pro', 'gpt-6-luna', 'gpt-6-luna-pro',
@@ -170,8 +170,9 @@ const KNOWN_UNPRICED: string[] = [
   'gpt-oss-120b', 'gpt-oss-20b', 'gpt-oss-safeguard-20b',
   // Older OpenAI models the table never carried (six), and an alias.
   'gpt-3.5-turbo-0613', 'gpt-3.5-turbo-16k', 'gpt-4', 'gpt-4.1', 'gpt-4.1-mini', 'gpt-4.1-nano', 'gpt-chat-latest',
-  // OpenAI's o-series: the table has gpt- rows only.
-  'o3', 'o3-pro',
+  // OpenAI's o-series: the table has gpt- rows only. o3-mini and o4-mini, and gpt-4-turbo below, the source lists
+  // under a variant alone (`:batch`, `:free`); the bare id is still one a caller can ask for.
+  'o3', 'o3-pro', 'o3-mini', 'o4-mini', 'gpt-4-turbo',
   // Google's open-weight Gemma models (OpenRouter's rate is a host's) and the Lyria music models, priced by the second.
   'gemma-2-27b-it', 'gemma-3-12b-it', 'gemma-3-27b-it', 'gemma-3-4b-it', 'gemma-4-26b-a4b-it', 'gemma-4-31b-it',
   'lyria-3-clip-preview', 'lyria-3-pro-preview',
@@ -209,15 +210,17 @@ const siblingsFound = () => {
   return out;
 };
 const unpricedFound = () => {
-  const out: string[] = [];
-  for (const model of snapshot.models) {
-    const id = tableIdFor(model.id);
+  const out = new Set<string>();
+  // A model the source lists under a variant alone (`openai/gpt-4-turbo:batch`) is still a model a caller
+  // can ask the table for by its bare id; its variant's rates are the variant's, so it is checked for a row, not compared.
+  for (const sourceId of new Set(snapshot.models.map((m) => bareSourceId(m.id)))) {
+    const id = tableIdFor(sourceId);
     if (!id) continue;
     if (getDefaultPricing(id, AT)) continue;
     if (PRICING_TABLE.some((r) => r.pricing === null && prefixNames(r.prefix, id))) continue;
-    out.push(id);
+    out.add(id);
   }
-  return out.sort();
+  return [...out].sort();
 };
 
 describe('the source snapshot', () => {
@@ -261,6 +264,15 @@ describe('the built-in pricing table against the source snapshot', () => {
     });
   }
 
+  it('a source model with an unreadable rate fails its row before any comparison', () => {
+    const row = priced.find((r) => r.prefix === 'gpt-5.4')!;
+    const model = { ...sourceModelOf(row.prefix)!, pricing: { ...sourceModelOf(row.prefix)!.pricing, completion: 'invalid' } };
+    const source = pricingFromSource(model);
+    expect(source.unreadable).toEqual(['outputPerMillion']);
+    // Were it compared, the unreadable field would read as absent — and absent on both sides passes; the row test asks unreadable first.
+    expect(comparePricing(effective(row.prefix), source).some((d) => d.field === 'outputPerMillion')).toBe(true);
+  });
+
   it('lists each known gap once, with a reason, and none the table no longer has or whose figures moved', () => {
     const stale: string[] = [];
     const seen = new Set<string>();
@@ -297,8 +309,18 @@ describe('the built-in pricing table against the source snapshot', () => {
   });
 
   it('lists no known sibling that is gone, has its own row, or is priced at its base rates', () => {
-    const now = new Set(siblingsFound().map((f) => f.model.id));
-    expect(KNOWN_SIBLINGS.filter((k) => !now.has(k.sourceId)).map((k) => k.sourceId)).toEqual([]);
+    const now = new Map(siblingsFound().map((f) => [f.model.id, f]));
+    const stale = KNOWN_SIBLINGS.filter((k) => !now.has(k.sourceId)).map((k) => {
+      const model = bySourceId.get(k.sourceId);
+      if (!model) return `${k.sourceId}: gone from the source (listed under row ${k.row}: ${k.why}) — delete the entry`;
+      const id = tableIdFor(model.id)!;
+      const row = rowOf(getDefaultPricing(id, AT), id);
+      if (!row) return `${k.sourceId}: no row prices it now — it belongs in KNOWN_UNPRICED, not here`;
+      if (row.prefix === id) return `${k.sourceId}: has its own row now — delete the entry`;
+      const s = pricingFromSource(model), t = effective(row.prefix);
+      return `${k.sourceId}: row ${row.prefix} prices it at its base rates now (input ${show(t.inputPerMillion)} vs ${show(s.inputPerMillion)}, output ${show(t.outputPerMillion)} vs ${show(s.outputPerMillion)}; listed as ${show(k.table[0])}/${show(k.table[1])} vs ${show(k.source[0])}/${show(k.source[1])}) — delete the entry`;
+    });
+    expect(stale).toEqual([]);
     const ids = KNOWN_SIBLINGS.map((k) => k.sourceId);
     expect(ids.filter((id, i) => ids.indexOf(id) !== i), 'a sibling listed twice').toEqual([]);
   });
@@ -385,7 +407,8 @@ describe('reading the source', () => {
     const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'types', 'provider.ts'), 'utf8');
     const block = source.slice(source.indexOf('export interface ModelPricing {'));
     const body = block.slice(0, block.indexOf('\n}'));
-    const fields = [...body.matchAll(/^\s+(\w+PerMillion)\??: number/gm)].map((m) => m[1]).sort();
+    // Top-level members sit at two spaces; a nested object's members sit deeper and are not base rates.
+    const fields = [...body.matchAll(/^  (?:readonly )?(\w+PerMillion)\??: number/gm)].map((m) => m[1]).sort();
     expect(fields.length).toBeGreaterThan(0);
     expect(fields).toEqual([...RATE_FIELDS].sort());
   });

@@ -13,7 +13,7 @@
 // field the table has in one shape, so a divergence between the two is
 // visible in a test rather than found by reading pages. Refreshing the
 // snapshot is the one hand step, and it is a diff to review.
-import { writeFileSync } from 'node:fs';
+import { renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -64,6 +64,7 @@ function trimPricing(id, pricing) {
     if (typeof pricing[key] !== 'string') fail(1, `${id}: pricing.${key} is ${JSON.stringify(pricing[key])}, not the per-token string the list has always carried; the snapshot is left as it was`);
     out[key] = pricing[key];
   }
+  if (pricing?.overrides !== undefined && pricing.overrides !== null && !Array.isArray(pricing.overrides)) fail(1, `${id}: pricing.overrides is ${JSON.stringify(pricing.overrides).slice(0, 80)}, not an array; the snapshot is left as it was`);
   if (Array.isArray(pricing?.overrides)) {
     const tiers = [];
     for (const o of pricing.overrides) {
@@ -88,8 +89,9 @@ function trimPricing(id, pricing) {
 const readAt = fromStdin ? new Date(Date.parse(readAtArg)).toISOString() : new Date().toISOString();
 const list = await readList();
 if (!Array.isArray(list?.data)) fail(1, `the response has no model list (${JSON.stringify(list).slice(0, 200)}); the snapshot is left as it was`);
+for (const [i, m] of list.data.entries()) if (typeof m?.id !== 'string') fail(1, `data[${i}] has no string id (${JSON.stringify(m).slice(0, 80)}); the snapshot is left as it was`);
 const models = list.data
-  .filter((m) => typeof m?.id === 'string' && PROVIDERS.some((p) => m.id.startsWith(p)))
+  .filter((m) => PROVIDERS.some((p) => m.id.startsWith(p)))
   .map((m) => {
     if (m.context_length !== undefined && m.context_length !== null && typeof m.context_length !== 'number') fail(1, `${m.id}: context_length is ${JSON.stringify(m.context_length)}, not a number; the snapshot is left as it was`);
     return { id: m.id, context_length: m.context_length ?? null, pricing: trimPricing(m.id, m.pricing) };
@@ -100,5 +102,6 @@ for (const provider of PROVIDERS) {
 }
 
 const snapshot = { source: SOURCE, readAt, models };
-writeFileSync(OUT, `${JSON.stringify(snapshot, null, 2)}\n`);
+writeFileSync(`${OUT}.new`, `${JSON.stringify(snapshot, null, 2)}\n`);
+renameSync(`${OUT}.new`, OUT); // the old snapshot stays whole until the new one is complete
 console.log(`${models.length} models written to ${OUT} (read ${snapshot.readAt})`);

@@ -15,8 +15,9 @@ import type { ModelPricing } from '../../src/types/provider.js';
  * `scripts/pricing-source.mjs`), and a test compares each row's rates in
  * effect at the snapshot's instant to it, so a divergence is a failing test
  * with the two figures rather than a page nobody happened to re-read. The
- * check is as current as the snapshot: a provider's change after it is caught
- * at the next refresh, not before. The test also looks the other way, from the
+ * check is as current as the snapshot, and as wide as the source: a change to
+ * a model the source carries is caught at the next refresh, not before; a row
+ * the source has no model for (KNOWN_MISSING) is not compared at all. The test also looks the other way, from the
  * source to the table, for the models the table has no row for.
  *
  * OpenRouter is not the authority — the provider's own page is. The point is
@@ -108,9 +109,17 @@ export function sourceIdFor(prefix: string): string | null {
     const dotted = prefix.replace(/^claude-(\d)-(\d)-(\w+)$/, 'claude-$1.$2-$3').replace(/-(\d+)-(\d+)$/, '-$1.$2');
     return `anthropic/${dotted}`;
   }
-  if (prefix.startsWith('gpt-')) return `openai/${prefix}`;
-  if (prefix.startsWith('gemini-')) return `google/${prefix}`;
+  if (/^(gpt-|chatgpt-|o\d)/.test(prefix)) return `openai/${prefix}`;
+  if (/^(gemini-|gemma-|lyria-)/.test(prefix)) return `google/${prefix}`;
   return null;
+}
+
+/** The bare provider model id behind a source id, variant suffix dropped
+ *  (`openai/gpt-4-turbo:batch` → `openai/gpt-4-turbo`): what a caller can ask
+ *  the table for, even where the source lists the model under a variant alone. */
+export function bareSourceId(sourceId: string): string {
+  const colon = sourceId.indexOf(':');
+  return colon === -1 ? sourceId : sourceId.slice(0, colon);
 }
 
 /** A per-token rate string as dollars per million. `undefined` — never 0 —
@@ -120,7 +129,8 @@ export function perMillion(rate: unknown): number | undefined {
   if (typeof rate !== 'string' || rate.trim() === '') return undefined;
   const n = Number(rate);
   if (!Number.isFinite(n) || n < 0) return undefined;
-  return n * 1_000_000;
+  const perMillion = n * 1_000_000;
+  return Number.isFinite(perMillion) ? perMillion : undefined;
 }
 
 export const RATE_FIELDS = ['inputPerMillion', 'outputPerMillion', 'cacheReadPerMillion', 'cacheWritePerMillion', 'cacheWrite1hPerMillion'] as const;
@@ -193,6 +203,7 @@ export function effectiveTier(table: TablePricing): LongTier | undefined {
     const v = t[field] ?? table[field];
     if (v !== undefined) out[field] = v;
   }
+  if (out.cacheWrite1hPerMillion === undefined && out.cacheWritePerMillion !== undefined) out.cacheWrite1hPerMillion = out.cacheWritePerMillion;
   return out;
 }
 
@@ -200,7 +211,9 @@ export function effectiveTier(table: TablePricing): LongTier | undefined {
 export function comparePricing(table: TablePricing, source: SourcePricing): PricingDifference[] {
   const out: PricingDifference[] = [];
   for (const field of RATE_FIELDS) {
-    if (!sameRate(table[field], source[field])) out.push({ field, table: table[field], source: source[field] });
+    // A row without a 1-hour rate charges 1-hour writes at its short rate (cacheWriteCost), so that is what is compared.
+    const charged = field === 'cacheWrite1hPerMillion' ? table[field] ?? table.cacheWritePerMillion : table[field];
+    if (!sameRate(charged, source[field])) out.push({ field, table: charged, source: source[field] });
   }
   const t = effectiveTier(table), s = source.longPrompt;
   if (!t && !s) return out;
