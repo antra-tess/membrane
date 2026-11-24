@@ -109,6 +109,8 @@ interface OpenRouterResponse {
     prompt_tokens_details?: {
       cached_tokens?: number;
     };
+    /** OpenAI's shape, which OpenRouter keeps for every routed provider: reasoning tokens inside completion_tokens. */
+    completion_tokens_details?: { reasoning_tokens?: number } | null;
   };
 }
 
@@ -615,6 +617,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
       usage: {
         inputTokens: response.usage?.prompt_tokens ?? 0,
         outputTokens: response.usage?.completion_tokens ?? 0,
+        ...(typeof response.usage?.completion_tokens_details?.reasoning_tokens === 'number' ? { thinkingTokens: response.usage.completion_tokens_details.reasoning_tokens } : {}),
         cacheCreationTokens: cacheCreationTokens ?? undefined,
         ...cacheCreation1h(response.usage?.cache_creation),
         cacheReadTokens: cacheReadTokens ?? undefined,
@@ -648,6 +651,7 @@ export class OpenRouterAdapter implements ProviderAdapter {
       usage: {
         inputTokens: streamUsage?.prompt_tokens ?? 0,
         outputTokens: streamUsage?.completion_tokens ?? 0,
+        ...(typeof streamUsage?.completion_tokens_details?.reasoning_tokens === 'number' ? { thinkingTokens: streamUsage.completion_tokens_details.reasoning_tokens } : {}),
         cacheCreationTokens: cacheCreationTokens ?? undefined,
         ...cacheCreation1h(streamUsage?.cache_creation),
         cacheReadTokens: cacheReadTokens ?? undefined,

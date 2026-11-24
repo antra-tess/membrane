@@ -527,6 +527,8 @@ export class OpenAIAdapter implements ProviderAdapter {
 
     const cachedTokens = response.usage?.prompt_tokens_details?.cached_tokens;
     const writtenTokens = response.usage?.prompt_tokens_details?.cache_write_tokens;
+    // Reasoning tokens are inside completion_tokens (OpenAI's usage), as thinkingTokens is inside outputTokens.
+    const reasoningTokens = response.usage?.completion_tokens_details?.reasoning_tokens;
 
     return {
       content: this.messageToContent(message),
@@ -539,6 +541,7 @@ export class OpenAIAdapter implements ProviderAdapter {
         // Chat Completions reports a prompt-cache write as prompt_tokens_details.cache_write_tokens,
         // inside prompt_tokens, as the Responses API does in input_tokens_details (openai-responses-api.ts).
         // Only the Responses API reports the 30-minute / 12-hour split.
+        ...(typeof reasoningTokens === 'number' ? { thinkingTokens: reasoningTokens } : {}),
         ...(typeof cachedTokens === 'number' ? { cacheReadTokens: cachedTokens } : {}),
         ...(typeof writtenTokens === 'number' ? { cacheCreationTokens: writtenTokens } : {}),
       },
@@ -558,6 +561,7 @@ export class OpenAIAdapter implements ProviderAdapter {
   ): ProviderResponse {
     const cachedTokens = streamUsage?.prompt_tokens_details?.cached_tokens;
     const writtenTokens = streamUsage?.prompt_tokens_details?.cache_write_tokens;
+    const reasoningTokens = streamUsage?.completion_tokens_details?.reasoning_tokens;
 
     return {
       content: this.messageToContent(message),
@@ -567,6 +571,7 @@ export class OpenAIAdapter implements ProviderAdapter {
       usage: {
         inputTokens: streamUsage?.prompt_tokens ?? 0,
         outputTokens: streamUsage?.completion_tokens ?? 0,
+        ...(typeof reasoningTokens === 'number' ? { thinkingTokens: reasoningTokens } : {}),
         ...(typeof cachedTokens === 'number' ? { cacheReadTokens: cachedTokens } : {}),
         ...(typeof writtenTokens === 'number' ? { cacheCreationTokens: writtenTokens } : {}),
       },

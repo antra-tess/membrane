@@ -97,6 +97,8 @@ interface OpenAIResponse {
     prompt_tokens: number;
     completion_tokens: number;
     total_tokens: number;
+    /** OpenAI's shape, which the servers this fronts mostly keep: reasoning tokens inside completion_tokens. */
+    completion_tokens_details?: { reasoning_tokens?: number } | null;
   };
 }
 
@@ -515,6 +517,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       usage: {
         inputTokens: response.usage?.prompt_tokens ?? 0,
         outputTokens: response.usage?.completion_tokens ?? 0,
+        ...(typeof response.usage?.completion_tokens_details?.reasoning_tokens === 'number' ? { thinkingTokens: response.usage.completion_tokens_details.reasoning_tokens } : {}),
       },
       ...unreportedUsage(response.usage?.prompt_tokens, response.usage?.completion_tokens),
       model: response.model ?? requestedModel,
@@ -538,6 +541,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       usage: {
         inputTokens: streamUsage?.prompt_tokens ?? 0,
         outputTokens: streamUsage?.completion_tokens ?? 0,
+        ...(typeof streamUsage?.completion_tokens_details?.reasoning_tokens === 'number' ? { thinkingTokens: streamUsage.completion_tokens_details.reasoning_tokens } : {}),
       },
       ...unreportedUsage(streamUsage?.prompt_tokens, streamUsage?.completion_tokens),
       model: requestedModel,
