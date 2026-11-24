@@ -153,7 +153,8 @@ const OPENAI_MAX_STOP_SEQUENCES = 4;
 export class OpenAIAdapter implements ProviderAdapter {
   readonly name = 'openai';
 
-  /** `prompt_tokens` includes the cached span (`prompt_tokens_details.cached_tokens`): a SUBSET, not an addition. */
+  /** `prompt_tokens` includes the cached span (`prompt_tokens_details.cached_tokens`) and the written span
+   *  (`prompt_tokens_details.cache_write_tokens`): SUBSETS, not additions; the normalization takes both out. */
   readonly usageCacheConvention = 'cache-inclusive' as const;
   private apiKey: string;
   private baseURL: string;

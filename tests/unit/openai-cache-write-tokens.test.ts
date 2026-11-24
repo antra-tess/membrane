@@ -5,7 +5,8 @@
  * cache_write_tokens` — and from GPT-5.6 on bills it at 1.25× input for the
  * 30-minute cache and 2.5× for the 12-hour cache (prompt-caching guide); earlier
  * models and gpt-6-astra-law charge the input rate. The adapters carry the
- * total as `cacheCreationTokens` and the 12-hour part as `cacheCreation1hTokens`;
+ * total as `cacheCreationTokens`, and the Responses adapter the 12-hour part as
+ * `cacheCreation1hTokens` (Chat Completions has the 30-minute TTL alone);
  * membrane's cache-inclusive normalization takes them out of `inputTokens`; the
  * rows price them, and a row without a write rate is warned about once.
  */
@@ -18,7 +19,7 @@ import { Membrane } from '../../src/membrane.js';
 import { OpenAIResponsesFormatter } from '../../src/formatters/openai-responses.js';
 import { NativeFormatter } from '../../src/formatters/native.js';
 import { TurnUsageAccumulator } from '../../src/utils/usage.js';
-import { getDefaultPricing } from '../../src/registry/default-pricing.js';
+import { PRICING_TABLE, getDefaultPricing } from '../../src/registry/default-pricing.js';
 import { calculateCost } from '../../src/utils/cost.js';
 
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); resetUnpricedModelWarnings(); });
@@ -193,7 +194,7 @@ describe('OpenAI Chat Completions cache writes', () => {
 
 describe('OpenAI rows', () => {
   it('price a 30-minute write at 1.25× and a 12-hour write at 2.5× input from GPT-5.6 on; at the input rate before, and on gpt-6-astra-law', () => {
-    for (const id of ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
+    for (const id of ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.6-cyber']) {
       const row = getDefaultPricing(id)!;
       expect(row.cacheWritePerMillion, id).toBeCloseTo(row.inputPerMillion * 1.25, 12);
       expect(row.cacheWrite1hPerMillion, id).toBeCloseTo(row.inputPerMillion * 2.5, 12);
@@ -204,7 +205,22 @@ describe('OpenAI rows', () => {
     expect(law.cacheWrite1hPerMillion).toBeUndefined();
     // A GPT-5.6 id without a row is unpriced, not priced as gpt-5.
     expect(getDefaultPricing('gpt-5.6')).toBeUndefined();
-    expect(getDefaultPricing('gpt-5.6-cyber')).toBeUndefined();
+    expect(getDefaultPricing('gpt-5.6-mini')).toBeUndefined();
+    expect(getDefaultPricing('gpt-5.6-cyber')).toMatchObject({ inputPerMillion: 12.5, outputPerMillion: 75, cacheWritePerMillion: 15.625, cacheWrite1hPerMillion: 31.25 });
+  });
+
+  it('every built-in OpenAI row carries a write rate, and a 12-hour rate where the write is a premium — the rule the normalization rests on', () => {
+    // A row without cacheWritePerMillion prices written tokens nowhere under the cache-inclusive
+    // normalization; a row whose 30-minute write is above input is a GPT-5.6+ row, which the
+    // Responses API can bill at the 12-hour rate too. Whichever PR adds an OpenAI row next
+    // (#251's gpt-6.1-sol, #264's tiers) goes red here until the rates are in.
+    for (const row of PRICING_TABLE) {
+      if (!row.prefix.startsWith('gpt-') || row.pricing === null) continue;
+      expect(row.pricing.cacheWritePerMillion, `${row.prefix} has no write rate`).toBeDefined();
+      if (row.pricing.cacheWritePerMillion! > row.pricing.inputPerMillion) {
+        expect(row.pricing.cacheWrite1hPerMillion, `${row.prefix} has a write premium and no 12-hour rate`).toBeDefined();
+      }
+    }
     // Each id with its own row's input rate, so a removed or renamed row can't pass on a
     // prefix neighbour's equal rates (gpt-5.1 and gpt-5 are priced the same, and are the one pair this can't tell apart).
     const earlier: Record<string, number> = {

@@ -189,6 +189,13 @@ export const PRICING_TABLE: readonly PricingRow[] = [
     prefix: 'gpt-5.6-luna',
     pricing: { inputPerMillion: 0.20, outputPerMillion: 1.20, cacheWritePerMillion: 0.25, cacheWrite1hPerMillion: 0.50, cacheReadPerMillion: 0.02, currency: 'USD', asOf: DEFAULT_PRICING_LAST_VERIFIED },
   },
+  {
+    // Cyber (Trusted Access) configuration of GPT-5.6: the page's "Specialized
+    // models" section, short context only (no long-context column), 30-minute
+    // write 1.25x and 12-hour write 2.5x input as the GPT-5.6 line.
+    prefix: 'gpt-5.6-cyber',
+    pricing: { inputPerMillion: 12.5, outputPerMillion: 75, cacheWritePerMillion: 15.625, cacheWrite1hPerMillion: 31.25, cacheReadPerMillion: 1.25, currency: 'USD', asOf: '2026-11-24' },
+  },
   // Any other GPT-5.6 id (a bare gpt-5.6, a variant the table has no row for)
   // is unpriced and warns, rather than falling through to the gpt-5 row at a
   // tenth of a 5.6 model's rates and a write rate that isn't 1.25×.
