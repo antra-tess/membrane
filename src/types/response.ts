@@ -26,10 +26,12 @@ export interface CallUsage extends BasicUsage {
   cacheCreationTokens?: number;
 
   /**
-   * Of `cacheCreationTokens`, those written with a 1-hour TTL; the rest were
+   * Of `cacheCreationTokens`, those written with the provider's longer TTL —
+   * Anthropic's 1 hour, OpenAI's 12 hours on the Responses API; the rest were
    * written with the short TTL. Set only when the provider reports the split
-   * (Anthropic's `usage.cache_creation.ephemeral_1h_input_tokens`), so a
-   * missing value means "unknown", not zero.
+   * (Anthropic's `usage.cache_creation.ephemeral_1h_input_tokens`, OpenAI's
+   * `cache_write_tokens_details.ttl_12h_tokens`), so a missing value means
+   * "unknown", not zero. The field keeps its first provider's name.
    */
   cacheCreation1hTokens?: number;
 

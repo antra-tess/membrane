@@ -82,15 +82,22 @@ export interface ModelPricing {
   /**
    * Cost per million cache write tokens — the provider's shortest cache TTL
    * (Anthropic's 5-minute bucket). Also the rate for every write when the
-   * usage report does not say which TTL a write had.
+   * usage report does not say which TTL a write had. Unset, writes are not
+   * priced (`calculateCost` has no input-rate fallback, by design — see its
+   * test). So a row for a provider whose adapter reports writes inside its
+   * input count (OpenAI's Responses API and Chat Completions) must carry one, or the writes the
+   * normalization takes out of `inputTokens` are priced nowhere: the input
+   * rate itself where the provider charges nothing extra for a write.
    */
   cacheWritePerMillion?: number;
 
   /**
-   * Cost per million cache write tokens written with a 1-hour TTL (Anthropic
-   * bills these at 2× base input, against 1.25× for 5 minutes). Applied to
-   * {@link CallUsage.cacheCreation1hTokens}; unset means those tokens fall
-   * back to `cacheWritePerMillion`, which under-estimates them. Read only
+   * Cost per million cache write tokens written with the provider's longer TTL:
+   * Anthropic's 1 hour (2× base input, against 1.25× for 5 minutes), OpenAI's
+   * 12 hours on the Responses API (2.5× input, against 1.25× for 30 minutes).
+   * Applied to {@link CallUsage.cacheCreation1hTokens}; unset means those
+   * tokens fall back to `cacheWritePerMillion`, which under-estimates them
+   * where the long rate is higher. Read only
    * beside `cacheWritePerMillion`: a row with this rate alone has no rate for
    * its short-TTL writes, and cache writes stay unpriced as they were.
    */
@@ -492,8 +499,9 @@ export interface ProviderResponse {
     outputTokens: number;
     cacheCreationTokens?: number;
     /**
-     * Of `cacheCreationTokens`, those written with a 1-hour TTL. Set only when
-     * the provider reports the split. See {@link CallUsage.cacheCreation1hTokens}.
+     * Of `cacheCreationTokens`, those written with the provider's longer TTL
+     * (Anthropic's 1 hour, OpenAI's 12 hours). Set only when the provider
+     * reports the split. See {@link CallUsage.cacheCreation1hTokens}.
      */
     cacheCreation1hTokens?: number;
     cacheReadTokens?: number;

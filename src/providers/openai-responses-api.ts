@@ -64,7 +64,12 @@ export interface OpenAIResponsesAPIResponse {
     input_tokens?: number;
     output_tokens?: number;
     total_tokens?: number;
-    input_tokens_details?: { cached_tokens?: number } | null;
+    input_tokens_details?: {
+      cached_tokens?: number;
+      cache_write_tokens?: number;
+      /** The split of `cache_write_tokens` by TTL (prompt-caching guide); 12-hour writes bill at 2.5× input. */
+      cache_write_tokens_details?: { ttl_30m_tokens?: number; ttl_12h_tokens?: number } | null;
+    } | null;
     output_tokens_details?: { reasoning_tokens?: number } | null;
   } | null;
   [key: string]: unknown;
@@ -181,9 +186,10 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
   readonly reportsContentAlterations = true;
 
   /**
-   * Reads `usage.input_tokens_details.cached_tokens` from OpenAI's automatic
-   * prompt caching, whose cached span is a subset of the input count on
-   * /v1/chat/completions; no cache hit has confirmed it on /v1/responses.
+   * Reads `usage.input_tokens_details.cached_tokens` and `cache_write_tokens`
+   * from OpenAI's automatic prompt caching. Both are inside `input_tokens`:
+   * the prompt-caching guide's example has 12,000 input tokens of which 4,000
+   * are reads and 7,000 writes, "1,000 input tokens are ordinary input".
    */
   readonly usageCacheConvention = 'cache-inclusive' as const;
 
@@ -552,6 +558,11 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
     const outputItems = Array.isArray(response.output) ? response.output : [];
     const content = this.outputToContent(outputItems);
     const cachedTokens = response.usage?.input_tokens_details?.cached_tokens;
+    // Billed at 1.25× input on GPT-5.6 and later for the 30-minute cache, as
+    // input before; the 12-hour writes inside the total (2.5× input) are split
+    // out below into the long-TTL count when the API reports them.
+    const writtenTokens = response.usage?.input_tokens_details?.cache_write_tokens;
+    const written12h = response.usage?.input_tokens_details?.cache_write_tokens_details?.ttl_12h_tokens;
 
     return {
       content,
@@ -563,6 +574,10 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
         inputTokens: response.usage?.input_tokens ?? 0,
         outputTokens: response.usage?.output_tokens ?? 0,
         ...(typeof cachedTokens === 'number' ? { cacheReadTokens: cachedTokens } : {}),
+        ...(typeof writtenTokens === 'number' ? { cacheCreationTokens: writtenTokens } : {}),
+        // The long-TTL slot: Anthropic's 1-hour writes and OpenAI's 12-hour writes are both
+        // "the provider's longer TTL at its higher rate" (cacheWrite1hPerMillion).
+        ...(typeof writtenTokens === 'number' && typeof written12h === 'number' ? { cacheCreation1hTokens: written12h } : {}),
       },
       ...unreportedUsage(response.usage?.input_tokens, response.usage?.output_tokens),
       model: response.model ?? requestedModel,

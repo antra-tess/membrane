@@ -5,7 +5,7 @@ export interface CostableUsage {
   inputTokens: number;
   outputTokens: number;
   cacheCreationTokens?: number;
-  /** Of cacheCreationTokens, those written with a 1-hour TTL (see CallUsage). */
+  /** Of cacheCreationTokens, those written with the provider's longer TTL: Anthropic's 1 hour, OpenAI's 12 hours (see CallUsage). */
   cacheCreation1hTokens?: number;
   cacheReadTokens?: number;
 }
@@ -22,8 +22,22 @@ export function warnUnpricedModel(modelId: string): void {
   );
 }
 
+const warnedUnpricedWrites = new Set<string>();
+
+/** A row without `cacheWritePerMillion` prices no cache write (by design, no input-rate fallback); said once per model, so the silence isn't silent. */
+export function warnUnpricedCacheWrite(modelId: string): void {
+  if (warnedUnpricedWrites.has(modelId)) return;
+  warnedUnpricedWrites.add(modelId);
+  console.warn(
+    `[membrane:cost] model "${modelId}" wrote to the prompt cache, but its pricing row has no`
+    + ' cacheWritePerMillion, so estimatedCost leaves the written tokens out (this is NOT a cost of'
+    + ' zero). Add a write rate to the row: the input rate where the provider charges nothing extra.'
+  );
+}
+
 export function resetUnpricedModelWarnings(): void {
   warnedUnpricedModels.clear();
+  warnedUnpricedWrites.clear();
 }
 
 export function addCostBreakdowns(
@@ -54,9 +68,10 @@ export function addCostBreakdowns(
 }
 
 /**
- * Cache writes at two rates: the 1-hour-TTL tokens the provider reported at
- * the 1-hour rate, the rest at the short-TTL rate. A pricing row without a
- * 1-hour rate prices every write at the short rate, as before. A 1-hour count
+ * Cache writes at two rates: the long-TTL tokens the provider reported
+ * (Anthropic's 1-hour, OpenAI's 12-hour) at the long-TTL rate, the rest at
+ * the short-TTL rate. A pricing row without a long-TTL rate prices every
+ * write at the short rate, as before. A long-TTL count
  * larger than the total (a provider report that contradicts itself) is clamped
  * to the total rather than billing tokens that were not written.
  */

@@ -102,7 +102,7 @@ import {
 } from './formatters/normalize-tool-pairs.js';
 import { YieldingStreamImpl } from './yielding-stream.js';
 import { classifyFailure, membraneRetrySettings, retryDecision, type RetrySettings } from './retry.js';
-import { calculateCost, warnUnpricedModel } from './utils/cost.js';
+import { calculateCost, warnUnpricedCacheWrite, warnUnpricedModel } from './utils/cost.js';
 import { isAnthropicServerBlock } from './utils/anthropic-server-blocks.js';
 import {
   TurnUsageAccumulator,
@@ -2789,6 +2789,9 @@ export class Membrane {
     if (!pricing) {
       warnUnpricedModel(actualModel || requestedModel);
       return undefined;
+    }
+    if ((usage.cacheCreationTokens ?? 0) > 0 && pricing.cacheWritePerMillion == null) {
+      warnUnpricedCacheWrite(actualModel || requestedModel);
     }
     return calculateCost(usage, pricing);
   }

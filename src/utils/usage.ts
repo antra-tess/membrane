@@ -1,6 +1,6 @@
 import type { ModelPricing, ProviderResponse, UsageCacheConvention } from '../types/provider.js';
 import type { CostBreakdown, DetailedUsage, TurnRoundUsage } from '../types/response.js';
-import { addCostBreakdowns, calculateCost, warnUnpricedModel } from './cost.js';
+import { addCostBreakdowns, calculateCost, warnUnpricedCacheWrite, warnUnpricedModel } from './cost.js';
 
 const warnedUndeclaredAdapters = new Set<string>();
 
@@ -35,7 +35,8 @@ export function normalizeUsageToCacheExcluded(
 }
 
 /**
- * The 1-hour share of two cache-write totals summed. A part's share is known
+ * The long-TTL share (Anthropic's 1-hour, OpenAI's 12-hour writes) of two
+ * cache-write totals summed. A part's share is known
  * when it reports one, or when it wrote nothing; the sum's share is known only
  * when both parts' are, so a round that wrote with no TTL split makes the
  * aggregate's split unknown (absent) rather than counting its writes as short.
@@ -139,6 +140,7 @@ export class TurnUsageAccumulator {
     const roundPricing = this.resolveRoundPricing(servedModel);
     const roundCost = roundPricing ? calculateCost(usage, roundPricing) : undefined;
     if (!roundPricing) warnUnpricedModel(roundModel);
+    else if ((usage.cacheCreationTokens ?? 0) > 0 && roundPricing.cacheWritePerMillion == null) warnUnpricedCacheWrite(roundModel);
 
     this.rounds.push({
       model: roundModel,
