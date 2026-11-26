@@ -404,7 +404,8 @@ export interface ProviderRequestOptions {
    * object, each event-stream message that decodes to one. Never for a frame
    * that parses to anything else (`null`, a number, a string, an array),
    * which carries no event, nor for keepalives (Anthropic's and
-   * Bedrock's `ping`), SSE comments or raw body bytes: those prove the
+   * Bedrock's `ping`, and a `keepalive` or `ping` event on a Responses
+   * stream), SSE comments or raw body bytes: those prove the
    * connection is up, not that the model is making progress. An adapter that
    * reports content (SendReport.reportsContent) passes `'content'` for an
    * event that is content and `'think'` for a thinking block's start (see

@@ -9,6 +9,7 @@ import { OpenAICompletionsAdapter } from '../../src/providers/openai-completions
 import { OpenRouterAdapter } from '../../src/providers/openrouter.js';
 import { OpenAIResponsesAPIAdapter } from '../../src/providers/openai-responses-api.js';
 import { BedrockAdapter } from '../../src/providers/bedrock.js';
+import { OpenAIResponsesFormatter } from '../../src/formatters/index.js';
 import { MockAdapter } from '../../src/providers/mock.js';
 import { rawSseResponse } from '../helpers/sse-fixtures.js';
 import { chunkFrame, streamBody } from '../helpers/bedrock-event-stream.js';
@@ -667,6 +668,89 @@ describe('every streaming adapter reports progress once per parsed event', () =>
       )
       .catch(() => undefined);
     expect(progress).toBe(3);
+  });
+
+  it('openai-responses-api: response events count, keepalive and ping events do not', async () => {
+    stubFetch(() => rawSseResponse([
+      'data: {"type":"response.created","response":{"id":"resp_zz","status":"in_progress"}}\n\n',
+      'data: {"type":"keepalive","sequence_number":2}\n\n',
+      'data: {"type":"ping"}\n\n',
+      'data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"zz"}\n\n',
+      'data: {"type":"keepalive","sequence_number":4}\n\n',
+    ]));
+    let progress = 0;
+    await new OpenAIResponsesAPIAdapter({ apiKey: 'zz-not-a-key' })
+      .stream(
+        { model: 'zz-model', messages: [{ role: 'user', content: 'zz hello' }], maxTokens: 16 } as never,
+        { onChunk: () => {} },
+        { onProgress: () => { progress++; } },
+      )
+      .catch(() => undefined);
+    expect(progress).toBe(2);
+  });
+});
+
+describe('OpenAI Responses: the deadline follows response events, not keepalive or ping events', () => {
+  const RESPONSES_REQUEST: NormalizedRequest = { ...REQUEST, config: { ...REQUEST.config, model: 'gpt-zz' } };
+  const membrane = (adapter: OpenAIResponsesAPIAdapter): Membrane =>
+    new Membrane(adapter, { formatter: new OpenAIResponsesFormatter() });
+  const data = (event: object): string => `data: ${JSON.stringify(event)}\n\n`;
+  const created = (): string => data({ type: 'response.created', response: { id: 'resp_zz', status: 'in_progress' } });
+  const beats: Array<[string, () => string]> = [
+    ['keepalive', () => data({ type: 'keepalive', sequence_number: 2 })],
+    ['ping', () => data({ type: 'ping' })],
+  ];
+
+  for (const [name, beat] of beats) {
+    it(`ends a stream that sends only ${name} events after response.created, as a timeout`, async () => {
+      stubFetch((init) => liveResponse(init, async (io) => {
+        io.emit(created());
+        await keepalives(io, beat, Infinity);
+      }));
+      const result = await onFakeTime(() =>
+        membrane(new OpenAIResponsesAPIAdapter({ apiKey: 'zz-not-a-key' })).stream(RESPONSES_REQUEST, { progressTimeoutMs: PROGRESS_MS }));
+      expect(isAbortedResponse(result)).toBe(true);
+      expect((result as { reason: string }).reason).toBe('timeout');
+      expect(torn[0]).toBe(true);
+    });
+  }
+
+  it('keeps a stream alive while text deltas come faster than the deadline, with keepalive events between them', async () => {
+    const parts = ['zz1', 'zz2', 'zz3', 'zz4', 'zz5', 'zz6', 'zz7', 'zz8'];
+    stubFetch((init) => liveResponse(init, async (io) => {
+      io.emit(created());
+      for (const part of parts) {
+        await keepalives(io, beats[0]![1], PROGRESS_MS / 2);
+        io.emit(data({ type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: part }));
+      }
+      io.emit(data({
+        type: 'response.completed',
+        response: { id: 'resp_zz', model: 'gpt-zz', status: 'completed', output: [], usage: { input_tokens: 1, output_tokens: 8, total_tokens: 9 } },
+      }));
+      io.close();
+    }));
+    const result = await onFakeTime(() =>
+      membrane(new OpenAIResponsesAPIAdapter({ apiKey: 'zz-not-a-key' })).stream(RESPONSES_REQUEST, { progressTimeoutMs: PROGRESS_MS }));
+    expect(isAbortedResponse(result)).toBe(false);
+    const text = (result as { content: Array<{ type: string; text?: string }> }).content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('');
+    expect(text).toBe(parts.join(''));
+  });
+
+  it('bounds a complete() that streams in subscription mode, and names the deadline', async () => {
+    stubFetch((init) => liveResponse(init, async (io) => {
+      io.emit(created());
+      await keepalives(io, beats[0]![1], Infinity);
+    }));
+    const adapter = new OpenAIResponsesAPIAdapter({ mode: 'subscription', credentials: async () => ({ token: 'zz-not-a-token' }) });
+    const error = await onFakeTime(() => membrane(adapter).complete(RESPONSES_REQUEST, { progressTimeoutMs: PROGRESS_MS }))
+      .then(() => undefined, (e: unknown) => e);
+    expect(error).toBeInstanceOf(TimeoutAbortError);
+    expect((error as TimeoutAbortError).message).toMatch(
+      new RegExp(`^No provider progress within ${PROGRESS_MS}ms: the call began at \\S+, provider events: 1\\b`),
+    );
   });
 });
 

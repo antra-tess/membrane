@@ -302,7 +302,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
           return;
         }
         if (!isEventObject(event)) return;
-        options?.onProgress?.();
+        if (event.type !== 'keepalive' && event.type !== 'ping') options?.onProgress?.();
         events.push(event);
 
         if (event.type === 'response.output_text.delta') {
