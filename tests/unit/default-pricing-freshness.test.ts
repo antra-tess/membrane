@@ -44,6 +44,9 @@ describe('default pricing rows match the published price pages (2026-08-25)', ()
     expect(sol?.inputPerMillion).toBe(2);
     expect(sol?.outputPerMillion).toBe(10);
     expect(sol?.cacheReadPerMillion).toBe(0.10);
+    // The page's two write columns: 30-minute $2.50, 12-hour $5.00 (1.25x and 2.5x input), read 2026-11-25.
+    expect(sol?.cacheWritePerMillion).toBe(2.5);
+    expect(sol?.cacheWrite1hPerMillion).toBe(5);
     const astra = getDefaultPricing('gpt-6-astra');
     expect(astra?.inputPerMillion).toBe(10);
   });
