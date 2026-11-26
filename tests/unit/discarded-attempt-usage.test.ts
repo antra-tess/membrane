@@ -11,7 +11,7 @@ import type {
 } from '../../src/types/provider.js';
 import type { NormalizedRequest, StreamEvent } from '../../src/types/index.js';
 
-const REFUSED_USAGE = { inputTokens: 700, outputTokens: 70 };
+const REFUSED_USAGE = { inputTokens: 700, outputTokens: 70, thinkingTokens: 40 };
 const SURVIVING_USAGE = { inputTokens: 700, outputTokens: 30 };
 
 class BilledRefusingAdapter implements ProviderAdapter {
@@ -70,6 +70,7 @@ describe('complete() refusal retries report discarded spend', () => {
       attempts: 1,
       inputTokens: 700,
       outputTokens: 70,
+      thinkingTokens: 40,
     });
   });
 
@@ -82,6 +83,7 @@ describe('complete() refusal retries report discarded spend', () => {
       attempts: 2,
       inputTokens: 1400,
       outputTokens: 140,
+      thinkingTokens: 80,
     });
   });
 
@@ -115,6 +117,7 @@ describe('streamYielding() refusal retries report discarded spend', () => {
       attempts: 1,
       inputTokens: 700,
       outputTokens: 70,
+      thinkingTokens: 40,
     });
   });
 });

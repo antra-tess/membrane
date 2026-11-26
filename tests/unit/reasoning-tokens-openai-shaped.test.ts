@@ -86,6 +86,30 @@ describe('reasoning tokens reach thinkingTokens, inside outputTokens as the API 
     expect(streamed.usage).toEqual({ inputTokens: 100, outputTokens: 60, thinkingTokens: 40 });
   });
 
+  it('OpenRouterAdapter stream: a reported zero is zero, an absent count stays absent', async () => {
+    const request = { ...chatRequest, model: 'openai/gpt-5.6-sol' };
+    stubFetchWithSseLines([
+      '{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}',
+      JSON.stringify({ choices: [], usage: { prompt_tokens: 100, completion_tokens: 60, total_tokens: 160, completion_tokens_details: { reasoning_tokens: 0 } } }),
+      '[DONE]',
+    ]);
+    const zero = await new OpenRouterAdapter({ apiKey: 'or-test' }).stream(request, { onChunk: () => {} } as any);
+    expect(zero.usage.thinkingTokens).toBe(0);
+    stubFetchWithSseLines([
+      '{"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}',
+      JSON.stringify({ choices: [], usage: { prompt_tokens: 100, completion_tokens: 60, total_tokens: 160 } }),
+      '[DONE]',
+    ]);
+    const none = await new OpenRouterAdapter({ apiKey: 'or-test' }).stream(request, { onChunk: () => {} } as any);
+    expect('thinkingTokens' in none.usage).toBe(false);
+  });
+
+  it('OpenAICompatibleAdapter: completion_tokens_details null is no count', async () => {
+    stubChat({ prompt_tokens: 100, completion_tokens: 60, total_tokens: 160, completion_tokens_details: null }, 'zz-model');
+    const whole = await new OpenAICompatibleAdapter({ baseURL: 'http://localhost:9/v1', apiKey: 'zz-key' }).complete({ ...chatRequest, model: 'zz-model' });
+    expect('thinkingTokens' in whole.usage).toBe(false);
+  });
+
   it('stays absent when the API reports no reasoning count, and a reported zero is zero', async () => {
     stubChat({ prompt_tokens: 100, completion_tokens: 60, total_tokens: 160 });
     const none = await new OpenAIAdapter({ apiKey: 'sk-test' }).complete(chatRequest);
