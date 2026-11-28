@@ -179,7 +179,7 @@ export const PRICING_TABLE: readonly PricingRow[] = [
   },
   {
     prefix: 'gpt-6.1-sol',
-    pricing: { inputPerMillion: 2, outputPerMillion: 10, cacheReadPerMillion: 0.10, currency: 'USD', asOf: '2026-11-09' },
+    pricing: { inputPerMillion: 2, outputPerMillion: 10, cacheWritePerMillion: 2.5, cacheWrite1hPerMillion: 5, cacheReadPerMillion: 0.10, currency: 'USD', asOf: '2026-11-25' },
   },
   {
     prefix: 'gpt-5.6-sol',
