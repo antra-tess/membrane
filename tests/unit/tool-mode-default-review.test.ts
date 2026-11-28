@@ -627,12 +627,12 @@ describe('normalize events reach hooks.onNormalize', () => {
       ] },
     ],
   });
-  it.each(['complete', 'stream', 'yielding'])('a duplicate result turned into text is reported via %s', async path => {
+  it.each(['complete', 'stream', 'yielding'])('a duplicate result left out is reported via %s', async path => {
     const events: any[] = [];
     const membrane = new Membrane(mock(), { formatter: new NativeFormatter(), hooks: { onNormalize: event => events.push(event) } });
     await run(path, membrane, duplicated());
     expect(events).toContainEqual(expect.objectContaining({
-      kind: 'stray_tool_result_textified', toolUseId: 't1', reason: 'duplicate_in_cycle', recoveredChars: 'again'.length,
+      kind: 'stray_tool_result_dropped', toolUseId: 't1', reason: 'duplicate_in_cycle',
     }));
   });
 });

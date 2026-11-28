@@ -221,22 +221,21 @@ describe('shared native readiness and budget ownership', () => {
   }
 });
 
-describe('cache markers on duplicate textification', () => {
-  it.each(['duplicate_in_cycle', 'cycle_closed'])('retains the marker and payload for $0', reason => {
+describe('a cache marker on a duplicate result that is left out', () => {
+  it.each(['duplicate_in_cycle', 'cycle_closed'])('moves to the last cacheable block before it for $0', reason => {
     const duplicate = { ...result('zz-second-copy'), cache_control: marker };
     const input = reason === 'duplicate_in_cycle'
       ? [message('user', text('go')), message('assistant', use()), message('user', result('first'), duplicate)]
       : [message('user', text('go')), message('assistant', use()), message('user', result('first')), message('assistant', text('later')), message('user', duplicate)];
     const before = structuredClone(input);
     const output = normalizeToolPairs(input).messages;
-    const textified = blocks(output).filter(block => block.type === 'text' && String(block.text).includes('zz-second-copy'));
-    expect(textified).toHaveLength(1);
-    expect(textified[0]).toMatchObject({ cache_control: marker });
-    expect(countWireCacheMarkers({ messages: output })).toBe(1);
+    expect(JSON.stringify(output)).not.toContain('zz-second-copy');
+    const marked = blocks(output).filter(block => block.cache_control);
+    expect(marked).toEqual([reason === 'duplicate_in_cycle' ? { ...result('first'), cache_control: marker } : { ...text('later'), cache_control: marker }]);
     expect(input).toEqual(before);
   });
 
-  it.each(['complete', 'stream', 'yielding'])('keeps a duplicate-message breakpoint through %s, leaving the system prompt unmarked', async entry => {
+  it.each(['complete', 'stream', 'yielding'])('keeps a duplicate-message breakpoint on the result it duplicates through %s, leaving the system prompt unmarked', async entry => {
     const { adapter, requests } = recordingAdapter();
     const membrane = new Membrane(adapter, { formatter: new NativeFormatter() });
     const req: NormalizedRequest = {
@@ -251,14 +250,13 @@ describe('cache markers on duplicate textification', () => {
       ],
     };
     const before = structuredClone(req);
-    if (entry === 'complete') await membrane.complete(req);
-    else if (entry === 'stream') await membrane.stream(req);
-    else for await (const event of membrane.streamYielding(req)) {
-      if (event.type === 'error') throw event.error;
-    }
+    await invoke(entry, membrane, req);
     expect(requests).toHaveLength(1);
     const wire = requests[0];
-    expect(blocks(wire.messages as ProviderMessage[]).find(block => block.type === 'text' && String(block.text).includes('[duplicate tool_result'))?.cache_control).toEqual(marker);
+    expect(JSON.stringify(wire.messages)).not.toContain('duplicate');
+    expect(blocks(wire.messages as ProviderMessage[]).filter(block => block.cache_control)).toEqual([
+      { type: 'tool_result', tool_use_id: 'u', content: 'first', cache_control: marker },
+    ]);
     expect(countWireCacheMarkers(wire)).toBe(1);
     expect(wire.system).toBe('rules');
     expect(req).toEqual(before);
@@ -266,32 +264,82 @@ describe('cache markers on duplicate textification', () => {
 });
 
 describe('a cache marker on an orphan result', () => {
-  it.each(['complete', 'stream', 'yielding'])('keeps its breakpoint through %s, leaving the system prompt unmarked', async entry => {
+  const orphan = { type: 'tool_result' as const, toolUseId: 'zz-gone', content: 'orphan payload' };
+  async function wireOf(messages: NormalizedRequest['messages'], extra: Partial<NormalizedRequest> = {}, entry = 'complete') {
     const { adapter, requests } = recordingAdapter();
+    const receipts: unknown[] = [];
     const membrane = new Membrane(adapter, { formatter: new NativeFormatter() });
     const req: NormalizedRequest = {
-      ...request(), promptCaching: true, cacheTtl: '1h', system: 'rules', toolMode: 'native',
-      messages: [
-        { participant: 'User', content: [{ type: 'text', text: 'go' }] },
-        { participant: 'Tool', cacheBreakpoint: true, content: [
-          { type: 'tool_result', toolUseId: 'zz-gone', content: 'orphan payload' },
-        ] },
-      ],
+      ...request(), promptCaching: true, cacheTtl: '1h', system: 'rules', toolMode: 'native', messages,
+      onCacheWireReceipt: receipt => receipts.push(receipt), ...extra,
     };
-    const before = structuredClone(req);
-    if (entry === 'complete') await membrane.complete(req);
-    else if (entry === 'stream') await membrane.stream(req);
-    else for await (const event of membrane.streamYielding(req)) {
-      if (event.type === 'error') throw event.error;
-    }
+    const before = structuredClone({ ...req, onCacheWireReceipt: undefined });
+    await invoke(entry, membrane, req);
+    expect({ ...req, onCacheWireReceipt: undefined }).toEqual(before);
     expect(requests).toHaveLength(1);
-    const wire = requests[0];
-    expect(blocks(wire.messages as ProviderMessage[]).find(block => String(block.text).startsWith('[orphan tool_result'))).toEqual({
-      type: 'text', text: '[orphan tool_result for zz-gone]: orphan payload', cache_control: marker,
-    });
+    expect(JSON.stringify(requests[0].messages)).not.toContain('orphan payload');
+    return { wire: requests[0], receipts };
+  }
+  const marked = (wire: ProviderRequest) => blocks(wire.messages as ProviderMessage[]).filter(block => block.cache_control);
+
+  it.each(['complete', 'stream', 'yielding'])('moves its breakpoint to the text before it in its message through %s, leaving the system prompt unmarked', async entry => {
+    const { wire } = await wireOf([
+      { participant: 'User', content: [{ type: 'text', text: 'go' }] },
+      { participant: 'Tool', cacheBreakpoint: true, content: [{ type: 'text', text: 'see' }, orphan] },
+    ], {}, entry);
+    expect(marked(wire)).toEqual([{ type: 'text', text: 'Tool: see', cache_control: marker }]);
     expect(countWireCacheMarkers(wire)).toBe(1);
     expect(wire.system).toBe('rules');
-    expect(req).toEqual(before);
+  });
+
+  it('moves the breakpoint of an orphan-only message to the last cacheable block of the message before it', async () => {
+    const { wire } = await wireOf([
+      { participant: 'User', content: [{ type: 'text', text: 'go' }] },
+      { participant: 'Claude', content: [{ type: 'text', text: 'ok' }] },
+      { participant: 'Tool', cacheBreakpoint: true, content: [orphan] },
+      { participant: 'User', content: [{ type: 'text', text: 'next' }] },
+    ]);
+    expect(marked(wire)).toEqual([{ type: 'text', text: 'ok', cache_control: marker }]);
+    expect(wire.system).toBe('rules');
+  });
+
+  it('lets the breakpoint go where that block carries one already, and membrane-system marks the system prompt when none is left', async () => {
+    const { wire } = await wireOf([
+      { participant: 'User', content: [{ type: 'text', text: 'go' }] },
+      { participant: 'Claude', cacheBreakpoint: true, content: [{ type: 'text', text: 'ok' }] },
+      { participant: 'Tool', cacheBreakpoint: true, content: [orphan] },
+      { participant: 'User', content: [{ type: 'text', text: 'next' }] },
+    ]);
+    expect(marked(wire)).toEqual([{ type: 'text', text: 'ok', cache_control: marker }]);
+    expect(countWireCacheMarkers(wire)).toBe(1);
+    const alone = await wireOf([{ participant: 'Tool', cacheBreakpoint: true, content: [orphan] }, { participant: 'Claude', content: [{ type: 'text', text: 'ok' }] }]);
+    expect(marked(alone.wire)).toEqual([]);
+    expect(alone.wire.system).toEqual([{ type: 'text', text: 'rules', cache_control: marker }]);
+  });
+
+  it('reports a cm-owned caller\'s moved marker in the cache wire receipt where it went, as the same request with the marker there would', async () => {
+    const owned = { cacheMarkers: 'cm-owned' as const };
+    const moved = await wireOf([
+      { participant: 'User', content: [{ type: 'text', text: 'go' }] },
+      { participant: 'Claude', content: [{ type: 'text', text: 'ok' }] },
+      { participant: 'Tool', cacheBreakpoint: true, content: [orphan] },
+      { participant: 'User', content: [{ type: 'text', text: 'next' }] },
+    ], owned);
+    const { adapter, requests } = recordingAdapter();
+    const receipts: unknown[] = [];
+    await new Membrane(adapter, { formatter: new NativeFormatter() }).complete({
+      ...request(), promptCaching: true, cacheTtl: '1h', system: 'rules', toolMode: 'native', ...owned,
+      onCacheWireReceipt: receipt => receipts.push(receipt),
+      messages: [
+        { participant: 'User', content: [{ type: 'text', text: 'go' }] },
+        { participant: 'Claude', cacheBreakpoint: true, content: [{ type: 'text', text: 'ok' }] },
+        { participant: 'User', content: [{ type: 'text', text: 'next' }] },
+      ],
+    });
+    expect(moved.wire.messages).toEqual(requests[0].messages);
+    expect(moved.receipts).toHaveLength(1);
+    expect((moved.receipts[0] as { markers: unknown[] }).markers).toHaveLength(1);
+    expect((moved.receipts[0] as { markers: unknown }).markers).toEqual((receipts[0] as { markers: unknown }).markers);
   });
 });
 

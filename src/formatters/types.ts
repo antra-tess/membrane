@@ -100,7 +100,9 @@ export interface BuildOptions {
    *  In prefill formatters: defaults to '<cmd>cat untitled.txt</cmd>' with a CLI simulation
    *  system prompt when no system prompt is configured, or '[Start]' when a system prompt is set.
    *  In native construction: the leading user turn the tool-pair normalizer synthesizes,
-   *  '[continuing]' by default and in place of text that is only whitespace. */
+   *  '[continuing]' by default and in place of text that is only whitespace, and the text
+   *  of a user turn, anywhere in the conversation, that a left-out tool result leaves holding
+   *  nothing the API is sent: no blocks, or only blank text or media without a source. */
   prefillUserMessage?: string;
 
   /**
@@ -120,16 +122,18 @@ export interface BuildOptions {
    */
   pendingToolCallIds?: ReadonlySet<string>;
 
-  /** Telemetry callback for the tool-pair normalizer's events (`NormalizeEvent`). */
+  /** Telemetry callback for the tool-pair normalizer's events, and the drops other builders make (`NormalizeEvent`). */
   onNormalize?: (event: NormalizeEvent) => void;
 }
 
 /**
  * Events emitted by the tool-pair normalizer, through
- * `BuildOptions.onNormalize`: one per block it moves, synthesizes or
- * rewrites, except a result's `toolUseId` renamed `tool_use_id`, which
+ * `BuildOptions.onNormalize`: one per block it moves, synthesizes, leaves out
+ * or rewrites, except a result's `toolUseId` renamed `tool_use_id`, which
  * emits none, and `pending_in_flight` for a pending call it leaves
- * unmatched.
+ * unmatched. The Responses formatter and `AnthropicXmlFormatter` in XML tool
+ * mode emit the two `*_tool_result_dropped` events too, for each result they
+ * leave out.
  */
 export type NormalizeEvent =
   | { kind: 'block_re_roled'; blockType: string; from: 'user' | 'assistant'; to: 'user' | 'assistant' }
@@ -144,17 +148,22 @@ export type NormalizeEvent =
   | { kind: 'synthetic_pending_result'; toolUseId: string; reason: 'trailing' | 'mid_stream' }
   /**
    * A tool_result whose tool_use id appears nowhere in the message list was
-   * rewritten as a text block. `recoveredChars` is the length of the payload
-   * carried across — array-form content is flattened, so a zero here means
-   * the result genuinely had no recoverable text, never that structure was
-   * dropped on the floor.
+   * left out: a result without its call is never sent, as a result or as
+   * text. In XML tool mode, where a generation parsed back from its text
+   * gives its calls fresh ids, a result whose id names no call can take a
+   * call in its own message that no later result names, and so be sent;
+   * also left out there is a result, its call in the request or not, that
+   * the model would never read as its own call's answer.
+   * `toolUseId` is `'<missing>'` for a result with no id, or an empty one.
    */
-  | { kind: 'orphan_tool_result_textified'; toolUseId: string; recoveredChars: number }
+  | { kind: 'orphan_tool_result_dropped'; toolUseId: string }
   /**
    * A tool_result whose tool_use exists but whose own cycle is already
    * satisfied (a duplicate re-append after a cancellation or stream restart)
-   * was rewritten as a text block. It could not be relocated without
-   * displacing the real result, and dropping it would lose content.
+   * was left out. It could not be relocated without displacing the result
+   * its call already has, and outside its cycle it would be a result standing
+   * where no call is answered. When the later copy was the real output and
+   * the first a placeholder, the real output is the one left out.
    *
    * `reason` names which duplicate shape the producer emitted, since the two
    * point at different producer bugs:
@@ -165,14 +174,21 @@ export type NormalizeEvent =
    *                             envelope, behind a result that already
    *                             answered that call. Pairing is one-to-one, so
    *                             the first result consumes the id and every
-   *                             later copy of it is textified here.
+   *                             later copy of it is left out here.
+   *   - `'answered'`          → from a builder with no turns as the normalizer
+   *                             builds them (the Responses formatter, XML
+   *                             tool mode): earlier results answered every
+   *                             call before this one that carries the id it
+   *                             names.
+   *
+   * `fromEnvelope`, the normalizer's envelope the copy was in, is set on the
+   * native path only.
    */
   | {
-      kind: 'stray_tool_result_textified';
+      kind: 'stray_tool_result_dropped';
       toolUseId: string;
-      fromEnvelope: number;
-      recoveredChars: number;
-      reason: 'cycle_closed' | 'duplicate_in_cycle';
+      fromEnvelope?: number;
+      reason: 'cycle_closed' | 'duplicate_in_cycle' | 'answered';
     }
   | { kind: 'pending_in_flight'; toolUseId: string }
   | {

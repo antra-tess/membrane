@@ -27,7 +27,9 @@ export interface TextContent {
   /**
    * Opaque provider-native item this block was derived from (e.g. an OpenAI
    * Responses output item, or an Anthropic server-tool block). Formatters
-   * for its own wire replay it verbatim; other providers must ignore it. A
+   * for its own wire replay it verbatim, except a Responses tool output whose
+   * call isn't in the input, or a second one for its call, which is left
+   * out; other providers must ignore it. A
    * zero-width carrier (`text: ''` plus `rawItem`) has no normalized
    * equivalent. Membrane's build for an adapter that declares
    * `replaysAnthropicServerBlocks` (AnthropicAdapter) sends one holding an
@@ -154,7 +156,11 @@ export interface ToolUseContent {
 export interface ToolResultContent {
   type: 'tool_result';
   toolUseId: string;
-  /** Tool name; XML replay renders it as the `<tool_name>` element. */
+  /**
+   * Tool name; XML replay renders it as the `<tool_name>` element, unless it
+   * names a tool other than its call's, when the result goes without it. An
+   * error result renders as `<error>`, which carries no name.
+   */
   toolName?: string;
   content: string | ContentBlock[];
   isError?: boolean;
@@ -163,10 +169,14 @@ export interface ToolResultContent {
    * the full `<function_results>…</function_results>` block as the harness
    * originally placed it in the document, shared by every result parsed
    * from that block. Replayed exactly on the prefill path, in
-   * place of the block's other fields (`content`, `toolName`, `isError`): a
-   * consumer that changes the result (truncating it, say) must drop or
-   * replace `rawXml` too, or the change won't reach the provider, and round
-   * reports count the block as carried when its raw text is. Where
+   * place of the block's other fields (`content`, `toolName`, `isError`),
+   * except where XML tool mode renders each kept result that shares this text
+   * from its fields: when a result sharing it stood in a run XML tool mode
+   * reordered, or was left out, or, not being an error, names a tool other
+   * than its call's: a consumer that changes the result
+   * (truncating it, say) must drop or replace `rawXml` too, or the change
+   * won't reach the provider, and round reports count the block as carried
+   * when its raw text is. Where
    * `rawXmlImagesAt` is set, the replay can also send the images the turn
    * sent, from `content`, at that place (see there).
    */

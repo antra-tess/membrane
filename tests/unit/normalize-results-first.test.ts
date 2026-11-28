@@ -14,7 +14,6 @@ const use = (id: string): ProviderBlock => ({ type: 'tool_use', id, name: 'noop'
 const result = (id: string, value = id): ProviderBlock => ({ type: 'tool_result', tool_use_id: id, content: value });
 const image = (): ProviderBlock => ({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgo=' } });
 const message = (role: 'user' | 'assistant', ...content: ProviderBlock[]): ProviderMessage => ({ role, content });
-const recovered = text('[orphan tool_result for zz]: ghost');
 const marker = { type: 'ephemeral', ttl: '1h' };
 const cycle = (content: ProviderBlock[], ids = ['a', 'b']): ProviderMessage[] => [
   message('user', text('hi')), message('assistant', ...ids.map(use)), message('user', ...content),
@@ -23,8 +22,8 @@ const tail = (messages: ProviderMessage[]): ProviderBlock[] => messages.at(-1)!.
 const composed = (input: ProviderMessage[]) => mergeConsecutiveRoles(normalizeToolPairs(input).messages);
 
 const cases = [
-  { label: 'leading orphan', input: [result('zz', 'ghost'), result('a'), result('b')], expected: [result('a'), result('b'), recovered] },
-  { label: 'interleaved orphan', input: [result('a'), result('zz', 'ghost'), result('b')], expected: [result('a'), result('b'), recovered] },
+  { label: 'leading orphan', input: [result('zz', 'ghost'), result('a'), result('b')], expected: [result('a'), result('b')] },
+  { label: 'interleaved orphan', input: [result('a'), result('zz', 'ghost'), result('b')], expected: [result('a'), result('b')] },
   { label: 'interleaved text', input: [result('a'), text('middle'), result('b')], expected: [result('a'), result('b'), text('middle')] },
   { label: 'interleaved image', input: [result('a'), image(), result('b')], expected: [result('a'), result('b'), image()] },
   { label: 'result order is stable', input: [result('b'), text('middle'), result('a')], expected: [result('b'), result('a'), text('middle')] },
@@ -63,12 +62,12 @@ describe('results-first repair and independent validation', () => {
     expect(() => assertToolPairsValid([message('user', text('plain'), image())])).not.toThrow();
   });
 
-  it('orders orphan recovery after both real and synthesized results', () => {
+  it('leaves an orphan out beside real and synthesized results', () => {
     const input = cycle([result('zz', 'ghost'), text('event'), result('b')]);
     const output = normalizeToolPairs(input);
     expect(output.ready).toBe(true);
     expect(tail(output.messages)).toEqual([
-      { ...result('a', '[pending]'), is_error: false }, result('b'), recovered, text('event'),
+      { ...result('a', '[pending]'), is_error: false }, result('b'), text('event'),
     ]);
     expect(composed(output.messages)).toEqual(mergeConsecutiveRoles(output.messages));
   });
@@ -78,18 +77,16 @@ describe('results-first repair and independent validation', () => {
     const pending = new Set(['b']);
     const output = normalizeToolPairs(input, { pendingToolCallIds: pending });
     expect(output.ready).toBe(false);
-    expect(tail(output.messages)).toEqual([result('a'), recovered, text('event')]);
+    expect(tail(output.messages)).toEqual([result('a'), text('event')]);
     expect(() => assertToolPairsValid(output.messages, pending)).not.toThrow();
     const again = normalizeToolPairs(output.messages, { pendingToolCallIds: pending });
     expect(again).toEqual(output);
   });
 
-  it('retains duplicate recovery payload and its marker after later results', () => {
+  it('leaves a duplicate out and hands its marker to the block before it', () => {
     const input = cycle([result('a'), { ...result('a', 'duplicate'), cache_control: marker }, result('b')]);
     const output = composed(input);
-    expect(tail(output)).toEqual([
-      result('a'), result('b'), { type: 'text', text: '[duplicate tool_result for a]: duplicate', cache_control: marker },
-    ]);
+    expect(tail(output)).toEqual([{ ...result('a'), cache_control: marker }, result('b')]);
     expect(countWireCacheMarkers({ messages: output })).toBe(1);
   });
 
@@ -115,7 +112,7 @@ describe('results-first repair and independent validation', () => {
     ]);
   });
 
-  it('stably partitions every permutation of two results, an orphan, text, and an image', () => {
+  it('stably partitions every permutation of two results, an orphan, text, and an image, leaving the orphan out', () => {
     function permutations(items: ProviderBlock[]): ProviderBlock[][] {
       if (items.length === 0) return [[]];
       return items.flatMap((item, i) => permutations(items.filter((_, j) => i !== j)).map(rest => [item, ...rest]));
@@ -123,7 +120,7 @@ describe('results-first repair and independent validation', () => {
     const inputs = permutations([result('a'), result('b'), result('zz', 'ghost'), text('event'), image()]);
     expect(inputs).toHaveLength(120);
     for (const content of inputs) {
-      const repaired = content.map(block => block.type === 'tool_result' && block.tool_use_id === 'zz' ? recovered : block);
+      const repaired = content.filter(block => !(block.type === 'tool_result' && block.tool_use_id === 'zz'));
       const expected = [...repaired.filter(block => block.type === 'tool_result'), ...repaired.filter(block => block.type !== 'tool_result')];
       const output = composed(cycle(content));
       expect(tail(output)).toEqual(expected);
@@ -134,7 +131,7 @@ describe('results-first repair and independent validation', () => {
 });
 
 describe('public native request ordering', () => {
-  it.each(['complete', 'stream', 'yielding'])('%s sends all tool results before recovered/user content', async entry => {
+  it.each(['complete', 'stream', 'yielding'])('%s sends all tool results before user content, and no orphan', async entry => {
     const sent: ProviderRequest[] = [];
     const response = (req: ProviderRequest) => {
       sent.push(structuredClone(req));
@@ -169,10 +166,10 @@ describe('public native request ordering', () => {
     else for await (const event of membrane.streamYielding(req)) if (event.type === 'error') throw event.error;
     expect(sent).toHaveLength(1);
     const output = sent[0].messages as ProviderMessage[];
-    expect(tail(output).map(block => block.type)).toEqual(['tool_result', 'tool_result', 'text', 'text']);
+    expect(tail(output).map(block => block.type)).toEqual(['tool_result', 'tool_result', 'text']);
     expect(tail(output).filter(block => block.type === 'tool_result').map(block => block.tool_use_id)).toEqual(['a', 'b']);
-    expect(tail(output).filter(block => block.type === 'text').map(block => block.text).join(' ')).toContain('ghost');
-    expect(tail(output).filter(block => block.type === 'text').map(block => block.text).join(' ')).toContain('event');
+    expect(JSON.stringify(output)).not.toContain('ghost');
+    expect(tail(output)[2].text).toBe('Tool: event');
     expect(tail(output)[1].cache_control).toEqual(marker);
     expect(() => assertToolPairsValid(output)).not.toThrow();
     expect(req).toEqual(before);

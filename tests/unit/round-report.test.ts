@@ -787,7 +787,7 @@ describe('Greptile\'s review of #104', () => {
       ],
       altered: [2],
     },
-  ])('a textified tool_result alters exactly the message it came from: $name', ({ messages, altered }) => {
+  ])('a tool_result left out alters exactly the message it came from: $name', ({ messages, altered }) => {
     it('the yielding native loop', async () => {
       const { rounds } = await drive(new Membrane(new ScriptedAdapter([finalTurn()])), nativeRequest(messages()));
       expect(rounds[0]!.altered.messages).toEqual(altered);
@@ -801,17 +801,25 @@ describe('Greptile\'s review of #104', () => {
       expect(notes.established).toBe(true);
     });
 
-    it('the replacement keeps its owner, so a later report about it names the same message', () => {
-      const notes = new FidelityNotes();
-      const built = new NativeFormatter().buildMessages(messages(), { assistantParticipant: 'Claude', participantMode: 'multiuser', fidelity: notes } as any);
-      const replacements = (built.messages as Array<{ content: unknown }>)
-        .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
-        .filter((b: any) => b.type === 'text' && /^\[(orphan|duplicate) tool_result for /.test(b.text));
-      expect(replacements.length).toBeGreaterThan(0);
-      for (const replacement of replacements) notes.alterBlock(replacement);
-      expect(sorted(notes.altered)).toEqual(altered);
-      expect(notes.established).toBe(true);
-    });
+  });
+
+  it('a block that takes a dropped result\'s marker keeps its owner, so a later report about it names its own message', () => {
+    const notes = new FidelityNotes();
+    const messages: NormalizedRequest['messages'] = [
+      { participant: 'User', content: [text('see')] },
+      { participant: 'Tool', cacheBreakpoint: true, content: [toolResult('gone', 'never called')] },
+      { participant: 'Claude', content: [text('ok')] },
+    ];
+    const built = new NativeFormatter().buildMessages(messages, { assistantParticipant: 'Claude', participantMode: 'multiuser', promptCaching: true, fidelity: notes } as any);
+    expect(sorted(notes.altered)).toEqual([1]);
+    const marked = (built.messages as Array<{ content: unknown }>)
+      .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
+      .filter((b: any) => b.cache_control);
+    expect(marked).toHaveLength(1);
+    expect(JSON.stringify(marked[0])).toContain('see');
+    notes.alterBlock(marked[0]);
+    expect(sorted(notes.altered)).toEqual([0, 1]);
+    expect(notes.established).toBe(true);
   });
 
 
@@ -840,11 +848,13 @@ describe('Greptile\'s review of #104', () => {
   it('Responses subscription normalization reports a tool result whose nested content it can\'t carry, wrapped or standalone', () => {
     let dropped = 0;
     const lossy = [{ type: 'text', text: 'result' }, { type: 'document', source: { type: 'base64', mediaType: 'application/pdf', data: 'JVBERi0=' } }];
-    normalizeResponsesInput([{ role: 'user', content: [{ type: 'tool_result', toolUseId: 'c1', content: lossy }] }] as any, () => dropped++);
+    // each result's call, so none is left out as a result without its call
+    const calls = (...ids: string[]) => ids.map((id) => ({ type: 'function_call', call_id: id, name: 'noop', arguments: '{}' }));
+    normalizeResponsesInput([...calls('c1'), { role: 'user', content: [{ type: 'tool_result', toolUseId: 'c1', content: lossy }] }] as any, () => dropped++);
     expect(dropped).toBe(1);
-    normalizeResponsesInput([{ type: 'tool_result', toolUseId: 'c2', content: lossy }] as any, () => dropped++);
+    normalizeResponsesInput([...calls('c2'), { type: 'tool_result', toolUseId: 'c2', content: lossy }] as any, () => dropped++);
     expect(dropped).toBe(2);
-    normalizeResponsesInput([{ role: 'user', content: [
+    normalizeResponsesInput([...calls('c3', 'c4'), { role: 'user', content: [
       { type: 'tool_result', toolUseId: 'c3', content: [{ type: 'text', text: 'ok' }] },
       { type: 'tool_result', toolUseId: 'c4', content: 'ok' },
     ] }] as any, () => dropped++);
@@ -1213,6 +1223,8 @@ describe('an automated review of #104\'s own range', () => {
       { role: 'assistant', content: [{ type: 'text', text: 'see' }, image, call] },
       { role: 'user', content: [failed] },
       { role: 'user', content: [fine] },
+      // the call `fine` answers, so it isn't left out as a result without its call
+      { type: 'function_call', call_id: 'c2', name: 'noop', arguments: '{}' },
     ] as any, (block) => { heard.push(block); notes.alterBlock(block); });
     expect(heard).toHaveLength(3);
     expect(heard[0]).toBe(image);
@@ -1221,7 +1233,7 @@ describe('an automated review of #104\'s own range', () => {
     expect([...notes.altered].sort()).toEqual([0, 1]);
     expect(notes.established).toBe(true);
     let standalone = 0;
-    normalizeResponsesInput([{ type: 'tool_result', toolUseId: 'c3', content: 'boom', is_error: true }] as any, () => standalone++);
+    normalizeResponsesInput([{ type: 'function_call', call_id: 'c3', name: 'noop', arguments: '{}' }, { type: 'tool_result', toolUseId: 'c3', content: 'boom', is_error: true }] as any, () => standalone++);
     expect(standalone).toBe(1);
   });
 

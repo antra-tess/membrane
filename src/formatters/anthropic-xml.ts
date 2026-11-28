@@ -1,6 +1,7 @@
 import { NativeFormatter } from './native.js';
 import type {
   NormalizedMessage,
+  Base64Source,
   ContentBlock,
   ToolDefinition,
   ToolCall,
@@ -15,6 +16,7 @@ import type {
   BuildOptions,
   BuildResult,
   FormatterConfig,
+  NormalizeEvent,
   ProviderMessage,
 } from './types.js';
 import {
@@ -66,6 +68,201 @@ export interface AnthropicXmlFormatterConfig extends FormatterConfig {
    * Default: 10
    */
   maxParticipantsForStop?: number;
+}
+
+/**
+ * The messages with each tool result where the model reads it as its own
+ * call's answer, and without the ones it can't stand there. The transcript
+ * carries no ids: a results block answers the latest calls, those made since
+ * the last result or user turn the request keeps before them, since a result
+ * left out leaves no mark there, and a result reads as answering the first
+ * of them not yet answered, of the tool its `<tool_name>` names where it
+ * names its call's tool, or of any tool where it doesn't (an error goes out
+ * without one). So within each run of
+ * results in a message, a result whose id names a call takes that call, and
+ * one whose id names no call takes the first call in its own message that no
+ * later result names: a generation parsed back from its text gives its calls fresh
+ * ids, and keeps its results beside them. The run keeps the host's order,
+ * which a host can choose, except that a result that would read as another
+ * call's answer waits until it reads as its own: results the model can't tell
+ * apart, of one tool or without a name, go in call order, as a host that
+ * stores results as their tools finish needs. One that never reads as its own
+ * is never sent, as a result or as text, and a kept one that names a tool
+ * other than its call's goes out without the name, so it reads back by
+ * place, as it was kept. Results don't move between messages.
+ * A kept result renders from its fields when a result anywhere that shares
+ * its `rawXml` stood in a run that was reordered, was left out, or went
+ * without its name, since the raw text holds the old order, the other result
+ * or the name. `onEvent` hears each result left out, and `onAltered` each
+ * message changed.
+ */
+function withoutCalllessResults(
+  messages: NormalizedMessage[],
+  assistant: string,
+  onEvent: (event: NormalizeEvent) => void,
+  onAltered: (index: number) => void,
+): NormalizedMessage[] {
+  const callIds = new Set<string>();
+  for (const message of messages) {
+    for (const block of message.content) if (block.type === 'tool_use') callIds.add(block.id);
+  }
+  // Each call's block, whether a result after it names its id, for the
+  // fallback: a result whose id names no call doesn't take a call some
+  // later result names.
+  const namedAfter = new Set<ContentBlock>();
+  const resultIds = new Set<string>();
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const content = messages[i]!.content;
+    for (let j = content.length - 1; j >= 0; j--) {
+      const block = content[j]!;
+      if (block.type === 'tool_result' && typeof block.toolUseId === 'string') resultIds.add(block.toolUseId);
+      else if (block.type === 'tool_use' && resultIds.has(block.id)) namedAfter.add(block);
+    }
+  }
+  // The latest calls, those made since the last kept result or user turn
+  // before them, as the wire shows them: a result left out doesn't end them.
+  // Each with its message and tool, whether a later result names it, and
+  // whether a kept result answers it.
+  let calls: Array<{ id: string; message: number; tool: string; named: boolean; done: boolean }> = [];
+  let keptSince = false;
+  // Per call id, the calls so far that carry it, and how many of those a kept result answers.
+  const carried = new Map<string, number>();
+  const answered = new Map<string, number>();
+  const released = new Set<string>();
+  // Per message, the places of kept results that name a tool other than
+  // their call's: they go out without the name, so they read back by place,
+  // as they were kept.
+  const unnamed = messages.map(() => new Set<number>());
+  // Each message's blocks as they go out, by index: a run of results in the
+  // order the model reads each as its own call's answer, without the ones left out.
+  const orders = messages.map((message, i) => {
+    const order: number[] = [];
+    const content = message.content;
+    for (let j = 0; j < content.length;) {
+      const first = content[j]!;
+      if (first.type === 'tool_use') {
+        if (keptSince) calls = [];
+        keptSince = false;
+        calls.push({ id: first.id, message: i, tool: first.name, named: namedAfter.has(first), done: false });
+        carried.set(first.id, (carried.get(first.id) ?? 0) + 1);
+        order.push(j++);
+        continue;
+      }
+      if (first.type !== 'tool_result') {
+        // A user turn the request keeps ends the calls before it, from where
+        // it starts: the model reads a later results block against the calls
+        // of its own turn.
+        if (message.participant !== assistant && holdsTurnContent(first)) keptSince = true;
+        order.push(j++);
+        continue;
+      }
+      const run: number[] = [];
+      while (j < content.length && content[j]!.type === 'tool_result') run.push(j++);
+      const taken = new Set<number>();
+      const placeOf = new Map<number, number>();
+      const take = (at: number, fits: (call: { id: string; message: number; named: boolean }) => boolean): void => {
+        for (let k = 0; k < calls.length; k++) {
+          if (taken.has(k) || calls[k]!.done || !fits(calls[k]!)) continue;
+          taken.add(k);
+          placeOf.set(at, k);
+          return;
+        }
+      };
+      const namedOf = (at: number): string | undefined => {
+        const id = (content[at] as ToolResultContent).toolUseId;
+        return typeof id === 'string' && callIds.has(id) ? id : undefined;
+      };
+      for (const at of run) {
+        const named = namedOf(at);
+        if (named !== undefined) take(at, (call) => call.id === named);
+      }
+      for (const at of run) {
+        if (namedOf(at) === undefined) take(at, (call) => call.message === i && !call.named);
+      }
+      // Whether the model reads the result at `at` as its own call's answer:
+      // the first call not yet answered, of the tool it names where that's
+      // its call's, or of any tool.
+      const readsAsOwn = (at: number): boolean => {
+        const place = placeOf.get(at)!;
+        const block = content[at] as ToolResultContent;
+        const tool = !block.isError && block.toolName === calls[place]!.tool ? block.toolName : undefined;
+        for (let k = 0; k < calls.length; k++) {
+          if (calls[k]!.done || (tool !== undefined && calls[k]!.tool !== tool)) continue;
+          return k === place;
+        }
+        return false;
+      };
+      const waiting = run.filter((at) => placeOf.has(at));
+      const keptHere: number[] = [];
+      for (let p = waiting.findIndex(readsAsOwn); p >= 0; p = waiting.findIndex(readsAsOwn)) {
+        const at = waiting.splice(p, 1)[0]!;
+        const call = calls[placeOf.get(at)!]!;
+        call.done = true;
+        answered.set(call.id, (answered.get(call.id) ?? 0) + 1);
+        keptHere.push(at);
+      }
+      if (keptHere.length > 0) keptSince = true;
+      const reordered = keptHere.some((at, k) => k > 0 && at < keptHere[k - 1]!);
+      for (const at of run) {
+        const block = content[at] as ToolResultContent;
+        if (keptHere.includes(at)) {
+          const misnamed = !block.isError && block.toolName !== undefined && block.toolName !== calls[placeOf.get(at)!]!.tool;
+          if (misnamed) unnamed[i]!.add(at);
+          if ((reordered || misnamed) && block.rawXml !== undefined) released.add(block.rawXml);
+          continue;
+        }
+        const named = namedOf(at);
+        onEvent(named !== undefined && (carried.get(named) ?? 0) > 0 && answered.get(named) === carried.get(named)
+          ? { kind: 'stray_tool_result_dropped', toolUseId: named !== '' ? named : '<missing>', reason: 'answered' }
+          : { kind: 'orphan_tool_result_dropped', toolUseId: typeof block.toolUseId === 'string' && block.toolUseId !== '' ? block.toolUseId : '<missing>' });
+        if (block.rawXml !== undefined) released.add(block.rawXml);
+      }
+      order.push(...keptHere);
+    }
+    return order;
+  });
+
+  return messages.map((message, index) => {
+    const order = orders[index]!;
+    let changed = order.length !== message.content.length || order.some((at, k) => at !== k);
+    const content: ContentBlock[] = order.map((at) => {
+      const block = message.content[at]!;
+      if (block.type !== 'tool_result') return block;
+      if (unnamed[index]!.has(at)) {
+        const { rawXml: _raw, rawXmlImagesAt: _at, toolName: _name, ...rendered } = block;
+        changed = true;
+        return rendered;
+      }
+      if (block.rawXml === undefined || !released.has(block.rawXml)) return block;
+      const { rawXml: _raw, rawXmlImagesAt: _at, ...rendered } = block;
+      changed = true;
+      return rendered;
+    });
+    if (!changed) return message;
+    onAltered(index);
+    return { ...message, content };
+  });
+}
+
+/**
+ * What extractContent sends for a block besides a tool call or result: its
+ * text, unless it carries a raw item, or an image with a base64 source, as
+ * the image or a placeholder's text. Any other block sends nothing.
+ */
+function sentContent(block: ContentBlock): { text: string } | { image: Base64Source } | undefined {
+  if (block.type === 'text') return isRawItemCarrier(block) ? undefined : { text: block.text };
+  if (block.type === 'image' && block.source?.type === 'base64') return { image: block.source };
+  return undefined;
+}
+
+/**
+ * Whether a block besides a tool call or result shows on the wire: what
+ * extractContent sends for it, unless that is blank text, which isEmpty reads
+ * as nothing.
+ */
+function holdsTurnContent(block: ContentBlock): boolean {
+  const sent = sentContent(block);
+  return sent !== undefined && (!('text' in sent) || sent.text.trim() !== '');
 }
 
 function toToolResult(block: ToolResultContent): ToolResult {
@@ -190,6 +387,18 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     const providerMessages: ProviderMessage[] = [];
     const joiner = this.config.messageDelimiter ? '' : '\n';
 
+    // Messages the filter changed: one it leaves showing nothing keeps its breakpoint.
+    const filtered = new Set<number>();
+    // A message that held a result keeps the continuation state it had, so a
+    // drop doesn't fold the next assistant message into it, and the caller's
+    // cache-marker check reads the message as the caller gave it.
+    const given = messages;
+    const heldResult = messages.map((message) => message.content.some((c) => c.type === 'tool_result'));
+    messages = withoutCalllessResults(messages, assistantParticipant, (event) => options.onNormalize?.(event), (index) => {
+      options.fidelity?.alter(index);
+      filtered.add(index);
+    });
+
     let currentConversation: string[] = [];
     let lastNonEmptyParticipant: string | null = null;
     let lastWasToolResults = false;
@@ -198,6 +407,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     const totalMessages = messages.length;
     const toolInjectionIndex = Math.max(0, totalMessages - this.config.toolInjectionPosition);
     let toolsInjected = false;
+    let leadingFiltered = 0;
     const hasToolsForConversation =
       toolMode === 'xml' &&
       this.config.toolInjectionMode === 'conversation' &&
@@ -277,7 +487,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         }
       }
 
-      const hasToolResult = message.content.some(c => c.type === 'tool_result');
+      const hasToolResult = heldResult[i]!;
 
       if (hasImages && !isEmpty) {
         if (currentConversation.length > 0) {
@@ -321,31 +531,41 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         if (holdsContent(message.content)) onAltered?.();
       };
 
+      const markConversation = () => {
+        providerMessages.push({
+          role: 'assistant',
+          content: [{ type: 'text', text: currentConversation.join(joiner), cache_control: cacheControl }],
+        });
+        currentConversation = [];
+      };
+
+      // At a message the caller's check marks, the conversation so far goes as
+      // its own message, marked when caching.
+      const partConversation = () => {
+        if (currentConversation.length === 0) return;
+        if (promptCaching) {
+          markConversation();
+          return;
+        }
+        providerMessages.push({
+          role: 'assistant',
+          content: currentConversation.join(joiner),
+        });
+        currentConversation = [];
+      };
+
       if (isEmpty && !isLastMessage) {
         omitted();
+        // A breakpoint on a message the filter left showing nothing marks the
+        // conversation before it.
+        if (filtered.has(i) && (hasCacheMarker?.(given[i]!, i) || (message.cacheBreakpoint && promptCaching))) partConversation();
+        if (filtered.has(i) && i === leadingFiltered) leadingFiltered++;
         continue;
       }
 
-      if (hasCacheMarker && hasCacheMarker(message, i)) {
-        if (currentConversation.length > 0 && promptCaching) {
-          const content = currentConversation.join(joiner);
-          const contentBlock: Record<string, unknown> = { type: 'text', text: content };
-          contentBlock.cache_control = cacheControl;
-          providerMessages.push({
-            role: 'assistant',
-            content: [contentBlock],
-          });
-          currentConversation = [];
-        } else if (currentConversation.length > 0) {
-          providerMessages.push({
-            role: 'assistant',
-            content: currentConversation.join(joiner),
-          });
-          currentConversation = [];
-        }
-      }
+      if (hasCacheMarker && hasCacheMarker(given[i]!, i)) partConversation();
 
-      const shouldInjectHere = toolInjectionIndex > 0 ? i >= toolInjectionIndex : i === 0;
+      const shouldInjectHere = toolInjectionIndex > 0 ? i >= toolInjectionIndex : i === leadingFiltered;
       if (hasToolsForConversation && !toolsInjected && shouldInjectHere) {
         currentConversation.push(toolsText);
         toolsInjected = true;
@@ -379,16 +599,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
         }
       }
 
-      if (message.cacheBreakpoint && promptCaching && currentConversation.length > 0) {
-        const content = currentConversation.join(joiner);
-        const contentBlock: Record<string, unknown> = { type: 'text', text: content };
-        contentBlock.cache_control = cacheControl;
-        providerMessages.push({
-          role: 'assistant',
-          content: [contentBlock],
-        });
-        currentConversation = [];
-      }
+      if (message.cacheBreakpoint && promptCaching && currentConversation.length > 0) markConversation();
     }
 
     let turnPrefix: string;
@@ -492,6 +703,7 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
     return blocks;
   }
 
+  /** What a message puts on the wire. */
   private extractContent(
     content: ContentBlock[],
     participant: string,
@@ -505,15 +717,15 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
 
     for (let i = 0; i < content.length; i++) {
       const block = content[i]!;
-      if (block.type === 'text') {
-        if (isRawItemCarrier(block)) {
+      if (block.type !== 'tool_use' && block.type !== 'tool_result') {
+        const sent = sentContent(block);
+        if (sent === undefined) {
+          if (block.type === 'document' || block.type === 'audio') hasUnsupportedMedia = true;
           onAltered?.();
-          continue;
-        }
-        parts.push(block.text);
-      } else if (block.type === 'image') {
-        if (block.source?.type === 'base64') {
-          const { mediaType, placeholder } = imageForRequest(block.source.data, block.source.mediaType);
+        } else if ('text' in sent) {
+          parts.push(sent.text);
+        } else {
+          const { mediaType, placeholder } = imageForRequest(sent.image.data, sent.image.mediaType);
           if (placeholder) {
             parts.push(placeholder.text);
             onAltered?.();
@@ -523,12 +735,10 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
               source: {
                 type: 'base64',
                 media_type: mediaType,
-                data: block.source.data,
+                data: sent.image.data,
               },
             });
           }
-        } else {
-          onAltered?.();
         }
       } else if (block.type === 'tool_use') {
         const run: ToolUseContent[] = [];
@@ -555,11 +765,6 @@ export class AnthropicXmlFormatter implements PrefillFormatter {
             parts = [piece.after];
           }
         }
-      } else if (block.type === 'document' || block.type === 'audio') {
-        hasUnsupportedMedia = true;
-        onAltered?.();
-      } else {
-        onAltered?.();
       }
     }
 
