@@ -79,7 +79,7 @@ describe('Anthropic 5.x rows match the published price page (2026-11-18)', () =>
     cacheWrite1hPerMillion: input * 2,
     cacheReadPerMillion: cacheRead, currency: 'USD', asOf: ANTHROPIC_PRICING_LAST_VERIFIED,
   });
-  const rows: Array<[string, ReturnType<typeof usd>]> = [
+  const rows: Array<[string, ReturnType<typeof usd> & { longPrompt?: unknown }]> = [
     ['claude-fable-5-2', usd(8, 40, 10, 0.20)],
     ['claude-mythos-5-2', usd(8, 40, 10, 0.20)],
     ['claude-fable-5-2-20261109', usd(8, 40, 10, 0.20)],
@@ -88,8 +88,11 @@ describe('Anthropic 5.x rows match the published price page (2026-11-18)', () =>
     ['claude-fable-5-1', usd(10, 50, 12.50, 0.25)],
     ['claude-mythos-5-1', usd(10, 50, 12.50, 0.25)],
     ['claude-mythos-5', usd(10, 50, 12.50, 1)],
-    // Its price-page rate for prompts up to 100,000 tokens; the table has no field for the higher rate above that.
-    ['claude-haiku-5-5', usd(0.10, 0.50, 0.125, 0.01)],
+    // Priced by prompt length; the over-100k row is on the page too.
+    ['claude-haiku-5-5', {
+      ...usd(0.10, 0.50, 0.125, 0.01),
+      longPrompt: { overTokens: 100_000, inputPerMillion: 0.50, outputPerMillion: 2.50, cacheWritePerMillion: 0.625, cacheWrite1hPerMillion: 1, cacheReadPerMillion: 0.05 },
+    }],
     ['claude-opus-5', usd(5, 25, 6.25, 0.50)],
     ['claude-sonnet-5', usd(2, 10, 2.50, 0.20)],
     ['claude-fable-5', usd(10, 50, 12.50, 1)],
