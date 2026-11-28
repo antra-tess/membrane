@@ -800,8 +800,16 @@ export function fromOpenRouterMessage(message: OpenRouterMessage): ContentBlock[
     }
   }
 
-  if (message.tool_calls) {
+  if (Array.isArray(message.tool_calls)) {
+    let warned = false;
     for (const tc of message.tool_calls) {
+      if (typeof tc?.function?.name !== 'string') {
+        if (!warned) {
+          warned = true;
+          console.warn('[membrane:openrouter] skipped tool_calls entry: expected a string function.name');
+        }
+        continue;
+      }
       result.push({
         type: 'tool_use',
         id: tc.id,
