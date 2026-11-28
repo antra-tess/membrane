@@ -20,7 +20,7 @@ import { errorFromThrown } from '../types/errors.js';
 import { isRawItemCarrier } from '../utils/fidelity.js';
 import { parseKeepingLongIntegers } from '../utils/long-integers.js';
 import { convertMcpMedia } from '../utils/mcp-media.js';
-import { toolUseInputFromText, textOnlyToolResultContent, openAIImagePart, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved, streamedToolCalls, isEventObject, callerAbort } from './utils.js';
+import { toolUseBlocksFromCalls, stopReasonForContent, textOnlyToolResultContent, openAIImagePart, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved, streamedToolCalls, isEventObject, callerAbort } from './utils.js';
 
 interface OpenAIContentPart {
   type: 'text' | 'image_url';
@@ -528,9 +528,10 @@ export class OpenAIAdapter implements ProviderAdapter {
     const cachedTokens = response.usage?.prompt_tokens_details?.cached_tokens;
     const writtenTokens = response.usage?.prompt_tokens_details?.cache_write_tokens;
 
+    const content = this.messageToContent(message);
     return {
-      content: this.messageToContent(message),
-      stopReason: this.mapFinishReason(choice?.finish_reason),
+      content,
+      stopReason: stopReasonForContent(this.mapFinishReason(choice?.finish_reason), content),
       providerStopReason: choice?.finish_reason ?? undefined,
       stopSequence: undefined,
       usage: {
@@ -559,9 +560,10 @@ export class OpenAIAdapter implements ProviderAdapter {
     const cachedTokens = streamUsage?.prompt_tokens_details?.cached_tokens;
     const writtenTokens = streamUsage?.prompt_tokens_details?.cache_write_tokens;
 
+    const content = this.messageToContent(message);
     return {
-      content: this.messageToContent(message),
-      stopReason: this.mapFinishReason(finishReason),
+      content,
+      stopReason: stopReasonForContent(this.mapFinishReason(finishReason), content),
       providerStopReason: finishReason,
       stopSequence: undefined,
       usage: {
@@ -587,16 +589,7 @@ export class OpenAIAdapter implements ProviderAdapter {
       if (text) content.push({ type: 'text', text });
     }
     
-    if (message.tool_calls) {
-      for (const tc of message.tool_calls) {
-        content.push({
-          type: 'tool_use',
-          id: tc.id,
-          name: tc.function.name,
-          ...toolUseInputFromText(tc.function.arguments),
-        });
-      }
-    }
+    content.push(...toolUseBlocksFromCalls(message.tool_calls, 'openai'));
     
     return content;
   }
@@ -648,16 +641,7 @@ export function fromOpenAIContent(message: OpenAIMessage): ContentBlock[] {
     if (text) result.push({ type: 'text', text });
   }
   
-  if (message.tool_calls) {
-    for (const tc of message.tool_calls) {
-      result.push({
-        type: 'tool_use',
-        id: tc.id,
-        name: tc.function.name,
-        ...toolUseInputFromText(tc.function.arguments),
-      });
-    }
-  }
+  result.push(...toolUseBlocksFromCalls(message.tool_calls, 'openai'));
   
   return result;
 }

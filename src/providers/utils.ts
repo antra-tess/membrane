@@ -3,6 +3,7 @@ import { imageForRequest, urlImageForRequest } from '../utils/image-media.js';
 import { parseKeepingLongIntegers } from '../utils/long-integers.js';
 import { trackProgress, type ProgressBounds, type ProgressTracker } from '../progress-bounds.js';
 import type { ProgressSeen, SendReport } from '../types/provider.js';
+import type { ContentBlock } from '../types/content.js';
 
 interface StreamErrorFrameFields {
   code?: unknown;
@@ -278,6 +279,32 @@ export function toolUseInputFromText(text: unknown): ToolUseInput {
 export function toolUseInputFromValue(value: unknown): ToolUseInput {
   if (value === undefined) return { input: {} };
   return isPlainObject(value) ? { input: value } : notAnObject(JSON.stringify(value), value);
+}
+
+/**
+ * An OpenAI-shaped message's tool_calls as tool_use blocks. An entry without a
+ * non-empty string function.name is skipped, with one warning per message that
+ * does not log provider content (antra-tess/membrane#95).
+ */
+export function toolUseBlocksFromCalls(toolCalls: unknown, provider: string): ContentBlock[] {
+  if (!Array.isArray(toolCalls)) return [];
+  const blocks: ContentBlock[] = [];
+  let skipped = false;
+  for (const tc of toolCalls) {
+    const name: unknown = tc?.function?.name;
+    if (typeof name !== 'string' || name === '') {
+      skipped = true;
+      continue;
+    }
+    blocks.push({ type: 'tool_use', id: tc.id, name, ...toolUseInputFromText(tc.function.arguments) });
+  }
+  if (skipped) console.warn(`[membrane:${provider}] skipped tool_calls entry: expected a non-empty string function.name`);
+  return blocks;
+}
+
+/** A tool_calls finish names calls to run; when none survived, the turn ended without one. */
+export function stopReasonForContent(stopReason: string, content: ContentBlock[]): string {
+  return stopReason === 'tool_use' && !content.some((b) => b.type === 'tool_use') ? 'end_turn' : stopReason;
 }
 
 /** Constant text, so a history that holds it serializes to the same bytes on every request (the prompt cache reads bytes). */
