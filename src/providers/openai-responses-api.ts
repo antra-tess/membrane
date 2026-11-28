@@ -563,6 +563,8 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
     // out below into the long-TTL count when the API reports them.
     const writtenTokens = response.usage?.input_tokens_details?.cache_write_tokens;
     const written12h = response.usage?.input_tokens_details?.cache_write_tokens_details?.ttl_12h_tokens;
+    // Reasoning tokens are inside output_tokens (OpenAI's usage), as thinkingTokens is inside outputTokens.
+    const reasoningTokens = response.usage?.output_tokens_details?.reasoning_tokens;
 
     return {
       content,
@@ -573,6 +575,7 @@ export class OpenAIResponsesAPIAdapter implements ProviderAdapter {
       usage: {
         inputTokens: response.usage?.input_tokens ?? 0,
         outputTokens: response.usage?.output_tokens ?? 0,
+        ...(typeof reasoningTokens === 'number' ? { thinkingTokens: reasoningTokens } : {}),
         ...(typeof cachedTokens === 'number' ? { cacheReadTokens: cachedTokens } : {}),
         ...(typeof writtenTokens === 'number' ? { cacheCreationTokens: writtenTokens } : {}),
         // The long-TTL slot: Anthropic's 1-hour writes and OpenAI's 12-hour writes are both

@@ -2690,6 +2690,9 @@ export class Membrane {
     if (add.cacheReadTokens != null) {
       next.cacheReadTokens = (next.cacheReadTokens ?? 0) + add.cacheReadTokens;
     }
+    if (add.thinkingTokens != null) {
+      next.thinkingTokens = (next.thinkingTokens ?? 0) + add.thinkingTokens;
+    }
     return next;
   }
 
@@ -2702,6 +2705,7 @@ export class Membrane {
       ...(detailed.cacheCreationTokens != null ? { cacheCreationTokens: detailed.cacheCreationTokens } : {}),
       ...(detailed.cacheCreation1hTokens != null ? { cacheCreation1hTokens: detailed.cacheCreation1hTokens } : {}),
       ...(detailed.cacheReadTokens != null ? { cacheReadTokens: detailed.cacheReadTokens } : {}),
+      ...(detailed.thinkingTokens != null ? { thinkingTokens: detailed.thinkingTokens } : {}),
     };
   }
 

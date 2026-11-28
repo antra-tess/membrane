@@ -42,8 +42,9 @@ export interface CallUsage extends BasicUsage {
    * Thinking/reasoning tokens the provider reported separately from its
    * visible-output count, already INCLUDED in `outputTokens` (they are billed
    * at the output rate). Surfaced so a caller can attribute spend to thinking;
-   * summing it with `outputTokens` would double-count. Gemini's
-   * `thoughtsTokenCount` is the current source.
+   * summing it with `outputTokens` would double-count. Sources: Gemini's
+   * `thoughtsTokenCount`, and `reasoning_tokens` on the four OpenAI-shaped
+   * adapters (OpenAI chat and Responses, OpenRouter, openai-compatible).
    */
   thinkingTokens?: number;
 
