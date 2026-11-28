@@ -149,7 +149,7 @@ describe('AnthropicAdapter makes one attempt at each request', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
-  it('the cache keepalive’s replays keep the SDK’s own retries', async () => {
+  it('the cache keepalive’s replays are one HTTP send too', async () => {
     const fetch = vi.fn(async () => new Response(
       JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'zz internal' } }),
       { status: 500, headers: { 'content-type': 'application/json', 'retry-after-ms': '1' } },
@@ -157,7 +157,7 @@ describe('AnthropicAdapter makes one attempt at each request', () => {
     vi.stubGlobal('fetch', fetch);
     const keepalive = (new AnthropicAdapter({ apiKey: 'zz-key' }).cacheKeepalive as any);
     await keepalive.send({ model: 'zz-model', max_tokens: 0, messages: [{ role: 'user', content: 'zz go' }] }, {}).catch(() => {});
-    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it('through membrane, with retry: false a 429 arrives after one send', async () => {

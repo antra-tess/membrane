@@ -22,7 +22,7 @@ export interface RetryConfig {
    * the larger of this and `overloaded.maxRetries`, on the `overloaded`
    * schedule. Membrane is the only layer that retries a call's requests:
    * AnthropicAdapter turns its SDK client's own retries off for them, and
-   * only the cache keepalive's background replays keep the SDK's. A caller
+   * for its cache keepalive's background replays too. A caller
    * whose own layer retries passes `retry: false` on the call, which turns
    * off every retry this config schedules for it, these floors included.
    */
