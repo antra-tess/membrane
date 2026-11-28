@@ -407,7 +407,8 @@ const AUTH_CODES = new Set(['invalid_api_key', 'authentication_error', 'unauthen
  * Refusals of the account or its credential, not the request, as a 400 or
  * 422 or with no status: "Your credit balance is too low to access the
  * Anthropic API", "You have reached your specified API usage limits. You
- * will regain access on <date>", "This organization has been disabled.", and
+ * will regain access on <date>" (a workspace's limit says "your specified
+ * workspace API usage limits"), "This organization has been disabled.", and
  * "This credential is only authorized for use with Claude Code and cannot be
  * used for other API requests." (a Claude subscription's OAuth token sent to
  * the API). Anthropic sends the first, second and fourth as
@@ -415,7 +416,7 @@ const AUTH_CODES = new Set(['invalid_api_key', 'authentication_error', 'unauthen
  * them apart; the disabled organization's type isn't attested.
  */
 const ACCOUNT_REFUSAL_PATTERN =
-  /credit balance is too low|reached your specified API usage limits|organization has been disabled|only authorized for use with Claude Code/i;
+  /credit balance is too low|reached your specified (?:workspace )?API usage limits|organization has been disabled|only authorized for use with Claude Code/i;
 
 /** A retry hint stated only in prose: Azure OpenAI's "Please retry after 60 seconds." */
 const RETRY_AFTER_PROSE = /\bretry after (\d+(?:\.\d+)?) ?(?:s|secs?|seconds?)(?=\s*(?:[.!;,)]|$))/i;

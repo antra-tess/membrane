@@ -222,6 +222,15 @@ describe('a refusal of the account or its credential sent as a 400 is auth', () 
     expect(error.httpStatus).toBe(400);
   });
 
+  it('anthropic: "You have reached your specified workspace API usage limits"', () => {
+    const error = anthropic400(
+      'You have reached your specified workspace API usage limits. You will regain access on 2026-09-01 at 00:00 UTC.',
+    );
+    expect(error.type).toBe('auth');
+    expect(error.retryable).toBe(false);
+    expect(error.httpStatus).toBe(400);
+  });
+
   it('anthropic: "This organization has been disabled."', () => {
     const error = anthropic400('This organization has been disabled.');
     expect(error.type).toBe('auth');
@@ -559,6 +568,7 @@ describe("every shape of a provider's own message, and nothing else, types the e
   it('without a status, a refusal in the provider\'s own message is auth, as with one', () => {
     for (const message of [
       'Your credit balance is too low to access the Anthropic API.',
+      'You have reached your specified workspace API usage limits. You will regain access on 2026-09-01 at 00:00 UTC.',
       'This organization has been disabled.',
       'This credential is only authorized for use with Claude Code and cannot be used for other API requests.',
     ]) {
