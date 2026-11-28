@@ -58,4 +58,55 @@ describe('OpenRouter malformed tool_calls entries', () => {
     expect(response.stopReason).toBe('end_turn');
     expect(response.usage).toMatchObject({ inputTokens: 7, outputTokens: 3 });
   });
+
+  it('complete: finish_reason tool_calls with every call skipped does not claim tool_use', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { role: 'assistant', content: 'calling', tool_calls: [{}] }, finish_reason: 'tool_calls' }],
+      usage,
+    }))));
+    const response = await new OpenRouterAdapter({ apiKey: 'test' }).complete(
+      { messages: [{ role: 'user', content: 'hello' }], model: 'test-model', maxTokens: 128 } as any,
+    );
+    expect(response.content).toEqual([{ type: 'text', text: 'calling' }]);
+    expect(response.stopReason).toBe('end_turn');
+    expect(response.providerStopReason).toBe('tool_calls');
+  });
+
+  it('complete: a well-formed call still stops with tool_use', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { role: 'assistant', content: null, tool_calls: [good] }, finish_reason: 'tool_calls' }],
+      usage,
+    }))));
+    const response = await new OpenRouterAdapter({ apiKey: 'test' }).complete(
+      { messages: [{ role: 'user', content: 'hello' }], model: 'test-model', maxTokens: 128 } as any,
+    );
+    expect(response.content).toEqual([{ type: 'tool_use', id: 'call_1', name: 'noop', input: { a: 1 } }]);
+    expect(response.stopReason).toBe('tool_use');
+  });
+
+  it('an empty function.name is malformed', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const blocks = fromOpenRouterMessage({
+      role: 'assistant', content: 'kept', tool_calls: [{ id: 'c1', type: 'function', function: { name: '', arguments: '{}' } }],
+    } as any);
+    expect(blocks).toEqual([{ type: 'text', text: 'kept' }]);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('stream: a call with an id but no name is skipped and the turn ends without tool_use', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(sseResponse([
+      JSON.stringify({
+        choices: [{ delta: { content: 'calling', tool_calls: [{ id: 'c1', function: { arguments: '{}' } }] }, finish_reason: 'tool_calls' }],
+        usage,
+      }),
+    ])));
+    const response = await new OpenRouterAdapter({ apiKey: 'test' }).stream(
+      { messages: [{ role: 'user', content: 'hello' }], model: 'test-model', maxTokens: 128 } as any,
+      { onChunk: () => {} },
+    );
+    expect(response.content).toEqual([{ type: 'text', text: 'calling' }]);
+    expect(response.stopReason).toBe('end_turn');
+  });
 });

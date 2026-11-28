@@ -22,7 +22,7 @@ import { errorFromThrown } from '../types/errors.js';
 import { isRawItemCarrier } from '../utils/fidelity.js';
 import { parseKeepingLongIntegers } from '../utils/long-integers.js';
 import { convertMcpMedia } from '../utils/mcp-media.js';
-import { toolUseInputFromText, textOnlyToolResultContent, openAIImagePart, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved, streamedToolCalls, isEventObject, callerAbort } from './utils.js';
+import { toolUseBlocksFromCalls, stopReasonForContent, textOnlyToolResultContent, openAIImagePart, createCombinedSignal, SSELineParser, isDeadlineAbort, deadlineTimeoutError, throwOnStreamErrorFrame, assertTerminalEventObserved, streamedToolCalls, isEventObject, callerAbort } from './utils.js';
 
 /** Content block for messages through OpenRouter */
 type OpenRouterContentBlock =
@@ -607,9 +607,10 @@ export class OpenRouterAdapter implements ProviderAdapter {
       ?? response.usage?.prompt_tokens_details?.cached_tokens;
     const cacheConvention = resolveRoutedCacheConvention(anthropicShapedCacheRead, cacheCreationTokens, cacheReadTokens);
 
+    const content = this.messageToContent(message);
     return {
-      content: this.messageToContent(message),
-      stopReason: this.mapFinishReason(choice?.finish_reason),
+      content,
+      stopReason: stopReasonForContent(this.mapFinishReason(choice?.finish_reason), content),
       providerStopReason: choice?.finish_reason ?? undefined,
       stopSequence: undefined,
       usage: {
@@ -640,9 +641,10 @@ export class OpenRouterAdapter implements ProviderAdapter {
       ?? streamUsage?.prompt_tokens_details?.cached_tokens;
     const cacheConvention = resolveRoutedCacheConvention(anthropicShapedCacheRead, cacheCreationTokens, cacheReadTokens);
 
+    const content = this.messageToContent(message);
     return {
-      content: this.messageToContent(message),
-      stopReason: this.mapFinishReason(finishReason),
+      content,
+      stopReason: stopReasonForContent(this.mapFinishReason(finishReason), content),
       providerStopReason: finishReason,
       stopSequence: undefined,
       usage: {
@@ -800,24 +802,7 @@ export function fromOpenRouterMessage(message: OpenRouterMessage): ContentBlock[
     }
   }
 
-  if (Array.isArray(message.tool_calls)) {
-    let warned = false;
-    for (const tc of message.tool_calls) {
-      if (typeof tc?.function?.name !== 'string') {
-        if (!warned) {
-          warned = true;
-          console.warn('[membrane:openrouter] skipped tool_calls entry: expected a string function.name');
-        }
-        continue;
-      }
-      result.push({
-        type: 'tool_use',
-        id: tc.id,
-        name: tc.function.name,
-        ...toolUseInputFromText(tc.function.arguments),
-      });
-    }
-  }
+  result.push(...toolUseBlocksFromCalls(message.tool_calls, 'openrouter'));
   
   return result;
 }
